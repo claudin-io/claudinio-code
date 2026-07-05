@@ -108,7 +108,7 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "code_search".into(),
-            description: "Full-text search across indexed symbols (FTS5). Faster than grep for finding definitions.".into(),
+            description: "Full-text search across indexed symbols (FTS5). Faster and more targeted than grep for finding definitions — prefer this over grep.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -120,7 +120,7 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "symbol_lookup".into(),
-            description: "Look up a symbol by exact name across the workspace.".into(),
+            description: "Look up a symbol by exact name across the workspace. Use when you know the exact symbol name.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -131,7 +131,7 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "file_outline".into(),
-            description: "List all symbols defined in a file.".into(),
+            description: "List all symbols defined in a file. Use this before read_file to understand a file's structure at a glance.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -142,7 +142,7 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "go_to_definition".into(),
-            description: "Find where a symbol is defined at a specific position in a file. Uses LSP when available (precise), falls back to tree-sitter index (heuristic).".into(),
+            description: "Find where a symbol is defined at a specific position. Uses LSP (precise) or indexed fallback. Prefer over grep for finding definitions.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -155,7 +155,7 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "find_references".into(),
-            description: "Find all references to a symbol at a specific position. Uses LSP when available (precise), falls back to heuristic name matching.".into(),
+            description: "Find all references to a symbol at a specific position. Uses LSP (precise) or index. Prefer over grep for finding usages.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

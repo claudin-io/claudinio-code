@@ -54,6 +54,17 @@ each file edit is shown to the user for approval before it lands. When you finis
 concrete recap of what changed and how to verify it. \
 If you are missing information only the user can supply, or need a decision from them, call the ask_user tool \
 with concrete options instead of ending the turn with an open question — do not guess. \
+\
+The workspace has a pre-indexed symbol database (FTS5). Before brute-forcing with grep or read_file, \
+use these tools in this order of preference: \
+  \u{2022} code_search  \u{2014} find any symbol/definition by name (faster than grep) \
+  \u{2022} file_outline \u{2014} list all symbols in a file (preview structure before reading) \
+  \u{2022} go_to_definition / find_references \u{2014} navigate symbol relationships precisely \
+  \u{2022} symbol_lookup \u{2014} exact symbol name lookup across workspace \
+Accuracy hierarchy: LSP tools (precise) \u{2192} indexed tools (fast) \u{2192} grep/bash (fallback). \
+Use grep only when the index doesn't cover what you need. \
+Example: to understand an unfamiliar file, call file_outline first, not read_file. \
+\
 Be focused and concrete. Reply in the user's language (Portuguese if they write in Portuguese).";
 
 /// Build the per-session system prompt. The result is byte-identical for every
