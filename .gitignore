@@ -3,4 +3,7 @@ dist
 src-tauri/target
 .DS_Store
 .claudinio_index.db*
+.claudinio/
+.serena/
 src-tauri/2026-07-04-*
+2026-07-05-*
