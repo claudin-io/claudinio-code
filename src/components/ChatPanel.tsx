@@ -1,4 +1,4 @@
-import { createSignal, For, Show, type Component } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
 import {
   sendMessage,
   approveTool,
@@ -1018,6 +1018,20 @@ const ApprovalCard: Component<{
   const proposal = () => props.toolCall.editProposal as EditProposalData | undefined;
   const isBash = () => props.toolCall.toolName === "bash";
 
+  // The chat input is disabled while an approval is pending, so a global
+  // listener is safe: Enter approves, Esc rejects.
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      props.onApprove();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      props.onReject();
+    }
+  };
+  onMount(() => document.addEventListener("keydown", onKey));
+  onCleanup(() => document.removeEventListener("keydown", onKey));
+
   const detectLanguage = (path: string): string => {
     if (path.endsWith(".ts") || path.endsWith(".tsx")) return "typescript";
     if (path.endsWith(".rs")) return "rust";
@@ -1091,6 +1105,7 @@ const ApprovalCard: Component<{
         >
           <Icon name="check" class="h-4 w-4" />
           Aprovar
+          <kbd class="rounded bg-accent-ink/15 px-1 font-mono text-[10px]">⏎</kbd>
         </button>
         <button
           onClick={props.onReject}
@@ -1098,6 +1113,7 @@ const ApprovalCard: Component<{
         >
           <Icon name="x" class="h-4 w-4" />
           Rejeitar
+          <kbd class="rounded bg-surface-2 px-1 font-mono text-[10px]">esc</kbd>
         </button>
       </div>
     </div>
