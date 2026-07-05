@@ -41,12 +41,35 @@ export interface ApproveArgs {
   toolId: string;
 }
 
+// Replay-only: old sessions may still have "plan" | "execute" | "summary"
+// phase records on disk. No new session emits these.
+export type Phase = "plan" | "execute" | "summary";
+
 export type AgentEvent =
+  | { event: "TextStep"; data: { text: string } }
   | { event: "Thinking"; data: string }
   | { event: "ToolCall"; data: ToolCallData }
   | { event: "ToolResult"; data: ToolResultData }
+  | { event: "AskUser"; data: AskUserData }
   | { event: "Done"; data: DoneData }
   | { event: "Error"; data: string };
+
+export interface AskUserQuestion {
+  question: string;
+  options: string[];
+  multi_select?: boolean;
+}
+
+export interface AskUserData {
+  sessionId: string;
+  toolId: string;
+  questions: AskUserQuestion[];
+}
+
+export interface UserAnswer {
+  question: string;
+  answer: string;
+}
 
 export interface ToolCallData {
   sessionId: string;
@@ -77,10 +100,10 @@ export interface ToolResultData {
 }
 
 export interface DoneData {
-  stop_reason: string;
-  text_output: string;
-  input_tokens: number;
-  output_tokens: number;
+  stopReason: string;
+  textOutput: string;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 export function sendMessage(
@@ -95,12 +118,47 @@ export function sendMessage(
   });
 }
 
+export interface SessionSummary {
+  sessionId: string;
+  createdAt: number;
+  updatedAt: number;
+  title: string;
+  turnCount: number;
+}
+
+// One line of a session JSONL file. `kind` discriminates the variant; extra
+// fields depend on the kind (see the Rust SessionRecord enum).
+export type SessionRecord = {
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error";
+  [key: string]: unknown;
+};
+
+export function newSession(): Promise<void> {
+  return invoke<void>("new_session");
+}
+
+export function listSessions(): Promise<SessionSummary[]> {
+  return invoke<SessionSummary[]>("list_sessions");
+}
+
+export function loadSession(sessionId: string): Promise<SessionRecord[]> {
+  return invoke<SessionRecord[]>("load_session", { sessionId });
+}
+
 export function approveTool(sessionId: string, toolId: string): Promise<void> {
   return invoke<void>("approve_tool", { args: { sessionId, toolId } });
 }
 
 export function rejectTool(sessionId: string, toolId: string): Promise<void> {
   return invoke<void>("reject_tool", { args: { sessionId, toolId } });
+}
+
+export function submitAnswers(
+  sessionId: string,
+  toolId: string,
+  answers: UserAnswer[],
+): Promise<void> {
+  return invoke<void>("submit_answers", { args: { sessionId, toolId, answers } });
 }
 
 export function setConfig(args: SetConfigArgs): Promise<void> {

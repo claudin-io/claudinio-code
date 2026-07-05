@@ -1,3 +1,4 @@
+mod bash;
 mod edit_file;
 mod grep;
 mod list_dir;
@@ -165,6 +166,43 @@ pub fn get_defs() -> Vec<ToolDef> {
                 "required": ["file_path", "line", "character"]
             }),
         },
+        ToolDef {
+            name: "bash".into(),
+            description: "Run a shell command. It already runs with the project workspace root as its working directory — run commands directly (e.g. \"git status\") with relative paths; never cd into guessed paths. Requires approval for non-allowlisted commands. Danger-sensitive commands are blocked automatically.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to run" },
+                    "workdir": { "type": "string", "description": "Working directory (defaults to project root)" },
+                    "stdin": { "type": "string", "description": "Optional stdin input for the command" },
+                    "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default 30, override if command needs more time)" }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDef {
+            name: "ask_user".into(),
+            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Each question carries concrete options; the UI automatically appends a final free-text option, so never add an 'Other' option yourself. Blocks until answered and returns the compiled question/answer pairs.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "Questions to ask the user",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": { "type": "string", "description": "The complete question, ending with a question mark" },
+                                "options": { "type": "array", "items": { "type": "string" }, "description": "2-4 concise, mutually exclusive choices" },
+                                "multi_select": { "type": "boolean", "description": "Allow picking more than one option (default false)" }
+                            },
+                            "required": ["question", "options"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }),
+        },
     ]
 }
 
@@ -255,6 +293,14 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             }
 
             heuristically_find_references(file_path, line, character, &ctx.db_path)
+        }
+        "bash" => {
+            let mut a: bash::BashArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            if a.workdir.is_none() {
+                a.workdir = ctx.workspace_root.clone();
+            }
+            let content = bash::execute(a).await?;
+            Ok(ToolOutput::Text { content })
         }
         _ => Err(format!("unknown tool: {name}")),
     }
@@ -421,5 +467,36 @@ mod tests {
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
         assert!(result.is_err(), "rg likely not installed in test env");
+    }
+
+    #[test]
+    fn test_bash_dispatch_echo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ctx = ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+        };
+        let args = serde_json::json!({"command": "echo hello"});
+        let result = rt.block_on(execute("bash", args, &ctx));
+        let output = result.expect("bash should succeed");
+        match output {
+            ToolOutput::Text { content } => assert_eq!(content.trim(), "hello"),
+            _ => panic!("expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_bash_dispatch_unknown_tool() {
+        let ctx = ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+        };
+        let args = serde_json::json!({"command": "echo"});
+        let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown tool"), "got: {err}");
     }
 }

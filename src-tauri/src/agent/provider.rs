@@ -140,6 +140,7 @@ pub async fn stream_message(
     config: &AgentConfig,
     messages: &[Message],
     tools: &[ToolDescription],
+    system: Option<&str>,
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
     assistant_text: &mut String,
@@ -151,7 +152,7 @@ pub async fn stream_message(
         stream: true,
         messages: messages.to_vec(),
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
-        system: None,
+        system: system.map(|s| s.to_string()),
     };
 
     let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
