@@ -1,10 +1,14 @@
 use crate::code_intel::db::{IndexDb, SearchResult, SymbolRecord};
+use crate::code_intel::embeddings::{self, SharedEmbedder};
 use crate::code_intel::indexer;
 use crate::code_intel::watcher::FileWatcher;
 use crate::state::AppState;
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
+use tauri::ipc::Channel;
+use tauri::Emitter;
+use tauri::Manager;
 use tauri::State;
 use tokio::task::spawn_blocking;
 
@@ -16,23 +20,97 @@ pub struct IndexStatus {
     pub symbols_count: i64,
 }
 
+fn resolve_model_dir(app_handle: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    if let Ok(r) = app_handle.path().resource_dir() {
+        let p = r.join("models/LateOn-Code-edge");
+        if p.join("model_int8.onnx").exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = Path::new(&manifest).join("models/LateOn-Code-edge");
+        if p.join("model_int8.onnx").exists() {
+            return Some(p);
+        }
+    }
+    let cache = dirs::config_dir()
+        .unwrap_or_else(|| Path::new(".").to_path_buf())
+        .join("claudinio-code/models/LateOn-Code-edge");
+    if cache.join("model_int8.onnx").exists() {
+        return Some(cache);
+    }
+    None
+}
+
+fn cache_model_dir() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| Path::new(".").to_path_buf())
+        .join("claudinio-code/models/LateOn-Code-edge")
+}
+
 #[tauri::command]
 pub async fn open_workspace(
     path: String,
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
+    progress_channel: Channel<indexer::IndexProgress>,
 ) -> Result<IndexStatus, String> {
     let db_path = Path::new(&path).join(".claudinio_index.db");
     let db = Arc::new(IndexDb::open(&db_path)?);
 
-    let (files_count, symbols_count) = spawn_blocking({
+    let _ = app_handle.emit("index-progress", indexer::IndexProgress {
+        status: "loading_model".into(),
+        files_indexed: 0,
+        symbols_indexed: 0,
+        total_files: 0,
+    });
+
+    // Download model to cache if not bundled
+    if resolve_model_dir(&app_handle).is_none() {
+        let cache = cache_model_dir();
+        if let Err(e) = embeddings::ensure_model_downloaded(&cache).await {
+            eprintln!("[open_workspace] failed to download embedding model: {e}");
+        }
+    }
+
+    // Phase 1: Start scanning WITHOUT embeddings immediately
+    let scan_handle = spawn_blocking({
         let db = Arc::clone(&db);
         let path = path.clone();
         let app_handle = app_handle.clone();
-        move || indexer::scan_workspace(db.as_ref(), &path, Some(&app_handle))
-    })
-    .await
-    .map_err(|e| format!("scan task panicked: {e}"))??;
+        let progress_channel = progress_channel.clone();
+        move || {
+            indexer::scan_workspace(
+                db.as_ref(),
+                &path,
+                Some(&app_handle),
+                None, // no embedder yet
+                Some(&progress_channel),
+            )
+        }
+    });
+
+    // Phase 2: In parallel, try to load the embedding model
+    let model_handle = spawn_blocking({
+        let app_handle = app_handle.clone();
+        move || {
+            let model_dir = resolve_model_dir(&app_handle);
+            model_dir.and_then(|d| embeddings::load_shared(&d).ok())
+        }
+    });
+
+    // Phase 3: Wait for scan to complete (this is what the user sees)
+    let (files_count, symbols_count) = scan_handle
+        .await
+        .map_err(|e| format!("scan task panicked: {e}"))?
+        .map_err(|e| e)?;
+
+    // Phase 4: Try to get embedder with a generous timeout
+    let embedder = tokio::time::timeout(std::time::Duration::from_secs(30), model_handle)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten();
 
     let watcher = FileWatcher::start(&path, &db_path, app_handle.clone())?;
 
@@ -48,7 +126,10 @@ pub async fn open_workspace(
         let mut w = state._watcher.lock().await;
         *w = Some(watcher);
     }
-
+    {
+        let mut em = state.embedding_model.lock().await;
+        *em = embedder;
+    }
     {
         let mut lsp = state.lsp_manager.lock().await;
         let _ = lsp.start_for_workspace(&path);

@@ -44,6 +44,18 @@ pub struct SearchResult {
     pub signature: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticSearchResult {
+    pub symbol_id: i64,
+    pub name: String,
+    pub kind: String,
+    pub file_path: String,
+    pub start_line: i64,
+    pub signature: Option<String>,
+    pub score: f32,
+}
+
 impl IndexDb {
     pub fn open(db_path: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("db open: {e}"))?;
@@ -96,6 +108,12 @@ impl IndexDb {
             CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);
             CREATE INDEX IF NOT EXISTS idx_relations_from ON relations(from_symbol_id);
             CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_symbol_id);
+
+            CREATE TABLE IF NOT EXISTS symbol_embeddings (
+                symbol_id INTEGER PRIMARY KEY,
+                embedding BLOB NOT NULL,
+                FOREIGN KEY(symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
+            );
             ",
         )
         .map_err(|e| format!("schema: {e}"))?;
@@ -167,6 +185,8 @@ impl IndexDb {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM relations WHERE from_symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1) OR to_symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)", params![file_id])
             .map_err(|e| format!("delete relations: {e}"))?;
+        conn.execute("DELETE FROM symbol_embeddings WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)", params![file_id])
+            .map_err(|e| format!("delete embeddings: {e}"))?;
         conn.execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])
             .map_err(|e| format!("delete symbols: {e}"))?;
         Ok(())
@@ -182,12 +202,13 @@ impl IndexDb {
         start_col: i64,
         end_line: i64,
         end_col: i64,
+        doc_comment: Option<&str>,
     ) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO symbols (file_id, name, kind, signature, start_line, start_col, end_line, end_col)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![file_id, name, kind, signature, start_line, start_col, end_line, end_col],
+            "INSERT INTO symbols (file_id, name, kind, signature, start_line, start_col, end_line, end_col, doc_comment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![file_id, name, kind, signature, start_line, start_col, end_line, end_col, doc_comment],
         )
         .map_err(|e| format!("insert symbol: {e}"))?;
         let id: i64 = conn.last_insert_rowid();
@@ -313,6 +334,99 @@ impl IndexDb {
             .filter_map(|r| r.ok())
             .collect();
         Ok(results)
+    }
+
+    pub fn upsert_embedding(&self, symbol_id: i64, embedding: &[f32]) -> Result<(), String> {
+        let bytes: Vec<u8> = embedding
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO symbol_embeddings (symbol_id, embedding) VALUES (?1, ?2)",
+            params![symbol_id, bytes],
+        )
+        .map_err(|e| format!("upsert embedding: {e}"))?;
+        Ok(())
+    }
+
+    pub fn delete_embeddings_for_file(&self, file_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM symbol_embeddings WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+            params![file_id],
+        )
+        .map_err(|e| format!("delete embeddings: {e}"))?;
+        Ok(())
+    }
+
+    pub fn load_all_embeddings(&self) -> Result<Vec<(SymbolRecord, Vec<f32>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let dim = 48;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.file_id, s.name, s.kind, s.signature,
+                        s.start_line, s.start_col, s.end_line, s.end_col, f.path,
+                        e.embedding
+                 FROM symbols s
+                 JOIN files f ON f.id = s.file_id
+                 JOIN symbol_embeddings e ON e.symbol_id = s.id",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let results = stmt
+            .query_map([], |row| {
+                let blob: Vec<u8> = row.get(10)?;
+                let mut embedding = vec![0f32; dim];
+                for (i, chunk) in blob.chunks_exact(4).enumerate().take(dim) {
+                    let arr: [u8; 4] = chunk.try_into().unwrap_or([0; 4]);
+                    embedding[i] = f32::from_le_bytes(arr);
+                }
+                Ok((
+                    SymbolRecord {
+                        id: row.get(0)?,
+                        file_id: row.get(1)?,
+                        name: row.get(2)?,
+                        kind: row.get(3)?,
+                        signature: row.get(4)?,
+                        start_line: row.get(5)?,
+                        start_col: row.get(6)?,
+                        end_line: row.get(7)?,
+                        end_col: row.get(8)?,
+                        file_path: row.get(9)?,
+                    },
+                    embedding,
+                ))
+            })
+            .map_err(|e| format!("query: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
+    pub fn search_by_embedding(&self, query_vec: &[f32], limit: usize) -> Result<Vec<SemanticSearchResult>, String> {
+        let all = self.load_all_embeddings()?;
+        let mut scored: Vec<(f32, SemanticSearchResult)> = all
+            .into_iter()
+            .map(|(sym, emb)| {
+                let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
+                let score = dot.max(0.0).min(1.0);
+                (
+                    score,
+                    SemanticSearchResult {
+                        symbol_id: sym.id,
+                        name: sym.name,
+                        kind: sym.kind,
+                        file_path: sym.file_path.unwrap_or_default(),
+                        start_line: sym.start_line,
+                        signature: sym.signature,
+                        score,
+                    },
+                )
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, r)| r).collect())
     }
 
     #[allow(dead_code)]

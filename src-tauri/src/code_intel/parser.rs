@@ -7,6 +7,8 @@ pub struct ParsedSymbol {
     pub name: String,
     pub kind: String,
     pub signature: Option<String>,
+    pub doc_comment: Option<String>,
+    pub body_text: Option<String>,
     pub start_line: i64,
     pub start_col: i64,
     pub end_line: i64,
@@ -48,6 +50,56 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         "swift" => Err("swift grammar not loaded".into()),
         _ => Err(format!("unknown language: {lang}")),
     }
+}
+
+fn extract_doc_comment(content: &str, start_line: i64) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut doc_lines: Vec<&str> = Vec::new();
+    let mut line = (start_line - 2) as usize;
+    loop {
+        let trimmed = lines.get(line)?.trim();
+        if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            doc_lines.push(trimmed.trim_start_matches("///").trim_start_matches("//!").trim());
+            if line == 0 {
+                break;
+            }
+            line = line.wrapping_sub(1);
+        } else if trimmed.starts_with("/**") || trimmed.starts_with("/*!") || trimmed.starts_with("* ") {
+            doc_lines.push(trimmed.trim_start_matches("/**").trim_start_matches("/*!").trim_start_matches('*').trim());
+            if trimmed.contains("*/") {
+                break;
+            }
+            if line == 0 {
+                break;
+            }
+            line = line.wrapping_sub(1);
+        } else if trimmed == "*/" || trimmed == "**/" {
+            if line == 0 {
+                break;
+            }
+            line = line.wrapping_sub(1);
+        } else {
+            break;
+        }
+    }
+    if doc_lines.is_empty() {
+        return None;
+    }
+    doc_lines.reverse();
+    Some(doc_lines.join(" "))
+}
+
+fn extract_body_text(content: &str, start_line: i64, end_line: i64) -> Option<String> {
+    if start_line <= 0 || end_line < start_line {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let start = (start_line - 1) as usize;
+    let end = (end_line as usize).min(lines.len());
+    if start >= end || start >= lines.len() {
+        return None;
+    }
+    Some(lines[start..end].join("\n"))
 }
 
 pub fn parse_file(path: &str, content: &str) -> ParseResult {
@@ -123,14 +175,18 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                     let start = node.start_position();
                     let end = node.end_position();
                     let sig_text = get_node_text(content, &node, 80);
+                    let sl = start.row as i64 + 1;
+                    let el = end.row as i64 + 1;
 
                     symbols.push(ParsedSymbol {
                         name,
                         kind: kind.into(),
                         signature: Some(sig_text),
-                        start_line: start.row as i64 + 1,
+                        doc_comment: extract_doc_comment(content, sl),
+                        body_text: extract_body_text(content, sl, el),
+                        start_line: sl,
                         start_col: start.column as i64 + 1,
-                        end_line: end.row as i64 + 1,
+                        end_line: el,
                         end_col: end.column as i64 + 1,
                     });
                 }
@@ -170,13 +226,18 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                     text.split_whitespace().nth(1).unwrap_or("import").to_string()
                 };
 
+                let sl = start.row as i64 + 1;
+                let el = end.row as i64 + 1;
+
                 symbols.push(ParsedSymbol {
                     name,
                     kind: "import".into(),
                     signature: Some(sig_text),
-                    start_line: start.row as i64 + 1,
+                    doc_comment: extract_doc_comment(content, sl),
+                    body_text: extract_body_text(content, sl, el),
+                    start_line: sl,
                     start_col: start.column as i64 + 1,
-                    end_line: end.row as i64 + 1,
+                    end_line: el,
                     end_col: end.column as i64 + 1,
                 });
             }

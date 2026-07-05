@@ -72,7 +72,7 @@ impl FileWatcher {
                             "file": path_str,
                         }));
 
-                        match indexer::reindex_file(&db, path_str) {
+                        match indexer::reindex_file(&db, path_str, None) {
                             Ok(Some(result)) => {
                                 let _ = h.emit("index-progress", serde_json::json!({
                                     "status": "reindexed",

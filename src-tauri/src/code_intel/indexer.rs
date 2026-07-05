@@ -1,9 +1,11 @@
 use crate::code_intel::db::IndexDb;
+use crate::code_intel::embeddings::{build_embedding_text, CodeEmbedder};
 use crate::code_intel::parser::{self, ParseResult};
 use std::path::Path;
 use std::time::SystemTime;
 use xxhash_rust::xxh3::xxh3_64;
 use tauri::Emitter;
+use tauri::ipc::Channel;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,7 +21,12 @@ pub fn compute_hash(content: &str) -> String {
     format!("{:x}", xxh3_64(content.as_bytes()))
 }
 
-pub fn index_file(db: &IndexDb, path: &str, content: &str) -> Result<ParseResult, String> {
+pub fn index_file(
+    db: &IndexDb,
+    path: &str,
+    content: &str,
+    mut embedder: Option<&mut CodeEmbedder>,
+) -> Result<ParseResult, String> {
     let lang = parser::detect_language(path).unwrap_or("unknown");
     let hash = compute_hash(content);
     let modified = SystemTime::now()
@@ -42,6 +49,7 @@ pub fn index_file(db: &IndexDb, path: &str, content: &str) -> Result<ParseResult
 
     for sym in &parse_result.symbols {
         let sig = sym.signature.as_deref();
+        let doc = sym.doc_comment.as_deref();
         let id = db.insert_symbol(
             file_id,
             &sym.name,
@@ -51,6 +59,7 @@ pub fn index_file(db: &IndexDb, path: &str, content: &str) -> Result<ParseResult
             sym.start_col,
             sym.end_line,
             sym.end_col,
+            doc,
         )?;
         symbol_ids.push((sym.name.clone(), id));
     }
@@ -67,6 +76,30 @@ pub fn index_file(db: &IndexDb, path: &str, content: &str) -> Result<ParseResult
 
     db.update_fts_for_file(file_id)?;
 
+    if let Some(ref mut emb) = embedder {
+        let texts: Vec<String> = parse_result
+            .symbols
+            .iter()
+            .map(|sym| {
+                build_embedding_text(
+                    &sym.kind,
+                    &sym.name,
+                    sym.doc_comment.as_deref(),
+                    sym.body_text.as_deref(),
+                )
+            })
+            .collect();
+
+        if !texts.is_empty() {
+            let str_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+            if let Ok(vectors) = emb.encode(&str_refs) {
+                for ((_, sid), vec) in symbol_ids.iter().zip(vectors.iter()) {
+                    let _ = db.upsert_embedding(*sid, vec);
+                }
+            }
+        }
+    }
+
     Ok(parse_result)
 }
 
@@ -74,6 +107,8 @@ pub fn scan_workspace(
     db: &IndexDb,
     root: &str,
     app_handle: Option<&tauri::AppHandle>,
+    mut embedder: Option<&mut CodeEmbedder>,
+    progress_channel: Option<&Channel<IndexProgress>>,
 ) -> Result<(i64, i64), String> {
     let mut total_files = 0i64;
     let mut total_symbols = 0i64;
@@ -99,13 +134,26 @@ pub fn scan_workspace(
 
     let total = all_paths.len() as i64;
 
+    let initial_progress = IndexProgress {
+        status: "indexing".into(),
+        files_indexed: 0,
+        symbols_indexed: 0,
+        total_files: total,
+    };
+    if let Some(handle) = app_handle.as_ref() {
+        let _ = handle.emit("index-progress", initial_progress.clone());
+    }
+    if let Some(ch) = progress_channel {
+        let _ = ch.send(initial_progress);
+    }
+
     for path_str in &all_paths {
         let content = match std::fs::read_to_string(path_str) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        match index_file(db, path_str, &content) {
+        match index_file(db, path_str, &content, embedder.as_deref_mut()) {
             Ok(parse_result) => {
                 total_files += 1;
                 total_symbols += parse_result.symbols.len() as i64;
@@ -123,31 +171,39 @@ pub fn scan_workspace(
         }
 
         counted += 1;
-        if counted % 50 == 0 {
+        if counted % 10 == 0 {
+            let prog = IndexProgress {
+                status: "indexing".into(),
+                files_indexed: counted,
+                symbols_indexed: total_symbols,
+                total_files: total,
+            };
             if let Some(handle) = app_handle {
-                let _ = handle.emit("index-progress", IndexProgress {
-                    status: "indexing".into(),
-                    files_indexed: counted,
-                    symbols_indexed: total_symbols,
-                    total_files: total,
-                });
+                let _ = handle.emit("index-progress", prog.clone());
+            }
+            if let Some(ch) = progress_channel {
+                let _ = ch.send(prog);
             }
         }
     }
 
+    let done_progress = IndexProgress {
+        status: "done".into(),
+        files_indexed: total_files,
+        symbols_indexed: total_symbols,
+        total_files: total,
+    };
     if let Some(handle) = app_handle {
-        let _ = handle.emit("index-progress", IndexProgress {
-            status: "done".into(),
-            files_indexed: total_files,
-            symbols_indexed: total_symbols,
-            total_files: total,
-        });
+        let _ = handle.emit("index-progress", done_progress.clone());
+    }
+    if let Some(ch) = progress_channel {
+        let _ = ch.send(done_progress);
     }
 
     Ok((total_files, total_symbols))
 }
 
-pub fn reindex_file(db: &IndexDb, path: &str) -> Result<Option<ParseResult>, String> {
+pub fn reindex_file(db: &IndexDb, path: &str, embedder: Option<&mut CodeEmbedder>) -> Result<Option<ParseResult>, String> {
     let existing = db.file_by_path(path)?;
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -167,6 +223,6 @@ pub fn reindex_file(db: &IndexDb, path: &str) -> Result<Option<ParseResult>, Str
         }
     }
 
-    let result = index_file(db, path, &content).ok();
+    let result = index_file(db, path, &content, embedder).ok();
     Ok(result)
 }

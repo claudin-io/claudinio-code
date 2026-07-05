@@ -5,6 +5,7 @@ mod list_dir;
 mod read_file;
 
 use crate::code_intel::db::IndexDb;
+use crate::code_intel::embeddings::SharedEmbedder;
 use crate::lsp::manager::LspManager;
 use serde::Serialize;
 use serde_json::Value;
@@ -16,6 +17,7 @@ pub struct ToolContext {
     pub db_path: Option<String>,
     pub lsp_manager: Option<Arc<Mutex<LspManager>>>,
     pub workspace_root: Option<String>,
+    pub embedding_model: Option<SharedEmbedder>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -167,6 +169,23 @@ pub fn get_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "semantic_search".into(),
+            description: "Semantic (concept-based) code search using CodeBERT embeddings. \
+Finds code by meaning and behavior, not keywords — e.g. 'message queue system' or \
+'sistema de filas de mensagens' finds SteeringCtl.drain/push/queue even without \
+identifier match. Prefer this when you can describe the functionality but don't know \
+the exact symbol name. Ranking: go_to_definition (precise) → semantic_search \
+(conceptual) → code_search (keyword) → grep (fallback).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural language description of what the code does (English or Portuguese)" },
+                    "limit": { "type": "integer", "default": 15 }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
             name: "bash".into(),
             description: "Run a shell command. It already runs with the project workspace root as its working directory — run commands directly (e.g. \"git status\") with relative paths; never cd into guessed paths. Requires approval for non-allowlisted commands. Danger-sensitive commands are blocked automatically.".into(),
             input_schema: serde_json::json!({
@@ -294,6 +313,19 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 
             heuristically_find_references(file_path, line, character, &ctx.db_path)
         }
+        "semantic_search" => {
+            let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
+            let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(15);
+            let db = open_db(&ctx.db_path)?;
+            let model = ctx
+                .embedding_model
+                .as_ref()
+                .ok_or("semantic search not available — open a workspace or wait for the embedding model to load")?;
+            let mut model = model.lock().map_err(|e| format!("embedder lock: {e}"))?;
+            let query_vec = model.encode_query(query)?;
+            let results = db.search_by_embedding(&query_vec, limit as usize)?;
+            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
+        }
         "bash" => {
             let mut a: bash::BashArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             if a.workdir.is_none() {
@@ -398,6 +430,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
+            embedding_model: None,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -411,6 +444,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
+            embedding_model: None,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -424,6 +458,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
+            embedding_model: None,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -435,6 +470,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
+            embedding_model: None,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -449,6 +485,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
+            embedding_model: None,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -463,6 +500,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
+            embedding_model: None,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -476,6 +514,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
+            embedding_model: None,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -492,6 +531,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
+            embedding_model: None,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));

@@ -70,10 +70,15 @@ pub async fn send_message(
         .as_ref()
         .map(|p| format!("{p}/.claudinio_index.db"));
 
+    let embedding_model = {
+        let em = state.embedding_model.lock().await;
+        em.clone()
+    };
     let ctx = ToolContext {
         db_path,
         lsp_manager: Some(state.lsp_manager.clone()),
         workspace_root,
+        embedding_model,
     };
 
     // Reset steering for the new run, then drain any residual from a race.

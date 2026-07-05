@@ -1,6 +1,7 @@
 use crate::agent::provider::AgentConfig;
 use crate::agent::session::{AnswerMap, ApprovalMap, SteeringCtl};
 use crate::code_intel::db::IndexDb;
+use crate::code_intel::embeddings::SharedEmbedder;
 use crate::lsp::manager::LspManager;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ pub struct AppState {
     pub lsp_manager: Arc<Mutex<LspManager>>,
     pub active_session: Mutex<Option<SessionHandle>>,
     pub steering: Arc<SteeringCtl>,
+    pub embedding_model: Mutex<Option<SharedEmbedder>>,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             lsp_manager: Arc::new(Mutex::new(LspManager::new())),
             active_session: Mutex::new(None),
             steering: Arc::new(SteeringCtl::new()),
+            embedding_model: Mutex::new(None),
         }
     }
 }

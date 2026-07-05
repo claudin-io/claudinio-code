@@ -187,6 +187,14 @@ export interface IndexStatus {
   symbolsCount: number;
 }
 
+export interface IndexProgress {
+  status: string;
+  filesIndexed: number;
+  symbolsIndexed: number;
+  totalFiles: number;
+  file?: string;
+}
+
 export interface SearchResult {
   symbolId: number;
   name: string;
@@ -209,8 +217,10 @@ export interface SymbolRecord {
   filePath?: string | null;
 }
 
-export function openWorkspace(path: string): Promise<IndexStatus> {
-  return invoke<IndexStatus>("open_workspace", { path });
+export function openWorkspace(path: string, onProgress?: (p: IndexProgress) => void): Promise<IndexStatus> {
+  const channel = new Channel<IndexProgress>();
+  channel.onmessage = onProgress ?? (() => {});
+  return invoke<IndexStatus>("open_workspace", { path, progressChannel: channel });
 }
 
 export function searchSymbols(

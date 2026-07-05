@@ -1,6 +1,7 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, Show, onMount } from "solid-js";
 import "./App.css";
-import { pickFolder, openWorkspace, setConfig, getConfig } from "./lib/ipc";
+import { listen } from "@tauri-apps/api/event";
+import { pickFolder, openWorkspace, setConfig, getConfig, type IndexProgress } from "./lib/ipc";
 import "./lib/theme";
 import { FileTree } from "./components/FileTree";
 import { ChatPanel } from "./components/ChatPanel";
@@ -32,12 +33,21 @@ function App() {
   const [root, setRoot] = createSignal<string | null>(null);
   const [selectedFile, setSelectedFile] = createSignal<string | null>(null);
   const [indexStatus, setIndexStatus] = createSignal("");
+  const [progress, setProgress] = createSignal<IndexProgress | null>(null);
   const [showConfig, setShowConfig] = createSignal(false);
   const [configApiKey, setConfigApiKey] = createSignal("");
   const [configBaseUrl, setConfigBaseUrl] = createSignal("https://api.claudin.io");
   const [configModel, setConfigModel] = createSignal("claudinio");
   const [showTree, setShowTree] = createSignal(false);
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
+
+  // Listen for global index-progress events (model loading, watcher re-indexing)
+  onMount(() => {
+    const unlisten = listen<IndexProgress>("index-progress", (event) => {
+      setProgress(event.payload);
+    });
+    return () => { unlisten.then((f) => f()); };
+  });
 
   const openConfig = async () => {
     try {
@@ -69,11 +79,14 @@ function App() {
     setRoot(folder);
     setShowTree(false);
     setIndexStatus("indexando…");
+    setProgress(null);
     try {
-      const s = await openWorkspace(folder);
+      const s = await openWorkspace(folder, (p) => setProgress(p));
       setIndexStatus(`${s.filesCount} arquivos, ${s.symbolsCount} símbolos`);
+      setTimeout(() => setProgress(null), 800);
     } catch (e) {
       setIndexStatus(`erro: ${e}`);
+      setProgress(null);
     }
   };
 
@@ -247,9 +260,46 @@ function App() {
             </div>
           </Show>
 
-          <Show when={root() && !showTree() && indexStatus()}>
-            <div class="border-t border-border-subtle px-2 py-1 font-mono text-[10px] text-ink-faint">
-              {indexStatus()}
+          <Show when={root() && !showTree() && (progress() || indexStatus())}>
+            <div class="border-t border-border-subtle px-3 py-2">
+              <Show when={progress() !== null}
+                fallback={
+                  <div class="font-mono text-[10px] text-ink-faint">
+                    {indexStatus()}
+                  </div>
+                }
+              >
+                <Show when={progress()!.totalFiles > 0}
+                  fallback={
+                    <div class="font-mono text-[10px] text-ink-faint">
+                      Carregando modelo…
+                    </div>
+                  }
+                >
+                  <div class="flex flex-col gap-1">
+                    <div class="flex items-center justify-between text-[10px]">
+                      <span class="text-ink-muted">Indexando</span>
+                      <span class="font-mono text-ink-faint">
+                        {progress()!.filesIndexed}/{progress()!.totalFiles}
+                      </span>
+                    </div>
+                    <div class="h-1 w-full overflow-hidden rounded-full bg-surface-0">
+                      <div
+                        class="h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
+                        style={{
+                          width:
+                            progress()!.totalFiles > 0
+                              ? `${(progress()!.filesIndexed / progress()!.totalFiles) * 100}%`
+                              : "0%",
+                        }}
+                      />
+                    </div>
+                    <div class="font-mono text-[9px] text-ink-faint">
+                      {progress()!.symbolsIndexed} símbolos
+                    </div>
+                  </div>
+                </Show>
+              </Show>
             </div>
           </Show>
         </aside>

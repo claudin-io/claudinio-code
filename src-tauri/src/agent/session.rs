@@ -60,12 +60,21 @@ use these tools in this order of preference: \
   \u{2022} code_search  \u{2014} find any symbol/definition by name (faster than grep) \
   \u{2022} file_outline \u{2014} list all symbols in a file (preview structure before reading) \
   \u{2022} go_to_definition / find_references \u{2014} navigate symbol relationships precisely \
-  \u{2022} symbol_lookup \u{2014} exact symbol name lookup across workspace \
-Accuracy hierarchy: LSP tools (precise) \u{2192} indexed tools (fast) \u{2192} grep/bash (fallback). \
+   \u{2022} symbol_lookup \u{2014} exact symbol name lookup across workspace \
+   \u{2022} semantic_search \u{2014} search by concept/meaning using LateOn code embeddings. \
+Describe what the code does in natural language: \
+'message queue system' finds SteeringCtl.queue/drain/push without \
+identifier match. Use this BEFORE grep when you can describe behavior \
+but don't know symbol names. \
+Accuracy hierarchy: LSP tools (precise) \u{2192} semantic_search (conceptual) \u{2192} \
+code_search (keyword) \u{2192} grep/bash (fallback). \
 Use grep only when the index doesn't cover what you need. \
 Example: to understand an unfamiliar file, call file_outline first, not read_file. \
 \
-Be focused and concrete. Reply in the user's language (Portuguese if they write in Portuguese).";
+Be focused and concrete. \
+IMPORTANT — Language policy: ALL communication must be in English. Write in English and ONLY in English, \
+regardless of the language the user writes in. If the user writes in a non-English language, \
+treat it as if they asked in English — respond in English only.";
 
 /// Build the per-session system prompt. The result is byte-identical for every
 /// request in the same workspace, so the provider's prefix cache stays warm.
@@ -237,6 +246,25 @@ fn inject_steering(
 /// step to the session JSONL store. The model decides at each round whether it
 /// still needs a tool call or can answer directly — there are no forced phases.
 #[allow(clippy::too_many_arguments)]
+/// Reject messages that are not written in English.
+fn reject_non_english(msg: &str) -> Result<(), String> {
+    let non_ascii: Vec<char> = msg.chars().filter(|&c| c > '\u{7E}').collect();
+    if non_ascii.is_empty() {
+        return Ok(());
+    }
+    let total = msg.chars().count() as f64;
+    let ratio = non_ascii.len() as f64 / total;
+    if ratio > 0.10 {
+        let sample: String = non_ascii.iter().take(5).collect();
+        return Err(format!(
+            "Only English is supported. Please write your message in English. \
+             (Detected non-English characters: {})",
+            sample
+        ));
+    }
+    Ok(())
+}
+
 pub async fn run_workflow(
     config: &AgentConfig,
     history: &mut Vec<Message>,
@@ -249,6 +277,7 @@ pub async fn run_workflow(
     store: &SessionStore,
     steering: &Arc<SteeringCtl>,
 ) -> Result<(), String> {
+    reject_non_english(&user_message)?;
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
         ts: now_ms(),

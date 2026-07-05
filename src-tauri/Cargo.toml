@@ -33,4 +33,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 notify = "8"
 notify-debouncer-mini = "0.5"
 dirs = "6"
+ort = { version = "2.0.0-rc.12", features = ["download-binaries", "load-dynamic"] }
+tokenizers = "0.23"
 
