@@ -1,8 +1,11 @@
 import { createSignal, For, Show } from "solid-js";
 import "./App.css";
 import { pickFolder, openWorkspace, setConfig, getConfig } from "./lib/ipc";
+import "./lib/theme";
 import { FileTree } from "./components/FileTree";
 import { ChatPanel } from "./components/ChatPanel";
+import { EmptyState } from "./components/EmptyState";
+import { Icon } from "./components/Icon";
 
 const RECENT_KEY = "claudinio_recent_projects";
 
@@ -87,35 +90,35 @@ function App() {
     await indexProject(folder);
   };
 
+  const isMac = () => document.documentElement.classList.contains("is-macos");
+
   return (
     <div class="flex h-full flex-col">
-      <header class="flex shrink-0 items-center gap-2 border-b border-border-subtle bg-surface-1 px-3 py-1.5">
-        <span class="text-sm font-semibold whitespace-nowrap">
+      <header
+        class="flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle bg-surface-1 px-3"
+        classList={{ "pl-[78px]": isMac() }}
+        data-tauri-drag-region
+      >
+        <span class="whitespace-nowrap text-[13px] font-semibold" data-tauri-drag-region>
           Claudinio <span class="text-accent">Code</span>
         </span>
-        <button
-          class="rounded-md border border-border-subtle bg-surface-2 px-2.5 py-1 text-xs hover:border-accent whitespace-nowrap"
-          onClick={openFolder}
-        >
-          Abrir pasta…
-        </button>
-        <Show when={root()}>
-          <span class="truncate text-xs text-ink-muted">{root()}</span>
-        </Show>
-        <div class="ml-auto flex items-center gap-2">
+        <span class="max-w-[280px] truncate font-mono text-[12px] text-ink-faint" data-tauri-drag-region>
+          {root()}
+        </span>
+        <div class="ml-auto flex items-center gap-1.5">
           <button
             onClick={openConfig}
-            class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs hover:border-accent"
+            class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
             title="Configurar API"
           >
-            Config
+            <Icon name="settings" />
           </button>
         </div>
       </header>
 
       <Show when={showConfig()}>
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div class="w-96 rounded-lg border border-border-subtle bg-surface-1 p-5 shadow-xl">
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+          <div class="w-[400px] rounded-lg bg-surface-1 p-5 shadow-modal">
             <h2 class="mb-4 text-sm font-semibold text-ink">Configuração da API</h2>
 
             <label class="mb-1 block text-xs text-ink-muted">API Key</label>
@@ -124,14 +127,14 @@ function App() {
               value={configApiKey()}
               onInput={(e) => setConfigApiKey(e.currentTarget.value)}
               placeholder="sk-..."
-              class="mb-3 w-full rounded border border-border-subtle bg-surface-2 p-2 text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent"
+              class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
 
             <label class="mb-1 block text-xs text-ink-muted">Base URL</label>
             <input
               value={configBaseUrl()}
               onInput={(e) => setConfigBaseUrl(e.currentTarget.value)}
-              class="mb-3 w-full rounded border border-border-subtle bg-surface-2 p-2 text-sm text-ink focus:outline-none focus:border-accent"
+              class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
 
             <label class="mb-1 block text-xs text-ink-muted">Modelo</label>
@@ -139,19 +142,19 @@ function App() {
               value={configModel()}
               onInput={(e) => setConfigModel(e.currentTarget.value)}
               placeholder="claudinio"
-              class="mb-4 w-full rounded border border-border-subtle bg-surface-2 p-2 text-sm text-ink focus:outline-none focus:border-accent"
+              class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
 
             <div class="flex justify-end gap-2">
               <button
                 onClick={() => setShowConfig(false)}
-                class="rounded border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-0"
+                class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
               >
                 Cancelar
               </button>
               <button
                 onClick={saveConfig}
-                class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
+                class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
               >
                 Salvar
               </button>
@@ -167,7 +170,7 @@ function App() {
             fallback={
               <>
                 <div class="flex items-center justify-between border-b border-border-subtle px-3 py-2">
-                  <span class="text-xs font-semibold uppercase tracking-wide text-ink-muted">
+                  <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
                     Projetos
                   </span>
                 </div>
@@ -176,18 +179,18 @@ function App() {
                   <For each={recentProjects()}>
                     {(proj) => (
                       <button
-                        class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-surface-2"
+                        class="flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm hover:bg-surface-2"
                         classList={{
-                          "bg-surface-2 text-accent": root() === proj,
+                          "border-accent bg-surface-2": root() === proj,
                         }}
                         onClick={() => openRecent(proj)}
                       >
-                        <span class="text-ink-muted">📁</span>
+                        <Icon name="folder" class="shrink-0 text-ink-muted" />
                         <div class="min-w-0">
-                          <div class="truncate text-ink">
+                          <div class="truncate text-[13px] text-ink">
                             {proj.split("/").pop()}
                           </div>
-                          <div class="truncate text-[10px] text-ink-muted">
+                          <div class="truncate text-[11px] text-ink-faint">
                             {proj}
                           </div>
                         </div>
@@ -196,7 +199,7 @@ function App() {
                   </For>
 
                   <Show when={recentProjects().length === 0}>
-                    <div class="px-3 py-8 text-center text-xs text-ink-muted">
+                    <div class="px-3 py-8 text-center text-xs text-ink-faint">
                       Nenhum projeto recente
                     </div>
                   </Show>
@@ -205,16 +208,18 @@ function App() {
                 <div class="border-t border-border-subtle p-2">
                   <button
                     onClick={openFolder}
-                    class="w-full rounded-md border border-dashed border-border-subtle px-3 py-2 text-xs text-ink-muted hover:border-accent hover:text-accent"
+                    class="flex w-full items-center gap-2 rounded-md border border-dashed border-border-subtle px-3 py-2 text-xs text-ink-muted hover:border-accent hover:text-accent"
                   >
-                    + Abrir pasta
+                    <Icon name="plus" class="h-3.5 w-3.5" />
+                    Abrir pasta
                   </button>
                   <Show when={root()}>
                     <button
                       onClick={() => setShowTree(true)}
-                      class="mt-1 w-full rounded-md px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
+                      class="mt-1 flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
                     >
-                      ▸ Explorar arquivos
+                      <Icon name="chevron-right" class="h-3 w-3" />
+                      Explorar arquivos
                     </button>
                   </Show>
                 </div>
@@ -224,9 +229,10 @@ function App() {
             <div class="flex items-center gap-2 border-b border-border-subtle px-2 py-1.5">
               <button
                 onClick={() => setShowTree(false)}
-                class="rounded px-1.5 py-0.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
+                class="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
               >
-                ← Voltar
+                <Icon name="arrow-left" class="h-3 w-3" />
+                Voltar
               </button>
               <span class="truncate text-xs font-semibold text-ink">
                 {root()?.split("/").pop()}
@@ -241,15 +247,23 @@ function App() {
             </div>
           </Show>
 
-          <Show when={indexStatus()}>
-            <div class="border-t border-border-subtle px-2 py-1 text-[10px] text-ink-muted">
+          <Show when={root() && !showTree() && indexStatus()}>
+            <div class="border-t border-border-subtle px-2 py-1 font-mono text-[10px] text-ink-faint">
               {indexStatus()}
             </div>
           </Show>
         </aside>
 
         <main class="min-w-0 flex-1">
-          <ChatPanel />
+          <Show when={root()} fallback={
+            <EmptyState
+              recentProjects={recentProjects()}
+              openRecent={openRecent}
+              openFolder={openFolder}
+            />
+          }>
+            <ChatPanel />
+          </Show>
         </main>
       </div>
     </div>

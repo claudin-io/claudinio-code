@@ -1,14 +1,54 @@
 import { createSignal, For, Show, type Component } from "solid-js";
-import { sendMessage, approveTool, rejectTool, type AgentEvent, type ToolCallData, type EditProposalData, type DoneData, type ChatStep, type ToolResultData } from "../lib/ipc";
+import {
+  sendMessage,
+  approveTool,
+  rejectTool,
+  type AgentEvent,
+  type ToolCallData,
+  type EditProposalData,
+  type DoneData,
+  type ToolResultData,
+} from "../lib/ipc";
 import { DiffViewer } from "./DiffViewer";
+import { Icon, toolIcon, type IconName } from "./Icon";
 
 type Status = "idle" | "thinking" | "awaiting_approval" | "done" | "error";
 
 interface ChatMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant";
   text: string;
-  steps?: ChatStep[];
+  steps?: TimelineItem[];
   done?: DoneData;
+}
+
+interface TimelineItem {
+  type: "thinking" | "tool";
+  thinking?: { text: string; startedAt: number; endedAt?: number };
+  tool?: {
+    call: ToolCallData;
+    result?: ToolResultData;
+    status: "running" | "ok" | "error";
+  };
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return `${n}`;
+  return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+}
+
+function summarizeArgs(args: Record<string, unknown>): string {
+  const path = args.path as string | undefined;
+  if (path) return path;
+  const pattern = args.pattern as string | undefined;
+  if (pattern) return `/${pattern}/`;
+  const content = args.content as string | undefined;
+  if (content) return `${content.slice(0, 60)}…`;
+  return JSON.stringify(args).slice(0, 80);
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export const ChatPanel: Component = () => {
@@ -16,28 +56,74 @@ export const ChatPanel: Component = () => {
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [status, setStatus] = createSignal<Status>("idle");
   const [currentToolCall, setCurrentToolCall] = createSignal<ToolCallData | null>(null);
-  const [currentSteps, setCurrentSteps] = createSignal<ChatStep[]>([]);
+  const [currentSteps, setCurrentSteps] = createSignal<TimelineItem[]>([]);
+  const [thinkingStart, setThinkingStart] = createSignal(0);
+  const [expandedStep, setExpandedStep] = createSignal<number | null>(null);
 
   let messagesEndRef: HTMLDivElement | undefined;
+  let inputRef: HTMLTextAreaElement | undefined;
 
   const scrollToBottom = () => {
     setTimeout(() => messagesEndRef?.scrollIntoView({ behavior: "smooth" }), 50);
   };
 
+  const addOrUpdateTool = (item: TimelineItem) => {
+    setCurrentSteps((prev) => {
+      const idx = prev.findIndex(
+        (s) => s.type === "tool" && s.tool?.call.toolId === item.tool?.call.toolId,
+      );
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = item;
+        return next;
+      }
+      return [...prev, item];
+    });
+  };
+
+  const applyToolResult = (data: ToolResultData) => {
+    setCurrentSteps((prev) => {
+      const idx = prev.findIndex(
+        (s) => s.type === "tool" && s.tool?.call.toolId === data.toolId,
+      );
+      if (idx === -1) return prev;
+      const next = [...prev];
+      const t = next[idx];
+      if (t.type !== "tool" || !t.tool) return prev;
+      next[idx] = {
+        type: "tool",
+        tool: { ...t.tool, result: data, status: data.error ? "error" : "ok" },
+      };
+      return next;
+    });
+  };
+
   const handleEvent = (event: AgentEvent) => {
     if (event.event === "Thinking") {
       if (!event.data) return;
+      const now = Date.now();
+      if (thinkingStart() === 0) setThinkingStart(now);
       setCurrentSteps((prev) => {
         const last = prev[prev.length - 1];
         if (last?.type === "thinking") {
-          return [...prev.slice(0, -1), { type: "thinking", text: event.data }];
+          return prev.map((s, i) =>
+            i === prev.length - 1
+              ? { type: "thinking" as const, thinking: { ...s.thinking!, text: event.data } }
+              : s,
+          );
         }
-        return [...prev, { type: "thinking", text: event.data }];
+        return [
+          ...prev,
+          { type: "thinking" as const, thinking: { text: event.data, startedAt: now } } as TimelineItem,
+        ];
       });
       scrollToBottom();
     } else if (event.event === "ToolCall") {
       const data = event.data as ToolCallData;
-      setCurrentSteps((prev) => [...prev, { type: "tool_call", data }]);
+      addOrUpdateTool({
+        type: "tool",
+        tool: { call: data, status: "running" },
+      });
       if (data.permission === "requires_approval" && data.editProposal) {
         setStatus("awaiting_approval");
         setCurrentToolCall(data);
@@ -45,29 +131,29 @@ export const ChatPanel: Component = () => {
       scrollToBottom();
     } else if (event.event === "ToolResult") {
       const data = event.data as ToolResultData;
-      setCurrentSteps((prev) => [...prev, { type: "tool_result", data }]);
+      applyToolResult(data);
       scrollToBottom();
     } else if (event.event === "Done") {
       const data = event.data as DoneData;
       const steps = currentSteps();
+      const final = steps.map((s) => {
+        if (s.type === "thinking") {
+          return { ...s, thinking: { ...s.thinking!, endedAt: Date.now() } };
+        }
+        return s;
+      });
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          text: data.text_output,
-          steps,
-          done: data,
-        },
+        { role: "assistant", text: data.text_output, steps: final, done: data },
       ]);
       setCurrentSteps([]);
+      setThinkingStart(0);
       setStatus("done");
       scrollToBottom();
     } else if (event.event === "Error") {
-      setMessages((prev) => [
-        ...prev,
-        { role: "system", text: `Error: ${event.data}` },
-      ]);
+      setMessages((prev) => [...prev, { role: "user", text: `Erro: ${event.data}` }]);
       setCurrentSteps([]);
+      setThinkingStart(0);
       setStatus("error");
     }
   };
@@ -79,15 +165,13 @@ export const ChatPanel: Component = () => {
     setMessages((prev) => [...prev, { role: "user", text }]);
     setInput("");
     setCurrentSteps([]);
+    setThinkingStart(0);
     setStatus("thinking");
 
     try {
       await sendMessage(text, handleEvent);
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "system", text: `Failed to send: ${String(e)}` },
-      ]);
+      setMessages((prev) => [...prev, { role: "user", text: `Falha ao enviar: ${String(e)}` }]);
       setStatus("error");
     }
   };
@@ -100,10 +184,7 @@ export const ChatPanel: Component = () => {
     try {
       await approveTool(tc.sessionId, tc.toolId);
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "system", text: `Approval failed: ${String(e)}` },
-      ]);
+      setMessages((prev) => [...prev, { role: "user", text: `Aprovação falhou: ${String(e)}` }]);
     }
   };
 
@@ -115,10 +196,7 @@ export const ChatPanel: Component = () => {
     try {
       await rejectTool(tc.sessionId, tc.toolId);
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "system", text: `Reject failed: ${String(e)}` },
-      ]);
+      setMessages((prev) => [...prev, { role: "user", text: `Rejeição falhou: ${String(e)}` }]);
     }
   };
 
@@ -129,182 +207,270 @@ export const ChatPanel: Component = () => {
     }
   };
 
+  const autoResize = () => {
+    if (inputRef) {
+      inputRef.style.height = "auto";
+      inputRef.style.height = `${Math.min(inputRef.scrollHeight, 156)}px`;
+    }
+  };
+
+  const statusLabel = () => {
+    switch (status()) {
+      case "thinking": return "Trabalhando";
+      case "awaiting_approval": return "Aguardando aprovação";
+      case "done": return "Pronto";
+      case "error": return "Erro";
+      default: return "Parado";
+    }
+  };
+
+  const statusDot = (): string => {
+    switch (status()) {
+      case "thinking": return "bg-accent";
+      case "done": return "bg-success";
+      case "error": return "bg-danger";
+      default: return "bg-ink-faint";
+    }
+  };
+
   return (
-    <div class="flex h-full flex-col bg-surface-1">
-      <div class="flex items-center justify-between border-b border-border-subtle px-3 py-1.5">
-        <span class="text-xs font-semibold uppercase tracking-wide text-ink-muted">
-          Agente
-        </span>
-        <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-ink-muted">
-          {status()}
-        </span>
+    <div class="flex h-full flex-col bg-surface-0">
+      <div class="flex items-center justify-between border-b border-border-subtle px-6 py-1.5">
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
+            Agente
+          </span>
+          <span
+            class={`inline-block h-[6px] w-[6px] rounded-full ${statusDot()}`}
+            classList={{
+              "animate-pulse-soft": status() === "thinking" || status() === "awaiting_approval",
+            }}
+          />
+          <span class="text-[11px] text-ink-faint">{statusLabel()}</span>
+        </div>
       </div>
 
-      <div class="flex flex-1 flex-col gap-2 overflow-y-auto p-2">
-        <For each={messages()}>
-          {(msg) => (
-            <ChatBubble message={msg} />
-          )}
-        </For>
+      <div class="flex flex-1 flex-col overflow-y-auto">
+        <div class="mx-auto w-full max-w-[720px] px-6 py-4">
+          <For each={messages()}>
+            {(msg) => (
+              <div class="mb-6">
+                <Show when={msg.role === "user"}>
+                  <div class="mb-1">
+                    <span class="text-[11px] font-semibold uppercase tracking-wider text-accent">
+                      Você
+                    </span>
+                  </div>
+                  <div class="border-l-2 border-accent/60 pl-3">
+                    <p class="whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink">
+                      {msg.text}
+                    </p>
+                  </div>
+                </Show>
 
-        <Show when={status() === "thinking" || status() === "done"}>
-          <StepsList steps={currentSteps()} isLive={status() === "thinking"} />
-        </Show>
+                <Show when={msg.role === "assistant" && msg.steps && msg.steps!.length > 0}>
+                  <TimelineSteps
+                    steps={msg.steps!}
+                    expandedStep={expandedStep()}
+                    onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
+                    isLive={false}
+                  />
 
-        <Show when={currentToolCall() && status() === "awaiting_approval"}>
-          <ApprovalCard
-            toolCall={currentToolCall()!}
-            onApprove={handleApprove}
-            onReject={handleReject}
-          />
-        </Show>
+                  <Show when={msg.text}>
+                    <div class="mb-1 mt-4">
+                      <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
+                        Resposta
+                      </span>
+                    </div>
+                    <p class="whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink">
+                      {msg.text}
+                    </p>
+                  </Show>
 
-        <div ref={messagesEndRef} />
+                  <Show when={msg.done}>
+                    <div class="mt-2 font-mono text-[11px] text-ink-faint">
+                      {formatTokens(msg.done!.input_tokens)} → {formatTokens(msg.done!.output_tokens)} tokens
+                    </div>
+                  </Show>
+                </Show>
+              </div>
+            )}
+          </For>
+
+          <Show when={status() === "thinking" || status() === "done"}>
+            <div class="mb-6">
+              <TimelineSteps
+                steps={currentSteps()}
+                expandedStep={expandedStep()}
+                onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
+                isLive={status() === "thinking"}
+              />
+            </div>
+          </Show>
+
+          <Show when={currentToolCall() && status() === "awaiting_approval"}>
+            <div class="mb-6">
+              <ApprovalCard
+                toolCall={currentToolCall()!}
+                onApprove={handleApprove}
+                onReject={handleReject}
+              />
+            </div>
+          </Show>
+
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
-      <div class="border-t border-border-subtle p-2">
-        <div class="flex gap-2">
-          <textarea
-            value={input()}
-            onInput={(e) => setInput(e.currentTarget.value)}
-            onKeyDown={handleKeyDown}
-            disabled={status() === "thinking" || status() === "awaiting_approval"}
-            placeholder={
-              status() === "awaiting_approval"
-                ? "Aprove ou rejeite a edição primeiro…"
-                : "Pergunte algo sobre o código…"
-            }
-            class="min-h-[36px] flex-1 resize-none rounded-md border border-border-subtle bg-surface-2 p-2 text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent disabled:opacity-50"
-            rows={2}
-          />
-          <button
-            onClick={send}
-            disabled={!input().trim() || status() === "thinking" || status() === "awaiting_approval"}
-            class="self-end rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40"
-          >
-            Enviar
-          </button>
+      <div class="border-t border-border-subtle px-6 py-3">
+        <div class="mx-auto max-w-[720px]">
+          <div class="flex items-end gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
+            <textarea
+              ref={inputRef!}
+              value={input()}
+              onInput={(e) => {
+                setInput(e.currentTarget.value);
+                autoResize();
+              }}
+              onKeyDown={handleKeyDown}
+              disabled={status() === "thinking" || status() === "awaiting_approval"}
+              placeholder={
+                status() === "awaiting_approval"
+                  ? "Aprove ou rejeite a edição primeiro…"
+                  : "Pergunte algo sobre o código…"
+              }
+              class="max-h-[156px] min-h-[36px] flex-1 resize-none border-0 bg-transparent p-1 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
+              rows={1}
+            />
+            <button
+              onClick={send}
+              disabled={!input().trim() || status() === "thinking" || status() === "awaiting_approval"}
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-accent hover:text-accent-ink disabled:opacity-30"
+            >
+              <Icon name="send" class="h-4 w-4" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-const StepsList: Component<{ steps: ChatStep[]; isLive: boolean }> = (props) => {
+const TimelineSteps: Component<{
+  steps: TimelineItem[];
+  expandedStep: number | null;
+  onToggle: (index: number) => void;
+  isLive: boolean;
+}> = (props) => {
   return (
-    <div class="flex flex-col gap-1.5">
+    <div class="flex flex-col gap-0.5">
       <For each={props.steps}>
-        {(step, i) => <StepItem step={step} index={i()} total={props.steps.length} isLive={props.isLive} />}
+        {(step, i) => (
+          <>
+            <Show when={step.type === "thinking" && step.thinking}>
+              <ThinkingRow
+                thinking={step.thinking!}
+                isLive={props.isLive}
+                isLast={i() === props.steps.length - 1}
+              />
+            </Show>
+            <Show when={step.type === "tool" && step.tool}>
+              <ToolRow
+                tool={step.tool!}
+                isExpanded={props.expandedStep === i()}
+                onToggle={() => props.onToggle(i())}
+              />
+            </Show>
+          </>
+        )}
       </For>
     </div>
   );
 };
 
-const StepItem: Component<{ step: ChatStep; index?: number; total?: number; isLive?: boolean }> = (props) => {
-  if (props.step.type === "thinking") {
-    const showCursor = props.isLive && props.index === props.total - 1;
-    return (
-      <div class="rounded-lg bg-surface-2 p-3 text-sm text-ink">
-        <div class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-accent">
-          Pensando
-        </div>
-        <p class="whitespace-pre-wrap break-words text-sm leading-relaxed">
-          {props.step.text}
-          {showCursor ? <span class="animate-pulse">▊</span> : null}
-        </p>
-      </div>
-    );
-  }
+const ThinkingRow: Component<{
+  thinking: { text: string; startedAt: number; endedAt?: number };
+  isLive: boolean;
+  isLast: boolean;
+}> = (props) => {
+  const duration = () => {
+    if (props.thinking.endedAt) {
+      return formatDuration(props.thinking.endedAt - props.thinking.startedAt);
+    }
+    return formatDuration(Date.now() - props.thinking.startedAt);
+  };
 
-  if (props.step.type === "tool_call") {
-    const tc = props.step.data;
-    const argsPreview = JSON.stringify(tc.args).slice(0, 300);
-    return (
-      <div class="rounded-lg border border-border-subtle bg-surface-0 p-2">
+  return (
+    <div class="group flex items-start gap-2 py-0.5">
+      <div class="mt-0.5 shrink-0 text-accent">
+        <Icon name="brain" class="h-[14px] w-[14px]" />
+      </div>
+      <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2">
-          <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-mono text-accent">
-            {tc.toolName}
-          </span>
-          <span class="truncate text-xs text-ink-muted">
-            {tc.toolName === "read_file" && (tc.args.path as string)
-              ? tc.args.path as string
-              : tc.toolName === "list_dir" && (tc.args.path as string)
-                ? tc.args.path as string
-                : tc.toolName === "grep" && (tc.args.pattern as string)
-                  ? `/${tc.args.pattern}/`
-                  : tc.toolName === "edit_file" && (tc.args.path as string)
-                    ? tc.args.path as string
-                    : ""}
-          </span>
+          <span class="text-xs font-medium text-ink-muted">Pensando</span>
+          <span class="font-mono text-[11px] text-ink-faint">{duration()}</span>
         </div>
-        <Show when={tc.permission === "auto"}>
-          <div class="mt-1 text-xs text-ink-muted break-all font-mono">
-            {argsPreview}
-            {argsPreview.length >= 300 ? "…" : ""}
-          </div>
+        <Show when={props.isLive && props.isLast}>
+          <p class="whitespace-pre-wrap break-words text-xs text-ink-muted">
+            {props.thinking.text}
+            <span class="stream-cursor" />
+          </p>
         </Show>
       </div>
-    );
-  }
-
-  if (props.step.type === "tool_result") {
-    const tr = props.step.data;
-    const output = tr.error ?? tr.output;
-    const isError = !!tr.error;
-    return (
-      <div class="rounded-lg border border-border-subtle bg-surface-0 p-2">
-        <div class="flex items-center gap-2">
-          <span
-            class="rounded px-1.5 py-0.5 text-[10px] font-mono"
-            classList={{
-              "bg-green-900/30 text-green-400": !isError,
-              "bg-red-900/30 text-red-400": isError,
-            }}
-          >
-            {isError ? "erro" : "ok"}
-          </span>
-          <span class="truncate text-xs text-ink-muted">{tr.toolName}</span>
-        </div>
-        <div class="mt-1 max-h-24 overflow-y-auto text-xs text-ink-muted whitespace-pre-wrap break-all font-mono">
-          {output?.slice(0, 1000)}
-          {output && output.length > 1000 ? "…" : ""}
-        </div>
-      </div>
-    );
-  }
-
-  return null;
+    </div>
+  );
 };
 
-const ChatBubble: Component<{ message: ChatMessage }> = (props) => {
-  const isUser = () => props.message.role === "user";
+const ToolRow: Component<{
+  tool: { call: ToolCallData; result?: ToolResultData; status: string };
+  isExpanded: boolean;
+  onToggle: () => void;
+}> = (props) => {
+  const icon = () => toolIcon(props.tool.call.toolName) as IconName;
+  const label = () => props.tool.call.toolName;
+  const summary = () => summarizeArgs(props.tool.call.args);
+
+  const statusIcon = () => {
+    if (props.tool.status === "running") return "loader";
+    if (props.tool.status === "error") return "x";
+    return "check";
+  };
+
+  const statusClass = () => {
+    if (props.tool.status === "running") return "text-accent animate-spin-slow";
+    if (props.tool.status === "error") return "text-danger";
+    return "text-success";
+  };
+
   return (
-    <div
-      class="rounded-lg p-3 text-sm"
-      classList={{
-        "bg-accent/10 self-end max-w-[85%]": isUser(),
-        "bg-surface-2 self-start w-full": !isUser(),
-        "text-red-400": props.message.role === "system",
-      }}
-    >
-      <Show when={!isUser() && props.message.role !== "system"}>
-        <div class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
-          {props.message.done ? "Resposta" : "Mensagem"}
+    <div>
+      <button
+        onClick={props.onToggle}
+        class="flex h-7 w-full items-center gap-2 rounded px-1 text-xs hover:bg-surface-2"
+      >
+        <Icon name={icon()} class="h-[14px] w-[14px] shrink-0 text-ink-muted" />
+        <span class="font-mono text-[12px] text-ink-muted">{label()}</span>
+        <span class="truncate text-[12px] text-ink-faint">{summary()}</span>
+        <div class="ml-auto flex items-center gap-1">
+          <Icon name={statusIcon() as IconName} class={`h-3 w-3 ${statusClass()}`} />
+          <Icon
+            name="chevron-right"
+            class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${props.isExpanded ? "rotate-90" : ""}`}
+          />
         </div>
-      </Show>
-      <Show when={props.message.steps && props.message.steps.length > 0}>
-        <div class="mb-3 flex flex-col gap-1.5">
-          <For each={props.message.steps}>
-            {(step) => <StepItem step={step} isLive={false} />}
-          </For>
-        </div>
-      </Show>
-      <p class="whitespace-pre-wrap break-words leading-relaxed">
-        {props.message.text}
-      </p>
-      <Show when={props.message.done}>
-        <div class="mt-2 flex gap-3 text-[10px] text-ink-muted">
-          <span>tokens: {props.message.done!.input_tokens}→{props.message.done!.output_tokens}</span>
+      </button>
+      <Show when={props.isExpanded}>
+        <div class="ml-6 rounded-md bg-surface-1 p-2 text-xs">
+          <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">Argumentos</div>
+          <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
+            {JSON.stringify(props.tool.call.args, null, 2)}
+          </pre>
+          <Show when={props.tool.result}>
+            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">Resultado</div>
+            <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+              {(props.tool.result!.error ?? props.tool.result!.output).slice(0, 5000)}
+            </pre>
+          </Show>
         </div>
       </Show>
     </div>
@@ -331,21 +497,21 @@ const ApprovalCard: Component<{
   };
 
   return (
-    <div class="rounded-lg border border-accent/40 bg-surface-2 p-3">
+    <div class="rounded-lg border border-accent/50 bg-surface-1 p-3">
       <div class="mb-2 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <span class="rounded bg-accent/20 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-            edit_file
+          <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
+            Edição proposta
           </span>
-          <span class="truncate text-xs text-ink-muted">
-            {proposal()?.path ?? props.toolCall.args.path as string}
+          <span class="truncate font-mono text-[12px] text-ink-muted">
+            {proposal()?.path ?? (props.toolCall.args.path as string)}
           </span>
         </div>
       </div>
 
       <Show when={proposal()}>
         {(p) => (
-          <div class="mb-3 h-48 overflow-hidden rounded border border-border-subtle">
+          <div class="mb-3 h-56 overflow-hidden rounded border border-border-subtle">
             <DiffViewer
               original={p().oldString}
               modified={p().newString}
@@ -356,7 +522,7 @@ const ApprovalCard: Component<{
       </Show>
 
       <Show when={!proposal()}>
-        <pre class="mb-3 max-h-32 overflow-auto rounded bg-surface-0 p-2 text-xs text-ink-muted">
+        <pre class="mb-3 max-h-32 overflow-auto rounded bg-surface-0 p-2 font-mono text-[12px] text-ink-faint">
           {JSON.stringify(props.toolCall.args, null, 2)}
         </pre>
       </Show>
@@ -364,14 +530,16 @@ const ApprovalCard: Component<{
       <div class="flex gap-2">
         <button
           onClick={props.onApprove}
-          class="flex-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
+          class="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
         >
+          <Icon name="check" class="h-4 w-4" />
           Aprovar
         </button>
         <button
           onClick={props.onReject}
-          class="flex-1 rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-sm text-ink hover:bg-surface-2"
+          class="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-sm text-ink hover:border-danger hover:text-danger"
         >
+          <Icon name="x" class="h-4 w-4" />
           Rejeitar
         </button>
       </div>

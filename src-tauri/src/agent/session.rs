@@ -21,6 +21,7 @@ pub enum AgentEvent {
         edit_proposal: Option<EditProposalData>,
     },
     ToolResult {
+        tool_id: String,
         tool_name: String,
         output: String,
         error: Option<String>,
@@ -156,6 +157,7 @@ pub async fn run_session(
                             };
                             tool_result_blocks.push(ContentBlock::tool_result(&tool_use_id, &content));
                             let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone(),
                                 output: truncated,
                                 error: None,
@@ -170,6 +172,7 @@ pub async fn run_session(
                                 &err_msg,
                             ));
                             let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone(),
                                 output: err_msg,
                                 error: Some("requires approval".into()),
@@ -181,6 +184,7 @@ pub async fn run_session(
                                 &format!("Error: {e}"),
                             ));
                             let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone(),
                                 output: String::new(),
                                 error: Some(e),
@@ -194,6 +198,7 @@ pub async fn run_session(
                         Ok(ToolOutput::Text { content }) => {
                             tool_result_blocks.push(ContentBlock::tool_result(&tool_use_id, &content));
                             let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone(),
                                 output: content,
                                 error: None,
@@ -230,6 +235,7 @@ pub async fn run_session(
                                         Ok(msg) => {
                                             tool_result_blocks.push(ContentBlock::tool_result(&tool_use_id, &msg));
                                             let _ = event_tx.send(AgentEvent::ToolResult {
+                                                tool_id: tool_use_id.clone(),
                                                 tool_name: tool_name.clone(),
                                                 output: msg,
                                                 error: None,
@@ -241,6 +247,7 @@ pub async fn run_session(
                                                 &format!("Error applying: {e}"),
                                             ));
                                             let _ = event_tx.send(AgentEvent::ToolResult {
+                                                tool_id: tool_use_id.clone(),
                                                 tool_name: tool_name.clone(),
                                                 output: String::new(),
                                                 error: Some(e),
@@ -252,6 +259,7 @@ pub async fn run_session(
                                     let msg = "Edit rejected by user".to_string();
                                     tool_result_blocks.push(ContentBlock::tool_result(&tool_use_id, &msg));
                                     let _ = event_tx.send(AgentEvent::ToolResult {
+                                        tool_id: tool_use_id.clone(),
                                         tool_name: tool_name.clone(),
                                         output: msg,
                                         error: None,
@@ -269,6 +277,7 @@ pub async fn run_session(
                                 &format!("Error: {e}"),
                             ));
                             let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone(),
                                 output: String::new(),
                                 error: Some(e),

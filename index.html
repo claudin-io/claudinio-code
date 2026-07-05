@@ -1,9 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-BR" data-theme="dark">
   <head>
+    <script>
+      (function () {
+        var theme = window.matchMedia("(prefers-color-scheme: light)").matches
+          ? "light"
+          : "dark";
+        document.documentElement.dataset.theme = theme;
+        if (navigator.userAgent.includes("Mac OS X")) {
+          document.documentElement.classList.add("is-macos");
+        }
+      })();
+    </script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
+    <meta name="theme-color" content="#141210" />
+    <meta name="theme-color" content="#faf8f5" media="(prefers-color-scheme: light)" />
     <link rel="icon" type="image/svg+xml" href="/src/assets/logo.svg" />
     <title>Claudinio Code</title>
   </head>

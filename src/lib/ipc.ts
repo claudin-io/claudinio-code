@@ -70,6 +70,7 @@ export interface EditProposalData {
 }
 
 export interface ToolResultData {
+  toolId: string;
   toolName: string;
   output: string;
   error?: string | null;
