@@ -1,0 +1,697 @@
+use crate::agent::session::AgentEvent;
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::fmt;
+use tauri::ipc::Channel;
+
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.claudin.io".into(),
+            api_key: String::new(),
+            model: "claudinio".into(),
+        }
+    }
+}
+
+pub fn config_path() -> Result<std::path::PathBuf, String> {
+    let dir = dirs::config_dir().ok_or("no config dir")?.join("claudinio-code");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+    Ok(dir.join("config.json"))
+}
+
+pub fn load_config() -> AgentConfig {
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(_) => return AgentConfig::default(),
+    };
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_config(config: &AgentConfig) {
+    if let Ok(path) = config_path() {
+        if let Ok(json) = serde_json::to_string_pretty(config) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: String,
+    pub content: Vec<ContentBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContentBlock {
+    Text {
+        #[serde(rename = "type")]
+        type_: String,
+        text: String,
+    },
+    ToolUse {
+        #[serde(rename = "type")]
+        type_: String,
+        id: String,
+        name: String,
+        input: Value,
+    },
+    ToolResult {
+        #[serde(rename = "type")]
+        type_: String,
+        tool_use_id: String,
+        content: String,
+    },
+}
+
+impl ContentBlock {
+    pub fn text(text: impl Into<String>) -> Self {
+        ContentBlock::Text {
+            type_: "text".into(),
+            text: text.into(),
+        }
+    }
+
+    pub fn tool_use(id: impl Into<String>, name: impl Into<String>, input: Value) -> Self {
+        ContentBlock::ToolUse {
+            type_: "tool_use".into(),
+            id: id.into(),
+            name: name.into(),
+            input,
+        }
+    }
+
+    pub fn tool_result(tool_use_id: impl Into<String>, content: impl Into<String>) -> Self {
+        ContentBlock::ToolResult {
+            type_: "tool_result".into(),
+            tool_use_id: tool_use_id.into(),
+            content: content.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDescription {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+#[derive(Serialize)]
+struct RequestBody {
+    model: String,
+    max_tokens: u32,
+    stream: bool,
+    messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ToolDescription>>,
+    system: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamOutput {
+    pub text_deltas: Vec<String>,
+    pub tool_uses: Vec<Value>,
+    pub stop_reason: Option<String>,
+    pub usage: Option<Usage>,
+}
+
+pub async fn stream_message(
+    config: &AgentConfig,
+    messages: &[Message],
+    tools: &[ToolDescription],
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+    assistant_text: &mut String,
+) -> Result<StreamOutput, String> {
+    let client = reqwest::Client::new();
+    let body = RequestBody {
+        model: config.model.clone(),
+        max_tokens: 8192,
+        stream: true,
+        messages: messages.to_vec(),
+        tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
+        system: None,
+    };
+
+    let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
+
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("x-api-key", &config.api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let err_msg = if status.as_u16() == 401 {
+            "Unauthorized — check your API key".into()
+        } else {
+            format!("API error: HTTP {status}")
+        };
+        let _ = event_tx.send(AgentEvent::Error(err_msg.clone()));
+        return Err(err_msg);
+    }
+
+    let dump_path = std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));
+    let mut dump = std::fs::File::create(&dump_path)
+        .map(|f| std::io::BufWriter::new(f))
+        .ok();
+    if let Some(ref mut f) = dump {
+        use std::io::Write;
+        let _ = writeln!(f, "--- API RAW DUMP session={session_id} ---");
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buf = String::new();
+
+    let mut current_event = String::new();
+    let mut current_data = String::new();
+
+    let mut text_deltas: Vec<String> = Vec::new();
+    let mut thinking_text: String = String::new();
+    let mut tool_uses: Vec<Value> = Vec::new();
+    let mut tool_inputs: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut stop_reason: Option<String> = None;
+    let mut usage: Option<Usage> = None;
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| format!("stream error: {e}"))?;
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        if let Some(ref mut f) = dump {
+            use std::io::Write;
+            let _ = writeln!(f, "[CHUNK {} bytes]", chunk.len());
+            let _ = writeln!(f, "{}", chunk_str);
+        }
+        buf.push_str(&chunk_str);
+
+        loop {
+            let newline = match buf.find('\n') {
+                Some(pos) => pos,
+                None => break,
+            };
+            let line = buf[..newline].trim_end_matches('\r').to_string();
+            buf = buf[newline + 1..].to_string();
+
+            if line.is_empty() {
+                if !current_event.is_empty() {
+                    if let Some(ref mut f) = dump {
+                        use std::io::Write;
+                        let _ = writeln!(f, "[EVENT] {} | DATA: {}", current_event, current_data);
+                    }
+                    process_line(
+                        &current_event,
+                        &current_data,
+                        event_tx,
+                        session_id,
+                        assistant_text,
+                        &mut thinking_text,
+                        &mut text_deltas,
+                        &mut tool_uses,
+                        &mut tool_inputs,
+                        &mut stop_reason,
+                        &mut usage,
+                    )?;
+                    current_event.clear();
+                    current_data.clear();
+                }
+                continue;
+            }
+
+            if let Some(data) = line.strip_prefix("event: ") {
+                current_event = data.to_string();
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                current_data = data.to_string();
+            } else if let Some(ref mut f) = dump {
+                use std::io::Write;
+                let _ = writeln!(f, "[RAW] {}", line);
+            }
+        }
+    }
+
+    if !current_event.is_empty() {
+        process_line(
+            &current_event,
+            &current_data,
+            event_tx,
+            session_id,
+            assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_uses,
+            &mut tool_inputs,
+            &mut stop_reason,
+            &mut usage,
+        )?;
+    }
+
+    if !buf.is_empty() {
+        if let Ok(full) = serde_json::from_str::<Value>(&buf) {
+            if let Some(blocks) = full.get("content").and_then(|c| c.as_array()) {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        if let Some(input) = block.get("input") {
+                            if !input.is_null() {
+                                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                if let Some(existing) = tool_uses.iter_mut().find(|t| {
+                                    t.get("id").and_then(|i| i.as_str()) == Some(id)
+                                }) {
+                                    if let Some(obj) = existing.as_object_mut() {
+                                        obj.insert("input".into(), input.clone());
+                                    }
+                                } else {
+                                    tool_uses.push(block.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(reason) = full.get("stop_reason").and_then(|r| r.as_str()) {
+                stop_reason = Some(reason.to_string());
+            }
+            if let Some(u) = full.get("usage") {
+                usage = serde_json::from_value(u.clone()).ok();
+            }
+        }
+    }
+
+    if !buf.is_empty() {
+        if let Some(ref mut f) = dump {
+            use std::io::Write;
+            let _ = writeln!(f, "--- REMAINING BUF ---\n{}", buf);
+        }
+    }
+
+    if let Some(ref mut f) = dump {
+        use std::io::Write;
+        let _ = writeln!(f, "--- END --- tool_uses={} text_deltas={}", tool_uses.len(), text_deltas.len());
+    }
+
+    Ok(StreamOutput {
+        text_deltas,
+        tool_uses,
+        stop_reason,
+        usage,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_line(
+    event_type: &str,
+    data: &str,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+    assistant_text: &mut String,
+    thinking_text: &mut String,
+    text_deltas: &mut Vec<String>,
+    tool_uses: &mut Vec<Value>,
+    tool_inputs: &mut std::collections::HashMap<usize, String>,
+    stop_reason: &mut Option<String>,
+    usage: &mut Option<Usage>,
+) -> Result<(), String> {
+    let value: Value = serde_json::from_str(data)
+        .map_err(|e| format!("json parse: {e} data: {data:.100}"))?;
+
+    let index = value.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
+
+    match event_type {
+        "content_block_start" => {
+            if let Some(block) = value.get("content_block") {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    let mut tool = block.clone();
+                    if let Some(idx) = index {
+                        if let Some(obj) = tool.as_object_mut() {
+                            obj.insert("_index".into(), serde_json::json!(idx));
+                        }
+                        tool_inputs.insert(idx, String::new());
+                    }
+                    tool_uses.push(tool);
+                }
+            }
+        }
+        "content_block_delta" => {
+            if let Some(delta) = value.get("delta") {
+                match delta.get("type").and_then(|t| t.as_str()) {
+                    Some("text_delta") => {
+                        if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                text_deltas.push(text.to_string());
+                                assistant_text.push_str(text);
+                            }
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                            if !thinking.is_empty() {
+                                thinking_text.push_str(thinking);
+                                let _ = event_tx.send(AgentEvent::Thinking(thinking_text.clone()));
+                            }
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(idx) = index {
+                            if let Some(partial) = delta.get("partial_json") {
+                                let fragment = match partial {
+                                    Value::String(s) => s.clone(),
+                                    other => serde_json::to_string(other).unwrap_or_default(),
+                                };
+                                tool_inputs.entry(idx).or_default().push_str(&fragment);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "content_block_stop" => {
+            if let Some(idx) = index {
+                if let Some(accumulated) = tool_inputs.remove(&idx) {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&accumulated) {
+                        if let Some(tool) = tool_uses.iter_mut().find(|t| {
+                            t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize) == Some(idx)
+                        }) {
+                            if let Some(obj) = tool.as_object_mut() {
+                                obj.insert("input".into(), parsed);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "message_delta" => {
+            if let Some(delta) = value.get("delta") {
+                if let Some(reason) = delta.get("stop_reason").and_then(|r| r.as_str()) {
+                    *stop_reason = Some(reason.to_string());
+                }
+            }
+            if let Some(u) = value.get("usage") {
+                *usage = serde_json::from_value(u.clone()).ok();
+            }
+        }
+        "message_start" | "ping" => {}
+        _ => {}
+    }
+
+    Ok(())
+}
+
+impl fmt::Display for StreamOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text: String = self.text_deltas.join("");
+        write!(f, "{text}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tauri::ipc::InvokeResponseBody;
+
+    #[test]
+    fn test_input_json_delta_accumulates_tool_args() {
+        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+
+        let mut text_deltas = Vec::new();
+        let mut tool_uses = Vec::new();
+        let mut tool_inputs = std::collections::HashMap::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut assistant_text = String::new();
+        let mut thinking_text = String::new();
+        // Step 1: content_block_start for tool_use with empty input placeholder
+        process_line(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_abc","name":"list_dir","input":{}}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0]["name"], "list_dir");
+        assert_eq!(tool_uses[0]["input"], json!({}));
+
+        // Step 2: first input_json_delta fragment
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Step 3: second fragment
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":" \"/home/user/project\""}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Step 4: third fragment (closing brace)
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"}"}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Step 5: content_block_stop — should finalize the input
+        process_line(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // The tool_use must now have the complete parsed input
+        assert_eq!(
+            tool_uses[0]["input"],
+            json!({"path": "/home/user/project"})
+        );
+    }
+
+    #[test]
+    fn test_tool_use_with_complete_input_in_start_keeps_it() {
+        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+
+        let mut text_deltas = Vec::new();
+        let mut tool_uses = Vec::new();
+        let mut tool_inputs = std::collections::HashMap::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut assistant_text = String::new();
+        let mut thinking_text = String::new();
+
+        // Some APIs send the complete input directly in content_block_start
+        process_line(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_def","name":"read_file","input":{"path":"/workspace/main.rs"}}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // content_block_stop with no input_json_delta in between
+        process_line(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Input should still be the original complete value
+        assert_eq!(
+            tool_uses[0]["input"],
+            json!({"path": "/workspace/main.rs"})
+        );
+    }
+
+    #[test]
+    fn test_tool_use_args_deserialize_successfully() {
+        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+
+        let mut text_deltas = Vec::new();
+        let mut tool_uses = Vec::new();
+        let mut tool_inputs = std::collections::HashMap::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut assistant_text = String::new();
+        let mut thinking_text = String::new();
+
+        // Full streaming sequence
+        process_line(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ghi","name":"read_file","input":{}}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"src/main.ts\""}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"}"}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        process_line(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Now simulate what session.rs does: deserialize the input
+        let input = tool_uses[0].get("input").unwrap();
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(path, "src/main.ts");
+    }
+
+    #[test]
+    fn test_mixed_text_and_tool_stream() {
+        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+
+        let mut text_deltas = Vec::new();
+        let mut tool_uses = Vec::new();
+        let mut tool_inputs = std::collections::HashMap::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut assistant_text = String::new();
+        let mut thinking_text = String::new();
+
+        // Text block at index 0
+        process_line(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Let me look at "}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Tool at index 1
+        process_line(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_xyz","name":"list_dir","input":{}}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Text delta
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"the source"}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Tool input delta
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Text block stops (index 0) — should NOT interfere with tool at index 1
+        process_line(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // More tool input
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"/src\""}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // More tool input
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"}"}}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Tool stops
+        process_line(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":1}"#,
+    &chan, "s1", &mut assistant_text, &mut thinking_text,
+        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Text: content_block_start for text isn't accumulated, only deltas are
+        assert_eq!(assistant_text, "the source");
+
+        // Tool should have complete input
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(
+            tool_uses[0]["input"],
+            json!({"path": "/src"})
+        );
+
+        // Text block stop at index 0 must NOT clear tool input at index 1
+        assert!(tool_inputs.get(&1).is_none(), "tool_inputs should be empty after content_block_stop");
+    }
+}

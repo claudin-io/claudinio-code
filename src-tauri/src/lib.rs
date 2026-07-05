@@ -1,0 +1,34 @@
+mod agent;
+mod code_intel;
+mod commands;
+mod lsp;
+mod state;
+
+use state::AppState;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::fs::list_dir,
+            commands::fs::read_file,
+            commands::fs::write_file,
+            commands::agent::send_message,
+            commands::agent::approve_tool,
+            commands::agent::reject_tool,
+            commands::agent::set_config,
+            commands::agent::get_config,
+            commands::code_intel::open_workspace,
+            commands::code_intel::search_symbols,
+            commands::code_intel::symbol_lookup,
+            commands::code_intel::file_outline,
+            commands::lsp::lsp_definition,
+            commands::lsp::lsp_references,
+            commands::lsp::lsp_hover,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
