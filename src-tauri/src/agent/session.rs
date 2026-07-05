@@ -5,9 +5,41 @@ use crate::agent::tools::{self, ToolContext, ToolOutput};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use tauri::ipc::Channel;
 use tokio::sync::{oneshot, Mutex};
+
+/// Steering: a queue of mid-run user messages and an interrupt flag.
+/// Thread-safe; the Mutex is never held across await.
+pub struct SteeringCtl {
+    pub queue: StdMutex<Vec<String>>,
+    pub interrupt: AtomicBool,
+}
+
+impl SteeringCtl {
+    pub fn new() -> Self {
+        Self {
+            queue: StdMutex::new(Vec::new()),
+            interrupt: AtomicBool::new(false),
+        }
+    }
+
+    pub fn drain(&self) -> Vec<String> {
+        let mut q = self.queue.lock().unwrap();
+        std::mem::take(&mut *q)
+    }
+
+    pub fn push(&self, text: String) {
+        let mut q = self.queue.lock().unwrap();
+        q.push(text);
+    }
+
+    pub fn clear(&self) {
+        self.queue.lock().unwrap().clear();
+        self.interrupt.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Cache-stable system prompt. This is the byte-identical prefix of every
 /// request in a session — keep it constant so the provider's prefix cache stays
@@ -91,6 +123,10 @@ pub enum AgentEvent {
         #[serde(rename = "outputTokens")]
         output_tokens: u32,
     },
+    #[serde(rename = "SteeringInjected")]
+    SteeringInjected {
+        text: String,
+    },
     #[serde(rename = "Error")]
     Error(String),
 }
@@ -158,6 +194,32 @@ fn push_user_blocks(history: &mut Vec<Message>, store: &SessionStore, blocks: Ve
     );
 }
 
+/// Drain the steering queue, persist each message, merge into the last user turn
+/// (or create a new one), and emit SteeringInjected events. Returns true if any
+/// steering was injected.
+fn inject_steering(
+    history: &mut Vec<Message>,
+    store: &SessionStore,
+    steering: &SteeringCtl,
+    event_tx: &Channel<AgentEvent>,
+) -> bool {
+    let messages = steering.drain();
+    if messages.is_empty() {
+        return false;
+    }
+    for text in &messages {
+        store.try_append(&SessionRecord::Steering {
+            text: text.clone(),
+            ts: now_ms(),
+        });
+        push_user_blocks(history, store, vec![ContentBlock::text(text)]);
+        let _ = event_tx.send(AgentEvent::SteeringInjected {
+            text: text.clone(),
+        });
+    }
+    true
+}
+
 /// Run a single continuous provider→tool loop for one user input, until the
 /// model produces a turn with no tool calls (or the safety cap is hit). Shares
 /// one conversation history (append-only, cache-friendly) and persists every
@@ -174,6 +236,7 @@ pub async fn run_workflow(
     session_id: &str,
     ctx: &ToolContext,
     store: &SessionStore,
+    steering: &Arc<SteeringCtl>,
 ) -> Result<(), String> {
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
@@ -197,14 +260,51 @@ pub async fn run_workflow(
             event_tx,
             session_id,
             &mut assistant_text,
+            &steering.interrupt,
         )
         .await?;
 
         let text_output = assistant_text;
         let tool_uses = stream_output.tool_uses;
+        let was_interrupted = stream_output.interrupted;
         if let Some(u) = &stream_output.usage {
             total_in += u.input_tokens;
             total_out += u.output_tokens;
+        }
+
+        // A — Interrupt no meio do stream: persistir texto parcial se não vazio,
+        //     resetar flag, tentar steering ou pausar.
+        if was_interrupted {
+            if !text_output.is_empty() {
+                push_turn(
+                    history,
+                    store,
+                    Message {
+                        role: "assistant".into(),
+                        content: vec![ContentBlock::text(&text_output)],
+                    },
+                );
+                last_text = text_output;
+            }
+            steering.interrupt.store(false, Ordering::SeqCst);
+            if inject_steering(history, store, steering, event_tx) {
+                continue;
+            }
+            if last_text.is_empty() {
+                last_text = "Pausado pelo usuário.".into();
+            }
+            store.try_append(&SessionRecord::Done {
+                input_tokens: total_in,
+                output_tokens: total_out,
+                ts: now_ms(),
+            });
+            let _ = event_tx.send(AgentEvent::Done {
+                stop_reason: "interrupted".into(),
+                text_output: last_text,
+                input_tokens: total_in,
+                output_tokens: total_out,
+            });
+            return Ok(());
         }
 
         // Terminal turn: no tool calls — the loop is done, this text is the reply.
@@ -219,6 +319,10 @@ pub async fn run_workflow(
                     },
                 );
                 last_text = text_output;
+            }
+            // B — Antes de encerrar, verificar steering. Se houver, continuar.
+            if inject_steering(history, store, steering, event_tx) {
+                continue;
             }
             // If the model didn't produce a final text response, provide a
             // generic closing so the user doesn't see a blank answer.
@@ -252,7 +356,38 @@ pub async fn run_workflow(
         }
         let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
 
-        for tool_use in &tool_uses {
+        for (ti, tool_use) in tool_uses.iter().enumerate() {
+            // C — Entre tools: checar interrupt. Se setado, sintetizar
+            // tool_result "interrompido" para este e todos os tool_uses restantes.
+            if steering.interrupt.load(Ordering::SeqCst) {
+                for remaining in tool_uses.iter().skip(ti) {
+                    let tid = remaining
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let tname = remaining
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    tool_assistant_blocks.push(ContentBlock::tool_use(
+                        &tid,
+                        &tname,
+                        remaining.get("input").cloned().unwrap_or(Value::Null),
+                    ));
+                    let msg = "Interrompido pelo usuário — ferramenta não executada.";
+                    let _ = event_tx.send(AgentEvent::ToolResult {
+                        tool_id: tid.clone(),
+                        tool_name: tname,
+                        output: msg.into(),
+                        error: None,
+                    });
+                    tool_result_blocks.push(ContentBlock::tool_result(&tid, msg));
+                }
+                break;
+            }
+
             let tool_use_id = tool_use
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -302,6 +437,29 @@ pub async fn run_workflow(
                 content: tool_result_blocks,
             },
         );
+
+        // D — Pós tool_results: checar interrupt ou steering.
+        if steering.interrupt.swap(false, Ordering::SeqCst) {
+            if inject_steering(history, store, steering, event_tx) {
+                continue;
+            }
+            if last_text.is_empty() {
+                last_text = "Pausado pelo usuário.".into();
+            }
+            store.try_append(&SessionRecord::Done {
+                input_tokens: total_in,
+                output_tokens: total_out,
+                ts: now_ms(),
+            });
+            let _ = event_tx.send(AgentEvent::Done {
+                stop_reason: "interrupted".into(),
+                text_output: last_text,
+                input_tokens: total_in,
+                output_tokens: total_out,
+            });
+            return Ok(());
+        }
+        inject_steering(history, store, steering, event_tx);
     }
 
     // Safety cap hit: stop looping and report what we have so far rather than

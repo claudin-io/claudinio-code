@@ -32,6 +32,8 @@ pub fn run() {
             commands::lsp::lsp_definition,
             commands::lsp::lsp_references,
             commands::lsp::lsp_hover,
+            commands::agent::queue_steering,
+            commands::agent::interrupt_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

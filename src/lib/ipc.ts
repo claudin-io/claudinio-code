@@ -52,6 +52,7 @@ export type AgentEvent =
   | { event: "ToolResult"; data: ToolResultData }
   | { event: "AskUser"; data: AskUserData }
   | { event: "Done"; data: DoneData }
+  | { event: "SteeringInjected"; data: { text: string } }
   | { event: "Error"; data: string };
 
 export interface AskUserQuestion {
@@ -83,7 +84,8 @@ export interface ToolCallData {
 export type ChatStep =
   | { type: "thinking"; text: string }
   | { type: "tool_call"; data: ToolCallData }
-  | { type: "tool_result"; data: ToolResultData };
+  | { type: "tool_result"; data: ToolResultData }
+  | { type: "steering"; text: string };
 
 export interface EditProposalData {
   path: string;
@@ -129,7 +131,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering";
   [key: string]: unknown;
 };
 
@@ -159,6 +161,14 @@ export function submitAnswers(
   answers: UserAnswer[],
 ): Promise<void> {
   return invoke<void>("submit_answers", { args: { sessionId, toolId, answers } });
+}
+
+export function queueSteering(sessionId: string, text: string): Promise<void> {
+  return invoke<void>("queue_steering", { sessionId, text });
+}
+
+export function interruptSession(sessionId: string): Promise<void> {
+  return invoke<void>("interrupt_session", { sessionId });
 }
 
 export function setConfig(args: SetConfigArgs): Promise<void> {

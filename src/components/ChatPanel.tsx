@@ -7,6 +7,8 @@ import {
   newSession,
   listSessions,
   loadSession,
+  queueSteering,
+  interruptSession,
   type AgentEvent,
   type AskUserData,
   type ToolCallData,
@@ -47,7 +49,7 @@ interface ChatMessage {
 }
 
 interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text";
+  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering";
   thinking?: { text: string; startedAt: number; endedAt?: number };
   tool?: {
     call: ToolCallData;
@@ -57,6 +59,7 @@ interface TimelineItem {
   phase?: Phase;
   phaseResult?: { phase: Phase; text: string };
   text?: string;
+  steering?: { text: string };
 }
 
 const PHASE_LABEL: Record<Phase, string> = {
@@ -180,6 +183,11 @@ function recordsToMessages(records: SessionRecord[]): ChatMessage[] {
           }
         }
       }
+    } else if (kind === "steering") {
+      steps.push({
+        type: "steering",
+        steering: { text: String(rec.text ?? "") },
+      });
     } else if (kind === "done") {
       done = {
         stopReason: "end_turn",
@@ -204,6 +212,8 @@ export const ChatPanel: Component = () => {
   const [liveExpandedStep, setLiveExpandedStep] = createSignal<number | null>(null);
   const [sessions, setSessions] = createSignal<SessionSummary[]>([]);
   const [showSessions, setShowSessions] = createSignal(false);
+  const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
+  const [queuedSteering, setQueuedSteering] = createSignal<string[]>([]);
 
   let messagesEndRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
@@ -285,6 +295,13 @@ export const ChatPanel: Component = () => {
       setCurrentAskUser(event.data as AskUserData);
       setStatus("awaiting_input");
       scrollToBottom();
+    } else if (event.event === "SteeringInjected") {
+      setQueuedSteering((prev) => prev.filter((s) => s !== event.data.text));
+      setCurrentSteps((prev) => [
+        ...prev,
+        { type: "steering" as const, steering: { text: event.data.text } } as TimelineItem,
+      ]);
+      scrollToBottom();
     } else if (event.event === "Done") {
       const data = event.data as DoneData;
       const steps = currentSteps();
@@ -299,8 +316,9 @@ export const ChatPanel: Component = () => {
         { role: "assistant", text: data.textOutput, steps: final, done: data },
       ]);
       setCurrentSteps([]);
+      setQueuedSteering([]);
       setThinkingStart(0);
-      setStatus("done");
+      setStatus(data.stopReason === "interrupted" ? "done" : "done");
       scrollToBottom();
     } else if (event.event === "Error") {
       setMessages((prev) => [...prev, { role: "user", text: `Erro: ${event.data}` }]);
@@ -314,6 +332,21 @@ export const ChatPanel: Component = () => {
     const text = input().trim();
     if (!text || status() === "awaiting_approval" || status() === "awaiting_input") return;
 
+    // If the agent is currently thinking, queue the message as steering
+    if (status() === "thinking") {
+      const sid = activeSessionId();
+      if (sid) {
+        try {
+          await queueSteering(sid, text);
+        } catch {
+          // best-effort
+        }
+      }
+      setQueuedSteering((prev) => [...prev, text]);
+      setInput("");
+      return;
+    }
+
     setMessages((prev) => [...prev, { role: "user", text }]);
     setInput("");
     setCurrentSteps([]);
@@ -321,7 +354,8 @@ export const ChatPanel: Component = () => {
     setStatus("thinking");
 
     try {
-      await sendMessage(text, handleEvent);
+      const result = await sendMessage(text, handleEvent);
+      setActiveSessionId(result.sessionId);
     } catch (e) {
       setMessages((prev) => [...prev, { role: "user", text: `Falha ao enviar: ${String(e)}` }]);
       setStatus("error");
@@ -418,6 +452,21 @@ export const ChatPanel: Component = () => {
       inputRef.style.height = `${Math.min(inputRef.scrollHeight, 156)}px`;
     }
   };
+
+  // Global ESC handler: only fires when status is "thinking"
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && status() === "thinking") {
+        e.preventDefault();
+        const sid = activeSessionId();
+        if (sid) {
+          interruptSession(sid).catch(() => {});
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => document.removeEventListener("keydown", onKey));
+  });
 
   const statusLabel = () => {
     switch (status()) {
@@ -569,6 +618,19 @@ export const ChatPanel: Component = () => {
         </div>
       </div>
 
+      <Show when={queuedSteering().length > 0}>
+        <div class="flex flex-wrap gap-1.5 border-t border-border-subtle px-6 py-1.5">
+          <For each={queuedSteering()}>
+            {(s) => (
+              <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+                <span class="h-1.5 w-1.5 rounded-full bg-accent" />
+                {s.length > 40 ? `${s.slice(0, 40)}…` : s}
+              </span>
+            )}
+          </For>
+        </div>
+      </Show>
+
       <div class="border-t border-border-subtle px-6 py-3">
         <div class="w-full">
           <div class="flex items-end gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
@@ -580,13 +642,15 @@ export const ChatPanel: Component = () => {
                 autoResize();
               }}
               onKeyDown={handleKeyDown}
-              disabled={status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input"}
+              disabled={status() === "awaiting_approval" || status() === "awaiting_input"}
               placeholder={
                 status() === "awaiting_approval"
                   ? "Aprove ou rejeite a edição primeiro…"
                   : status() === "awaiting_input"
                     ? "Responda as perguntas acima primeiro…"
-                    : "Pergunte algo sobre o código…"
+                    : status() === "thinking"
+                      ? "Digite para orientar o agente… (Esc para pausar)"
+                      : "Pergunte algo sobre o código…"
               }
               class="max-h-[156px] min-h-[36px] flex-1 resize-none border-0 bg-transparent p-1 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
               rows={1}
@@ -595,7 +659,6 @@ export const ChatPanel: Component = () => {
               onClick={send}
               disabled={
                 !input().trim() ||
-                status() === "thinking" ||
                 status() === "awaiting_approval" ||
                 status() === "awaiting_input"
               }
@@ -724,6 +787,17 @@ const TimelineSteps: Component<{
               isExpanded={props.expandedStep === i()}
               onToggle={() => props.onToggle(i())}
             />
+          </Show>
+          <Show when={step.type === "steering" && step.steering}>
+            <div class="my-1 ml-6 flex items-center gap-1.5">
+              <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+                <span class="h-1.5 w-1.5 rounded-full bg-accent" />
+                {step.steering!.text.length > 50
+                  ? `${step.steering!.text.slice(0, 50)}…`
+                  : step.steering!.text}
+              </span>
+              <span class="text-[10px] text-ink-faint">orientação</span>
+            </div>
           </Show>
         </>
       )}

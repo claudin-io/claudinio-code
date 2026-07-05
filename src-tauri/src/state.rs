@@ -1,5 +1,5 @@
 use crate::agent::provider::AgentConfig;
-use crate::agent::session::{AnswerMap, ApprovalMap};
+use crate::agent::session::{AnswerMap, ApprovalMap, SteeringCtl};
 use crate::code_intel::db::IndexDb;
 use crate::lsp::manager::LspManager;
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ pub struct AppState {
     pub _watcher: Mutex<Option<crate::code_intel::watcher::FileWatcher>>,
     pub lsp_manager: Arc<Mutex<LspManager>>,
     pub active_session: Mutex<Option<SessionHandle>>,
+    pub steering: Arc<SteeringCtl>,
 }
 
 impl AppState {
@@ -37,6 +38,7 @@ impl AppState {
             _watcher: Mutex::new(None),
             lsp_manager: Arc::new(Mutex::new(LspManager::new())),
             active_session: Mutex::new(None),
+            steering: Arc::new(SteeringCtl::new()),
         }
     }
 }

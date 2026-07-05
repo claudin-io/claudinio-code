@@ -3,6 +3,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -102,6 +103,13 @@ impl ContentBlock {
             content: content.into(),
         }
     }
+
+    pub fn get_text(&self) -> Option<&str> {
+        match self {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +142,7 @@ pub struct StreamOutput {
     pub tool_uses: Vec<Value>,
     pub stop_reason: Option<String>,
     pub usage: Option<Usage>,
+    pub interrupted: bool,
 }
 
 pub async fn stream_message(
@@ -144,6 +153,7 @@ pub async fn stream_message(
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
     assistant_text: &mut String,
+    interrupt: &AtomicBool,
 ) -> Result<StreamOutput, String> {
     let client = reqwest::Client::new();
     let body = RequestBody {
@@ -201,6 +211,19 @@ pub async fn stream_message(
     let mut usage: Option<Usage> = None;
 
     while let Some(chunk_result) = stream.next().await {
+        // Check interrupt before processing each chunk
+        if interrupt.load(Ordering::SeqCst) {
+            // Drop the stream to cancel the HTTP request eagerly
+            drop(stream);
+            return Ok(StreamOutput {
+                text_deltas,
+                tool_uses,
+                stop_reason: Some("interrupted".into()),
+                usage: None,
+                interrupted: true,
+            });
+        }
+
         let chunk = chunk_result.map_err(|e| format!("stream error: {e}"))?;
         let chunk_str = String::from_utf8_lossy(&chunk);
         if let Some(ref mut f) = dump {
@@ -319,6 +342,7 @@ pub async fn stream_message(
         tool_uses,
         stop_reason,
         usage,
+        interrupted: false,
     })
 }
 

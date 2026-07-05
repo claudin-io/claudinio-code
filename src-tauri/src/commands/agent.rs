@@ -76,15 +76,31 @@ pub async fn send_message(
         workspace_root,
     };
 
+    // Reset steering for the new run, then drain any residual from a race.
+    state.steering.clear();
+    let residual = state.steering.drain();
+    let message = if residual.is_empty() {
+        message
+    } else {
+        let mut prefix = String::new();
+        for r in &residual {
+            prefix.push_str(r);
+            prefix.push('\n');
+        }
+        prefix.push_str(&message);
+        prefix
+    };
+
     let cfg = config;
     let sid = handle.id.clone();
     let chan = event_channel;
     let appr = state.approvals.clone();
     let answ = state.answers.clone();
+    let steering = state.steering.clone();
 
     tokio::spawn(async move {
         if let Err(e) = session::run_workflow(
-            &cfg, &mut history, message, &chan, &appr, &answ, &sid, &ctx, &store,
+            &cfg, &mut history, message, &chan, &appr, &answ, &sid, &ctx, &store, &steering,
         )
         .await
         {
@@ -104,6 +120,7 @@ pub async fn send_message(
 /// Start a new conversation: the next `send_message` opens a fresh JSONL session.
 #[tauri::command]
 pub async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
+    state.steering.clear();
     let mut guard = state.active_session.lock().await;
     *guard = None;
     Ok(())
@@ -130,6 +147,7 @@ pub async fn load_session(
         return Err(format!("session '{session_id}' not found"));
     }
     let records = load_records(&path)?;
+    state.steering.clear();
     {
         let mut guard = state.active_session.lock().await;
         *guard = Some(SessionHandle {
@@ -237,4 +255,42 @@ pub async fn get_config(
         "model": cfg.model,
         "hasApiKey": !cfg.api_key.is_empty(),
     }))
+}
+
+/// Push a steering message into the queue for the active session.
+#[tauri::command]
+pub async fn queue_steering(
+    session_id: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let guard = state.active_session.lock().await;
+        match guard.as_ref() {
+            Some(h) if h.id == session_id => {}
+            _ => return Err("no active session or session mismatch".into()),
+        }
+    }
+    state.steering.push(text);
+    Ok(())
+}
+
+/// Set the interrupt flag on the active session's steering controller.
+#[tauri::command]
+pub async fn interrupt_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let guard = state.active_session.lock().await;
+        match guard.as_ref() {
+            Some(h) if h.id == session_id => {}
+            _ => return Err("no active session or session mismatch".into()),
+        }
+    }
+    state
+        .steering
+        .interrupt
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }

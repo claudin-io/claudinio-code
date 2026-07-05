@@ -46,6 +46,8 @@ pub enum SessionRecord {
     },
     /// A run failed.
     Error { message: String, ts: u64 },
+    /// A steering message injected mid-run.
+    Steering { text: String, ts: u64 },
 }
 
 pub fn now_ms() -> u64 {
@@ -133,14 +135,32 @@ pub fn load_records(path: &Path) -> Result<Vec<SessionRecord>, String> {
 }
 
 /// Rebuild the model conversation history from a session's records.
+/// Steering records are merged into the last user turn (or create a new one),
+/// mirroring push_user_blocks in session.rs.
 pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
-    records
-        .iter()
-        .filter_map(|r| match r {
-            SessionRecord::Turn { message, .. } => Some(message.clone()),
-            _ => None,
-        })
-        .collect()
+    let mut out: Vec<Message> = Vec::new();
+    for rec in records {
+        match rec {
+            SessionRecord::Turn { message, .. } => {
+                out.push(message.clone());
+            }
+            SessionRecord::Steering { text, .. } => {
+                let block = crate::agent::provider::ContentBlock::text(text);
+                if let Some(last) = out.last_mut() {
+                    if last.role == "user" {
+                        last.content.push(block);
+                        continue;
+                    }
+                }
+                out.push(Message {
+                    role: "user".into(),
+                    content: vec![block],
+                });
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Lightweight summary shown in the session list.
@@ -198,7 +218,8 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Turn { ts, .. }
                 | SessionRecord::PhaseResult { ts, .. }
                 | SessionRecord::Done { ts, .. }
-                | SessionRecord::Error { ts, .. } => {
+                | SessionRecord::Error { ts, .. }
+                | SessionRecord::Steering { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
             }
@@ -254,6 +275,75 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].role, "user");
         assert_eq!(history[1].role, "assistant");
+    }
+
+    #[test]
+    fn history_from_records_with_steering_merges_into_last_user() {
+        let recs = vec![
+            SessionRecord::Turn {
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("hi")],
+                },
+                ts: 1,
+            },
+            SessionRecord::Turn {
+                message: Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text("hello")],
+                },
+                ts: 2,
+            },
+            // Steering after assistant -> new user turn
+            SessionRecord::Steering {
+                text: "steer1".into(),
+                ts: 3,
+            },
+            // Steering again -> merge into the new user turn
+            SessionRecord::Steering {
+                text: "steer2".into(),
+                ts: 4,
+            },
+        ];
+        let history = history_from_records(&recs);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[2].role, "user");
+        assert_eq!(history[2].content.len(), 2);
+        assert_eq!(
+            history[2].content[0].get_text().unwrap(),
+            "steer1"
+        );
+        assert_eq!(
+            history[2].content[1].get_text().unwrap(),
+            "steer2"
+        );
+    }
+
+    #[test]
+    fn history_from_records_steering_merges_into_existing_user() {
+        let recs = vec![
+            SessionRecord::Turn {
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("original")],
+                },
+                ts: 1,
+            },
+            // Steering should merge into the existing user turn
+            SessionRecord::Steering {
+                text: "steer".into(),
+                ts: 2,
+            },
+        ];
+        let history = history_from_records(&recs);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content.len(), 2);
+        assert_eq!(
+            history[0].content[1].get_text().unwrap(),
+            "steer"
+        );
     }
 
     #[test]
