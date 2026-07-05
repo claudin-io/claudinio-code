@@ -9,6 +9,7 @@ import {
   type DoneData,
   type ToolResultData,
 } from "../lib/ipc";
+import { marked } from "marked";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
 
@@ -251,7 +252,7 @@ export const ChatPanel: Component = () => {
       </div>
 
       <div class="flex flex-1 flex-col overflow-y-auto">
-        <div class="mx-auto w-full max-w-[720px] px-6 py-4">
+        <div class="w-full px-6 py-4">
           <For each={messages()}>
             {(msg) => (
               <div class="mb-6">
@@ -282,9 +283,10 @@ export const ChatPanel: Component = () => {
                         Resposta
                       </span>
                     </div>
-                    <p class="whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink">
-                      {msg.text}
-                    </p>
+                    <div
+                      class="prose-content whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink"
+                      innerHTML={marked.parse(msg.text, { async: false }) as string}
+                    />
                   </Show>
 
                   <Show when={msg.done}>
@@ -323,7 +325,7 @@ export const ChatPanel: Component = () => {
       </div>
 
       <div class="border-t border-border-subtle px-6 py-3">
-        <div class="mx-auto max-w-[720px]">
+        <div class="w-full">
           <div class="flex items-end gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
             <textarea
               ref={inputRef!}
