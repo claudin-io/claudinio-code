@@ -216,6 +216,34 @@ function normalizeCompactTails(records: SessionRecord[]): SessionRecord[] {
 // Compacted records are rendered as an ArchivedBlock: the messages the
 // compaction summarized fold into a collapsible section; the kept-verbatim
 // tail (tail_turns) stays in the active view.
+// Text long enough to be a real explanation rather than a one-line status note.
+const SUBSTANTIAL_TEXT_CHARS = 280;
+
+// A short closing message after tool calls often just points at a longer
+// explanation the model wrote mid-turn (before a trailing tasks_set). That
+// explanation would otherwise stay hidden inside the collapsed trajectory, so
+// hoist the last substantial text step into the visible answer.
+function promoteSubstantialText(
+  steps: TimelineItem[],
+  text: string,
+): { steps: TimelineItem[]; text: string } {
+  if (text.length >= SUBSTANTIAL_TEXT_CHARS) return { steps, text };
+  let idx = -1;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i];
+    if (s.type === "text" && s.text && s.text.length >= SUBSTANTIAL_TEXT_CHARS) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return { steps, text };
+  const hoisted = steps[idx].text!;
+  return {
+    steps: steps.filter((_, i) => i !== idx),
+    text: text ? `${hoisted}\n\n${text}` : hoisted,
+  };
+}
+
 function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
   const records = normalizeCompactTails(rawRecords);
   const out: ChatMessage[] = [];
@@ -228,7 +256,8 @@ function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
 
   const flush = () => {
     if (steps.length || assistantText || done) {
-      const msg: ChatMessage = { role: "assistant", text: assistantText, steps: [...steps] };
+      const promoted = promoteSubstantialText([...steps], assistantText);
+      const msg: ChatMessage = { role: "assistant", text: promoted.text, steps: promoted.steps };
       if (done) msg.done = done;
       preCompact.push(msg);
       steps = [];
@@ -733,9 +762,10 @@ export const ChatPanel: Component<{
       });
       // Stats are NOT recomputed here: the last SessionStats event from the
       // backend already carries the authoritative numbers.
+      const promoted = promoteSubstantialText(final, data.textOutput);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant" as const, text: data.textOutput, steps: final, done: data },
+        { role: "assistant" as const, text: promoted.text, steps: promoted.steps, done: data },
       ]);
       setCurrentSteps([]);
       setQueuedSteering([]);
@@ -1044,12 +1074,14 @@ export const ChatPanel: Component<{
                   </div>
                 </Show>
 
-                <Show when={msg.role === "assistant" && msg.steps && msg.steps!.length > 0}>
-                  <Trajectory
-                    steps={msg.steps!}
-                    tokens={msg.done ? { input: msg.done.inputTokens, output: msg.done.outputTokens } : undefined}
-                    onViewDetails={(id) => setOpenSubagentId(id)}
-                  />
+                <Show when={msg.role === "assistant" && (msg.text || (msg.steps && msg.steps!.length > 0))}>
+                  <Show when={msg.steps && msg.steps!.length > 0}>
+                    <Trajectory
+                      steps={msg.steps!}
+                      tokens={msg.done ? { input: msg.done.inputTokens, output: msg.done.outputTokens } : undefined}
+                      onViewDetails={(id) => setOpenSubagentId(id)}
+                    />
+                  </Show>
 
                   <Show when={msg.text}>
                     <div
@@ -1692,11 +1724,19 @@ const PhaseResultRow: Component<{ phaseResult: { phase: Phase; text: string } }>
   );
 };
 
+// Substantial intermediate text (a real explanation the model wrote before a
+// tool call) must read like an answer, not like a dim progress note; only
+// short one-liner status texts keep the muted style.
 const TextRow: Component<{ text: string }> = (props) => {
+  const substantial = () => props.text.length >= SUBSTANTIAL_TEXT_CHARS;
   return (
     <div class="my-1 ml-6">
       <div
-        class="prose-content text-[12px] leading-[1.6] text-ink-muted"
+        class={
+          substantial()
+            ? "prose-content text-[13px] leading-[1.6] text-ink"
+            : "prose-content text-[12px] leading-[1.6] text-ink-muted"
+        }
         innerHTML={marked.parse(props.text, { async: false }) as string}
       />
     </div>
