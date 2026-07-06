@@ -43,6 +43,8 @@ pub fn run() {
             commands::skills::find_remote_skills,
             commands::skills::preview_remote_skill,
             commands::skills::install_remote_skill,
+            commands::tasks::get_tasks,
+            commands::tasks::set_tasks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

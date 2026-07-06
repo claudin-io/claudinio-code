@@ -8,6 +8,7 @@ import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
 import { FileTree } from "./components/FileTree";
 import { ChatPanel } from "./components/ChatPanel";
 import { EmptyState } from "./components/EmptyState";
+import { TasksPanel } from "./components/TasksPanel";
 import { Icon } from "./components/Icon";
 
 const RECENT_KEY = "claudinio_recent_projects";
@@ -45,6 +46,7 @@ function App() {
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [showTree, setShowTree] = createSignal(false);
+  const [taskCount, setTaskCount] = createSignal(0);
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
 
   // Listen for global index-progress events (model loading, embedding
@@ -436,6 +438,15 @@ function App() {
             <ChatPanel />
           </Show>
         </main>
+
+        <Show when={root()}>
+          <aside
+            class="shrink-0 border-l border-border-subtle bg-surface-1 overflow-hidden transition-[width] duration-100"
+            classList={{ "w-10": taskCount() > 0, "w-0": taskCount() === 0 }}
+          >
+            <TasksPanel onTasksChange={setTaskCount} />
+          </aside>
+        </Show>
       </div>
     </div>
   );

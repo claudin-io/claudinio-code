@@ -3,6 +3,7 @@ mod edit_file;
 mod grep;
 mod list_dir;
 mod read_file;
+mod tasks;
 
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
@@ -21,6 +22,9 @@ pub struct ToolContext {
     /// Live handle into AppState so a model that finishes loading mid-session
     /// becomes visible without recreating the context.
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
+    /// Path to the active session's JSONL file. Used by tasks_get/tasks_set
+    /// tools to persist the task list as SessionRecord::Tasks lines.
+    pub session_store_path: Option<String>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -226,6 +230,36 @@ the exact symbol name. Ranking: go_to_definition (precise) → semantic_search \
             }),
         },
         ToolDef {
+            name: "tasks_get".into(),
+            description: "Return the current list of tasks. Each task has an id, title, description, journal (array of notes/findings), and status (todo | doing | done). Use this at the start of a session to understand what needs to be done.".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+        },
+        ToolDef {
+            name: "tasks_set".into(),
+            description: "Fully replace the task list (stateless — pass ALL tasks with updated statuses). Each task has: id (unique string), title, description, journal (array of findings/memory entries), status (todo | doing | done). Always read current tasks first with tasks_get before modifying.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "All tasks (full replace — include every task, not just the one you changed)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Unique task identifier" },
+                                "title": { "type": "string", "description": "Short task title" },
+                                "description": { "type": "string", "description": "Task description / goal" },
+                                "journal": { "type": "array", "items": { "type": "string" }, "description": "Findings or relevant information as memory entries" },
+                                "status": { "type": "string", "enum": ["todo", "doing", "done"], "description": "Task status" }
+                            },
+                            "required": ["id", "title", "description", "journal", "status"]
+                        }
+                    }
+                },
+                "required": ["tasks"]
+            }),
+        },
+        ToolDef {
             name: "spawn_agents".into(),
             description: "Spawn 1-4 parallel subagents, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints. All agents in one call run in parallel.".into(),
             input_schema: serde_json::json!({
@@ -366,6 +400,15 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = bash::execute(a).await?;
             Ok(ToolOutput::Text { content })
         }
+        "tasks_get" => {
+            let content = tasks::execute_get(ctx)?;
+            Ok(ToolOutput::Text { content })
+        }
+        "tasks_set" => {
+            let a: tasks::SetTasksArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let content = tasks::execute_set(a, ctx)?;
+            Ok(ToolOutput::Text { content })
+        }
         "spawn_agents" => {
             Err("spawn_agents is handled by the session orchestrator".into())
         }
@@ -466,6 +509,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -480,6 +524,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -494,6 +539,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: None,
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -506,6 +552,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -521,6 +568,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -536,6 +584,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -550,6 +599,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: None,
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -567,6 +617,7 @@ mod tests {
             lsp_manager: None,
             workspace_root: None,
             embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));

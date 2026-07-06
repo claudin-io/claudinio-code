@@ -59,6 +59,13 @@ pub enum SessionRecord {
         tail_turns: usize,
         ts: u64,
     },
+    /// Tasks snapshot written by the agent (tool-level tasks_get/tasks_set).
+    #[serde(rename = "tasks")]
+    Tasks {
+        #[serde(rename = "tasksJson")]
+        tasks_json: String,
+        ts: u64,
+    },
     /// Periodic status snapshot: cumulative tokens and estimated cost.
     /// Written after every Done record. `context_tokens` is the size of the
     /// context for the NEXT request (drops after compaction), as opposed to
@@ -403,6 +410,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Error { ts, .. }
                 | SessionRecord::Steering { ts, .. }
                 | SessionRecord::Compacted { ts, .. }
+                | SessionRecord::Tasks { ts, .. }
                 | SessionRecord::Status { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }

@@ -85,6 +85,7 @@ pub async fn send_message(
         lsp_manager: Some(state.lsp_manager.clone()),
         workspace_root,
         embedding_model: state.embedding_model.clone(),
+        session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
     };
 
     // Reset steering for the new run, then drain any residual from a race.
@@ -418,6 +419,7 @@ pub async fn compact_session(
         lsp_manager: Some(state.lsp_manager.clone()),
         workspace_root,
         embedding_model: state.embedding_model.clone(),
+        session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
     };
 
     let summary = session::compact_history(

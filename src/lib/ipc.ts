@@ -361,6 +361,25 @@ export interface HoverInfo {
   endChar?: number | null;
 }
 
+
+// --- Tasks ---
+
+export interface TaskItem {
+  id: string;
+  title: string;
+  description: string;
+  journal: string[];
+  status: "todo" | "doing" | "done";
+}
+
+export function getTasks(): Promise<TaskItem[]> {
+  return invoke<TaskItem[]>("get_tasks");
+}
+
+export function setTasks(tasks: TaskItem[]): Promise<void> {
+  return invoke<void>("set_tasks", { tasks });
+}
+
 // --- Skills ---
 
 export interface SkillEntry {

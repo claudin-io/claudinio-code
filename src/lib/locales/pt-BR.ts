@@ -133,6 +133,19 @@ const dict: LocaleDict = {
   // ── ChatPanel - Drop overlay ──────────────────────────────────────
   "chat.drop.title": "Solte o arquivo para anexar",
   "chat.drop.hint": "Imagens, PDFs, documentos, código e mais",
+  // ── Tasks Panel ──────────────────────────────────────────────
+  "tasks.panel.title": "Tarefas",
+  "tasks.panel.noTasks": "Nenhuma tarefa ainda — peça ao agente para criar",
+  "tasks.panel.showDetails": "Mostrar detalhes",
+  "tasks.panel.hideDetails": "Esconder detalhes",
+  "tasks.panel.journal": "Diário",
+  "tasks.panel.cycleStatus": "Alternar status",
+  "tasks.panel.collapse": "Recolher",
+  "tasks.panel.expand": "Mostrar tarefas",
+  "tasks.panel.refresh": "Atualizar",
+  "tasks.status.todo": "Pendente",
+  "tasks.status.doing": "Fazendo",
+  "tasks.status.done": "Concluído",
 };
 
 export default dict;
