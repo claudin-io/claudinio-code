@@ -95,6 +95,8 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "elm" => Some("elm"),
         // Embedded template (ERB, EJS)
         "erb" | "ejs" => Some("embedded-template"),
+        // Erlang
+        "erl" | "hrl" => Some("erlang"),
         // Fish
         "fish" => Some("fish"),
         // Fortran
@@ -160,6 +162,8 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "odin" => Some("odin"),
         // Org mode
         "org" => Some("org"),
+        // Perl
+        "pl" | "pm" | "t" => Some("perl"),
         // PHP
         "php" | "phtml" | "php3" | "php4" | "php5" | "php7" | "phps" =>
             Some("php"),
@@ -199,6 +203,8 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "ts" | "tsx" => Some("typescript"),
         // Verilog
         "v" | "vh" => Some("verilog"),
+        // VHDL
+        "vhd" | "vhdl" => Some("vhdl"),
         // XML
         "xml" | "xsd" | "xslt" | "svg" | "plist" | "rss" | "atom" |
         "xaml" => Some("xml"),
@@ -240,10 +246,13 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         "dart" => Ok(tree_sitter_dart::LANGUAGE.into()),
         "elm" => Ok(tree_sitter_elm::LANGUAGE.into()),
         "embedded-template" => Ok(tree_sitter_embedded_template::LANGUAGE.into()),
+        "elixir" => Ok(tree_sitter_elixir::LANGUAGE.into()),
+        "erlang" => Ok(tree_sitter_erlang::LANGUAGE.into()),
         "fsharp" => Ok(tree_sitter_fsharp::LANGUAGE_FSHARP.into()),
         "glsl" => Ok(tree_sitter_glsl::LANGUAGE_GLSL.into()),
         "go" => Ok(tree_sitter_go::LANGUAGE.into()),
         "graphql" => Ok(tree_sitter_graphql::LANGUAGE.into()),
+        "haskell" => Ok(tree_sitter_haskell::LANGUAGE.into()),
         "hcl" => Ok(tree_sitter_hcl::LANGUAGE.into()),
         "heex" => Ok(tree_sitter_heex::LANGUAGE.into()),
         "hlsl" => Ok(tree_sitter_hlsl::LANGUAGE_HLSL.into()),
@@ -255,6 +264,7 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         "julia" => Ok(tree_sitter_julia::LANGUAGE.into()),
         "kconfig" => Ok(tree_sitter_kconfig::LANGUAGE.into()),
         "llvm" => Ok(tree_sitter_llvm::LANGUAGE.into()),
+        "lua" => Ok(tree_sitter_lua::LANGUAGE.into()),
         "make" => Ok(tree_sitter_make::LANGUAGE.into()),
         "matlab" => Ok(tree_sitter_matlab::LANGUAGE.into()),
         "nginx" => Ok(tree_sitter_nginx::LANGUAGE.into()),
@@ -282,9 +292,11 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         "solidity" => Ok(tree_sitter_solidity::LANGUAGE.into()),
         "sparql" => Ok(tree_sitter_sparql::LANGUAGE.into()),
         "systemverilog" => Ok(tree_sitter_systemverilog::LANGUAGE.into()),
+        "swift" => Ok(tree_sitter_swift::LANGUAGE.into()),
         "tsquery" => Ok(tree_sitter_tsquery::LANGUAGE.into()),
         "typescript" => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
         "verilog" => Ok(tree_sitter_verilog::LANGUAGE.into()),
+        "vhdl" => Ok(tree_sitter_vhdl::LANGUAGE.into()),
         "xml" => Ok(tree_sitter_xml::LANGUAGE_XML.into()),
         "yaml" => Ok(tree_sitter_yaml::LANGUAGE.into()),
         "zig" => Ok(tree_sitter_zig::LANGUAGE.into()),
@@ -295,15 +307,12 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         // de `links = "tree-sitter"`. Impedidas de compilar junto com 0.25.x.
         // Mantemos a detecção de linguagem, mas retornamos erro no parsing.
         "dot"
-        | "elixir"
         | "fish"
-        | "haskell"
+        | "gleam"
         | "kotlin"
         | "less"
-        | "lua"
         | "org"
-        | "scss"
-        | "swift" => Err(format!("{lang} grammar uses old tree-sitter API incompatible with 0.25")),
+        | "scss" => Err(format!("{lang} grammar uses old tree-sitter API incompatible with 0.25")),
 
         _ => Err(format!("unknown language: {lang}")),
     }
