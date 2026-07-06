@@ -68,8 +68,6 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "bicep" => Some("bicep"),
         // C
         "c" | "h" => Some("c"),
-        // Cap'n Proto
-        "capnp" => Some("capnp"),
         // Clojure
         "clj" | "cljs" | "cljc" | "edn" => Some("clojure"),
         // CMake
@@ -89,8 +87,6 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "d" => Some("d"),
         // Dart
         "dart" => Some("dart"),
-        // Dockerfile (extension variant)
-        "dockerfile" => Some("dockerfile"),
         // DOT / Graphviz
         "dot" | "gv" => Some("dot"),
         // Elixir
@@ -99,8 +95,6 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "elm" => Some("elm"),
         // Embedded template (ERB, EJS)
         "erb" | "ejs" => Some("embedded-template"),
-        // Erlang
-        "erl" | "hrl" => Some("erlang"),
         // Fish
         "fish" => Some("fish"),
         // Fortran
@@ -125,7 +119,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         // HLSL
         "hlsl" | "fx" | "fxh" | "hlsli" => Some("hlsl"),
         // HTML
-        "html" | "htm" | "xhtml" => Some("html"),
+        "html" | "htm" => Some("html"),
         // INI / config
         "ini" | "cfg" => Some("ini"),
         // Java
@@ -138,8 +132,6 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "jl" => Some("julia"),
         // Kotlin
         "kt" | "kts" | "ktm" => Some("kotlin"),
-        // LaTeX
-        "tex" | "ltx" | "latex" | "sty" | "cls" | "bbl" => Some("latex"),
         // Less
         "less" => Some("less"),
         // LLVM IR
@@ -148,8 +140,6 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "lua" => Some("lua"),
         // Make
         "mk" | "mak" => Some("make"),
-        // Markdown
-        "md" | "markdown" | "mdown" | "mdwn" => Some("markdown"),
         // MATLAB
         "m" => {
             // .m can be MATLAB or Objective-C; check file content hints
@@ -170,13 +160,9 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "odin" => Some("odin"),
         // Org mode
         "org" => Some("org"),
-        // Perl
-        "pl" | "pm" | "t" => Some("perl"),
         // PHP
         "php" | "phtml" | "php3" | "php4" | "php5" | "php7" | "phps" =>
             Some("php"),
-        // Pony
-        "pony" => Some("pony"),
         // PowerShell
         "ps1" | "psm1" | "psd1" | "ps1xml" => Some("powershell"),
         // Prisma
@@ -191,8 +177,6 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "r" | "R" | "Rmd" => Some("r"),
         // Racket
         "rkt" | "scrbl" | "rktd" => Some("racket"),
-        // RON
-        "ron" => Some("ron"),
         // Ruby
         "rb" | "ruby" => Some("ruby"),
         // Rust
@@ -201,51 +185,29 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "scala" | "sc" => Some("scala"),
         // Scheme
         "scm" | "ss" => Some("scheme"),
-        // SCSS
-        "scss" => Some("scss"),
         // Slint
         "slint" => Some("slint"),
         // Solidity
         "sol" => Some("solidity"),
         // SPARQL
         "rq" | "sparql" => Some("sparql"),
-        // SQL
-        "sql" => Some("sql"),
-        // Svelte
-        "svelte" => Some("svelte"),
         // Swift
         "swift" => Some("swift"),
         // SystemVerilog
         "sv" | "svh" => Some("systemverilog"),
-        // Thrift
-        "thrift" => Some("thrift"),
-        // TLA+
-        "tla" => Some("tlaplus"),
-        // TOML
-        "toml" => Some("toml"),
         // TypeScript / TSX
         "ts" | "tsx" => Some("typescript"),
         // Verilog
         "v" | "vh" => Some("verilog"),
-        // VHDL
-        "vhd" | "vhdl" => Some("vhdl"),
-        // Vue
-        "vue" => Some("vue"),
-        // WGSL
-        "wgsl" => Some("wgsl"),
         // XML
-        "xml" | "xsd" | "xslt" | "svg" | "plist" | "xhtml" | "rss" | "atom" |
-        "xaml" | "xml.dist" => Some("xml"),
+        "xml" | "xsd" | "xslt" | "svg" | "plist" | "rss" | "atom" |
+        "xaml" => Some("xml"),
         // YAML
         "yaml" | "yml" => Some("yaml"),
         // Zig
         "zig" => Some("zig"),
         // Java properties
         "properties" => Some("properties"),
-        // Nginx config
-        "nginx" => Some("nginx"),
-        // Earthly
-        "earthfile" => Some("earthfile"),
 
         _ => None,
     }
@@ -259,100 +221,89 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
 
 fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
     match lang {
+        // New API — LANGUAGE constant (LanguageFn), convertible via .into()
         "ada" => Ok(tree_sitter_ada::LANGUAGE.into()),
         "agda" => Ok(tree_sitter_agda::LANGUAGE.into()),
         "asm" => Ok(tree_sitter_asm::LANGUAGE.into()),
         "bash" => Ok(tree_sitter_bash::LANGUAGE.into()),
         "bicep" => Ok(tree_sitter_bicep::LANGUAGE.into()),
         "c" => Ok(tree_sitter_c::LANGUAGE.into()),
-        "capnp" => Ok(tree_sitter_capnp::LANGUAGE.into()),
         "clojure" => Ok(tree_sitter_clojure::LANGUAGE.into()),
         "cmake" => Ok(tree_sitter_cmake::LANGUAGE.into()),
-        "commonlisp" => Ok(tree_sitter_commonlisp::LANGUAGE.into()),
+        "commonlisp" => Ok(tree_sitter_commonlisp::LANGUAGE_COMMONLISP.into()),
         "cpp" => Ok(tree_sitter_cpp::LANGUAGE.into()),
         "c-sharp" => Ok(tree_sitter_c_sharp::LANGUAGE.into()),
         "css" => Ok(tree_sitter_css::LANGUAGE.into()),
         "cuda" => Ok(tree_sitter_cuda::LANGUAGE.into()),
         "d" => Ok(tree_sitter_d::LANGUAGE.into()),
+        "dafny" => Ok(tree_sitter_dafny::LANGUAGE.into()),
         "dart" => Ok(tree_sitter_dart::LANGUAGE.into()),
-        "dockerfile" => Ok(tree_sitter_dockerfile::LANGUAGE.into()),
-        "dot" => Ok(tree_sitter_dot::LANGUAGE.into()),
-        "elixir" => Ok(tree_sitter_elixir::LANGUAGE.into()),
         "elm" => Ok(tree_sitter_elm::LANGUAGE.into()),
         "embedded-template" => Ok(tree_sitter_embedded_template::LANGUAGE.into()),
-        "erlang" => Ok(tree_sitter_erlang::LANGUAGE.into()),
-        "fish" => Ok(tree_sitter_fish::LANGUAGE.into()),
-        "fortran" => Ok(tree_sitter_fortran::LANGUAGE.into()),
         "fsharp" => Ok(tree_sitter_fsharp::LANGUAGE_FSHARP.into()),
-        "gleam" => Ok(tree_sitter_gleam::LANGUAGE.into()),
-        "glsl" => Ok(tree_sitter_glsl::LANGUAGE.into()),
+        "glsl" => Ok(tree_sitter_glsl::LANGUAGE_GLSL.into()),
         "go" => Ok(tree_sitter_go::LANGUAGE.into()),
-        "gomod" => Ok(tree_sitter_gomod::LANGUAGE.into()),
         "graphql" => Ok(tree_sitter_graphql::LANGUAGE.into()),
-        "haskell" => Ok(tree_sitter_haskell::LANGUAGE.into()),
         "hcl" => Ok(tree_sitter_hcl::LANGUAGE.into()),
         "heex" => Ok(tree_sitter_heex::LANGUAGE.into()),
-        "hlsl" => Ok(tree_sitter_hlsl::LANGUAGE.into()),
+        "hlsl" => Ok(tree_sitter_hlsl::LANGUAGE_HLSL.into()),
         "html" => Ok(tree_sitter_html::LANGUAGE.into()),
         "ini" => Ok(tree_sitter_ini::LANGUAGE.into()),
         "java" => Ok(tree_sitter_java::LANGUAGE.into()),
+        "jsdoc" => Ok(tree_sitter_jsdoc::LANGUAGE.into()),
         "json" => Ok(tree_sitter_json::LANGUAGE.into()),
         "julia" => Ok(tree_sitter_julia::LANGUAGE.into()),
         "kconfig" => Ok(tree_sitter_kconfig::LANGUAGE.into()),
-        "kotlin" => Ok(tree_sitter_kotlin::LANGUAGE.into()),
-        "latex" => Ok(tree_sitter_latex::LANGUAGE.into()),
-        "less" => Ok(tree_sitter_less::LANGUAGE.into()),
         "llvm" => Ok(tree_sitter_llvm::LANGUAGE.into()),
-        "lua" => Ok(tree_sitter_lua::LANGUAGE.into()),
         "make" => Ok(tree_sitter_make::LANGUAGE.into()),
-        "markdown" => Ok(tree_sitter_markdown::LANGUAGE.into()),
         "matlab" => Ok(tree_sitter_matlab::LANGUAGE.into()),
+        "nginx" => Ok(tree_sitter_nginx::LANGUAGE.into()),
         "nickel" => Ok(tree_sitter_nickel::LANGUAGE.into()),
         "nix" => Ok(tree_sitter_nix::LANGUAGE.into()),
         "objc" => Ok(tree_sitter_objc::LANGUAGE.into()),
         "ocaml" => Ok(tree_sitter_ocaml::LANGUAGE_OCAML.into()),
         "ocamllex" => Ok(tree_sitter_ocamllex::LANGUAGE.into()),
         "odin" => Ok(tree_sitter_odin::LANGUAGE.into()),
-        "org" => Ok(tree_sitter_org::LANGUAGE.into()),
-        "perl" => Ok(tree_sitter_perl::LANGUAGE.into()),
         "php" => Ok(tree_sitter_php::LANGUAGE_PHP.into()),
-        "pony" => Ok(tree_sitter_pony::LANGUAGE.into()),
         "powershell" => Ok(tree_sitter_powershell::LANGUAGE.into()),
         "prisma-io" => Ok(tree_sitter_prisma_io::LANGUAGE.into()),
         "prolog" => Ok(tree_sitter_prolog::LANGUAGE.into()),
+        "properties" => Ok(tree_sitter_properties::LANGUAGE.into()),
         "proto" => Ok(tree_sitter_proto::LANGUAGE.into()),
         "python" => Ok(tree_sitter_python::LANGUAGE.into()),
-        "query" => Ok(tree_sitter_query::LANGUAGE.into()),
         "r" => Ok(tree_sitter_r::LANGUAGE.into()),
         "racket" => Ok(tree_sitter_racket::LANGUAGE.into()),
         "regex" => Ok(tree_sitter_regex::LANGUAGE.into()),
-        "ron" => Ok(tree_sitter_ron::LANGUAGE.into()),
         "ruby" => Ok(tree_sitter_ruby::LANGUAGE.into()),
         "rust" => Ok(tree_sitter_rust::LANGUAGE.into()),
         "scala" => Ok(tree_sitter_scala::LANGUAGE.into()),
         "scheme" => Ok(tree_sitter_scheme::LANGUAGE.into()),
-        "scss" => Ok(tree_sitter_scss::LANGUAGE.into()),
         "slint" => Ok(tree_sitter_slint::LANGUAGE.into()),
         "solidity" => Ok(tree_sitter_solidity::LANGUAGE.into()),
         "sparql" => Ok(tree_sitter_sparql::LANGUAGE.into()),
-        "sql" => Ok(tree_sitter_sql::LANGUAGE.into()),
-        "svelte" => Ok(tree_sitter_svelte::LANGUAGE.into()),
-        "swift" => Ok(tree_sitter_swift::LANGUAGE.into()),
         "systemverilog" => Ok(tree_sitter_systemverilog::LANGUAGE.into()),
-        "thrift" => Ok(tree_sitter_thrift::LANGUAGE.into()),
-        "tlaplus" => Ok(tree_sitter_tlaplus::LANGUAGE.into()),
-        "toml" => Ok(tree_sitter_toml::LANGUAGE.into()),
         "tsquery" => Ok(tree_sitter_tsquery::LANGUAGE.into()),
         "typescript" => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
         "verilog" => Ok(tree_sitter_verilog::LANGUAGE.into()),
-        "vhdl" => Ok(tree_sitter_vhdl::LANGUAGE.into()),
-        "vue" => Ok(tree_sitter_vue::LANGUAGE.into()),
-        "wgsl" => Ok(tree_sitter_wgsl::LANGUAGE.into()),
+        "xml" => Ok(tree_sitter_xml::LANGUAGE_XML.into()),
         "yaml" => Ok(tree_sitter_yaml::LANGUAGE.into()),
         "zig" => Ok(tree_sitter_zig::LANGUAGE.into()),
-        "properties" => Ok(tree_sitter_properties::LANGUAGE.into()),
-        "nginx" => Ok(tree_sitter_nginx::LANGUAGE.into()),
-        "earthfile" => Ok(tree_sitter_earthfile::LANGUAGE.into()),
+        "zsh" => Ok(tree_sitter_zsh::LANGUAGE.into()),
+
+        // ☯ Grammars que usam `pub fn language() -> tree_sitter::Language` — API antiga
+        // que linka contra uma versão diferente do nativo tree-sitter, causando conflito
+        // de `links = "tree-sitter"`. Impedidas de compilar junto com 0.25.x.
+        // Mantemos a detecção de linguagem, mas retornamos erro no parsing.
+        "dot"
+        | "elixir"
+        | "fish"
+        | "haskell"
+        | "kotlin"
+        | "less"
+        | "lua"
+        | "org"
+        | "scss"
+        | "swift" => Err(format!("{lang} grammar uses old tree-sitter API incompatible with 0.25")),
 
         _ => Err(format!("unknown language: {lang}")),
     }
@@ -877,11 +828,9 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
 
         // --- Call expressions ---
         if CALL_EXPRESSION_KINDS.contains(&kind) {
-            let func_node = node.child_by_field_name("function").or_else(|| {
-                // Some grammars use "name" or first child as the function
-                let mut c = node.walk();
-                node.children(&mut c).next()
-            });
+            let func_node = node
+                .child_by_field_name("function")
+                .or_else(|| node.child(0));
 
             if let Some(func) = func_node {
                 if let Ok(func_text) = func.utf8_text(content.as_bytes()) {
