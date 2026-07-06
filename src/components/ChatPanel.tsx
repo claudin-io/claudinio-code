@@ -31,6 +31,7 @@ import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
+import ContextWarning from "./ContextWarning";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
 import { setWorkspaceStatus } from "../lib/workspaceStatus";
@@ -995,6 +996,7 @@ export const ChatPanel: Component<{
             <Icon name="plus" class="h-3.5 w-3.5" />
             {t("chat.header.new")}
           </button>
+          <ContextWarning workspace={props.workspace} />
           <button
             onClick={toggleSessions}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
