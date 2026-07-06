@@ -127,6 +127,76 @@ pub async fn compact_history(
     Ok(summary)
 }
 
+/// The session's operating mode: Brain plans with read-only tools,
+/// Builder executes with the full toolset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMode {
+    Brain,
+    Builder,
+}
+
+impl SessionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionMode::Brain => "brain",
+            SessionMode::Builder => "builder",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<SessionMode> {
+        match s {
+            // "pensador"/"constructor" are the original names of these modes;
+            // JSONL files written before the rename still carry them.
+            "brain" | "pensador" => Some(SessionMode::Brain),
+            "builder" | "constructor" => Some(SessionMode::Builder),
+            _ => None,
+        }
+    }
+}
+
+/// Who put the session in its current mode. The agent may only exit Brain
+/// on its own if it was the one who entered it; a human-initiated Brain
+/// can only be exited by the human toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeOrigin {
+    Human,
+    Agent,
+}
+
+impl ModeOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModeOrigin::Human => "human",
+            ModeOrigin::Agent => "agent",
+        }
+    }
+}
+
+/// Shared, mutable mode state for a session. Lives in AppState keyed by
+/// session id so the UI toggle and the running workflow see the same value.
+/// The Mutex is never held across await.
+pub struct ModeCtl {
+    state: StdMutex<(SessionMode, ModeOrigin)>,
+}
+
+impl ModeCtl {
+    pub fn new(mode: SessionMode, origin: ModeOrigin) -> Self {
+        Self {
+            state: StdMutex::new((mode, origin)),
+        }
+    }
+
+    pub fn get(&self) -> (SessionMode, ModeOrigin) {
+        *self.state.lock().unwrap()
+    }
+
+    pub fn set(&self, mode: SessionMode, origin: ModeOrigin) {
+        *self.state.lock().unwrap() = (mode, origin);
+    }
+}
+
 /// Steering: a queue of mid-run user messages and an interrupt flag.
 /// Thread-safe; the Mutex is never held across await.
 pub struct SteeringCtl {
@@ -238,9 +308,82 @@ IMPORTANT — Language policy: ALL communication must be in English. Write in En
 regardless of the language the user writes in. If the user writes in a non-English language, \
 treat it as if they asked in English — respond in English only.";
 
-/// Build the per-session system prompt. The result is byte-identical for every
-/// request in the same workspace, so the provider's prefix cache stays warm.
-fn system_prompt(workspace_root: Option<&str>, skills_section: Option<&str>) -> String {
+/// Appended to the system prompt while the session is in Brain mode.
+const BRAIN_PROMPT: &str = "\n\n## CURRENT MODE: BRAIN (PLANNING — READ-ONLY)\n\
+You are in Brain mode: the brains of the operation — an explorer and requirements analyst. You \
+MUST NOT implement, edit files or run state-changing commands — your editing tools are disabled \
+and bash only accepts read-only commands.\n\
+\n\
+### Mandatory deliverables\n\
+A Brain session is NOT finished until BOTH exist, no matter who enabled this mode:\n\
+1. The Solution Design plan written via write_plan (.claudinio/plans/*.md).\n\
+2. The executable task list created via tasks_set — one self-contained task per atomic step, \
+each carrying enough description (file paths, symbols, constraints, the plan file path) to be \
+handed to a Builder subagent that knows nothing about this conversation. All status='todo'.\n\
+Never end your turn without both deliverables in place.\n\
+\n\
+### Investigation: smart tools FIRST\n\
+The indexed tools are your primary instruments — brute force is a last resort:\n\
+• semantic_search is your FIRST call for any conceptual question ('how does X work', 'where is \
+the behavior Y') — describe the behavior in English.\n\
+• code_search / symbol_lookup only when you already know the exact symbol or keyword.\n\
+• file_outline before read_file on unfamiliar files; go_to_definition / find_references to trace \
+relationships.\n\
+• grep and bash searching are LAST resorts, only after the indexed tools came back empty.\n\
+Use spawn_agents ('explore' mode) aggressively for anything broad — to map areas and validate \
+theories without polluting your context — and instruct each subagent to follow the same tool \
+order. Explore BEFORE interviewing so your questions are grounded in facts.\n\
+\n\
+### Requirements interview (MANDATORY — never skip)\n\
+Before writing ANY plan you MUST interview the user relentlessly about the request until you \
+reach a shared understanding. Every planning request has decisions the user must own — if you \
+wrote a plan without asking a single question, you did it wrong. Walk down each branch of the \
+design tree, resolving dependencies between decisions one by one:\n\
+1. Ask questions ONE AT A TIME via the ask_user tool — one ask_user call with ONE question, wait \
+for the answer, let it shape the next question. Batching questions is bewildering.\n\
+2. Every question carries your recommended answer as the FIRST option, suffixed ' (Recommended)'.\n\
+3. If a FACT can be found in the codebase, look it up with your tools instead of asking. The \
+DECISIONS are the user's — put each one to them and wait.\n\
+4. Do NOT call write_plan until the user has confirmed the shared understanding — your last \
+interview question must be a confirmation of the agreed design.\n\
+\n\
+### Workflow\n\
+EXPLORE (subagents + semantic_search) → INTERVIEW (protocol above) → write_plan (sections: \
+Context, Solution Design, Risks, Tasks summary; call again with the full content to revise) → \
+tasks_set → hand off: if YOU entered this mode (enter_plan_mode), call exit_plan_mode and start \
+building; if the USER enabled it, do NOT try to exit — finish by saying the plan and tasks are \
+ready for them to flip the toggle to Builder.";
+
+/// Appended to the system prompt while the session is in Builder mode.
+const BUILDER_PROMPT: &str = "\n\n## CURRENT MODE: BUILDER (EXECUTION)\n\
+You are in Builder mode: you execute plans. When starting work on a request:\n\
+1. Call tasks_get. If tasks exist (usually created in Brain mode), they ARE the plan — follow \
+them in order, respecting dependencies.\n\
+2. Check .claudinio/plans/ (list_dir) for the most recent plan file and read it before executing \
+its tasks — it carries the Solution Design context the tasks refer to.\n\
+3. Delegate: implement each task through spawn_agents in 'code' mode — one subagent per task, in \
+ONE call when tasks are independent (parallel), in sequential waves when they depend on each \
+other. This keeps your own context clean. Only implement directly yourself when a task is trivial \
+(a single small edit) or needs mid-task user decisions.\n\
+4. Use the available skills whenever one matches the work.\n\
+5. Keep the Task Panel live: status='doing' before starting a task, journal entries for findings, \
+status='done' when its subagent reports success and you verified the result.\n\
+6. After all tasks, verify the whole (build/tests where applicable) and report.\n\
+Investigate with the smart tools first — semantic_search for behavior questions, code_search / \
+symbol_lookup for known names, file_outline before reading — and leave grep/bash searching as \
+the last resort. Tell your subagents to do the same.\n\
+If a request turns out to be genuinely hard or ambiguous — unclear requirements, large design \
+space, conflicting constraints — call enter_plan_mode to switch yourself into Brain mode and \
+design first instead of guessing.";
+
+/// Build the per-session system prompt. The base is byte-identical for every
+/// request in the same workspace so the provider's prefix cache stays warm;
+/// the mode block is appended last and only changes when the mode switches.
+fn system_prompt(
+    workspace_root: Option<&str>,
+    skills_section: Option<&str>,
+    mode: SessionMode,
+) -> String {
     let base = match workspace_root {
         Some(root) => format!(
             "{SYSTEM_PROMPT}\n\nProject workspace root: {root}. \
@@ -250,9 +393,13 @@ File tools take absolute paths inside this root."
         ),
         None => SYSTEM_PROMPT.to_string(),
     };
-    match skills_section {
+    let base = match skills_section {
         Some(s) if !s.is_empty() => format!("{base}\n{s}"),
         _ => base,
+    };
+    match mode {
+        SessionMode::Brain => format!("{base}{BRAIN_PROMPT}"),
+        SessionMode::Builder => format!("{base}{BUILDER_PROMPT}"),
     }
 }
 
@@ -341,6 +488,12 @@ pub enum AgentEvent {
         subagent_id: String,
         event: Box<AgentEvent>,
     },
+    #[serde(rename = "ModeChanged")]
+    ModeChanged {
+        mode: String,
+        origin: String,
+        reason: Option<String>,
+    },
     #[serde(rename = "SessionStats")]
     SessionStats {
         #[serde(rename = "inputTokens")]
@@ -379,9 +532,23 @@ pub struct UserAnswer {
 
 pub type AnswerMap = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserAnswer>>>>>;
 
-fn api_tools() -> Vec<ToolDescription> {
-    tools::get_defs()
-        .iter()
+/// Tools offered to the model for a given mode. Builder gets the full
+/// registry plus enter_plan_mode; Brain drops edit_file and gains
+/// write_plan + exit_plan_mode (bash stays but is gated to read-only commands
+/// in run_workflow).
+fn api_tools(mode: SessionMode) -> Vec<ToolDescription> {
+    let mut defs = tools::get_defs();
+    match mode {
+        SessionMode::Builder => {
+            defs.push(tools::enter_plan_mode_def());
+        }
+        SessionMode::Brain => {
+            defs.retain(|t| t.name != "edit_file");
+            defs.push(tools::write_plan_def());
+            defs.push(tools::exit_plan_mode_def());
+        }
+    }
+    defs.iter()
         .map(|t| ToolDescription {
             name: t.name.clone(),
             description: t.description.clone(),
@@ -527,6 +694,7 @@ pub async fn run_workflow(
     ctx: &ToolContext,
     store: &SessionStore,
     steering: &Arc<SteeringCtl>,
+    mode_ctl: &Arc<ModeCtl>,
 ) -> Result<(), String> {
     reject_non_english(&user_message)?;
     store.try_append(&SessionRecord::User {
@@ -541,8 +709,9 @@ pub async fn run_workflow(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
-    let system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref());
-    let tools = api_tools();
+    let (mut cur_mode, _) = mode_ctl.get();
+    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), cur_mode);
+    let mut tools = api_tools(cur_mode);
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
@@ -615,9 +784,21 @@ pub async fn run_workflow(
 
     let max_rounds = config.max_rounds.unwrap_or(usize::MAX);
     for _ in 0..max_rounds {
+        // The mode can change mid-run (human toggle, or the agent's own
+        // enter/exit_plan_mode in the previous round) — refresh the prompt
+        // and tool list before each request.
+        let (mode_now, _) = mode_ctl.get();
+        if mode_now != cur_mode {
+            cur_mode = mode_now;
+            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), cur_mode);
+            tools = api_tools(cur_mode);
+        }
+
         let mut assistant_text = String::new();
+        let resolved_model = config.model_for_mode(cur_mode.as_str());
         let stream_output = provider::stream_message(
             config,
+            resolved_model,
             history,
             &tools,
             Some(system.as_str()),
@@ -658,7 +839,7 @@ pub async fn run_workflow(
         last_context = (estimate_tokens(history, &system, &tools) + out_tok).max(api_ctx);
 
         // Live stats for the context bar
-        let round_cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+        let round_cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
         let live_cost = cumul_cost.unwrap_or(0.0) + round_cost;
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: total_in + cumul_in as u32,
@@ -697,7 +878,7 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
             cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
             write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
             let _ = event_tx.send(AgentEvent::Done {
@@ -760,7 +941,7 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
             cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
             write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
             let _ = event_tx.send(AgentEvent::Done {
@@ -804,7 +985,7 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
             cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
             write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
             let _ = event_tx.send(AgentEvent::Done {
@@ -879,7 +1060,24 @@ pub async fn run_workflow(
                 tool_input.clone(),
             ));
 
-            let block = if tool_name == "spawn_agents" {
+            let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
+            let block = if tool_name == "enter_plan_mode" || tool_name == "exit_plan_mode" {
+                handle_mode_switch(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    mode_ctl,
+                    store,
+                    event_tx,
+                    session_id,
+                )
+            } else if tool_name == "spawn_agents" {
+                // Brain may only spawn read-only subagents.
+                let tool_input = if in_brain {
+                    force_explore_mode(tool_input)
+                } else {
+                    tool_input
+                };
                 let (block, sub_in, sub_out) = subagent::run_spawn_agents(
                     config,
                     ctx,
@@ -895,6 +1093,34 @@ pub async fn run_workflow(
                 total_in += sub_in;
                 total_out += sub_out;
                 block
+            } else if in_brain && tool_name == "edit_file" {
+                deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    "edit_file is not available in Brain mode — it is read-only. \
+                     Record the intended change in the plan (write_plan) instead.",
+                    event_tx,
+                    session_id,
+                )
+            } else if in_brain
+                && tool_name == "bash"
+                && !matches!(
+                    permissions::bash_permission(
+                        tool_input.get("command").and_then(|v| v.as_str()).unwrap_or("")
+                    ),
+                    PermissionLevel::Auto
+                )
+            {
+                deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    "Command not allowed in Brain mode — only read-only allowlisted \
+                     commands (git status/diff/log, ls, cat, cargo check, ...) run here.",
+                    event_tx,
+                    session_id,
+                )
             } else {
                 run_tool(
                     &tool_name,
@@ -945,7 +1171,7 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
             cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
             write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
             let _ = event_tx.send(AgentEvent::Done {
@@ -973,7 +1199,7 @@ pub async fn run_workflow(
     });
     cumul_in += total_in as u64;
     cumul_out += total_out as u64;
-    let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+    let cost = run_cost.unwrap_or_else(|| cost_for(config.model_for_mode(cur_mode.as_str()), total_in, total_cache, total_out));
     cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
     write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
     let _ = event_tx.send(AgentEvent::Done {
@@ -1333,6 +1559,141 @@ pub(crate) async fn run_tool(
             ContentBlock::tool_result(tool_use_id, &msg)
         }
     }
+}
+
+/// Emit a denied ToolCall/ToolResult pair and return the tool_result block.
+/// Used for tools blocked by the current mode (no approval prompt — a hard no).
+fn deny_tool(
+    tool_name: &str,
+    tool_use_id: &str,
+    tool_input: &Value,
+    msg: &str,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+) -> ContentBlock {
+    let _ = event_tx.send(AgentEvent::ToolCall {
+        session_id: session_id.to_string(),
+        tool_id: tool_use_id.to_string(),
+        tool_name: tool_name.to_string(),
+        args: tool_input.clone(),
+        permission: "denied".into(),
+        edit_proposal: None,
+    });
+    let _ = event_tx.send(AgentEvent::ToolResult {
+        tool_id: tool_use_id.to_string(),
+        tool_name: tool_name.to_string(),
+        output: msg.to_string(),
+        error: Some("denied".into()),
+    });
+    ContentBlock::tool_result(tool_use_id, msg)
+}
+
+/// Rewrite a spawn_agents input so every agent runs in 'explore' mode.
+/// Brain must never spawn code-mode (write-capable) subagents.
+fn force_explore_mode(mut tool_input: Value) -> Value {
+    if let Some(agents) = tool_input.get_mut("agents").and_then(|v| v.as_array_mut()) {
+        for agent in agents {
+            if let Some(obj) = agent.as_object_mut() {
+                obj.insert("mode".into(), Value::String("explore".into()));
+            }
+        }
+    }
+    tool_input
+}
+
+/// Handle the agent-initiated mode switch tools. enter_plan_mode always
+/// works (origin becomes Agent); exit_plan_mode only works when the agent
+/// itself entered Brain — a human-initiated Brain is exited only by
+/// the human toggle.
+fn handle_mode_switch(
+    tool_name: &str,
+    tool_use_id: &str,
+    tool_input: &Value,
+    mode_ctl: &Arc<ModeCtl>,
+    store: &SessionStore,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+) -> ContentBlock {
+    let _ = event_tx.send(AgentEvent::ToolCall {
+        session_id: session_id.to_string(),
+        tool_id: tool_use_id.to_string(),
+        tool_name: tool_name.to_string(),
+        args: tool_input.clone(),
+        permission: "auto".into(),
+        edit_proposal: None,
+    });
+
+    let (mode, origin) = mode_ctl.get();
+    let (result, error): (String, Option<String>) = match tool_name {
+        "enter_plan_mode" => {
+            if mode == SessionMode::Brain {
+                ("Already in Brain mode.".into(), Some("invalid".into()))
+            } else {
+                let reason = tool_input
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                mode_ctl.set(SessionMode::Brain, ModeOrigin::Agent);
+                store.try_append(&SessionRecord::Mode {
+                    mode: SessionMode::Brain.as_str().into(),
+                    origin: ModeOrigin::Agent.as_str().into(),
+                    ts: now_ms(),
+                });
+                let _ = event_tx.send(AgentEvent::ModeChanged {
+                    mode: SessionMode::Brain.as_str().into(),
+                    origin: ModeOrigin::Agent.as_str().into(),
+                    reason,
+                });
+                (
+                    "Entered Brain mode (read-only planning). Editing tools are now \
+                     disabled. Explore, interview the user, write the plan with write_plan, \
+                     create tasks with tasks_set, then call exit_plan_mode to build."
+                        .into(),
+                    None,
+                )
+            }
+        }
+        "exit_plan_mode" => {
+            if mode != SessionMode::Brain {
+                ("Not in Brain mode.".into(), Some("invalid".into()))
+            } else if origin != ModeOrigin::Agent {
+                (
+                    "The USER enabled Brain mode — only they can switch back to \
+                     Builder. Finish the plan and tasks, then end your turn telling \
+                     the user everything is ready for them to flip the toggle."
+                        .into(),
+                    Some("denied".into()),
+                )
+            } else {
+                mode_ctl.set(SessionMode::Builder, ModeOrigin::Agent);
+                store.try_append(&SessionRecord::Mode {
+                    mode: SessionMode::Builder.as_str().into(),
+                    origin: ModeOrigin::Agent.as_str().into(),
+                    ts: now_ms(),
+                });
+                let _ = event_tx.send(AgentEvent::ModeChanged {
+                    mode: SessionMode::Builder.as_str().into(),
+                    origin: ModeOrigin::Agent.as_str().into(),
+                    reason: None,
+                });
+                (
+                    "Back in Builder mode. Read the plan and execute the tasks \
+                     (one code-mode subagent per task where possible)."
+                        .into(),
+                    None,
+                )
+            }
+        }
+        _ => ("unknown mode tool".into(), Some("invalid".into())),
+    };
+
+    let _ = event_tx.send(AgentEvent::ToolResult {
+        tool_id: tool_use_id.to_string(),
+        tool_name: tool_name.to_string(),
+        output: result.clone(),
+        error,
+    });
+    ContentBlock::tool_result(tool_use_id, &result)
 }
 
 /// Handle the ask_user tool: surface the questions in the UI, wait for the

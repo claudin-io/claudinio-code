@@ -13,6 +13,10 @@ import {
   getSessionStats,
   getConfig,
   readAttachment,
+  setSessionMode,
+  normalizeSessionMode,
+  type SessionMode,
+  type ModeChangedData,
   type AgentEvent,
   type AskUserData,
   type ToolCallData,
@@ -80,7 +84,7 @@ interface SubagentTimelineState {
 }
 
 interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction";
+  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode";
   thinking?: { text: string; startedAt: number; endedAt?: number };
   tool?: {
     call: ToolCallData;
@@ -96,6 +100,12 @@ interface TimelineItem {
     kind: "start" | "done" | "fail";
     args: string[];
   };
+  modeChange?: ModeChangedData;
+}
+
+function modeChangeLabel(mc: ModeChangedData): string {
+  const label = t(`mode.changed.${mc.mode}.${mc.origin}`);
+  return mc.reason ? `${label} — ${t("mode.changed.reason", mc.reason)}` : label;
 }
 
 const PHASE_LABEL = (phase: Phase): string => {
@@ -360,6 +370,14 @@ function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
         type: "steering",
         steering: { text: String(rec.text ?? "") },
       });
+    } else if (kind === "mode") {
+      steps.push({
+        type: "mode",
+        modeChange: {
+          mode: normalizeSessionMode(rec.mode),
+          origin: rec.origin as ModeChangedData["origin"],
+        },
+      });
     } else if (kind === "done") {
       done = {
         stopReason: "end_turn",
@@ -409,6 +427,24 @@ export const ChatPanel: Component<{
   const [maxContextTokens, setMaxContextTokens] = createSignal(256_000);
   const [compactThreshold, setCompactThreshold] = createSignal(192_000);
   const [isCompacting, setIsCompacting] = createSignal(false);
+  const [mode, setMode] = createSignal<SessionMode>("builder");
+
+  // Human toggle: persists a Mode record in the session JSONL immediately so
+  // the mode survives reloads; a running workflow picks it up next round.
+  const switchMode = async (m: SessionMode) => {
+    if (m === mode()) return;
+    setMode(m);
+    setCurrentSteps((prev) => [
+      ...prev,
+      { type: "mode" as const, modeChange: { mode: m, origin: "human" as const } },
+    ]);
+    try {
+      const result = await setSessionMode(props.workspace, m);
+      setActiveSessionId(result.sessionId);
+    } catch {
+      // backend unavailable — sendMessage will sync the mode on next send
+    }
+  };
 
   // Feed the sidebar's per-workspace running indicator.
   createEffect(() => setWorkspaceStatus(props.workspace, status()));
@@ -677,6 +713,14 @@ export const ChatPanel: Component<{
       setCurrentAskUser(event.data as AskUserData);
       setStatus("awaiting_input");
       scrollToBottom();
+    } else if (event.event === "ModeChanged") {
+      const data = event.data as ModeChangedData;
+      setMode(data.mode);
+      setCurrentSteps((prev) => [
+        ...prev,
+        { type: "mode" as const, modeChange: data } as TimelineItem,
+      ]);
+      scrollToBottom();
     } else if (event.event === "SteeringInjected") {
       setQueuedSteering((prev) => prev.filter((s) => s !== event.data.text));
       setCurrentSteps((prev) => [
@@ -837,6 +881,7 @@ export const ChatPanel: Component<{
         text,
         atts.map((a) => ({ path: a.path })),
         handleEvent,
+        mode(),
       );
       setActiveSessionId(result.sessionId);
       setAttachments([]);
@@ -891,6 +936,7 @@ export const ChatPanel: Component<{
     setCurrentSteps([]);
     setThinkingStart(0);
     setContextStats({ contextTokens: 0, cumulativeTokens: 0 });
+    setMode("builder");
     setStatus("idle");
     setShowSessions(false);
   };
@@ -913,6 +959,9 @@ export const ChatPanel: Component<{
       const records = await loadSession(props.workspace, id);
       setMessages(recordsToMessages(records));
       statsFromRecords(records);
+      // The JSONL is the source of truth for the mode too: restore the last one.
+      const lastMode = [...records].reverse().find((r) => r.kind === "mode");
+      setMode(lastMode ? normalizeSessionMode(lastMode.mode) : "builder");
       setActiveSessionId(id);
       setCurrentSteps([]);
       setThinkingStart(0);
@@ -1234,6 +1283,30 @@ export const ChatPanel: Component<{
             >
               <Icon name="paperclip" class="h-4 w-4" />
             </button>
+            <div class="flex shrink-0 items-center rounded-md border border-border-subtle bg-surface-0 p-0.5">
+              <button
+                onClick={() => switchMode("brain")}
+                class={`flex h-7 w-7 items-center justify-center rounded ${
+                  mode() === "brain"
+                    ? "bg-accent/15 text-accent"
+                    : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
+                }`}
+                title={t("mode.brain.tooltip")}
+              >
+                <Icon name="thinking-face" class="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => switchMode("builder")}
+                class={`flex h-7 w-7 items-center justify-center rounded ${
+                  mode() === "builder"
+                    ? "bg-accent/15 text-accent"
+                    : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
+                }`}
+                title={t("mode.builder.tooltip")}
+              >
+                <Icon name="construction-worker" class="h-4 w-4" />
+              </button>
+            </div>
             <textarea
               ref={inputRef!}
               value={input()}
@@ -1572,6 +1645,17 @@ const TimelineSteps: Component<{
           </Show>
           <Show when={step.type === "subagent" && step.subagent}>
             <SubagentRow subagent={step.subagent!} onViewDetails={props.onViewDetails} />
+          </Show>
+          <Show when={step.type === "mode" && step.modeChange}>
+            <div class="my-1 ml-6 flex items-center gap-1.5">
+              <span class="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+                <Icon
+                  name={step.modeChange!.mode === "brain" ? "thinking-face" : "construction-worker"}
+                  class="h-3 w-3"
+                />
+                {modeChangeLabel(step.modeChange!)}
+              </span>
+            </div>
           </Show>
         </>
       )}

@@ -1,7 +1,7 @@
 import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, type IndexProgress } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, type IndexProgress } from "./lib/ipc";
 import { workspaceStatus, isBusy } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
@@ -55,8 +55,9 @@ function App() {
   const [progressMap, setProgressMap] = createSignal<Record<string, IndexProgress | null>>({});
   const [showConfig, setShowConfig] = createSignal(false);
   const [configApiKey, setConfigApiKey] = createSignal("");
-  const [configBaseUrl, setConfigBaseUrl] = createSignal("https://api.claudin.io");
-  const [configModel, setConfigModel] = createSignal("claudinio");
+  const [configBrainModel, setConfigBrainModel] = createSignal("claudinio");
+  const [configBuilderModel, setConfigBuilderModel] = createSignal("claudinio");
+  const [availableModels, setAvailableModels] = createSignal<string[]>(["claudinio", "claudius"]);
   const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
@@ -128,14 +129,17 @@ function App() {
 
   const openConfig = async () => {
     try {
-      const cfg = await getConfig();
+      const [cfg, models] = await Promise.all([getConfig(), listModels()]);
       if (cfg) {
-        setConfigBaseUrl(cfg.baseUrl);
-        setConfigModel(cfg.model);
+        setConfigBrainModel(cfg.brainModel);
+        setConfigBuilderModel(cfg.builderModel);
         setConfigMaxRounds(cfg.maxRounds ?? null);
         setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
+      }
+      if (models && models.length > 0) {
+        setAvailableModels(models);
       }
     } catch {}
     setShowConfig(true);
@@ -144,9 +148,9 @@ function App() {
   const saveConfig = async () => {
     try {
       await setConfig({
-        baseUrl: configBaseUrl() || undefined,
         apiKey: configApiKey() || undefined,
-        model: configModel() || undefined,
+        brainModel: configBrainModel() || undefined,
+        builderModel: configBuilderModel() || undefined,
         maxRounds: configMaxRounds(),
         subMaxRounds: configSubMaxRounds(),
         yoloMode: configYoloMode(),
@@ -296,23 +300,32 @@ function App() {
               value={configApiKey()}
               onInput={(e) => setConfigApiKey(e.currentTarget.value)}
               placeholder="sk-..."
-              class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
 
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.baseUrl")}</label>
-            <input
-              value={configBaseUrl()}
-              onInput={(e) => setConfigBaseUrl(e.currentTarget.value)}
-              class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            />
-
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.model")}</label>
-            <input
-              value={configModel()}
-              onInput={(e) => setConfigModel(e.currentTarget.value)}
-              placeholder="claudinio"
+            {/* Brain model selector */}
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.brainModel")}</label>
+            <select
+              value={configBrainModel()}
+              onChange={(e) => setConfigBrainModel(e.currentTarget.value)}
               class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            />
+            >
+              <For each={availableModels()}>
+                {(m) => <option value={m} selected={configBrainModel() === m}>{m}</option>}
+              </For>
+            </select>
+
+            {/* Builder model selector */}
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.builderModel")}</label>
+            <select
+              value={configBuilderModel()}
+              onChange={(e) => setConfigBuilderModel(e.currentTarget.value)}
+              class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              <For each={availableModels()}>
+                {(m) => <option value={m} selected={configBuilderModel() === m}>{m}</option>}
+              </For>
+            </select>
 
             <hr class="mb-4 border-border-subtle" />
 

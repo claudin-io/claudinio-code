@@ -66,6 +66,11 @@ pub enum SessionRecord {
         tasks_json: String,
         ts: u64,
     },
+    /// The session's operating mode changed: "pensador" (read-only planning)
+    /// or "constructor" (execution). `origin` records who switched:
+    /// "human" (UI toggle) or "agent" (enter_plan_mode/exit_plan_mode tools).
+    #[serde(rename = "mode")]
+    Mode { mode: String, origin: String, ts: u64 },
     /// Periodic status snapshot: cumulative tokens and estimated cost.
     /// Written after every Done record. `context_tokens` is the size of the
     /// context for the NEXT request (drops after compaction), as opposed to
@@ -325,6 +330,14 @@ fn compact_boundary(records: &[SessionRecord]) -> Option<(usize, usize)> {
     Some((idx, tail_start_index(records, idx, tail_turns)))
 }
 
+/// The mode recorded by the most recent Mode record, if any: (mode, origin).
+pub fn last_mode(records: &[SessionRecord]) -> Option<(String, String)> {
+    records.iter().rev().find_map(|r| match r {
+        SessionRecord::Mode { mode, origin, .. } => Some((mode.clone(), origin.clone())),
+        _ => None,
+    })
+}
+
 /// The context size recorded by the most recent Status record, if any.
 pub fn last_context_tokens(records: &[SessionRecord]) -> Option<u64> {
     records.iter().rev().find_map(|r| match r {
@@ -411,6 +424,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Steering { ts, .. }
                 | SessionRecord::Compacted { ts, .. }
                 | SessionRecord::Tasks { ts, .. }
+                | SessionRecord::Mode { ts, .. }
                 | SessionRecord::Status { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }

@@ -1,5 +1,5 @@
 use crate::agent::provider::AgentConfig;
-use crate::agent::session::{AnswerMap, ApprovalMap, SteeringCtl};
+use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, SteeringCtl};
 use crate::agent::skills::SkillManager;
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
@@ -42,6 +42,10 @@ pub struct AppState {
     /// removed when the run's workflow task finishes. Arc so the workflow task
     /// can clean up its own entry after the Tauri state borrow ends.
     pub steering: Arc<Mutex<HashMap<String, Arc<SteeringCtl>>>>,
+    /// Mode controllers keyed by session id: the current Brain/Builder
+    /// state shared between the UI toggle and a running workflow. Initialized
+    /// lazily from the session's JSONL (last Mode record).
+    pub modes: Arc<Mutex<HashMap<String, Arc<ModeCtl>>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
 }
 
@@ -53,6 +57,7 @@ impl AppState {
             answers: Arc::new(Mutex::new(std::collections::HashMap::new())),
             workspaces: Mutex::new(HashMap::new()),
             steering: Arc::new(Mutex::new(HashMap::new())),
+            modes: Arc::new(Mutex::new(HashMap::new())),
             embedding_model: Arc::new(Mutex::new(None)),
         }
     }
@@ -78,5 +83,28 @@ impl AppState {
 
     pub fn steering_map(&self) -> Arc<Mutex<HashMap<String, Arc<SteeringCtl>>>> {
         self.steering.clone()
+    }
+
+    /// The mode controller for a session, created on first access from the
+    /// session's persisted Mode records (default: Builder set by Human).
+    pub async fn mode_for(&self, session_id: &str, store_path: &std::path::Path) -> Arc<ModeCtl> {
+        let mut map = self.modes.lock().await;
+        map.entry(session_id.to_string())
+            .or_insert_with(|| {
+                let (mode, origin) = crate::agent::persist::load_records(store_path)
+                    .ok()
+                    .and_then(|recs| crate::agent::persist::last_mode(&recs))
+                    .and_then(|(m, o)| {
+                        SessionMode::parse(&m).map(|m| {
+                            (
+                                m,
+                                if o == "agent" { ModeOrigin::Agent } else { ModeOrigin::Human },
+                            )
+                        })
+                    })
+                    .unwrap_or((SessionMode::Builder, ModeOrigin::Human));
+                Arc::new(ModeCtl::new(mode, origin))
+            })
+            .clone()
     }
 }

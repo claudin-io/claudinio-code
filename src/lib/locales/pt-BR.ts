@@ -5,8 +5,8 @@ const dict: LocaleDict = {
   "app.title": "Claudinio Code",
   "app.config.title": "Configuração da API",
   "app.config.apiKey": "API Key",
-  "app.config.baseUrl": "Base URL",
-  "app.config.model": "Modelo",
+  "app.config.brainModel": "Modelo do Brain",
+  "app.config.builderModel": "Modelo do Builder",
   "app.config.maxRounds": "Limite de rounds (agente principal)",
   "app.config.subMaxRounds": "Limite de rounds (subagentes)",
   "app.config.unlimited": "Ilimitado (padrão)",
@@ -168,6 +168,17 @@ const dict: LocaleDict = {
   "context.warning.skillTokens": "Custo combinado em tokens",
   "context.warning.hintAgents": "💡 O arquivo AGENTS.md/CLAUDE.md é injetado no início de cada novo chat. Arquivos grandes consomem uma parte significativa do orçamento de contexto. Considere cortar seções desnecessárias.",
   "context.warning.hintSkills": "💡 As skills são injetadas no system prompt como XML. Skills com SKILL.md grandes aumentam o custo base de contexto. Revise se todas as skills ainda são necessárias.",
+
+  // ── Modo da sessão (Brain / Builder) ─────────────────────────
+  "mode.brain": "Brain",
+  "mode.builder": "Builder",
+  "mode.brain.tooltip": "Modo Brain: exploração somente-leitura, levantamento de requisitos, plano + tasks",
+  "mode.builder.tooltip": "Modo Builder: executa as tasks do plano com subagentes",
+  "mode.changed.brain.human": "Modo Brain ativado",
+  "mode.changed.builder.human": "Modo Builder ativado",
+  "mode.changed.brain.agent": "O agente entrou no modo Brain",
+  "mode.changed.builder.agent": "O agente voltou ao modo Builder",
+  "mode.changed.reason": "Motivo: {0}",
 };
 
 export default dict;

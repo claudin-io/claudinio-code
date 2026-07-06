@@ -37,7 +37,8 @@ export interface AttachmentData {
 
 export interface AgentConfig {
   baseUrl: string;
-  model: string;
+  brainModel: string;
+  builderModel: string;
   hasApiKey: boolean;
   maxContextTokens: number;
   compactThreshold: number;
@@ -50,7 +51,8 @@ export interface AgentConfig {
 export interface SetConfigArgs {
   baseUrl?: string;
   apiKey?: string;
-  model?: string;
+  brainModel?: string;
+  builderModel?: string;
   maxRounds?: number | null;
   subMaxRounds?: number | null;
   yoloMode?: boolean;
@@ -82,8 +84,24 @@ export interface SubagentDoneData {
   outputTokens: number;
 }
 
+export type SessionMode = "brain" | "builder";
+
+/// Map a persisted mode string to the current ids. Old session JSONLs carry
+/// the original names "pensador"/"constructor".
+export function normalizeSessionMode(s: unknown): SessionMode {
+  return s === "brain" || s === "pensador" ? "brain" : "builder";
+}
+export type ModeOrigin = "human" | "agent";
+
+export interface ModeChangedData {
+  mode: SessionMode;
+  origin: ModeOrigin;
+  reason?: string | null;
+}
+
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
+  | { event: "ModeChanged"; data: ModeChangedData }
   | { event: "Thinking"; data: string }
   | { event: "ToolCall"; data: ToolCallData }
   | { event: "ToolResult"; data: ToolResultData }
@@ -164,6 +182,7 @@ export function sendMessage(
   message: string,
   attachments: AttachmentInput[],
   onEvent: (event: AgentEvent) => void,
+  mode?: SessionMode,
 ): Promise<SessionStarted> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
@@ -171,8 +190,17 @@ export function sendMessage(
     workspace,
     message,
     attachments: attachments.length > 0 ? attachments : undefined,
+    mode,
     eventChannel: channel,
   });
+}
+
+export function setSessionMode(workspace: string, mode: SessionMode): Promise<SessionStarted> {
+  return invoke<SessionStarted>("set_session_mode", { workspace, mode });
+}
+
+export function getSessionMode(workspace: string): Promise<{ mode: SessionMode; origin: ModeOrigin }> {
+  return invoke<{ mode: SessionMode; origin: ModeOrigin }>("get_session_mode", { workspace });
 }
 
 export function readAttachment(path: string): Promise<AttachmentData> {
@@ -190,7 +218,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks";
   [key: string]: unknown;
 };
 
@@ -273,6 +301,10 @@ export function setConfig(args: SetConfigArgs): Promise<void> {
 
 export function getConfig(): Promise<AgentConfig> {
   return invoke<AgentConfig>("get_config");
+}
+
+export function listModels(): Promise<string[]> {
+  return invoke<string[]>("list_models");
 }
 
 // --- Code Intelligence ---

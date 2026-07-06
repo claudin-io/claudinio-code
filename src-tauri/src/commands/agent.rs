@@ -79,6 +79,7 @@ pub async fn send_message(
     workspace: String,
     message: String,
     attachments: Option<Vec<AttachmentInput>>,
+    mode: Option<String>,
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
 ) -> Result<SessionStarted, String> {
@@ -133,6 +134,21 @@ pub async fn send_message(
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
     };
+
+    // Sync the session's mode with what the UI toggle sent: a human-set value
+    // that differs from the current one is persisted before the run starts.
+    let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
+    if let Some(m) = mode.as_deref().and_then(session::SessionMode::parse) {
+        if mode_ctl.get().0 != m {
+            mode_ctl.set(m, session::ModeOrigin::Human);
+            let store = SessionStore { path: handle.store_path.clone() };
+            store.try_append(&SessionRecord::Mode {
+                mode: m.as_str().into(),
+                origin: session::ModeOrigin::Human.as_str().into(),
+                ts: now_ms(),
+            });
+        }
+    }
 
     // Reset this session's steering for the new run, then drain any residual
     // from a race.
@@ -233,7 +249,7 @@ pub async fn send_message(
 
     tokio::spawn(async move {
         if let Err(e) = session::run_workflow(
-            &cfg, &mut history, message, attachment_blocks, &chan, &appr, &answ, &sid, &ctx, &store, &steering,
+            &cfg, &mut history, message, attachment_blocks, &chan, &appr, &answ, &sid, &ctx, &store, &steering, &mode_ctl,
         )
         .await
         {
@@ -265,6 +281,7 @@ pub async fn new_session(
     let mut guard = ws.active_session.lock().await;
     if let Some(h) = guard.as_ref() {
         state.remove_steering(&h.id).await;
+        state.modes.lock().await.remove(&h.id);
     }
     *guard = None;
     Ok(())
@@ -372,7 +389,8 @@ pub async fn submit_answers(
 pub struct SetConfigArgs {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
-    pub model: Option<String>,
+    pub brain_model: Option<String>,
+    pub builder_model: Option<String>,
     pub max_rounds: Option<Option<usize>>,
     pub sub_max_rounds: Option<Option<usize>>,
     pub yolo_mode: Option<bool>,
@@ -391,8 +409,11 @@ pub async fn set_config(
     if let Some(key) = args.api_key {
         cfg.api_key = key;
     }
-    if let Some(model) = args.model {
-        cfg.model = model;
+    if let Some(brain_model) = args.brain_model {
+        cfg.brain_model = brain_model;
+    }
+    if let Some(builder_model) = args.builder_model {
+        cfg.builder_model = builder_model;
     }
     if let Some(max_rounds) = args.max_rounds {
         cfg.max_rounds = max_rounds;
@@ -417,7 +438,8 @@ pub async fn get_config(
     let cfg = state.config.lock().await;
     Ok(serde_json::json!({
         "baseUrl": cfg.base_url,
-        "model": cfg.model,
+        "brainModel": cfg.brain_model,
+        "builderModel": cfg.builder_model,
         "hasApiKey": !cfg.api_key.is_empty(),
         "maxContextTokens": session::MAX_CONTEXT_TOKENS,
         "compactThreshold": session::COMPACT_THRESHOLD,
@@ -426,6 +448,69 @@ pub async fn get_config(
         "yoloMode": cfg.yolo_mode,
         "yoloBlacklist": cfg.yolo_blacklist,
     }))
+}
+
+/// Fetch available models from the API. Calls GET {base_url}/v1/models and
+/// parses the response, falling back to ["claudinio", "claudius"] on any error.
+#[tauri::command]
+pub async fn list_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let cfg = state.config.lock().await;
+    let base_url = cfg.base_url.trim_end_matches('/').to_string();
+    let api_key = cfg.api_key.clone();
+    drop(cfg);
+
+    let url = format!("{base_url}/v1/models");
+    let client = reqwest::Client::new();
+    let response = match client
+        .get(&url)
+        .header("x-api-key", &api_key)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(vec!["claudinio".into(), "claudius".into()]),
+    };
+
+    let body: Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => return Ok(vec!["claudinio".into(), "claudius".into()]),
+    };
+
+    // Try common response shapes:
+    // 1. { data: [{ id: "claudinio" }, { id: "claudius" }] }
+    if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+        let models: Vec<String> = data
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+            .collect();
+        if !models.is_empty() {
+            return Ok(models);
+        }
+    }
+    // 2. Array of strings directly
+    if let Some(arr) = body.as_array() {
+        let models: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        if !models.is_empty() {
+            return Ok(models);
+        }
+    }
+    // 3. { models: ["claudinio", "claudius"] }
+    if let Some(models_arr) = body.get("models").and_then(|m| m.as_array()) {
+        let models: Vec<String> = models_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        if !models.is_empty() {
+            return Ok(models);
+        }
+    }
+
+    Ok(vec!["claudinio".into(), "claudius".into()])
 }
 
 /// Push a steering message into the queue for a running session.
@@ -511,6 +596,66 @@ pub async fn compact_session(
     .await?;
 
     Ok(summary)
+}
+
+/// Switch the workspace's active session between Brain and Builder.
+/// Always human-originated (the UI toggle); a running workflow picks the new
+/// mode up on its next round. Creates the session lazily so the toggle can be
+/// flipped before the first message.
+#[tauri::command]
+pub async fn set_session_mode(
+    workspace: String,
+    mode: String,
+    state: State<'_, AppState>,
+) -> Result<SessionStarted, String> {
+    let m = session::SessionMode::parse(&mode)
+        .ok_or_else(|| format!("invalid mode '{mode}' (expected 'pensador' or 'constructor')"))?;
+
+    let ws = state.workspace(&workspace).await?;
+    let workspace_root = ws.root.to_string_lossy().to_string();
+    let handle = {
+        let mut guard = ws.active_session.lock().await;
+        match guard.as_ref() {
+            Some(h) => h.clone(),
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let store = SessionStore::create(&id, Some(&workspace_root))?;
+                let h = SessionHandle { id, store_path: store.path };
+                *guard = Some(h.clone());
+                h
+            }
+        }
+    };
+
+    let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
+    if mode_ctl.get().0 != m {
+        mode_ctl.set(m, session::ModeOrigin::Human);
+        let store = SessionStore { path: handle.store_path.clone() };
+        store.try_append(&SessionRecord::Mode {
+            mode: m.as_str().into(),
+            origin: session::ModeOrigin::Human.as_str().into(),
+            ts: now_ms(),
+        });
+    }
+    Ok(SessionStarted { session_id: handle.id })
+}
+
+/// The current mode of the workspace's active session (for UI init).
+#[tauri::command]
+pub async fn get_session_mode(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let ws = state.workspace(&workspace).await?;
+    let handle = { ws.active_session.lock().await.clone() };
+    match handle {
+        Some(h) => {
+            let mode_ctl = state.mode_for(&h.id, &h.store_path).await;
+            let (mode, origin) = mode_ctl.get();
+            Ok(serde_json::json!({ "mode": mode.as_str(), "origin": origin.as_str() }))
+        }
+        None => Ok(serde_json::json!({ "mode": "constructor", "origin": "human" })),
+    }
 }
 
 /// Set the interrupt flag on a running session's steering controller.

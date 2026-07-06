@@ -274,6 +274,7 @@ pub async fn run_subagent(
         let mut assistant_text = String::new();
         let stream_output = match provider::stream_message(
             config,
+            &config.builder_model,
             &history,
             &tools,
             Some(system.as_str()),

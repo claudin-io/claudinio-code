@@ -12,7 +12,16 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct AgentConfig {
     pub base_url: String,
     pub api_key: String,
+    /// Legacy single model field — kept for backward compat with old config.json.
+    /// New configs use brain_model + builder_model.
+    #[serde(default)]
     pub model: String,
+    /// Model used in Brain (planning) mode.
+    #[serde(default = "default_claudinio")]
+    pub brain_model: String,
+    /// Model used in Builder (execution) mode.
+    #[serde(default = "default_claudinio")]
+    pub builder_model: String,
     /// Max tool-call rounds for the main agent loop. None = infinite.
     pub max_rounds: Option<usize>,
     /// Max tool-call rounds for subagents. None = infinite.
@@ -25,16 +34,32 @@ pub struct AgentConfig {
     pub yolo_blacklist: Vec<String>,
 }
 
+fn default_claudinio() -> String {
+    "claudinio".into()
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             base_url: "https://api.claudin.io".into(),
             api_key: String::new(),
             model: "claudinio".into(),
+            brain_model: "claudinio".into(),
+            builder_model: "claudinio".into(),
             max_rounds: None,
             sub_max_rounds: None,
             yolo_mode: false,
             yolo_blacklist: Vec::new(),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// Resolve which model to use for a given session mode.
+    pub fn model_for_mode(&self, mode: &str) -> &str {
+        match mode {
+            "brain" | "pensador" => &self.brain_model,
+            _ => &self.builder_model,
         }
     }
 }
@@ -45,15 +70,37 @@ pub fn config_path() -> Result<std::path::PathBuf, String> {
     Ok(dir.join("config.json"))
 }
 
+/// Load AgentConfig from the config file, migrating old configs that only have
+/// a single `model` field to the new `brain_model` + `builder_model`.
 pub fn load_config() -> AgentConfig {
     let path = match config_path() {
         Ok(p) => p,
         Err(_) => return AgentConfig::default(),
     };
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let s = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return AgentConfig::default(),
+    };
+    let mut cfg: serde_json::Value = match serde_json::from_str(&s) {
+        Ok(v) => v,
+        Err(_) => return AgentConfig::default(),
+    };
+    // Migration: if the old `model` field exists but `brain_model`/`builder_model`
+    // don't, seed both from `model`.
+    if cfg.get("brain_model").is_none() || cfg.get("builder_model").is_none() {
+        let legacy = cfg
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("claudinio")
+            .to_string();
+        if cfg.get("brain_model").is_none() {
+            cfg["brain_model"] = serde_json::json!(legacy);
+        }
+        if cfg.get("builder_model").is_none() {
+            cfg["builder_model"] = serde_json::json!(legacy);
+        }
+    }
+    serde_json::from_value(cfg).unwrap_or_default()
 }
 
 pub fn save_config(config: &AgentConfig) {
@@ -220,6 +267,7 @@ pub struct StreamOutput {
 
 pub async fn stream_message(
     config: &AgentConfig,
+    model: &str,
     messages: &[Message],
     tools: &[ToolDescription],
     system: Option<&str>,
@@ -230,7 +278,7 @@ pub async fn stream_message(
 ) -> Result<StreamOutput, String> {
     let client = reqwest::Client::new();
     let body = RequestBody {
-        model: config.model.clone(),
+        model: model.to_string(),
         // Large tasks (thinking + a whole-file edit in one tool call) easily
         // blow past 8k output tokens; a truncated stream ends the turn with
         // the work half-done. 32k fits every current Claude model's cap.

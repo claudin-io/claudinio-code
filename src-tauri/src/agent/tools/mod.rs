@@ -4,6 +4,7 @@ mod grep;
 mod list_dir;
 mod read_file;
 mod tasks;
+mod write_plan;
 
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
@@ -289,6 +290,56 @@ code_search (keyword) → grep (fallback).".into(),
 
 
 
+/// Definition of the write_plan tool. Only offered in Brain mode — it is
+/// the one write the planning mode is allowed to perform, and its target path
+/// is confined to `<workspace>/.claudinio/plans/`.
+pub fn write_plan_def() -> ToolDef {
+    ToolDef {
+        name: "write_plan".into(),
+        description: "Write the Solution Design plan to <workspace>/.claudinio/plans/YYYY-MM-DD_<name>.md. \
+Overwrites the file, so always pass the FULL plan content — call again with the same name and the \
+complete updated text to revise. Structure: Context, Solution Design, Risks, Tasks summary.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Short plan name; becomes the file slug (e.g. 'dark mode toggle')" },
+                "content": { "type": "string", "description": "Full markdown content of the plan" }
+            },
+            "required": ["name", "content"]
+        }),
+    }
+}
+
+/// Definition of the enter_plan_mode tool. Only offered in Builder mode.
+pub fn enter_plan_mode_def() -> ToolDef {
+    ToolDef {
+        name: "enter_plan_mode".into(),
+        description: "Switch this session into Brain (planning) mode. Use when the task turns out to be \
+genuinely hard or ambiguous — unclear requirements, large design space, conflicting constraints — and \
+designing first beats guessing. Editing tools are disabled until the plan and tasks are ready; because \
+you initiated it, you can return with exit_plan_mode.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "reason": { "type": "string", "description": "One sentence: why this task needs planning first (shown to the user)" }
+            },
+            "required": ["reason"]
+        }),
+    }
+}
+
+/// Definition of the exit_plan_mode tool. Only offered in Brain mode, and
+/// only succeeds when the agent itself entered Brain via enter_plan_mode.
+pub fn exit_plan_mode_def() -> ToolDef {
+    ToolDef {
+        name: "exit_plan_mode".into(),
+        description: "Leave Brain mode and return to Builder to execute the plan. Only works if YOU \
+entered Brain via enter_plan_mode; when the user enabled Brain, only their toggle can exit — \
+finish by telling them the plan and tasks are ready.".into(),
+        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+    }
+}
+
 pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
     match name {
         "read_file" => {
@@ -412,8 +463,16 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = tasks::execute_set(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
+        "write_plan" => {
+            let a: write_plan::WritePlanArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let content = write_plan::execute(a, ctx)?;
+            Ok(ToolOutput::Text { content })
+        }
         "spawn_agents" => {
             Err("spawn_agents is handled by the session orchestrator".into())
+        }
+        "enter_plan_mode" | "exit_plan_mode" => {
+            Err("mode switch tools are handled by the session orchestrator".into())
         }
         _ => Err(format!("unknown tool: {name}")),
     }
