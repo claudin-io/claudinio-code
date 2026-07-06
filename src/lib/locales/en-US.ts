@@ -153,6 +153,21 @@ const dict: LocaleDict = {
   "tasks.status.todo": "Todo",
   "tasks.status.doing": "Doing",
   "tasks.status.done": "Done",
+
+  // ── Context Warning ──────────────────────────────────────────
+  "context.warning.title": "Context Budget",
+  "context.warning.noData": "Unable to load context data.",
+  "context.warning.agentsFile": "Injected File",
+  "context.warning.size": "Size",
+  "context.warning.lines": "Lines",
+  "context.warning.estTokens": "Est. tokens",
+  "context.warning.issues": "Issues",
+  "context.warning.issuesFound": "{0} issues found — these directives consume context tokens every turn.",
+  "context.warning.skills": "Installed Skills",
+  "context.warning.totalSkills": "Total skills",
+  "context.warning.skillTokens": "Combined token cost",
+  "context.warning.hintAgents": "💡 The AGENTS.md/CLAUDE.md file is injected at the start of every new chat. Large files consume significant context budget. Consider trimming unnecessary sections.",
+  "context.warning.hintSkills": "💡 Skills are injected into the system prompt as XML. Skills with large SKILL.md bodies increase the base context cost. Review if all skills are still needed.",
 };
 
 export default dict;

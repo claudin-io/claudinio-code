@@ -153,6 +153,21 @@ const dict: LocaleDict = {
   "tasks.status.todo": "Pendente",
   "tasks.status.doing": "Fazendo",
   "tasks.status.done": "Concluído",
+
+  // ── Context Warning ──────────────────────────────────────────
+  "context.warning.title": "Orçamento de Contexto",
+  "context.warning.noData": "Não foi possível carregar dados do contexto.",
+  "context.warning.agentsFile": "Arquivo Injetado",
+  "context.warning.size": "Tamanho",
+  "context.warning.lines": "Linhas",
+  "context.warning.estTokens": "Tokens estimados",
+  "context.warning.issues": "Issues",
+  "context.warning.issuesFound": "{0} issues encontradas — essas diretivas consomem tokens de contexto a cada turno.",
+  "context.warning.skills": "Skills Instaladas",
+  "context.warning.totalSkills": "Total de skills",
+  "context.warning.skillTokens": "Custo combinado em tokens",
+  "context.warning.hintAgents": "💡 O arquivo AGENTS.md/CLAUDE.md é injetado no início de cada novo chat. Arquivos grandes consomem uma parte significativa do orçamento de contexto. Considere cortar seções desnecessárias.",
+  "context.warning.hintSkills": "💡 As skills são injetadas no system prompt como XML. Skills com SKILL.md grandes aumentam o custo base de contexto. Revise se todas as skills ainda são necessárias.",
 };
 
 export default dict;
