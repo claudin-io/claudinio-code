@@ -1,4 +1,5 @@
 use crate::agent::permissions;
+use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{now_ms, SessionRecord, SessionStore};
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
 use crate::agent::subagent;
@@ -881,6 +882,7 @@ pub async fn run_workflow(
                     answers,
                     session_id,
                     ctx,
+                    config,
                 )
                 .await
             };
@@ -961,6 +963,8 @@ pub async fn run_workflow(
 
 /// Execute one tool call (honoring its permission level) and return the
 /// `tool_result` block to feed back to the model. Emits the matching UI events.
+/// When `yolo_mode` is true and the tool is not in `yolo_blacklist`, tools that
+/// normally require approval are auto-approved instead.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_tool(
     tool_name: &str,
@@ -972,13 +976,37 @@ pub(crate) async fn run_tool(
     answers: &AnswerMap,
     session_id: &str,
     ctx: &ToolContext,
+    config: &AgentConfig,
 ) -> ContentBlock {
     // ask_user is inherently interactive: it never executes anything, it blocks
     // until the user answers in the UI (or the request is dropped).
     if tool_name == "ask_user" {
         return ask_user(tool_name, tool_use_id, tool_input, event_tx, answers, session_id).await;
     }
-    match perm {
+
+    // YOLO mode: auto-approve tools not on the blacklist, treating
+    // `RequiresApproval` as `Auto` (bash still checks its allowlist/deny-list).
+    let effective_perm = if config.yolo_mode
+        && matches!(perm, PermissionLevel::RequiresApproval)
+        && !config.yolo_blacklist.iter().any(|b| b == tool_name)
+    {
+        if tool_name == "bash" {
+            let command = tool_input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match permissions::bash_permission(command) {
+                PermissionLevel::Denied => PermissionLevel::Denied,
+                _ => PermissionLevel::Auto,
+            }
+        } else {
+            PermissionLevel::Auto
+        }
+    } else {
+        perm
+    };
+
+    match effective_perm {
         permissions::PermissionLevel::Auto => {
             let _ = event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),

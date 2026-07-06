@@ -42,6 +42,8 @@ function App() {
   const [configModel, setConfigModel] = createSignal("claudinio");
   const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
+  const [configYoloMode, setConfigYoloMode] = createSignal(false);
+  const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [showTree, setShowTree] = createSignal(false);
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
 
@@ -73,6 +75,8 @@ function App() {
         setConfigModel(cfg.model);
         setConfigMaxRounds(cfg.maxRounds ?? null);
         setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
+        setConfigYoloMode(cfg.yoloMode ?? false);
+        setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
       }
     } catch {}
     setShowConfig(true);
@@ -86,6 +90,11 @@ function App() {
         model: configModel() || undefined,
         maxRounds: configMaxRounds(),
         subMaxRounds: configSubMaxRounds(),
+        yoloMode: configYoloMode(),
+        yoloBlacklist: configYoloBlacklist()
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0),
       });
       setShowConfig(false);
       setConfigApiKey("");
@@ -223,6 +232,31 @@ function App() {
               class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
             <p class="mb-4 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
+
+            <hr class="mb-4 border-border-subtle" />
+
+            <label class="mb-2 flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={configYoloMode()}
+                onChange={(e) => setConfigYoloMode(e.currentTarget.checked)}
+                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+              />
+              <span class="text-sm font-medium text-ink">{t("app.config.yoloMode")}</span>
+              <span class="text-[11px] text-ink-faint">{t("app.config.yoloModeHint")}</span>
+            </label>
+
+            <Show when={configYoloMode()}>
+              <label class="mb-1 block text-xs text-ink-muted">{t("app.config.yoloBlacklist")}</label>
+              <textarea
+                value={configYoloBlacklist()}
+                onInput={(e) => setConfigYoloBlacklist(e.currentTarget.value)}
+                placeholder="edit_file, bash"
+                rows={2}
+                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+              <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{t("app.config.yoloBlacklistHint")}</p>
+            </Show>
 
             <div class="flex justify-end gap-2">
               <button

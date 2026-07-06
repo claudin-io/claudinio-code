@@ -309,6 +309,8 @@ pub struct SetConfigArgs {
     pub model: Option<String>,
     pub max_rounds: Option<Option<usize>>,
     pub sub_max_rounds: Option<Option<usize>>,
+    pub yolo_mode: Option<bool>,
+    pub yolo_blacklist: Option<Vec<String>>,
 }
 
 #[tauri::command]
@@ -332,6 +334,12 @@ pub async fn set_config(
     if let Some(sub_max_rounds) = args.sub_max_rounds {
         cfg.sub_max_rounds = sub_max_rounds;
     }
+    if let Some(yolo_mode) = args.yolo_mode {
+        cfg.yolo_mode = yolo_mode;
+    }
+    if let Some(yolo_blacklist) = args.yolo_blacklist {
+        cfg.yolo_blacklist = yolo_blacklist;
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -349,6 +357,8 @@ pub async fn get_config(
         "compactThreshold": session::COMPACT_THRESHOLD,
         "maxRounds": cfg.max_rounds,
         "subMaxRounds": cfg.sub_max_rounds,
+        "yoloMode": cfg.yolo_mode,
+        "yoloBlacklist": cfg.yolo_blacklist,
     }))
 }
 

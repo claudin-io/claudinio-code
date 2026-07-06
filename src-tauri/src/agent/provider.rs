@@ -17,6 +17,12 @@ pub struct AgentConfig {
     pub max_rounds: Option<usize>,
     /// Max tool-call rounds for subagents. None = infinite.
     pub sub_max_rounds: Option<usize>,
+    /// YOLO mode: auto-approve all tool calls except those in yolo_blacklist.
+    #[serde(default)]
+    pub yolo_mode: bool,
+    /// Tool names that still require approval even when yolo_mode is on.
+    #[serde(default)]
+    pub yolo_blacklist: Vec<String>,
 }
 
 impl Default for AgentConfig {
@@ -27,6 +33,8 @@ impl Default for AgentConfig {
             model: "claudinio".into(),
             max_rounds: None,
             sub_max_rounds: None,
+            yolo_mode: false,
+            yolo_blacklist: Vec::new(),
         }
     }
 }

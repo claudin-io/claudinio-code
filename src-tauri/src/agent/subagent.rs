@@ -381,6 +381,7 @@ pub async fn run_subagent(
                 answers,
                 session_id,
                 ctx,
+                config,
             )
             .await;
             tool_result_blocks.push(block);

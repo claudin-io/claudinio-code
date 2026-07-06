@@ -43,6 +43,8 @@ export interface AgentConfig {
   compactThreshold: number;
   maxRounds?: number | null;
   subMaxRounds?: number | null;
+  yoloMode?: boolean;
+  yoloBlacklist?: string[];
 }
 
 export interface SetConfigArgs {
@@ -51,6 +53,8 @@ export interface SetConfigArgs {
   model?: string;
   maxRounds?: number | null;
   subMaxRounds?: number | null;
+  yoloMode?: boolean;
+  yoloBlacklist?: string[];
 }
 
 export interface ApproveArgs {

@@ -29,6 +29,10 @@ const dict: LocaleDict = {
   "app.index.indexingStatus": "indexing…",
   "app.index.embeddingStatus": "Generating embeddings",
   "app.config.saveError": "Error saving config: {0}",
+  "app.config.yoloMode": "⚡ YOLO Mode (auto-approve all)",
+  "app.config.yoloModeHint": "Auto-approves tool calls except those in the blacklist below.",
+  "app.config.yoloBlacklist": "YOLO Blacklist (comma-separated tool names)",
+  "app.config.yoloBlacklistHint": "These tools still require manual approval even with YOLO on. Ex: edit_file, bash",
 
   // ── EmptyState ────────────────────────────────────────────────────
   "empty.title": "Claudinio Code",
