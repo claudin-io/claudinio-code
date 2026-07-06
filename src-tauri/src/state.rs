@@ -1,5 +1,6 @@
 use crate::agent::provider::AgentConfig;
 use crate::agent::session::{AnswerMap, ApprovalMap, SteeringCtl};
+use crate::agent::skills::SkillManager;
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
 use crate::lsp::manager::LspManager;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub active_session: Mutex<Option<SessionHandle>>,
     pub steering: Arc<SteeringCtl>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
+    pub skills_manager: Arc<Mutex<SkillManager>>,
 }
 
 impl AppState {
@@ -42,6 +44,7 @@ impl AppState {
             active_session: Mutex::new(None),
             steering: Arc::new(SteeringCtl::new()),
             embedding_model: Arc::new(Mutex::new(None)),
+            skills_manager: Arc::new(Mutex::new(SkillManager::new(None))),
         }
     }
 }

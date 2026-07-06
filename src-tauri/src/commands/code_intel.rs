@@ -176,6 +176,11 @@ pub async fn open_workspace(
         *ws = Some(std::path::PathBuf::from(&path));
     }
     {
+        // Update the SkillManager with the new workspace root
+        let mut skills = state.skills_manager.lock().await;
+        *skills = crate::agent::skills::SkillManager::new(Some(std::path::PathBuf::from(&path)));
+    }
+    {
         let mut w = state._watcher.lock().await;
         *w = Some(watcher);
     }

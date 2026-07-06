@@ -34,6 +34,13 @@ pub fn run() {
             commands::lsp::lsp_hover,
             commands::agent::queue_steering,
             commands::agent::interrupt_session,
+            commands::skills::list_skills,
+            commands::skills::get_skill_catalog,
+            commands::skills::get_skill_content,
+            commands::skills::rescan_skills,
+            commands::skills::find_remote_skills,
+            commands::skills::preview_remote_skill,
+            commands::skills::install_remote_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

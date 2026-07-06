@@ -242,9 +242,19 @@ async fn run_subagent(
     steering: &Arc<SteeringCtl>,
 ) -> SubagentResult {
     let tools = api_tools(spec.mode);
+    let skills_section = crate::agent::skills::build_skills_system_prompt_section(
+        &crate::agent::skills::SkillManager::new(
+            ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
+        ).catalog()
+    );
+    let skills_hint = match &skills_section {
+        Some(s) => format!("\n{s}"),
+        None => String::new(),
+    };
     let system = format!(
-        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.",
-        ctx.workspace_root.as_deref().unwrap_or("(none)")
+        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}",
+        ctx.workspace_root.as_deref().unwrap_or("(none)"),
+        skills_hint,
     );
 
     let mut history = vec![Message {

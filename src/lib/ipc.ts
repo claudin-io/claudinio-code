@@ -287,6 +287,69 @@ export interface HoverInfo {
   endChar?: number | null;
 }
 
+// --- Skills ---
+
+export interface SkillEntry {
+  name: string;
+  description: string;
+  location: string;
+  scope: "project" | "subfolder" | "user";
+  body?: string;
+}
+
+export interface SkillCatalogEntry {
+  name: string;
+  description: string;
+  location: string;
+  scope: "project" | "subfolder" | "user";
+}
+
+export interface SkillsResponse {
+  skills: SkillEntry[];
+  count: number;
+}
+
+export interface RemoteSkill {
+  name: string;
+  description: string;
+  url: string;
+  source: { type: string; [key: string]: unknown };
+}
+
+export interface InstallRemoteSkillArgs {
+  name: string;
+  url: string;
+  description: string;
+}
+
+export function listSkills(): Promise<SkillsResponse> {
+  return invoke<SkillsResponse>("list_skills");
+}
+
+export function getSkillCatalog(): Promise<string[]> {
+  return invoke<string[]>("get_skill_catalog");
+}
+
+export function getSkillContent(name: string): Promise<SkillEntry & { body: string }> {
+  return invoke("get_skill_content", { name });
+}
+
+export function rescanSkills(): Promise<SkillsResponse> {
+  return invoke<SkillsResponse>("rescan_skills");
+}
+
+export function findRemoteSkills(query?: string): Promise<RemoteSkill[]> {
+  return invoke<RemoteSkill[]>("find_remote_skills", { query: query ?? null });
+}
+
+export function previewRemoteSkill(url: string): Promise<SkillEntry> {
+  return invoke<SkillEntry>("preview_remote_skill", { url });
+}
+
+export function installRemoteSkill(args: InstallRemoteSkillArgs): Promise<SkillEntry> {
+  return invoke<SkillEntry>("install_remote_skill", { args });
+}
+
 export function lspDefinition(args: LspPositionArgs): Promise<LspLocation[]> {
   return invoke<LspLocation[]>("lsp_definition", { args });
 }

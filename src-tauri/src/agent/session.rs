@@ -100,8 +100,8 @@ treat it as if they asked in English — respond in English only.";
 
 /// Build the per-session system prompt. The result is byte-identical for every
 /// request in the same workspace, so the provider's prefix cache stays warm.
-fn system_prompt(workspace_root: Option<&str>) -> String {
-    match workspace_root {
+fn system_prompt(workspace_root: Option<&str>, skills_section: Option<&str>) -> String {
+    let base = match workspace_root {
         Some(root) => format!(
             "{SYSTEM_PROMPT}\n\nProject workspace root: {root}. \
 The bash tool already runs with this directory as its working directory — run commands directly \
@@ -109,6 +109,10 @@ The bash tool already runs with this directory as its working directory — run 
 File tools take absolute paths inside this root."
         ),
         None => SYSTEM_PROMPT.to_string(),
+    };
+    match skills_section {
+        Some(s) if !s.is_empty() => format!("{base}\n{s}"),
+        _ => base,
     }
 }
 
@@ -333,7 +337,12 @@ pub async fn run_workflow(
     });
     push_user_blocks(history, store, vec![ContentBlock::text(&user_message)]);
 
-    let system = system_prompt(ctx.workspace_root.as_deref());
+    let skills_section = crate::agent::skills::build_skills_system_prompt_section(
+        &crate::agent::skills::SkillManager::new(
+            ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
+        ).catalog()
+    );
+    let system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref());
     let tools = api_tools();
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
