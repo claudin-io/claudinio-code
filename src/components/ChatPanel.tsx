@@ -32,6 +32,7 @@ import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { t } from "../lib/grill-me";
 
 marked.use({
   renderer: {
@@ -91,10 +92,12 @@ interface TimelineItem {
   subagent?: SubagentTimelineState;
 }
 
-const PHASE_LABEL: Record<Phase, string> = {
-  plan: "Planejamento",
-  execute: "Execução",
-  summary: "Sumário",
+const PHASE_LABEL = (phase: Phase): string => {
+  switch (phase) {
+    case "plan": return t("chat.phase.plan");
+    case "execute": return t("chat.phase.execute");
+    case "summary": return t("chat.phase.summary");
+  }
 };
 
 function formatTokens(n: number): string {
@@ -437,7 +440,7 @@ export const ChatPanel: Component = () => {
       setCurrentSteps([]);
       scrollToBottom();
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: `Compactação falhou: ${e}` }]);
+      setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToCompact", String(e)) }]);
     } finally {
       setIsCompacting(false);
     }
@@ -593,7 +596,7 @@ export const ChatPanel: Component = () => {
           rounds: 0,
           inputTokens: 0,
           outputTokens: 0,
-          steps: [{ type: "thinking" as const, thinking: { text: "Aguardando resposta...", startedAt: now } }],
+          steps: [{ type: "thinking" as const, thinking: { text: t("chat.timeline.waiting"), startedAt: now } }],
         },
       }));
       setCurrentSteps((prev) => [
@@ -679,7 +682,7 @@ export const ChatPanel: Component = () => {
       if (data.maxContextTokens) setMaxContextTokens(data.maxContextTokens);
       if (data.compactThreshold) setCompactThreshold(data.compactThreshold);
     } else if (event.event === "Error") {
-      setMessages((prev) => [...prev, { role: "user", text: `Erro: ${event.data}` }]);
+      setMessages((prev) => [...prev, { role: "user", text: t("chat.status.error") + ": " + event.data }]);
       setCurrentSteps([]);
       setThinkingStart(0);
       setSubagentState({});
@@ -733,7 +736,7 @@ export const ChatPanel: Component = () => {
       setActiveSessionId(result.sessionId);
       setAttachments([]);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: `Falha ao enviar: ${String(e)}` }]);
+      setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToSend", String(e)) }]);
       setStatus("error");
     }
   };
@@ -745,7 +748,7 @@ export const ChatPanel: Component = () => {
     try {
       await approveTool(tc.sessionId, tc.toolId);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: `Aprovação falhou: ${String(e)}` }]);
+      setMessages((prev) => [...prev, { role: "user", text: t("chat.approval.failed", String(e)) }]);
     }
   };
 
@@ -757,7 +760,7 @@ export const ChatPanel: Component = () => {
     try {
       await submitAnswers(ask.sessionId, ask.toolId, answers);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: `Envio de respostas falhou: ${String(e)}` }]);
+      setMessages((prev) => [...prev, { role: "user", text: t("chat.question.answerFailed", String(e)) }]);
     }
   };
 
@@ -768,7 +771,7 @@ export const ChatPanel: Component = () => {
     try {
       await rejectTool(tc.sessionId, tc.toolId);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: `Rejeição falhou: ${String(e)}` }]);
+      setMessages((prev) => [...prev, { role: "user", text: t("chat.approval.rejectFailed", String(e)) }]);
     }
   };
 
@@ -812,7 +815,7 @@ export const ChatPanel: Component = () => {
       setShowSessions(false);
       scrollToBottom();
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: `Falha ao reabrir: ${String(e)}` }]);
+      setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToReopen", String(e)) }]);
     }
   };
 
@@ -847,12 +850,12 @@ export const ChatPanel: Component = () => {
 
   const statusLabel = () => {
     switch (status()) {
-      case "thinking": return "Trabalhando";
-      case "awaiting_approval": return "Aguardando aprovação";
-      case "awaiting_input": return "Aguardando sua resposta";
-      case "done": return "Pronto";
-      case "error": return "Erro";
-      default: return "Parado";
+      case "thinking": return t("chat.status.thinking");
+      case "awaiting_approval": return t("chat.status.awaitingApproval");
+      case "awaiting_input": return t("chat.status.awaitingInput");
+      case "done": return t("chat.status.done");
+      case "error": return t("chat.status.error");
+      default: return t("chat.status.idle");
     }
   };
 
@@ -871,7 +874,7 @@ export const ChatPanel: Component = () => {
       <div class="relative flex items-center justify-between border-b border-border-subtle px-6 py-1.5">
         <div class="flex items-center gap-2">
           <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-            Agente
+            {t("chat.header.agent")}
           </span>
           <span
             class={`inline-block h-[6px] w-[6px] rounded-full ${statusDot()}`}
@@ -888,18 +891,18 @@ export const ChatPanel: Component = () => {
             onClick={startNewSession}
             disabled={status() === "thinking" || status() === "awaiting_approval"}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2 disabled:opacity-30"
-            title="Nova sessão"
+            title={t("chat.header.newSession")}
           >
             <Icon name="plus" class="h-3.5 w-3.5" />
-            Nova
+            {t("chat.header.new")}
           </button>
           <button
             onClick={toggleSessions}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
-            title="Sessões salvas"
+            title={t("chat.header.savedSessions")}
           >
             <Icon name="clock" class="h-3.5 w-3.5" />
-            Histórico
+            {t("chat.header.history")}
           </button>
         </div>
 
@@ -907,7 +910,7 @@ export const ChatPanel: Component = () => {
           <div class="absolute right-4 top-9 z-20 max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
             <Show
               when={sessions().length > 0}
-              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">Nenhuma sessão salva.</div>}
+              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{t("chat.header.noSessions")}</div>}
             >
               <For each={sessions()}>
                 {(s) => (
@@ -917,7 +920,7 @@ export const ChatPanel: Component = () => {
                   >
                     <span class="truncate text-[12px] text-ink">{s.title}</span>
                     <span class="font-mono text-[10px] text-ink-faint">
-                      {new Date(s.updatedAt).toLocaleString()} · {s.turnCount} turno{s.turnCount === 1 ? "" : "s"}
+                      {new Date(s.updatedAt).toLocaleString()} · {s.turnCount} {s.turnCount === 1 ? t("chat.header.turn") : t("chat.header.turns")}
                     </span>
                   </button>
                 )}
@@ -935,7 +938,7 @@ export const ChatPanel: Component = () => {
                 <Show when={msg.role === "user"}>
                   <div class="mb-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wider text-accent">
-                      Você
+                      {t("chat.message.you")}
                     </span>
                   </div>
                   <div class="border-l-2 border-accent/60 pl-3">
@@ -1107,7 +1110,7 @@ export const ChatPanel: Component = () => {
               }}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
               class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
-              title="Anexar arquivo"
+              title={t("chat.input.attachFile")}
             >
               <Icon name="paperclip" class="h-4 w-4" />
             </button>
@@ -1122,14 +1125,14 @@ export const ChatPanel: Component = () => {
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
               placeholder={
                 isCompacting()
-                  ? "Compactando contexto…"
+                  ? t("chat.input.compacting")
                   : status() === "awaiting_approval"
-                    ? "Aprove ou rejeite a edição primeiro…"
+                    ? t("chat.input.approveFirst")
                     : status() === "awaiting_input"
-                      ? "Responda as perguntas acima primeiro…"
+                      ? t("chat.input.answerFirst")
                       : status() === "thinking"
-                        ? "Digite para orientar o agente… (Esc para pausar)"
-                        : "Pergunte algo sobre o código…"
+                        ? t("chat.input.steerAgent")
+                        : t("chat.input.askCode")
               }
               class="max-h-[156px] min-h-[36px] flex-1 resize-none border-0 bg-transparent p-1 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
               rows={1}
@@ -1169,8 +1172,8 @@ export const ChatPanel: Component = () => {
         <div class="drop-overlay">
           <div class="drop-overlay-inner">
             <Icon name="paperclip" class="h-8 w-8" />
-            <span>Solte o arquivo para anexar</span>
-            <small>Imagens, PDFs, documentos, código e mais</small>
+            <span>{t("chat.drop.title")}</span>
+            <small>{t("chat.drop.hint")}</small>
           </div>
         </div>
       </Show>
@@ -1195,11 +1198,11 @@ const ArchivedBlock: Component<{
           class={`h-3.5 w-3.5 shrink-0 text-ink-faint transition-transform duration-120 ${expanded() ? "rotate-90" : ""}`}
         />
         <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-          Histórico compactado
+          {t("chat.archived.title")}
         </span>
         <div class="h-px flex-1 bg-border-subtle" />
         <span class="text-[11px] text-ink-faint">
-          {props.messages.length} mensagens
+          {t("chat.archived.messages", String(props.messages.length))}
         </span>
         <Icon
           name="chevron-right"
@@ -1217,7 +1220,7 @@ const ArchivedBlock: Component<{
               {(msg) => (
                 <div class="rounded bg-surface-0 px-2 py-1.5">
                   <span class="mr-2 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
-                    {msg.role === "user" ? "Você" : "Agente"}
+                    {msg.role === "user" ? t("chat.archived.you") : t("chat.archived.agent")}
                   </span>
                   <span class="text-[12px] text-ink-muted">
                     {msg.text.length > 120 ? `${msg.text.slice(0, 120)}…` : msg.text}
@@ -1256,7 +1259,7 @@ const ContextFooter: Component<{
 
   return (
     <div class="flex items-center gap-3 border-t border-border-subtle bg-surface-2 px-6 py-1.5">
-      <div class="flex flex-1 items-center gap-2" title="Contexto da próxima requisição">
+      <div class="flex flex-1 items-center gap-2" title={t("chat.context.nextRequest")}>
         <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-0">
           <div
             class={`h-full rounded-full transition-[width] duration-300 ease-out ${barColor()}`}
@@ -1271,14 +1274,14 @@ const ContextFooter: Component<{
       <Show when={props.cumulativeTokens > 0}>
         <span
           class="font-mono text-[11px] text-ink-faint whitespace-nowrap"
-          title="Tokens acumulados da sessão"
+          title={t("chat.context.sessionTokens")}
         >
-          total: {formatTokens(props.cumulativeTokens)}
+          {t("chat.context.total", formatTokens(props.cumulativeTokens))}
         </span>
       </Show>
 
       <Show when={props.estimatedCost !== undefined}>
-        <span class="font-mono text-[11px] text-ink-faint" title="Custo acumulado da sessão">
+        <span class="font-mono text-[11px] text-ink-faint" title={t("chat.context.sessionCost")}>
           ~${props.estimatedCost!.toFixed(2)}
         </span>
       </Show>
@@ -1289,14 +1292,14 @@ const ContextFooter: Component<{
           class="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-ink-muted hover:bg-surface-3 hover:text-accent"
         >
           <Icon name="compress" class="h-3 w-3" />
-          Compactar
+          {t("chat.context.compact")}
         </button>
       </Show>
 
       <Show when={props.isCompacting}>
         <span class="flex items-center gap-1 text-[11px] text-accent">
           <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
-          Compactando…
+          {t("chat.context.compacting")}
         </span>
       </Show>
     </div>
@@ -1332,7 +1335,7 @@ const Trajectory: Component<{
 
   const summary = () => {
     const { ms, count } = stats();
-    const parts = [`Trabalhou por ${formatDuration(ms)}`, `${count} passo${count === 1 ? "" : "s"}`];
+    const parts = [t("chat.timeline.workedFor", formatDuration(ms)), t("chat.timeline.steps", String(count), count === 1 ? "" : "s")];
     if (props.tokens) parts.push(tokensLabel());
     return parts.join(" · ");
   };
@@ -1430,7 +1433,7 @@ const TimelineSteps: Component<{
                   ? `${step.steering!.text.slice(0, 50)}…`
                   : step.steering!.text}
               </span>
-              <span class="text-[10px] text-ink-faint">orientação</span>
+              <span class="text-[10px] text-ink-faint">{t("chat.timeline.steering")}</span>
             </div>
           </Show>
           <Show when={step.type === "subagent" && step.subagent}>
@@ -1458,11 +1461,11 @@ const SubagentRow: Component<{
 
   const statusLabel = () => {
     switch (props.subagent.status) {
-      case "running": return "Trabalhando";
-      case "completed": return `${props.subagent.rounds} rounds`;
-      case "failed": return "Falhou";
-      case "interrupted": return "Interrompido";
-      case "max_rounds": return "Limite de rounds";
+      case "running": return t("chat.subagent.running");
+      case "completed": return t("chat.subagent.completed", String(props.subagent.rounds));
+      case "failed": return t("chat.subagent.failed");
+      case "interrupted": return t("chat.subagent.interrupted");
+      case "max_rounds": return t("chat.subagent.maxRounds");
     }
   };
 
@@ -1522,11 +1525,11 @@ const SubagentModal: Component<{
 
   const statusLabel = () => {
     switch (props.subagent.status) {
-      case "running": return "Trabalhando";
-      case "completed": return `${props.subagent.rounds} rounds`;
-      case "failed": return "Falhou";
-      case "interrupted": return "Interrompido";
-      case "max_rounds": return "Limite de rounds";
+      case "running": return t("chat.subagent.running");
+      case "completed": return t("chat.subagent.completed", String(props.subagent.rounds));
+      case "failed": return t("chat.subagent.failed");
+      case "interrupted": return t("chat.subagent.interrupted");
+      case "max_rounds": return t("chat.subagent.maxRounds");
     }
   };
 
@@ -1571,7 +1574,7 @@ const PhaseRow: Component<{ phase: Phase }> = (props) => {
         <Icon name="layers" class="h-[13px] w-[13px] text-accent" />
       </span>
       <span class="text-[10px] font-semibold uppercase tracking-wider text-accent">
-        {PHASE_LABEL[props.phase]}
+        {PHASE_LABEL(props.phase)}
       </span>
       <div class="h-px flex-1 bg-border-subtle" />
     </div>
@@ -1625,7 +1628,7 @@ const ThinkingRow: Component<{
         <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
           <Icon name="brain" class="h-[14px] w-[14px] text-accent" />
         </span>
-        <span class="text-[12px] text-ink-muted">Pensou</span>
+        <span class="text-[12px] text-ink-muted">{t("chat.timeline.thought")}</span>
         <span class="ml-auto font-mono text-[11px] text-ink-faint">{duration()}</span>
       </button>
       <Show when={showText()}>
@@ -1684,12 +1687,12 @@ const ToolRow: Component<{
       </button>
       <Show when={props.isExpanded}>
         <div class="ml-6 rounded-md bg-surface-1 p-2 text-xs">
-          <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">Argumentos</div>
+          <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.args")}</div>
           <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
             {JSON.stringify(props.tool.call.args, null, 2)}
           </pre>
           <Show when={props.tool.result}>
-            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">Resultado</div>
+            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.result")}</div>
             <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
               {(props.tool.result!.error ?? props.tool.result!.output).slice(0, 5000)}
             </pre>
@@ -1757,7 +1760,7 @@ const QuestionCard: Component<{
     <div class="rounded-lg border border-accent/50 bg-surface-1 p-3">
       <div class="mb-3 flex items-center gap-2">
         <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-          O agente precisa da sua resposta
+          {t("chat.question.needsAnswer")}
         </span>
       </div>
 
@@ -1810,7 +1813,7 @@ const QuestionCard: Component<{
                       <Icon name="check" class="h-2.5 w-2.5 text-accent-ink" />
                     </Show>
                   </span>
-                  Outra resposta…
+                  {t("chat.question.other")}
                 </button>
 
                 <Show when={draft().otherSelected}>
@@ -1821,7 +1824,7 @@ const QuestionCard: Component<{
                     onKeyDown={(e) => {
                       if (e.key === "Enter") submit();
                     }}
-                    placeholder="Digite sua resposta…"
+                    placeholder={t("chat.question.typeAnswer")}
                     class="mt-1 rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-[13px] text-ink placeholder:text-ink-faint focus:border-accent/60 focus:outline-none"
                   />
                 </Show>
@@ -1837,7 +1840,7 @@ const QuestionCard: Component<{
         class="flex w-full items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover disabled:opacity-30"
       >
         <Icon name="send" class="h-4 w-4" />
-        Responder
+        {t("chat.question.submit")}
       </button>
     </div>
   );
@@ -1886,7 +1889,7 @@ const ApprovalCard: Component<{
             fallback={
               <>
                 <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-                  Edição proposta
+                  {t("chat.approval.proposedEdit")}
                 </span>
                 <span class="truncate font-mono text-[12px] text-ink-muted">
                   {proposal()?.path ?? (props.toolCall.args.path as string)}
@@ -1895,7 +1898,7 @@ const ApprovalCard: Component<{
             }
           >
             <span class="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-500">
-              Comando bash
+              {t("chat.approval.bashCommand")}
             </span>
           </Show>
         </div>
@@ -1937,7 +1940,7 @@ const ApprovalCard: Component<{
           class="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
         >
           <Icon name="check" class="h-4 w-4" />
-          Aprovar
+          {t("chat.approval.approve")}
           <kbd class="rounded bg-accent-ink/15 px-1 font-mono text-[10px]">⏎</kbd>
         </button>
         <button
@@ -1945,7 +1948,7 @@ const ApprovalCard: Component<{
           class="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-sm text-ink hover:border-danger hover:text-danger"
         >
           <Icon name="x" class="h-4 w-4" />
-          Rejeitar
+          {t("chat.approval.reject")}
           <kbd class="rounded bg-surface-2 px-1 font-mono text-[10px]">esc</kbd>
         </button>
       </div>

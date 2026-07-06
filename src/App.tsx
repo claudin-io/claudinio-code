@@ -3,6 +3,8 @@ import "./App.css";
 import { listen } from "@tauri-apps/api/event";
 import { pickFolder, openWorkspace, setConfig, getConfig, type IndexProgress } from "./lib/ipc";
 import "./lib/theme";
+import "./lib/grill-me";
+import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
 import { FileTree } from "./components/FileTree";
 import { ChatPanel } from "./components/ChatPanel";
 import { EmptyState } from "./components/EmptyState";
@@ -82,7 +84,7 @@ function App() {
       setShowConfig(false);
       setConfigApiKey("");
     } catch (e) {
-      alert(`Erro ao salvar config: ${e}`);
+      alert(t("app.config.saveError", String(e)));
     }
   };
 
@@ -90,11 +92,11 @@ function App() {
     setSelectedFile(null);
     setRoot(folder);
     setShowTree(false);
-    setIndexStatus("indexando…");
+    setIndexStatus(t("app.index.indexingStatus"));
     setProgress(null);
     try {
       const s = await openWorkspace(folder, (p) => setProgress(p));
-      setIndexStatus(`${s.filesCount} arquivos, ${s.symbolsCount} símbolos`);
+      setIndexStatus(t("app.index.filesCount", s.filesCount, s.symbolsCount));
       // Only clear scan progress — the embedding phase keeps reporting after
       // openWorkspace returns and clears itself on its terminal statuses.
       setTimeout(
@@ -102,7 +104,7 @@ function App() {
         800,
       );
     } catch (e) {
-      setIndexStatus(`erro: ${e}`);
+      setIndexStatus(`${t("chat.status.error")}: ${e}`);
       setProgress(null);
     }
   };
@@ -139,7 +141,7 @@ function App() {
           <button
             onClick={openConfig}
             class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
-            title="Configurar API"
+            title={t("app.config.title")}
           >
             <Icon name="settings" />
           </button>
@@ -149,9 +151,20 @@ function App() {
       <Show when={showConfig()}>
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
           <div class="w-[400px] rounded-lg bg-surface-1 p-5 shadow-modal">
-            <h2 class="mb-4 text-sm font-semibold text-ink">Configuração da API</h2>
+            <h2 class="mb-4 text-sm font-semibold text-ink">{t("app.config.title")}</h2>
 
-            <label class="mb-1 block text-xs text-ink-muted">API Key</label>
+            {/* Lang selector */}
+            <label class="mb-1 block text-xs text-ink-muted">Idioma / Language</label>
+            <select
+              value={locale()}
+              onChange={(e) => setLocale(e.currentTarget.value as LocaleId)}
+              class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              <option value="pt-BR">🇧🇷 Português</option>
+              <option value="en-US">🇺🇸 English</option>
+            </select>
+
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.apiKey")}</label>
             <input
               type="password"
               value={configApiKey()}
@@ -160,14 +173,14 @@ function App() {
               class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
 
-            <label class="mb-1 block text-xs text-ink-muted">Base URL</label>
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.baseUrl")}</label>
             <input
               value={configBaseUrl()}
               onInput={(e) => setConfigBaseUrl(e.currentTarget.value)}
               class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
 
-            <label class="mb-1 block text-xs text-ink-muted">Modelo</label>
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.model")}</label>
             <input
               value={configModel()}
               onInput={(e) => setConfigModel(e.currentTarget.value)}
@@ -180,13 +193,13 @@ function App() {
                 onClick={() => setShowConfig(false)}
                 class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
               >
-                Cancelar
+                {t("app.config.cancel")}
               </button>
               <button
                 onClick={saveConfig}
                 class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
               >
-                Salvar
+                {t("app.config.save")}
               </button>
             </div>
           </div>
@@ -201,7 +214,7 @@ function App() {
               <>
                 <div class="flex items-center justify-between border-b border-border-subtle px-3 py-2">
                   <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-                    Projetos
+                    {t("app.sidebar.projects")}
                   </span>
                 </div>
 
@@ -230,7 +243,7 @@ function App() {
 
                   <Show when={recentProjects().length === 0}>
                     <div class="px-3 py-8 text-center text-xs text-ink-faint">
-                      Nenhum projeto recente
+                      {t("app.sidebar.noRecent")}
                     </div>
                   </Show>
                 </div>
@@ -241,7 +254,7 @@ function App() {
                     class="flex w-full items-center gap-2 rounded-md border border-dashed border-border-subtle px-3 py-2 text-xs text-ink-muted hover:border-accent hover:text-accent"
                   >
                     <Icon name="plus" class="h-3.5 w-3.5" />
-                    Abrir pasta
+                    {t("app.sidebar.openFolder")}
                   </button>
                   <Show when={root()}>
                     <button
@@ -249,7 +262,7 @@ function App() {
                       class="mt-1 flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
                     >
                       <Icon name="chevron-right" class="h-3 w-3" />
-                      Explorar arquivos
+                      {t("app.sidebar.browseFiles")}
                     </button>
                   </Show>
                 </div>
@@ -262,7 +275,7 @@ function App() {
                 class="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
               >
                 <Icon name="arrow-left" class="h-3 w-3" />
-                Voltar
+                {t("app.sidebar.back")}
               </button>
               <span class="truncate text-xs font-semibold text-ink">
                 {root()?.split("/").pop()}
@@ -289,13 +302,13 @@ function App() {
                 <Switch
                   fallback={
                     <div class="font-mono text-[10px] text-ink-faint">
-                      Carregando modelo…
+                      {t("app.index.loadingModel")}
                     </div>
                   }
                 >
                   <Match when={progress()!.status === "embeddings_done"}>
                     <div class="font-mono text-[10px] text-ink-faint">
-                      Embeddings prontos · {progress()!.symbolsIndexed} símbolos
+                      {t("app.index.embeddingsReady")} · {progress()!.symbolsIndexed} {t("app.index.symbols")}
                     </div>
                   </Match>
                   <Match
@@ -305,7 +318,7 @@ function App() {
                     }
                   >
                     <div class="font-mono text-[10px] text-red-400">
-                      Falha nos embeddings — busca semântica indisponível
+                      {t("app.index.embeddingFailed")}
                     </div>
                   </Match>
                   <Match when={progress()!.totalFiles > 0}>
@@ -313,8 +326,8 @@ function App() {
                       <div class="flex items-center justify-between text-[10px]">
                         <span class="text-ink-muted">
                           {progress()!.status === "embedding"
-                            ? "Gerando embeddings"
-                            : "Indexando"}
+                            ? t("app.index.embeddingStatus")
+                            : t("app.index.indexing")}
                         </span>
                         <span class="font-mono text-ink-faint">
                           {progress()!.filesIndexed}/{progress()!.totalFiles}
@@ -332,7 +345,7 @@ function App() {
                         />
                       </div>
                       <div class="font-mono text-[9px] text-ink-faint">
-                        {progress()!.symbolsIndexed} símbolos
+                        {progress()!.symbolsIndexed} {t("app.index.symbols")}
                       </div>
                     </div>
                   </Match>

@@ -1,0 +1,110 @@
+import { createSignal, createRoot, createEffect } from "solid-js";
+
+export type LocaleId = "pt-BR" | "en-US";
+
+export interface LocaleDict {
+  [key: string]: string | ((...args: (string | number)[]) => string);
+}
+
+// ── reactive locale signal (persisted) ──────────────────────────────
+const STORAGE_KEY = "claudinio_locale";
+
+function createLocaleState() {
+  const stored = (typeof localStorage !== "undefined"
+    ? localStorage.getItem(STORAGE_KEY)
+    : null) as LocaleId | null;
+  const initial: LocaleId = stored ?? "pt-BR";
+  const [locale, _setLocale] = createSignal<LocaleId>(initial);
+
+  const setLocale = (id: LocaleId) => {
+    _setLocale(id);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY, id);
+    }
+  };
+
+  return { locale, setLocale };
+}
+
+let localeState: ReturnType<typeof createLocaleState>;
+function getLocaleState() {
+  if (!localeState) {
+    createRoot(() => {
+      localeState = createLocaleState();
+    });
+  }
+  return localeState;
+}
+
+export const { locale, setLocale } = new Proxy(
+  {} as {
+    locale: ReturnType<typeof createLocaleState>["locale"];
+    setLocale: ReturnType<typeof createLocaleState>["setLocale"];
+  },
+  {
+    get(_target, prop) {
+      const s = getLocaleState();
+      if (prop === "locale") return s.locale;
+      if (prop === "setLocale") return s.setLocale;
+      return undefined;
+    },
+  },
+);
+
+// ── loader for locale dicts ─────────────────────────────────────────
+const dictCache = new Map<LocaleId, LocaleDict>();
+
+async function loadDict(id: LocaleId): Promise<LocaleDict> {
+  if (dictCache.has(id)) return dictCache.get(id)!;
+  let mod: { default: LocaleDict };
+  if (id === "pt-BR") {
+    mod = await import("./locales/pt-BR");
+  } else {
+    mod = await import("./locales/en-US");
+  }
+  dictCache.set(id, mod.default);
+  return mod.default;
+}
+
+const [currentDict, setCurrentDict] = createRoot(() => createSignal<LocaleDict>({}));
+
+// Lazy-load the initial dict
+loadDict(getLocaleState().locale()).then((d) => setCurrentDict(d));
+
+// Subscribe to locale changes
+let effectStarted = false;
+function ensureDictWatcher() {
+  if (effectStarted) return;
+  effectStarted = true;
+  createRoot(() => {
+    createEffect(() => {
+      const id = getLocaleState().locale();
+      loadDict(id).then((d) => setCurrentDict(d));
+    });
+  });
+}
+ensureDictWatcher();
+
+// ── t() translation function ────────────────────────────────────────
+export function t(key: string, ...args: (string | number)[]): string {
+  const dict = currentDict();
+  let val = dict[key];
+  if (val === undefined) return key;
+  if (typeof val === "function") return val(...args);
+  let result = val;
+  for (let i = 0; i < args.length; i++) {
+    result = result.replace(new RegExp(`\\{${i}\\}`, "g"), String(args[i]));
+  }
+  return result;
+}
+
+// ── flags ───────────────────────────────────────────────────────────
+export const FLAGS: Record<LocaleId, string> = {
+  "pt-BR": "🇧🇷",
+  "en-US": "🇺🇸",
+};
+
+export const LOCALE_LABELS: Record<LocaleId, string> = {
+  "pt-BR": "PT",
+  "en-US": "EN",
+};
