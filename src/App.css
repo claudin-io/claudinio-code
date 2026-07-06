@@ -482,6 +482,47 @@ body,
   min-height: 0;
 }
 
+/* --- Drag-and-drop overlay --- */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.drop-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 48px;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-1));
+}
+
+.drop-overlay-inner svg {
+  width: 32px;
+  height: 32px;
+  color: var(--accent);
+}
+
+.drop-overlay-inner span {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.drop-overlay-inner small {
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .trajectory-collapse {
     transition: none;

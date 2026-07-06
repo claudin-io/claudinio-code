@@ -64,6 +64,11 @@ pub enum ContentBlock {
         type_: String,
         text: String,
     },
+    Image {
+        #[serde(rename = "type")]
+        type_: String,
+        source: ImageSource,
+    },
     ToolUse {
         #[serde(rename = "type")]
         type_: String,
@@ -79,11 +84,31 @@ pub enum ContentBlock {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(rename = "media_type")]
+    pub media_type: String,
+    pub data: String,
+}
+
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
         ContentBlock::Text {
             type_: "text".into(),
             text: text.into(),
+        }
+    }
+
+    pub fn image(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        ContentBlock::Image {
+            type_: "image".into(),
+            source: ImageSource {
+                type_: "base64".into(),
+                media_type: media_type.into(),
+                data: data.into(),
+            },
         }
     }
 

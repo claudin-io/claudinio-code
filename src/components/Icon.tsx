@@ -68,6 +68,15 @@ const PATHS: Record<string, string[]> = {
   compress: [
     "M4 13h16v-2H4zm7-8h2V3h-2zM9 7h4V5H9zm4 0h2V5h-2zm2 2h2V7h-2zM7 9h8V7H7zm4 10h2v2h-2zm-2-2h4v2H9zm4 0h2v2h-2zm2-2h2v2h-2zm-8 0h8v2H7z",
   ],
+  paperclip: [
+    "M21 4v5h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H8v-1H7v-1H6v-3h1v-1h1v-1h1v-1h1v-1h1V9h1V8h1V7h1V6h1V5h1v1h1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H9v1H8v1h1v1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1V9h1V8h1V5h-1V4h-1V3h-3v1h-1v1h-1v1h-1v1h-1v1H9v1H8v1H7v1H6v1H5v1H4v5h1v1h1v1h1v1h5v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h1v-1h2v2h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1h-1v1H7v-1H5v-1H4v-1H3v-2H2v-6h1v-1h1v-1h1V9h1V8h1V7h1V6h1V5h1V4h1V3h1V2h2V1h4v1h1v1h1v1z",
+  ],
+  "file-text": [
+    "M4 2h10l6 6v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2 0v20h12V8h-4V2H6Zm2 14h8v2H8v-2Zm0-4h8v2H8v-2Zm0-4h5v2H8V8Z",
+  ],
+  image: [
+    "M2 3h20v18H2V3Zm2 2v9.5l5.5-5.5 6 6 3-3L22 17V5H4Zm0 14h16v-2.5l-3-3-6 6-5.5-5.5L4 17.5V19Zm4-9a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z",
+  ],
 };
 
 export type IconName = keyof typeof PATHS;

@@ -24,6 +24,17 @@ export interface SessionStarted {
   sessionId: string;
 }
 
+export interface AttachmentInput {
+  path: string;
+}
+
+export interface AttachmentData {
+  name: string;
+  mediaType: string;
+  data: string;
+  size: number;
+}
+
 export interface AgentConfig {
   baseUrl: string;
   model: string;
@@ -142,14 +153,20 @@ export interface DoneData {
 
 export function sendMessage(
   message: string,
+  attachments: AttachmentInput[],
   onEvent: (event: AgentEvent) => void,
 ): Promise<SessionStarted> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
   return invoke<SessionStarted>("send_message", {
     message,
+    attachments: attachments.length > 0 ? attachments : undefined,
     eventChannel: channel,
   });
+}
+
+export function readAttachment(path: string): Promise<AttachmentData> {
+  return invoke<AttachmentData>("read_attachment", { path });
 }
 
 export interface SessionSummary {

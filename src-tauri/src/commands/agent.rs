@@ -1,12 +1,13 @@
 use crate::agent::persist::{
     self, load_records, now_ms, SessionRecord, SessionStore, SessionSummary,
 };
-use crate::agent::provider::save_config;
+use crate::agent::provider::{save_config, ContentBlock};
 use crate::agent::session::{self, AgentEvent};
 use crate::agent::tools::ToolContext;
 use crate::state::{AppState, SessionHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -14,6 +15,14 @@ use tauri::State;
 #[serde(rename_all = "camelCase")]
 pub struct SessionStarted {
     pub session_id: String,
+}
+
+/// An attachment the user wants to send to the agent along with their message.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInput {
+    /// Absolute path to the file on disk.
+    pub path: String,
 }
 
 async fn workspace_string(state: &State<'_, AppState>) -> Option<String> {
@@ -24,6 +33,7 @@ async fn workspace_string(state: &State<'_, AppState>) -> Option<String> {
 #[tauri::command]
 pub async fn send_message(
     message: String,
+    attachments: Option<Vec<AttachmentInput>>,
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
 ) -> Result<SessionStarted, String> {
@@ -80,7 +90,7 @@ pub async fn send_message(
     // Reset steering for the new run, then drain any residual from a race.
     state.steering.clear();
     let residual = state.steering.drain();
-    let message = if residual.is_empty() {
+    let mut message = if residual.is_empty() {
         message
     } else {
         let mut prefix = String::new();
@@ -92,6 +102,78 @@ pub async fn send_message(
         prefix
     };
 
+    // Process attachments into content blocks to prepend to the user message
+    let mut attachment_blocks: Vec<ContentBlock> = Vec::new();
+    if let Some(atts) = attachments {
+        for att in atts {
+            let file_path = Path::new(&att.path);
+            if !file_path.exists() {
+                continue;
+            }
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp");
+            let is_text = matches!(
+                ext.as_str(),
+                "txt" | "md" | "csv" | "json" | "yaml" | "yml" | "toml"
+                    | "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "swift"
+                    | "go" | "rb" | "html" | "htm" | "css" | "sh" | "bash"
+                    | "sql" | "xml" | "toml" | "log"
+            );
+
+            if is_image {
+                // Read image file and create an Image content block
+                let bytes = match std::fs::read(file_path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let media_type = match ext.as_str() {
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    "webp" => "image/webp",
+                    "bmp" => "image/bmp",
+                    _ => "image/png",
+                };
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                attachment_blocks.push(ContentBlock::image(media_type, data));
+            } else if is_text {
+                // Read text file contents
+                let text = match std::fs::read_to_string(file_path) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let file_name = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                let block_text = format!("[Arquivo anexado: `{file_name}`]\n```\n{text}\n```");
+                attachment_blocks.push(ContentBlock::text(block_text));
+            } else {
+                // For PDFs, audio, video, and other binary files: read name only
+                let file_name = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                let file_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
+                let size_str = if file_size > 1024 * 1024 {
+                    format!("{:.1} MB", file_size as f64 / (1024.0 * 1024.0))
+                } else if file_size > 1024 {
+                    format!("{:.1} KB", file_size as f64 / 1024.0)
+                } else {
+                    format!("{file_size} B")
+                };
+                let block_text =
+                    format!("[Arquivo anexado: `{file_name}` ({size_str}) — tipo: {ext}]");
+                attachment_blocks.push(ContentBlock::text(block_text));
+            }
+        }
+    }
+
     let cfg = config;
     let sid = handle.id.clone();
     let chan = event_channel;
@@ -101,7 +183,7 @@ pub async fn send_message(
 
     tokio::spawn(async move {
         if let Err(e) = session::run_workflow(
-            &cfg, &mut history, message, &chan, &appr, &answ, &sid, &ctx, &store, &steering,
+            &cfg, &mut history, message, attachment_blocks, &chan, &appr, &answ, &sid, &ctx, &store, &steering,
         )
         .await
         {

@@ -495,6 +495,7 @@ pub async fn run_workflow(
     config: &AgentConfig,
     history: &mut Vec<Message>,
     user_message: String,
+    attachment_blocks: Vec<ContentBlock>,
     event_tx: &Channel<AgentEvent>,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
@@ -508,7 +509,9 @@ pub async fn run_workflow(
         text: user_message.clone(),
         ts: now_ms(),
     });
-    push_user_blocks(history, store, vec![ContentBlock::text(&user_message)]);
+    let mut blocks = vec![ContentBlock::text(&user_message)];
+    blocks.extend(attachment_blocks);
+    push_user_blocks(history, store, blocks);
 
     let skill_mgr = crate::agent::skills::SkillManager::new(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from)

@@ -12,6 +12,7 @@ import {
   compactSession,
   getSessionStats,
   getConfig,
+  readAttachment,
   type AgentEvent,
   type AskUserData,
   type ToolCallData,
@@ -24,11 +25,13 @@ import {
   type SessionSummary,
   type SessionRecord,
   type UserAnswer,
+  type AttachmentData,
 } from "../lib/ipc";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 marked.use({
   renderer: {
@@ -57,6 +60,8 @@ interface ChatMessage {
   steps?: TimelineItem[];
   done?: DoneData;
   archived?: ArchivedBlock;
+  /** Files attached to a user message, shown as pills in the chat bubble */
+  attachments?: { name: string; mediaType: string; size: number }[];
 }
 
 interface SubagentTimelineState {
@@ -333,6 +338,9 @@ export const ChatPanel: Component = () => {
   const [showSessions, setShowSessions] = createSignal(false);
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   const [queuedSteering, setQueuedSteering] = createSignal<string[]>([]);
+  // Attachments to send with the next message
+  const [attachments, setAttachments] = createSignal<{ name: string; path: string; mediaType: string; size: number }[]>([]);
+  const [isDragging, setIsDragging] = createSignal(false);
   // Two distinct numbers, both computed by the backend (single source of
   // truth): contextTokens = size of the NEXT request's context (drops after
   // compaction); cumulative totals/cost never reset.
@@ -345,6 +353,24 @@ export const ChatPanel: Component = () => {
   const [compactThreshold, setCompactThreshold] = createSignal(192_000);
   const [isCompacting, setIsCompacting] = createSignal(false);
 
+  const addAttachment = async (filePath: string) => {
+    try {
+      const data = await readAttachment(filePath);
+      setAttachments((prev) => [...prev, {
+        name: data.name,
+        path: filePath,
+        mediaType: data.mediaType,
+        size: data.size,
+      }]);
+    } catch (e) {
+      // Silently ignore unreadable files
+    }
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
   onMount(() => {
     getConfig()
       .then((cfg) => {
@@ -352,6 +378,25 @@ export const ChatPanel: Component = () => {
         if (cfg.compactThreshold) setCompactThreshold(cfg.compactThreshold);
       })
       .catch(() => {});
+
+    // Listen for native file drop events via Tauri window API
+    const unlistenDrop = getCurrentWindow().onDragDropEvent(async (event) => {
+      const payload = event.payload;
+      if (payload.type === "over") {
+        setIsDragging(true);
+      } else if (payload.type === "drop") {
+        setIsDragging(false);
+        for (const filePath of payload.paths) {
+          await addAttachment(filePath);
+        }
+      } else if (payload.type === "leave") {
+        setIsDragging(false);
+      }
+    });
+
+    onCleanup(() => {
+      unlistenDrop.then((f) => f());
+    });
   });
 
   const statsFromRecords = (records: SessionRecord[]) => {
@@ -661,15 +706,32 @@ export const ChatPanel: Component = () => {
       return;
     }
 
-    setMessages((prev) => [...prev, { role: "user", text }]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "user",
+        text,
+        attachments: attachments().map((a) => ({
+          name: a.name,
+          mediaType: a.mediaType,
+          size: a.size,
+        })),
+      },
+    ]);
     setInput("");
     setCurrentSteps([]);
     setThinkingStart(0);
     setStatus("thinking");
 
     try {
-      const result = await sendMessage(text, handleEvent);
+      const atts = attachments();
+      const result = await sendMessage(
+        text,
+        atts.map((a) => ({ path: a.path })),
+        handleEvent,
+      );
       setActiveSessionId(result.sessionId);
+      setAttachments([]);
     } catch (e) {
       setMessages((prev) => [...prev, { role: "user", text: `Falha ao enviar: ${String(e)}` }]);
       setStatus("error");
@@ -880,6 +942,28 @@ export const ChatPanel: Component = () => {
                     <p class="whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink">
                       {msg.text}
                     </p>
+                    <Show when={msg.attachments && msg.attachments!.length > 0}>
+                      <div class="mt-2 flex flex-wrap gap-1.5">
+                        <For each={msg.attachments!}>
+                          {(att) => (
+                            <span class="inline-flex items-center gap-1 rounded-md border border-accent/20 bg-accent/[0.06] px-1.5 py-0.5 text-[11px] text-ink-muted">
+                              <Icon
+                                name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                                class="h-3 w-3 shrink-0"
+                              />
+                              <span class="max-w-[140px] truncate">{att.name}</span>
+                              <span class="font-mono text-[9px] text-ink-faint">
+                                {att.size > 1024 * 1024
+                                  ? `${(att.size / (1024 * 1024)).toFixed(1)} MB`
+                                  : att.size > 1024
+                                    ? `${(att.size / 1024).toFixed(0)} KB`
+                                    : `${att.size} B`}
+                              </span>
+                            </span>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
                   </div>
                 </Show>
 
@@ -975,9 +1059,58 @@ export const ChatPanel: Component = () => {
         </div>
       </Show>
 
+      <Show when={attachments().length > 0}>
+        <div class="flex flex-wrap gap-2 border-t border-border-subtle px-6 py-2">
+          <For each={attachments()}>
+            {(att, i) => (
+              <div class="group flex items-center gap-1.5 rounded-md border border-border-subtle bg-surface-1 px-2 py-1 text-xs text-ink-muted hover:border-accent/40">
+                <Icon
+                  name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                  class="h-3.5 w-3.5 shrink-0"
+                />
+                <span class="max-w-[180px] truncate">{att.name}</span>
+                <span class="font-mono text-[10px] text-ink-faint">
+                  {att.size > 1024 * 1024
+                    ? `${(att.size / (1024 * 1024)).toFixed(1)} MB`
+                    : att.size > 1024
+                      ? `${(att.size / 1024).toFixed(0)} KB`
+                      : `${att.size} B`}
+                </span>
+                <button
+                  onClick={() => removeAttachment(i())}
+                  class="ml-0.5 flex h-4 w-4 items-center justify-center rounded text-ink-faint hover:bg-danger/20 hover:text-danger"
+                >
+                  <Icon name="x" class="h-3 w-3" />
+                </button>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+
       <div class="border-t border-border-subtle px-6 py-3">
         <div class="w-full">
           <div class="flex items-end gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
+            <button
+              onClick={async () => {
+                // Use Tauri dialog to pick files
+                const { open } = await import("@tauri-apps/plugin-dialog");
+                const selected = await open({ multiple: true });
+                if (selected) {
+                  const files = Array.isArray(selected) ? selected : [selected];
+                  for (const f of files) {
+                    if (typeof f === "string") {
+                      await addAttachment(f);
+                    }
+                  }
+                }
+              }}
+              disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
+              title="Anexar arquivo"
+            >
+              <Icon name="paperclip" class="h-4 w-4" />
+            </button>
             <textarea
               ref={inputRef!}
               value={input()}
@@ -1031,6 +1164,16 @@ export const ChatPanel: Component = () => {
           status() !== "awaiting_input"
         }
       />
+
+      <Show when={isDragging()}>
+        <div class="drop-overlay">
+          <div class="drop-overlay-inner">
+            <Icon name="paperclip" class="h-8 w-8" />
+            <span>Solte o arquivo para anexar</span>
+            <small>Imagens, PDFs, documentos, código e mais</small>
+          </div>
+        </div>
+      </Show>
     </div>
   );
 };

@@ -9,6 +9,84 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+/// Read a file and return its base64-encoded content plus metadata.
+/// Used by the frontend to prepare attachments before sending to the agent.
+#[tauri::command]
+pub fn read_attachment(path: String) -> Result<AttachmentData, String> {
+    let file_path = Path::new(&path);
+    if !file_path.exists() {
+        return Err(format!("File not found: {path}"));
+    }
+    let bytes = std::fs::read(file_path).map_err(|e| format!("Cannot read file: {e}"))?;
+
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    let media_type = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "doc" | "docx" => "application/msword",
+        "xls" | "xlsx" => "application/vnd.ms-excel",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "yaml" | "yml" => "application/x-yaml",
+        "toml" => "application/toml",
+        "rs" => "text/x-rust",
+        "ts" | "tsx" => "text/typescript",
+        "js" | "jsx" => "text/javascript",
+        "py" => "text/x-python",
+        "swift" => "text/x-swift",
+        "go" => "text/x-go",
+        "rb" => "text/x-ruby",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "sh" | "bash" => "text/x-sh",
+        "sql" => "text/x-sql",
+        "xml" => "application/xml",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        _ => "application/octet-stream",
+    };
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    Ok(AttachmentData {
+        name: file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string(),
+        media_type: media_type.to_string(),
+        data,
+        size: bytes.len(),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentData {
+    pub name: String,
+    pub media_type: String,
+    pub data: String,
+    pub size: usize,
+}
+
 /// Lists one directory level, respecting .gitignore of the enclosing repo.
 /// Directories first, then files, both alphabetical.
 #[tauri::command]
