@@ -90,8 +90,11 @@ function App() {
     const unlisten = listen<IndexProgress>("index-progress", (event) => {
       const ws = event.payload.workspace;
       if (!ws) return;
-      setWsProgress(ws, event.payload);
       const st = event.payload.status;
+      // Watcher re-index events carry no file totals and have no terminal
+      // event to clear them — keep them out of the progress panel entirely.
+      if (st === "reindexing" || st === "reindexed" || st === "reindex_error") return;
+      setWsProgress(ws, event.payload);
       const clearIf = (delay: number) =>
         setTimeout(
           () => setProgressMap((m) => (m[ws]?.status === st ? { ...m, [ws]: null } : m)),
@@ -217,14 +220,11 @@ function App() {
     } catch {}
   };
 
-  /// Remove o projeto da lista do sidebar sem fechar o workspace no backend.
-  const removeFromSidebar = (folder: string) => {
-    const updated = openWorkspaces().filter((w) => w !== folder);
-    setOpenWorkspaces(updated);
-    saveOpenWorkspaces(updated);
-    if (activeWorkspace() === folder) {
-      setActiveWorkspace(updated[0] ?? null);
-    }
+  /// Remove um projeto da lista de recentes.
+  const removeFromRecent = (folder: string) => {
+    const updated = recentProjects().filter((p) => p !== folder);
+    setRecentProjects(updated);
+    saveRecent(updated);
   };
 
   const openFolder = async () => {
@@ -284,7 +284,7 @@ function App() {
             <select
               value={locale()}
               onChange={(e) => setLocale(e.currentTarget.value as LocaleId)}
-              class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             >
               <option value="pt-BR">🇧🇷 Português</option>
               <option value="en-US">🇺🇸 English</option>
@@ -311,7 +311,7 @@ function App() {
               value={configModel()}
               onInput={(e) => setConfigModel(e.currentTarget.value)}
               placeholder="claudinio"
-              class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
 
             <hr class="mb-4 border-border-subtle" />
@@ -453,7 +453,7 @@ function App() {
                           title={t("app.sidebar.closeWorkspace")}
                           onClick={(e) => {
                             e.stopPropagation();
-                            removeFromSidebar(proj);
+                            closeOpenWorkspace(proj);
                           }}
                         >
                           <Icon name="x" class="h-3 w-3" />
@@ -465,20 +465,32 @@ function App() {
                   {/* Recent projects not currently open */}
                   <For each={recentProjects().filter((p) => !openWorkspaces().includes(p))}>
                     {(proj) => (
-                      <button
-                        class="flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm opacity-70 hover:bg-surface-2 hover:opacity-100"
-                        onClick={() => openRecent(proj)}
-                      >
-                        <Icon name="folder" class="shrink-0 text-ink-muted" />
-                        <div class="min-w-0">
-                          <div class="truncate text-[13px] text-ink">
-                            {proj.split("/").pop()}
+                      <div class="group flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm opacity-70 hover:bg-surface-2 hover:opacity-100">
+                        <button
+                          class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          onClick={() => openRecent(proj)}
+                        >
+                          <Icon name="folder" class="shrink-0 text-ink-muted" />
+                          <div class="min-w-0">
+                            <div class="truncate text-[13px] text-ink">
+                              {proj.split("/").pop()}
+                            </div>
+                            <div class="truncate text-[11px] text-ink-faint">
+                              {proj}
+                            </div>
                           </div>
-                          <div class="truncate text-[11px] text-ink-faint">
-                            {proj}
-                          </div>
-                        </div>
-                      </button>
+                        </button>
+                        <button
+                          class="hidden shrink-0 rounded p-0.5 text-ink-faint hover:bg-surface-3 hover:text-ink group-hover:block"
+                          title={t("app.sidebar.closeWorkspace")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeFromRecent(proj);
+                          }}
+                        >
+                          <Icon name="x" class="h-3 w-3" />
+                        </button>
+                      </div>
                     )}
                   </For>
 
@@ -540,13 +552,12 @@ function App() {
                   </div>
                 }
               >
-                <Switch
-                  fallback={
+                <Switch>
+                  <Match when={progress()!.status === "loading_model"}>
                     <div class="font-mono text-[10px] text-ink-faint">
                       {t("app.index.loadingModel")}
                     </div>
-                  }
-                >
+                  </Match>
                   <Match when={progress()!.status === "embeddings_done"}>
                     <div class="font-mono text-[10px] text-ink-faint">
                       {t("app.index.embeddingsReady")} · {progress()!.symbolsIndexed} {t("app.index.symbols")}
