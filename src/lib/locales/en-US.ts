@@ -124,6 +124,11 @@ const dict: LocaleDict = {
   "chat.context.compacting": "Compacting…",
   "chat.context.compactLabel": "{0} / {1}",
 
+  // ── ChatPanel - Compaction ────────────────────────────────────────
+  "chat.compact.start": "Context at {0}k / {1}k — compacting…",
+  "chat.compact.done": "Context compacted: ~{0}k → ~{1}k tokens.",
+  "chat.compact.fail": "Compaction failed: {0} — continuing with full context.",
+
   // ── ChatPanel - Archived ──────────────────────────────────────────
   "chat.archived.title": "Compacted history",
   "chat.archived.messages": "{0} messages",

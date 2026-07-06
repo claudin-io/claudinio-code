@@ -92,11 +92,22 @@ const PATHS: Record<string, string[]> = {
   refresh: [
     "M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z",
   ],
+  // Compression / compaction icons
+  "package": [
+    "M12.876.64V.639l8.25 4.763c.541.313.875.89.875 1.515v9.525a1.75 1.75 0 0 1-.875 1.516l-8.25 4.762a1.748 1.748 0 0 1-1.75 0l-8.25-4.763a1.75 1.75 0 0 1-.875-1.515V6.917c0-.625.334-1.202.875-1.515L11.126.64a1.748 1.748 0 0 1 1.75 0Zm-1 1.298L4.251 6.34l7.75 4.474 7.75-4.474-7.625-4.402a.248.248 0 0 0-.25 0Zm.875 19.123 7.625-4.402a.25.25 0 0 0 .125-.216V7.639l-7.75 4.474ZM3.501 7.64v8.803c0 .09.048.172.125.216l7.625 4.402v-8.947Z",
+  ],
+  "package-process": [
+    "M11 22c-.818 0-1.6-.33-3.163-.99C3.946 19.366 2 18.543 2 17.16V7m9 15V11.355M11 22c.34 0 .646-.057 1-.172M20 7v4.5M18 18l.906-.905M22 18a4 4 0 1 0-8 0a4 4 0 0 0 8 0M7.326 9.691L4.405 8.278C2.802 7.502 2 7.114 2 6.5s.802-1.002 2.405-1.778l2.92-1.413C9.13 2.436 10.03 2 11 2s1.871.436 3.674 1.309l2.921 1.413C19.198 5.498 20 5.886 20 6.5s-.802 1.002-2.405 1.778l-2.92 1.413C12.87 10.564 11.97 11 11 11s-1.871-.436-3.674-1.309M5 12l2 1m9-9L6 9",
+  ],
+  "package-out-of-stock": [
+    "M12 22c-.818 0-1.6-.33-3.163-.988C4.946 19.373 3 18.554 3 17.175V7.542M12 22c.818 0 1.6-.33 3.163-.988C19.054 19.373 21 18.554 21 17.175V7.542M12 22v-9.97m9-4.488c0 .613-.802 1-2.405 1.773l-2.92 1.41c-1.804.87-2.705 1.304-3.675 1.304m9-4.487c0-.612-.802-.999-2.405-1.772L17 5M3 7.542c0 .613.802 1 2.405 1.773l2.92 1.41c1.804.87 2.705 1.304 3.675 1.304M3 7.542c0-.612.802-.999 2.405-1.772L7 5m-1 8.026l2 .997",
+    "m10 2l2 2m0 0l2 2m-2-2l-2 2m2-2l2-2",
+  ],
 };
 
 export type IconName = keyof typeof PATHS;
 
-export const Icon: Component<{ name: IconName; class?: string }> = (props) => {
+export const Icon: Component<{ name: IconName; class?: string; stroke?: boolean }> = (props) => {
   const paths = PATHS[props.name];
   if (!paths) return null;
   return (
@@ -105,7 +116,11 @@ export const Icon: Component<{ name: IconName; class?: string }> = (props) => {
       width="24"
       height="24"
       viewBox="0 0 24 24"
-      fill="currentColor"
+      fill={props.stroke ? "none" : "currentColor"}
+      stroke={props.stroke ? "currentColor" : undefined}
+      stroke-width={props.stroke ? "1.5" : undefined}
+      stroke-linecap={props.stroke ? "round" : undefined}
+      stroke-linejoin={props.stroke ? "round" : undefined}
       class={props.class}
     >
       <For each={paths}>{(d) => <path d={d} />}</For>

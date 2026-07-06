@@ -539,7 +539,7 @@ pub async fn run_workflow(
     if estimated >= COMPACT_THRESHOLD {
         let _ = event_tx.send(AgentEvent::TextStep {
             text: format!(
-                "📦 Contexto em ~{}k/{}k tokens — compactando…",
+                "__compact_start__:{}/{}",
                 estimated / 1000,
                 MAX_CONTEXT_TOKENS / 1000
             ),
@@ -567,7 +567,7 @@ pub async fn run_workflow(
                 });
                 let _ = event_tx.send(AgentEvent::TextStep {
                     text: format!(
-                        "✅ Contexto compactado: ~{}k → ~{}k tokens.",
+                        "__compact_done__:{}/{}",
                         estimated / 1000,
                         new_context / 1000
                     ),
@@ -575,7 +575,7 @@ pub async fn run_workflow(
             }
             Err(e) => {
                 let _ = event_tx.send(AgentEvent::TextStep {
-                    text: format!("⚠️ Falha na compactação: {e} — continuando com contexto cheio."),
+                    text: format!("__compact_fail__:{e}"),
                 });
             }
         }
