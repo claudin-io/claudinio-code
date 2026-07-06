@@ -1,58 +1,93 @@
-import type { Component } from "solid-js";
+import { For, type Component } from "solid-js";
 
-const PATHS: Record<string, string> = {
-  folder:
-    "M2 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Z",
-  "folder-open":
-    "M2 6a2 2 0 0 1 2-2h5l2 2h6a2 2 0 0 1 2 2v0a2 2 0 0 1-1.22 1.84l-5.8 2.32A5.5 5.5 0 0 1 6.96 13H4a2 2 0 0 1-2-2V6Z",
-  file: "M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2zM6 20V4h7v5h5v11H6Z",
-  "chevron-right": "M9 6l6 6-6 6",
-  "chevron-down": "M6 9l6 6 6-6",
-  settings:
-    "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
-  send: "M3.4 2.1A2 2 0 0 0 1.7 4.9l4.2 8.4a1 1 0 0 0 .9.55H18a1 1 0 0 0 .9-1.45l-6-12a1 1 0 0 0-1.8 0l-2.4 4.8L4.7 3.3a2 2 0 0 0-1.3-1.2Z",
-  check: "M20 6L9 17l-5-5",
-  x: "M18 6L6 18M6 6l12 12",
-  search:
-    "M10 3a7 7 0 1 0 4.95 11.95l4.25 4.25a1 1 0 0 0 1.42-1.42l-4.25-4.25A7 7 0 0 0 10 3z",
-  terminal:
-    "M4 20h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2ZM8 10l-2 2 2 2m4 0h4",
-  pencil:
-    "M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3Z",
-  brain:
-    "M9.5 2A2.5 2.5 0 0 1 12 4.5v1.56a3.5 3.5 0 0 1 4.64 4.28 3.5 3.5 0 0 1 1.6 5.1 3.5 3.5 0 0 1-1.13 5.09A3.5 3.5 0 0 1 8.5 18.5a3.5 3.5 0 0 1-2.1-6.34 3.5 3.5 0 0 1 .64-6.37A2.5 2.5 0 0 1 9.5 2Z",
-  loader:
-    "M21 12a9 9 0 1 1-6.22-8.55",
-  "arrow-left": "M19 12H5m7 7l-7-7 7-7",
-  "alert-circle":
-    "M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10zm0-14v4m0 4h.01",
-  plus: "M12 5v14m-7-7h14",
-  clock: "M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10zM12 6v6l4 2",
-  layers: "M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",
-  "external-link": "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6m4-3h6v6m-5 8L21 3",
-  compress:
-    "M8 4v4H4m16 0h-4V4M4 16h4v4m12-4h-4v4",
+const PATHS: Record<string, string[]> = {
+  folder: [
+    "M4 4h6v2H4zm0 14h16v2H4zM20 8h2v10h-2zM2 6h2v12H2zm8 0h10v2H10z",
+  ],
+  "folder-open": [
+    "M4 4h6v2H4zm6 6h8v2H10zm-4 4h12v2H6zm-2 4h14v2H4zM20 8h2v10h-2zM2 6h2v12H2z",
+  ],
+  file: [
+    "M6 4H4v16h2zm10-2H6v2h10zm4 4h-2v14h2zm-2 14H6v2h12zM16 4h2v2h-2zm-4 0h2v6h-2z",
+    "M12 8h6v2h-6z",
+  ],
+  "chevron-right": [
+    "M16 13v-2h-2v2h2Zm-2-2V9h-2v2h2Zm0 4v-2h-2v2h2Zm-2-6V7h-2v2h2Zm0 8v-2h-2v2h2ZM10 7V5H8v2h2Zm0 12v-2H8v2h2Z",
+  ],
+  "chevron-down": [
+    "M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z",
+  ],
+  settings: [
+    "M18 2h2v2h-2zM4 2h2v2H4zm16 20h-2v-2h2zM4 22h2v-2H4zM20 4h2v2h-2zM6 4h4v2H6zm12 16h-4v-2h4zM6 20h4v-2H6zM18 6h2v4h-2zM4 6h2v4H4zm16 12h-2v-4h2zM4 18h2v-4H4zM14 4h4v2h-4zM2 4h2v2H2zm20 16h-2v-2h2zM2 20h2v-2H2z",
+    "M8 2h2v4H8zm0 20h2v-4H8z",
+    "M8 2h8v2H8zm0 20h8v-2H8zM2 8h2v8H2zm20 8h-2V8h2z",
+    "M20 8h2v4h-2zM10 8h4v2h-4zm-2 2h2v4H8zm2 4h4v2h-4zm4-4h2v4h-2z",
+  ],
+  send: [
+    "M4 19h4v2H2v-8h2v6Zm8 0H8v-2h4v2Zm4-2h-4v-2h4v2Zm4-2h-4v-2h4v2Zm-10-2H4v-2h6v2Zm12 0h-2v-2h2v2ZM8 5H4v6H2V3h6v2Zm12 6h-4V9h4v2Zm-4-2h-4V7h4v2Zm-4-2H8V5h4v2Z",
+  ],
+  check: [
+    "M10 18H8v-2h2v2Zm-2-2H6v-2h2v2Zm4-2v2h-2v-2h2Zm-6 0H4v-2h2v2Zm8 0h-2v-2h2v2Zm2-2h-2v-2h2v2Zm2-2h-2V8h2v2Zm2-2h-2V6h2v2Z",
+  ],
+  x: [
+    "M9 21H7V17H9V21ZM17 21H15V17H17V21ZM11 17H9V13H11V17ZM15 17H13V13H15V17ZM13 13H11V11H13V13ZM11 11H9V7H11V11ZM15 11H13V7H15V11ZM9 7H7V3H9V7ZM17 7H15V3H17V7Z",
+  ],
+  search: [
+    "M22 22h-2v-2h2v2Zm-2-2h-2v-2h2v2Zm-6-2H6v-2h8v2Zm4 0h-2v-2h2v2ZM6 16H4v-2h2v2Zm10 0h-2v-2h2v2ZM4 14H2V6h2v8Zm14 0h-2V6h2v8ZM6 6H4V4h2v2Zm10 0h-2V4h2v2Zm-2-2H6V2h8v2Z",
+  ],
+  terminal: [
+    "M4 2h16v2H4zm0 18h16v2H4zM2 4h2v16H2zm18 0h2v16h-2zM6 16h2v2H6zm2-2h2v2H8zm-2-2h2v2H6z",
+  ],
+  pencil: [
+    "M4 16H6V18H8V20H10V22H2V14H4V16ZM12 20H10V18H12V20ZM14 18H12V16H14V18ZM10 16H8V14H10V16ZM16 16H14V14H16V16ZM6 14H4V12H6V14ZM12 14H10V12H12V14ZM18 14H16V12H18V14ZM8 12H6V10H8V12ZM14 12H12V10H14V12ZM20 12H18V10H20V12ZM10 10H8V8H10V10ZM18 10H16V8H18V10ZM22 10H20V8H22V10ZM12 8H10V6H12V8ZM16 8H14V6H16V8ZM20 8H18V6H20V8ZM14 6H12V4H14V6ZM18 6H16V4H18V6ZM16 4H14V2H16V4Z",
+  ],
+  brain: [
+    "M9 4h6v2H9zM7 6h2v2H7zm8 0h2v2h-2zm4-2h2v2h-2zm2-2h2v2h-2zM0 10h3v2H0zm21 0h3v2h-3zM3 4h2v2H3zM1 2h2v2H1zm6 12h2v2H7zm8 0h2v2h-2zM5 8h2v6H5zm12 0h2v6h-2zm-8 8h6v2H9zm0 4h6v2H9zm0-2h2v2H9zm4 0h2v2h-2zM11 0h2v3h-2z",
+  ],
+  loader: [
+    "M13 22h-2v-6h2v6Zm-6-3H5v-2h2v2Zm12 0h-2v-2h2v2ZM9 17H7v-2h2v2Zm8 0h-2v-2h2v2Zm-9-4H2v-2h6v2Zm14 0h-6v-2h6v2ZM9 9H7V7h2v2Zm8 0h-2V7h2v2Zm-4-1h-2V2h2v6ZM7 7H5V5h2v2Zm12 0h-2V5h2v2Z",
+  ],
+  "arrow-left": [
+    "M20 11v2H4v-2zM8 13v2H6v-2zm2 2v2H8v-2zm2 2v2h-2v-2zm-4-6V9H6v2z",
+    "M10 15V7H8v8zm2 2V5h-2v12z",
+  ],
+  "alert-circle": [
+    "M9 0h6v2H9zm6 24H9v-2h6zM0 15V9h2v6zm24-6v6h-2V9zM9 2h2v4H9zm6 20h-2v-4h2zM2 15v-2h4v2zm20-6v2h-4V9zm-9-7h2v4h-2zm-2 20H9v-4h2zM2 11V9h4v2zm20 2v2h-4v-2zM7 4h2v2H7zm10 0h-2v2h2zm0 16h-2v-2h2zM7 20h2v-2H7zM2 2h5v2H2zm20 0h-5v2h5zm0 20h-5v-2h5zM2 22h5v-2H2z",
+    "M2 2h2v5H2zm20 0h-2v5h2zm0 20h-2v-5h2zM2 22h2v-5H2zM4 7h2v2H4zm16 0h-2v2h2zm0 10h-2v-2h2zM4 17h2v-2H4zm6-9h4v2h-4zm0 6h4v2h-4zm-2-4h2v4H8zm6 0h2v4h-2z",
+  ],
+  plus: [
+    "M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z",
+  ],
+  clock: [
+    "M6 2h12v2H6zM2 6h2v12H2zm18 0h2v12h-2zm-2-2h2v2h-2zM4 4h2v2H4zm2 18h12v-2H6zm12-2h2v-2h-2zM4 20h2v-2H4zm7-14h2v7h-2zm2 7h2v2h-2zm2 2h2v2h-2z",
+  ],
+  layers: [
+    "M4 2h16v2H4zm0 18h16v2H4zM2 4h2v16H2zm18 0h2v16h-2zm-9 5h2V7h-2zm0 8h2v-6h-2z",
+  ],
+  "external-link": [
+    "M11 5H5v2h6V5ZM5 7H3v12h2V7Zm12 12H5v2h12v-2Zm2-6h-2v6h2v-6Zm-8 0H9v2h2v-2Zm2-2h-2v2h2v-2Zm2-2h-2v2h2V9Zm2-2h-2v2h2V7Zm2-2h-2v2h2V5Zm2-2h-2v8h2V3Z",
+    "M21 3h-8v2h8V3Z",
+  ],
+  compress: [
+    "M4 13h16v-2H4zm7-8h2V3h-2zM9 7h4V5H9zm4 0h2V5h-2zm2 2h2V7h-2zM7 9h8V7H7zm4 10h2v2h-2zm-2-2h4v2H9zm4 0h2v2h-2zm2-2h2v2h-2zm-8 0h8v2H7z",
+  ],
 };
 
 export type IconName = keyof typeof PATHS;
 
 export const Icon: Component<{ name: IconName; class?: string }> = (props) => {
-  const path = PATHS[props.name];
-  if (!path) return null;
+  const paths = PATHS[props.name];
+  if (!paths) return null;
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
       width="24"
       height="24"
       viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.75"
-      stroke-linecap="round"
-      stroke-linejoin="round"
+      fill="currentColor"
       class={props.class}
     >
-      <path d={path} />
+      <For each={paths}>{(d) => <path d={d} />}</For>
     </svg>
   );
 };
