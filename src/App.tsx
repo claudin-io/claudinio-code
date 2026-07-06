@@ -40,6 +40,8 @@ function App() {
   const [configApiKey, setConfigApiKey] = createSignal("");
   const [configBaseUrl, setConfigBaseUrl] = createSignal("https://api.claudin.io");
   const [configModel, setConfigModel] = createSignal("claudinio");
+  const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
+  const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
   const [showTree, setShowTree] = createSignal(false);
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
 
@@ -69,6 +71,8 @@ function App() {
       if (cfg) {
         setConfigBaseUrl(cfg.baseUrl);
         setConfigModel(cfg.model);
+        setConfigMaxRounds(cfg.maxRounds ?? null);
+        setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
       }
     } catch {}
     setShowConfig(true);
@@ -80,6 +84,8 @@ function App() {
         baseUrl: configBaseUrl() || undefined,
         apiKey: configApiKey() || undefined,
         model: configModel() || undefined,
+        maxRounds: configMaxRounds(),
+        subMaxRounds: configSubMaxRounds(),
       });
       setShowConfig(false);
       setConfigApiKey("");
@@ -187,6 +193,36 @@ function App() {
               placeholder="claudinio"
               class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
+
+            <hr class="mb-4 border-border-subtle" />
+
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.maxRounds")}</label>
+            <input
+              type="number"
+              min="0"
+              value={configMaxRounds() ?? ""}
+              onInput={(e) => {
+                const v = e.currentTarget.value;
+                setConfigMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
+              }}
+              placeholder={t("app.config.unlimited")}
+              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.maxRoundsHint")}</p>
+
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.subMaxRounds")}</label>
+            <input
+              type="number"
+              min="0"
+              value={configSubMaxRounds() ?? ""}
+              onInput={(e) => {
+                const v = e.currentTarget.value;
+                setConfigSubMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
+              }}
+              placeholder={t("app.config.unlimited")}
+              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <p class="mb-4 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
 
             <div class="flex justify-end gap-2">
               <button

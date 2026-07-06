@@ -41,12 +41,16 @@ export interface AgentConfig {
   hasApiKey: boolean;
   maxContextTokens: number;
   compactThreshold: number;
+  maxRounds?: number | null;
+  subMaxRounds?: number | null;
 }
 
 export interface SetConfigArgs {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  maxRounds?: number | null;
+  subMaxRounds?: number | null;
 }
 
 export interface ApproveArgs {

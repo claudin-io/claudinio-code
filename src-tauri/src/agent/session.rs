@@ -231,8 +231,7 @@ File tools take absolute paths inside this root."
     }
 }
 
-/// Safety cap on tool-call rounds per user message to bound runaway loops.
-const MAX_ROUNDS: usize = 30;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data")]
@@ -424,10 +423,10 @@ fn inject_steering(
 }
 
 /// Run a single continuous provider→tool loop for one user input, until the
-/// model produces a turn with no tool calls (or the safety cap is hit). Shares
-/// one conversation history (append-only, cache-friendly) and persists every
-/// step to the session JSONL store. The model decides at each round whether it
-/// still needs a tool call or can answer directly — there are no forced phases.
+/// model produces a turn with no tool calls. Shares one conversation history
+/// (append-only, cache-friendly) and persists every step to the session JSONL
+/// store. The model decides at each round whether it still needs a tool call
+/// or can answer directly — there are no forced phases.
 #[allow(clippy::too_many_arguments)]
 /// Reject messages that are not written in English.
 fn reject_non_english(msg: &str) -> Result<(), String> {
@@ -589,7 +588,8 @@ pub async fn run_workflow(
     let mut last_context: u64 = estimate_tokens(history, &system, &tools);
     let mut truncation_streak: u32 = 0;
 
-    for _ in 0..MAX_ROUNDS {
+    let max_rounds = config.max_rounds.unwrap_or(usize::MAX);
+    for _ in 0..max_rounds {
         let mut assistant_text = String::new();
         let stream_output = provider::stream_message(
             config,
@@ -934,11 +934,11 @@ pub async fn run_workflow(
     }
 
     // Safety cap hit: stop looping and report what we have so far rather than
-    // running forever.
+    // running forever. Only reachable when config.max_rounds is set.
     let capped_text = if last_text.is_empty() {
-        format!("Parei após {MAX_ROUNDS} rounds de ferramentas sem concluir. Tente reformular o pedido em partes menores.")
+        format!("Parei após {max_rounds} rounds de ferramentas sem concluir. Tente reformular o pedido em partes menores.")
     } else {
-        format!("{last_text}\n\n(Parei após {MAX_ROUNDS} rounds de ferramentas — pode não estar completo.)")
+        format!("{last_text}\n\n(Parei após {max_rounds} rounds de ferramentas — pode não estar completo.)")
     };
     store.try_append(&SessionRecord::Done {
         input_tokens: total_in,

@@ -307,6 +307,8 @@ pub struct SetConfigArgs {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
+    pub max_rounds: Option<Option<usize>>,
+    pub sub_max_rounds: Option<Option<usize>>,
 }
 
 #[tauri::command]
@@ -324,6 +326,12 @@ pub async fn set_config(
     if let Some(model) = args.model {
         cfg.model = model;
     }
+    if let Some(max_rounds) = args.max_rounds {
+        cfg.max_rounds = max_rounds;
+    }
+    if let Some(sub_max_rounds) = args.sub_max_rounds {
+        cfg.sub_max_rounds = sub_max_rounds;
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -339,6 +347,8 @@ pub async fn get_config(
         "hasApiKey": !cfg.api_key.is_empty(),
         "maxContextTokens": session::MAX_CONTEXT_TOKENS,
         "compactThreshold": session::COMPACT_THRESHOLD,
+        "maxRounds": cfg.max_rounds,
+        "subMaxRounds": cfg.sub_max_rounds,
     }))
 }
 

@@ -13,6 +13,10 @@ pub struct AgentConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// Max tool-call rounds for the main agent loop. None = infinite.
+    pub max_rounds: Option<usize>,
+    /// Max tool-call rounds for subagents. None = infinite.
+    pub sub_max_rounds: Option<usize>,
 }
 
 impl Default for AgentConfig {
@@ -21,6 +25,8 @@ impl Default for AgentConfig {
             base_url: "https://api.claudin.io".into(),
             api_key: String::new(),
             model: "claudinio".into(),
+            max_rounds: None,
+            sub_max_rounds: None,
         }
     }
 }

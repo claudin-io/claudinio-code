@@ -8,7 +8,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::ipc::Channel;
 
-pub const SUB_MAX_ROUNDS: usize = 15;
 pub const MAX_PARALLEL_AGENTS: usize = 4;
 
 #[derive(Deserialize, Clone, Copy)]
@@ -270,7 +269,8 @@ pub async fn run_subagent(
     let mut rounds: u32 = 0;
     let interrupt = &steering.interrupt;
 
-    for _ in 0..SUB_MAX_ROUNDS {
+    let sub_max = config.sub_max_rounds.unwrap_or(usize::MAX);
+    for _ in 0..sub_max {
         let mut assistant_text = String::new();
         let stream_output = match provider::stream_message(
             config,
@@ -398,7 +398,7 @@ pub async fn run_subagent(
 
     SubagentResult {
         status: "max_rounds",
-        report: format!("Reached {SUB_MAX_ROUNDS} rounds without completing."),
+        report: format!("Reached {sub_max} rounds without completing."),
         rounds,
         in_tok: total_in,
         out_tok: total_out,
