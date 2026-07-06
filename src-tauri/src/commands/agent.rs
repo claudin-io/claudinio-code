@@ -255,6 +255,8 @@ pub async fn get_config(
         "baseUrl": cfg.base_url,
         "model": cfg.model,
         "hasApiKey": !cfg.api_key.is_empty(),
+        "maxContextTokens": session::MAX_CONTEXT_TOKENS,
+        "compactThreshold": session::COMPACT_THRESHOLD,
     }))
 }
 
@@ -274,6 +276,61 @@ pub async fn queue_steering(
     }
     state.steering.push(text);
     Ok(())
+}
+
+/// Manually force context compaction for the active session.
+/// Returns the generated summary.
+#[tauri::command]
+pub async fn compact_session(
+    session_id: String,
+    event_channel: Channel<AgentEvent>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let config = {
+        let cfg = state.config.lock().await;
+        if cfg.api_key.is_empty() {
+            return Err("API key not configured.".into());
+        }
+        cfg.clone()
+    };
+
+    let workspace_root = workspace_string(&state).await;
+    let handle = {
+        let guard = state.active_session.lock().await;
+        match guard.as_ref() {
+            Some(h) if h.id == session_id => h.clone(),
+            _ => return Err("no active session or session mismatch".into()),
+        }
+    };
+
+    let store = SessionStore {
+        path: handle.store_path.clone(),
+    };
+
+    let db_path: Option<String> = workspace_root
+        .as_ref()
+        .map(|p| format!("{p}/.claudinio_index.db"));
+
+    let ctx = ToolContext {
+        db_path,
+        lsp_manager: Some(state.lsp_manager.clone()),
+        workspace_root,
+        embedding_model: state.embedding_model.clone(),
+    };
+
+    let summary = session::compact_history(
+        &config,
+        &store,
+        &ctx,
+        &event_channel,
+        &state.approvals,
+        &state.answers,
+        &handle.id,
+        &state.steering,
+    )
+    .await?;
+
+    Ok(summary)
 }
 
 /// Set the interrupt flag on the active session's steering controller.

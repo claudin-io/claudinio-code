@@ -48,6 +48,31 @@ pub enum SessionRecord {
     Error { message: String, ts: u64 },
     /// A steering message injected mid-run.
     Steering { text: String, ts: u64 },
+    /// Context was compacted: earlier turns replaced by a summary.
+    /// The frontend renders this as a collapsible archive block.
+    /// `tail_turns` Turn records immediately BEFORE this marker stay live
+    /// (verbatim) instead of being folded into the summary.
+    #[serde(rename = "compacted")]
+    Compacted {
+        summary: String,
+        #[serde(default)]
+        tail_turns: usize,
+        ts: u64,
+    },
+    /// Periodic status snapshot: cumulative tokens and estimated cost.
+    /// Written after every Done record. `context_tokens` is the size of the
+    /// context for the NEXT request (drops after compaction), as opposed to
+    /// the cumulative totals which are monotonic.
+    #[serde(rename = "status")]
+    Status {
+        session_id: String,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
+        total_cost: Option<f64>,
+        #[serde(default)]
+        context_tokens: Option<u64>,
+        ts: u64,
+    },
 }
 
 pub fn now_ms() -> u64 {
@@ -137,8 +162,48 @@ pub fn load_records(path: &Path) -> Result<Vec<SessionRecord>, String> {
 /// Rebuild the model conversation history from a session's records.
 /// Steering records are merged into the last user turn (or create a new one),
 /// mirroring push_user_blocks in session.rs.
+///
+/// When the session has been compacted, only records AFTER the last
+/// `Compacted` marker are included, with the summary injected as the
+/// opening user message so the model retains context of earlier work.
 pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
+    // Find the last compaction point
+    let compact_idx = records.iter().rposition(|r| matches!(r, SessionRecord::Compacted { .. }));
+
     let mut out: Vec<Message> = Vec::new();
+    match compact_idx {
+        Some(idx) => {
+            let (summary, tail_turns) = match &records[idx] {
+                SessionRecord::Compacted { summary, tail_turns, .. } => {
+                    (summary.clone(), *tail_turns)
+                }
+                _ => (String::new(), 0),
+            };
+            if !summary.is_empty() {
+                out.push(Message {
+                    role: "user".into(),
+                    content: vec![crate::agent::provider::ContentBlock::text(format!(
+                        "[Contexto anterior compactado]\n{}",
+                        summary
+                    ))],
+                });
+            }
+            // Kept-verbatim tail before the marker, then everything after it.
+            let tail_start = tail_start_index(records, idx, tail_turns);
+            fold_into_history(&mut out, records[tail_start..idx].iter());
+            fold_into_history(&mut out, records.iter().skip(idx + 1));
+        }
+        None => fold_into_history(&mut out, records.iter()),
+    }
+    out
+}
+
+/// Fold Turn/Steering records into a message history, merging steering text
+/// into the last user turn (mirrors push_user_blocks in session.rs).
+fn fold_into_history<'a>(
+    out: &mut Vec<Message>,
+    records: impl Iterator<Item = &'a SessionRecord>,
+) {
     for rec in records {
         match rec {
             SessionRecord::Turn { message, .. } => {
@@ -160,7 +225,124 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
             _ => {}
         }
     }
-    out
+}
+
+/// A Turn that starts a real user exchange: role "user" whose first block is
+/// plain text (not a tool_result continuation).
+pub fn is_real_user_turn(rec: &SessionRecord) -> bool {
+    match rec {
+        SessionRecord::Turn { message, .. } => {
+            message.role == "user"
+                && matches!(
+                    message.content.first(),
+                    Some(crate::agent::provider::ContentBlock::Text { .. })
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Index where the kept-verbatim tail begins for a `Compacted` marker at
+/// `compact_idx` with `tail_turns`. The tail is expanded backwards so the
+/// live history never starts on an assistant turn or splits a
+/// tool_use/tool_result pair: it must begin at a real user turn, otherwise
+/// the tail is dropped entirely (returns `compact_idx`).
+pub fn tail_start_index(records: &[SessionRecord], compact_idx: usize, tail_turns: usize) -> usize {
+    if tail_turns == 0 {
+        return compact_idx;
+    }
+    // Walk backwards collecting Turn records.
+    let mut start = compact_idx;
+    let mut count = 0usize;
+    for i in (0..compact_idx).rev() {
+        if matches!(records[i], SessionRecord::Turn { .. }) {
+            start = i;
+            count += 1;
+            if count >= tail_turns {
+                break;
+            }
+        }
+    }
+    if count == 0 {
+        return compact_idx;
+    }
+    // Expand backwards until the tail begins at a real user turn.
+    loop {
+        if is_real_user_turn(&records[start]) {
+            return start;
+        }
+        match (0..start).rev().find(|&i| matches!(records[i], SessionRecord::Turn { .. })) {
+            Some(prev) => start = prev,
+            None => return compact_idx, // no user turn found — drop the tail
+        }
+    }
+}
+
+/// Return the last `Compacted` summary, if any. Used by the frontend to
+/// render the archived-messages block.
+pub fn last_compacted_summary(records: &[SessionRecord]) -> Option<String> {
+    records.iter().rev().find_map(|r| match r {
+        SessionRecord::Compacted { summary, .. } => Some(summary.clone()),
+        _ => None,
+    })
+}
+
+/// Return all records that remain "active" after the last compaction: the
+/// kept-verbatim tail before the marker plus everything after it.
+pub fn records_since_compacted(records: &[SessionRecord]) -> Vec<&SessionRecord> {
+    match compact_boundary(records) {
+        Some((idx, tail_start)) => records[tail_start..idx]
+            .iter()
+            .chain(records.iter().skip(idx + 1))
+            .collect(),
+        None => records.iter().collect(),
+    }
+}
+
+/// Return all records archived by the last compaction (everything before the
+/// kept tail). Empty if no compaction has occurred.
+pub fn records_before_compacted(records: &[SessionRecord]) -> &[SessionRecord] {
+    match compact_boundary(records) {
+        Some((_, tail_start)) => &records[..tail_start],
+        None => &[],
+    }
+}
+
+/// (index of the last Compacted marker, index where its kept tail begins).
+fn compact_boundary(records: &[SessionRecord]) -> Option<(usize, usize)> {
+    let idx = records.iter().rposition(|r| matches!(r, SessionRecord::Compacted { .. }))?;
+    let tail_turns = match &records[idx] {
+        SessionRecord::Compacted { tail_turns, .. } => *tail_turns,
+        _ => 0,
+    };
+    Some((idx, tail_start_index(records, idx, tail_turns)))
+}
+
+/// The context size recorded by the most recent Status record, if any.
+pub fn last_context_tokens(records: &[SessionRecord]) -> Option<u64> {
+    records.iter().rev().find_map(|r| match r {
+        SessionRecord::Status { context_tokens, .. } => *context_tokens,
+        _ => None,
+    })
+}
+
+/// Compute cumulative token/cost stats from Status records.
+pub fn cumulative_stats(records: &[SessionRecord]) -> (u64, u64, Option<f64>) {
+    let mut total_in = 0u64;
+    let mut total_out = 0u64;
+    let mut total_cost = 0.0f64;
+    let mut has_cost = false;
+    for rec in records {
+        if let SessionRecord::Status { total_input_tokens, total_output_tokens, total_cost: cost, .. } = rec {
+            total_in = *total_input_tokens;
+            total_out = *total_output_tokens;
+            if let Some(c) = cost {
+                total_cost = *c;
+                has_cost = true;
+            }
+        }
+    }
+    (total_in, total_out, if has_cost { Some(total_cost) } else { None })
 }
 
 /// Lightweight summary shown in the session list.
@@ -219,7 +401,9 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::PhaseResult { ts, .. }
                 | SessionRecord::Done { ts, .. }
                 | SessionRecord::Error { ts, .. }
-                | SessionRecord::Steering { ts, .. } => {
+                | SessionRecord::Steering { ts, .. }
+                | SessionRecord::Compacted { ts, .. }
+                | SessionRecord::Status { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
             }
@@ -355,5 +539,353 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"kind\":\"phase\""), "got: {json}");
         assert!(json.contains("\"phase\":\"plan\""), "got: {json}");
+    }
+
+    #[test]
+    fn compacted_record_serialization() {
+        let rec = SessionRecord::Compacted {
+            summary: "User asked to implement feature X. Files changed: src/foo.rs.".into(),
+            tail_turns: 0,
+            ts: 100,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"compacted\""), "got: {json}");
+        assert!(json.contains("feature X"), "got: {json}");
+
+        // Round-trip
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionRecord::Compacted { summary, tail_turns, ts } => {
+                assert_eq!(summary, "User asked to implement feature X. Files changed: src/foo.rs.");
+                assert_eq!(tail_turns, 0);
+                assert_eq!(ts, 100);
+            }
+            _ => panic!("expected Compacted, got {:?}", back),
+        }
+    }
+
+    #[test]
+    fn status_record_serialization() {
+        let rec = SessionRecord::Status {
+            session_id: "s1".into(),
+            total_input_tokens: 1500,
+            total_output_tokens: 300,
+            context_tokens: None,
+            total_cost: Some(0.0045),
+            ts: 200,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"status\""), "got: {json}");
+        assert!(json.contains("0.0045"), "got: {json}");
+
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionRecord::Status { total_input_tokens, total_output_tokens, total_cost, .. } => {
+                assert_eq!(total_input_tokens, 1500);
+                assert_eq!(total_output_tokens, 300);
+                assert_eq!(total_cost, Some(0.0045));
+            }
+            _ => panic!("expected Status, got {:?}", back),
+        }
+    }
+
+    #[test]
+    fn old_format_records_still_deserialize() {
+        // Lines written before tail_turns / context_tokens existed must load.
+        let old_compacted = r#"{"kind":"compacted","summary":"old summary","ts":1}"#;
+        match serde_json::from_str::<SessionRecord>(old_compacted).unwrap() {
+            SessionRecord::Compacted { summary, tail_turns, .. } => {
+                assert_eq!(summary, "old summary");
+                assert_eq!(tail_turns, 0);
+            }
+            other => panic!("expected Compacted, got {other:?}"),
+        }
+        let old_status = r#"{"kind":"status","session_id":"s1","total_input_tokens":10,"total_output_tokens":5,"total_cost":0.01,"ts":2}"#;
+        match serde_json::from_str::<SessionRecord>(old_status).unwrap() {
+            SessionRecord::Status { context_tokens, total_input_tokens, .. } => {
+                assert_eq!(context_tokens, None);
+                assert_eq!(total_input_tokens, 10);
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn last_context_tokens_reads_most_recent_status() {
+        let recs = vec![
+            SessionRecord::Status {
+                session_id: "s1".into(),
+                total_input_tokens: 10,
+                total_output_tokens: 5,
+                total_cost: None,
+                context_tokens: Some(9000),
+                ts: 1,
+            },
+            SessionRecord::Status {
+                session_id: "s1".into(),
+                total_input_tokens: 20,
+                total_output_tokens: 10,
+                total_cost: None,
+                context_tokens: Some(1500),
+                ts: 2,
+            },
+        ];
+        assert_eq!(last_context_tokens(&recs), Some(1500));
+        assert_eq!(last_context_tokens(&[]), None);
+    }
+
+    fn user_turn(text: &str, ts: u64) -> SessionRecord {
+        SessionRecord::Turn {
+            message: Message { role: "user".into(), content: vec![ContentBlock::text(text)] },
+            ts,
+        }
+    }
+
+    fn assistant_turn(text: &str, ts: u64) -> SessionRecord {
+        SessionRecord::Turn {
+            message: Message { role: "assistant".into(), content: vec![ContentBlock::text(text)] },
+            ts,
+        }
+    }
+
+    fn tool_result_turn(ts: u64) -> SessionRecord {
+        SessionRecord::Turn {
+            message: Message {
+                role: "user".into(),
+                content: vec![ContentBlock::tool_result("t1", "result")],
+            },
+            ts,
+        }
+    }
+
+    #[test]
+    fn history_with_tail_turns_keeps_recent_exchanges_verbatim() {
+        let recs = vec![
+            user_turn("old question", 1),
+            assistant_turn("old answer", 2),
+            user_turn("recent question", 3),
+            assistant_turn("recent answer", 4),
+            SessionRecord::Compacted { summary: "S".into(), tail_turns: 2, ts: 5 },
+            user_turn("post-compact", 6),
+        ];
+        let history = history_from_records(&recs);
+        // summary + 2 tail turns + 1 post-compact
+        assert_eq!(history.len(), 4);
+        assert!(history[0].content[0].get_text().unwrap().starts_with("[Contexto anterior compactado]"));
+        assert_eq!(history[1].content[0].get_text().unwrap(), "recent question");
+        assert_eq!(history[2].content[0].get_text().unwrap(), "recent answer");
+        assert_eq!(history[3].content[0].get_text().unwrap(), "post-compact");
+    }
+
+    #[test]
+    fn tail_never_starts_on_assistant_or_tool_result() {
+        // tail_turns=2 lands on (tool_result, assistant) — must expand back to
+        // the real user turn so the API sees a valid alternating history.
+        let recs = vec![
+            user_turn("q1", 1),
+            assistant_turn("calling tool", 2),
+            tool_result_turn(3),
+            assistant_turn("final answer", 4),
+            SessionRecord::Compacted { summary: "S".into(), tail_turns: 2, ts: 5 },
+        ];
+        let start = tail_start_index(&recs, 4, 2);
+        assert_eq!(start, 0, "tail must expand back to the real user turn q1");
+        let history = history_from_records(&recs);
+        assert_eq!(history.len(), 5); // summary + all 4 turns
+        assert_eq!(history[1].content[0].get_text().unwrap(), "q1");
+    }
+
+    #[test]
+    fn tail_dropped_when_no_user_turn_exists() {
+        let recs = vec![
+            assistant_turn("orphan assistant", 1),
+            SessionRecord::Compacted { summary: "S".into(), tail_turns: 1, ts: 2 },
+        ];
+        assert_eq!(tail_start_index(&recs, 1, 1), 1, "no user turn — tail dropped");
+        let history = history_from_records(&recs);
+        assert_eq!(history.len(), 1, "only the summary message");
+    }
+
+    #[test]
+    fn records_before_and_since_respect_tail() {
+        let recs = vec![
+            user_turn("old", 1),
+            assistant_turn("old answer", 2),
+            user_turn("recent", 3),
+            assistant_turn("recent answer", 4),
+            SessionRecord::Compacted { summary: "S".into(), tail_turns: 2, ts: 5 },
+            user_turn("post", 6),
+        ];
+        let before = records_before_compacted(&recs);
+        assert_eq!(before.len(), 2, "only the pre-tail records are archived");
+        let since = records_since_compacted(&recs);
+        assert_eq!(since.len(), 3, "tail (2) + post-compact (1) stay active");
+    }
+
+    #[test]
+    fn history_from_records_with_compacted_returns_only_messages_after() {
+        let recs = vec![
+            SessionRecord::Turn {
+                message: Message { role: "user".into(), content: vec![ContentBlock::text("hello")] },
+                ts: 1,
+            },
+            SessionRecord::Turn {
+                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("hi there")] },
+                ts: 2,
+            },
+            SessionRecord::Compacted {
+                summary: "User greeted the agent.".into(),
+                tail_turns: 0,
+                ts: 3,
+            },
+            SessionRecord::Turn {
+                message: Message { role: "user".into(), content: vec![ContentBlock::text("new question")] },
+                ts: 4,
+            },
+            SessionRecord::Turn {
+                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("new answer")] },
+                ts: 5,
+            },
+        ];
+        let history = history_from_records(&recs);
+        // Should have: 1 summary user message + 2 turns after compacted
+        assert_eq!(history.len(), 3, "should have summary + 2 post-compact messages");
+        assert_eq!(
+            history[0].content[0].get_text().unwrap(),
+            "[Contexto anterior compactado]\nUser greeted the agent."
+        );
+        assert_eq!(history[1].role, "user");
+        assert_eq!(history[1].content[0].get_text().unwrap(), "new question");
+        assert_eq!(history[2].role, "assistant");
+        assert_eq!(history[2].content[0].get_text().unwrap(), "new answer");
+    }
+
+    #[test]
+    fn history_from_records_without_compacted_returns_all() {
+        let recs = vec![
+            SessionRecord::Turn {
+                message: Message { role: "user".into(), content: vec![ContentBlock::text("q1")] },
+                ts: 1,
+            },
+            SessionRecord::Turn {
+                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("a1")] },
+                ts: 2,
+            },
+        ];
+        let history = history_from_records(&recs);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content[0].get_text().unwrap(), "q1");
+        assert_eq!(history[1].content[0].get_text().unwrap(), "a1");
+    }
+
+    #[test]
+    fn history_from_records_multiple_compacted_uses_last() {
+        let recs = vec![
+            // Before first compact
+            SessionRecord::Turn {
+                message: Message { role: "user".into(), content: vec![ContentBlock::text("old")] },
+                ts: 1,
+            },
+            SessionRecord::Compacted { summary: "First compact".into(), tail_turns: 0, ts: 2 },
+            // Between compacts
+            SessionRecord::Turn {
+                message: Message { role: "user".into(), content: vec![ContentBlock::text("middle")] },
+                ts: 3,
+            },
+            SessionRecord::Compacted { summary: "Second compact".into(), tail_turns: 0, ts: 4 },
+            // After last compact
+            SessionRecord::Turn {
+                message: Message { role: "user".into(), content: vec![ContentBlock::text("recent")] },
+                ts: 5,
+            },
+        ];
+        let history = history_from_records(&recs);
+        // Summary from last compact + the turn after it
+        assert_eq!(history.len(), 2, "should use LAST compact's summary");
+        assert!(
+            history[0].content[0].get_text().unwrap().contains("Second compact"),
+            "summary should be from the last compact"
+        );
+        assert_eq!(history[1].content[0].get_text().unwrap(), "recent");
+    }
+
+    #[test]
+    fn cumulative_stats_from_status_records() {
+        let recs = vec![
+            SessionRecord::Status {
+                session_id: "s1".into(),
+                total_input_tokens: 1000,
+                total_output_tokens: 200,
+                context_tokens: None,
+                total_cost: Some(0.003),
+                ts: 10,
+            },
+            SessionRecord::Status {
+                session_id: "s1".into(),
+                total_input_tokens: 2500,
+                total_output_tokens: 500,
+                context_tokens: None,
+                total_cost: Some(0.009),
+                ts: 20,
+            },
+        ];
+        let (input, output, cost) = cumulative_stats(&recs);
+        assert_eq!(input, 2500, "should be the last Status value");
+        assert_eq!(output, 500);
+        assert_eq!(cost, Some(0.009));
+    }
+
+    #[test]
+    fn cumulative_stats_no_status_records() {
+        let recs = vec![
+            SessionRecord::Meta { session_id: "s1".into(), created_at: 1, workspace: None },
+        ];
+        let (input, output, cost) = cumulative_stats(&recs);
+        assert_eq!(input, 0);
+        assert_eq!(output, 0);
+        assert_eq!(cost, None);
+    }
+
+    #[test]
+    fn cumulative_stats_without_cost_returns_none() {
+        let recs = vec![
+            SessionRecord::Status {
+                session_id: "s1".into(),
+                total_input_tokens: 500,
+                total_output_tokens: 100,
+                context_tokens: None,
+                total_cost: None,
+                ts: 5,
+            },
+        ];
+        let (_, _, cost) = cumulative_stats(&recs);
+        assert_eq!(cost, None);
+    }
+
+    #[test]
+    fn records_after_and_before_compacted() {
+        let recs = vec![
+            SessionRecord::Meta { session_id: "s1".into(), created_at: 1, workspace: None },
+            SessionRecord::User { text: "old".into(), ts: 2 },
+            SessionRecord::Compacted { summary: "compact".into(), tail_turns: 0, ts: 3 },
+            SessionRecord::User { text: "new".into(), ts: 4 },
+        ];
+        let before = records_before_compacted(&recs);
+        assert_eq!(before.len(), 2, "meta + user before compact");
+        let after = records_since_compacted(&recs);
+        assert_eq!(after.len(), 1, "user after compact");
+        match &after[0] {
+            SessionRecord::User { text, .. } => assert_eq!(text, "new"),
+            _ => panic!("expected User"),
+        }
+    }
+
+    #[test]
+    fn records_after_and_before_without_compacted() {
+        let recs = vec![SessionRecord::User { text: "hello".into(), ts: 1 }];
+        let before = records_before_compacted(&recs);
+        assert!(before.is_empty());
+        let after = records_since_compacted(&recs);
+        assert_eq!(after.len(), 1);
     }
 }

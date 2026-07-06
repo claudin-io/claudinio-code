@@ -34,6 +34,7 @@ pub fn run() {
             commands::lsp::lsp_hover,
             commands::agent::queue_steering,
             commands::agent::interrupt_session,
+            commands::agent::compact_session,
             commands::skills::list_skills,
             commands::skills::get_skill_catalog,
             commands::skills::get_skill_content,

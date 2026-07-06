@@ -26,12 +26,12 @@ pub struct SubagentSpec {
     pub expected_output: Option<String>,
 }
 
-struct SubagentResult {
-    status: &'static str,
-    report: String,
-    rounds: u32,
-    in_tok: u32,
-    out_tok: u32,
+pub struct SubagentResult {
+    pub status: &'static str,
+    pub report: String,
+    pub rounds: u32,
+    pub in_tok: u32,
+    pub out_tok: u32,
 }
 
 const TOOL_PREFERENCE: &str = "\
@@ -231,7 +231,7 @@ pub async fn run_spawn_agents(
 
 /// Run a single subagent: a simplified enxuto version of `run_workflow`.
 /// No steering injection, no persistence, no `AgentEvent::Done`.
-async fn run_subagent(
+pub async fn run_subagent(
     config: &AgentConfig,
     ctx: &ToolContext,
     spec: &SubagentSpec,
@@ -402,6 +402,76 @@ async fn run_subagent(
         rounds,
         in_tok: total_in,
         out_tok: total_out,
+    }
+}
+
+/// Spawn a summary subagent that reads the session JSONL file and produces a
+/// concise summary of the conversation. The subagent has a completely fresh
+/// context — zero knowledge of the current conversation.
+pub async fn run_summary_agent(
+    config: &AgentConfig,
+    ctx: &ToolContext,
+    jsonl_path: &str,
+    tail_turns: usize,
+    event_tx: &Channel<AgentEvent>,
+    approvals: &ApprovalMap,
+    answers: &AnswerMap,
+    session_id: &str,
+    steering: &Arc<SteeringCtl>,
+) -> Result<String, String> {
+    let tail_note = if tail_turns > 0 {
+        format!(
+            "\nNote: the last {tail_turns} \"turn\" records of the file will be kept verbatim \
+             in the live context alongside your summary, so do NOT waste words re-describing \
+             those final exchanges — summarize everything BEFORE them.\n"
+        )
+    } else {
+        String::new()
+    };
+    let spec = SubagentSpec {
+        name: "summarizer".into(),
+        goal: format!(
+            "Read the conversation session file at `{}` and produce a structured handoff summary \
+             so the agent can seamlessly CONTINUE the work with your summary as its only memory \
+             of the earlier conversation. \
+             Use `read_file` to read it. The file is in JSONL format: one JSON object per line, each with a \
+             `kind` field. Lines with kind=\"user\" contain the user's input in the `text` field. \
+             Lines with kind=\"turn\" contain messages sent to/received from the AI — look for role=\"user\" \
+             and role=\"assistant\" messages in the `message.content` field. \
+             Lines with kind=\"steering\" contain mid-conversation guidance. \
+             Lines with kind=\"compacted\" contain previous compactions (summaries of older conversation) — \
+             fold their content into yours so nothing is lost. \
+             Ignore kind=\"done\" and kind=\"status\" lines (token bookkeeping).\n{}\
+             \n\
+             Structure the summary with exactly these sections:\n\
+             1. Task & intent — what the user is trying to achieve overall.\n\
+             2. Current state — what is done and what is in progress right now.\n\
+             3. Pending / next steps — an explicit TODO list to continue seamlessly.\n\
+             4. Files & symbols touched — file paths, key functions/structs, and what changed in each.\n\
+             5. Decisions & constraints — choices made, approaches rejected, user preferences.\n\
+             6. Learnings — errors hit, environment quirks, commands that work.\n\
+             \n\
+             Weight recent messages most heavily — they describe the live state. \
+             Write in English. Be specific and factual — exact file paths, function names, values. \
+             Keep it under 600 words. \
+             Do NOT mention that you read a JSONL file or that you are a subagent — \
+             just write the handoff as a direct description of the work.",
+            jsonl_path, tail_note
+        ),
+        mode: SubagentMode::Explore,
+        expected_output: Some(
+            "A structured handoff summary (sections: task & intent, current state, pending/next \
+             steps, files & symbols, decisions & constraints, learnings) under 600 words"
+                .into(),
+        ),
+    };
+
+    let result = run_subagent(config, ctx, &spec, event_tx, approvals, answers, session_id, steering).await;
+
+    if result.status == "completed" {
+        Ok(result.report)
+    } else {
+        Err(format!("Summary agent {}: {}", result.status, result.report))
     }
 }
 

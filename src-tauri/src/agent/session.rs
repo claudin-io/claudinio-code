@@ -11,6 +11,121 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tauri::ipc::Channel;
 use tokio::sync::{oneshot, Mutex};
 
+/// Context window of the supported models (claudinio and claudius: 256K).
+pub const MAX_CONTEXT_TOKENS: u64 = 256_000;
+
+/// Threshold for auto-compaction: if the context exceeds this before a
+/// request, the history is compacted first (75% of the window).
+pub const COMPACT_THRESHOLD: u64 = MAX_CONTEXT_TOKENS * 75 / 100;
+
+/// Rough token estimation: count chars / 3 + per-message overhead + system prompt + tools.
+fn estimate_message_tokens(msg: &Message) -> u64 {
+    let json = serde_json::to_string(msg).unwrap_or_default();
+    json.len() as u64 / 3 + 4 // +4 for role/format overhead
+}
+
+fn estimate_tokens(history: &[Message], system: &str, tools: &[ToolDescription]) -> u64 {
+    let mut total = system.len() as u64 / 3;
+    if !tools.is_empty() {
+        total += serde_json::to_string(tools).unwrap_or_default().len() as u64 / 3;
+    }
+    // Per-message overhead (~4 tokens each for role markers + turn formatting)
+    total += (history.len() as u64) * 8;
+    for msg in history {
+        total += estimate_message_tokens(msg);
+    }
+    total
+}
+
+/// How many recent user↔agent exchanges stay verbatim after a compaction.
+const TAIL_USER_TURNS: usize = 2;
+/// Budget for the kept tail; if the recent exchanges alone exceed this, the
+/// tail shrinks (down to zero) so compaction still frees the context.
+const TAIL_MAX_TOKENS: u64 = 20_000;
+
+/// Number of Turn records (counted back from the end) to keep verbatim when
+/// compacting: the last `TAIL_USER_TURNS` real user exchanges, bounded by
+/// `TAIL_MAX_TOKENS`. Only looks at records after the previous compaction.
+fn compute_tail_turns(records: &[SessionRecord]) -> usize {
+    let start = records
+        .iter()
+        .rposition(|r| matches!(r, SessionRecord::Compacted { .. }))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let mut turns = 0usize;
+    let mut exchanges = 0usize;
+    let mut tokens = 0u64;
+    let mut best = 0usize;
+    for rec in records[start..].iter().rev() {
+        let SessionRecord::Turn { message, .. } = rec else { continue };
+        turns += 1;
+        tokens += estimate_message_tokens(message);
+        if tokens > TAIL_MAX_TOKENS {
+            break;
+        }
+        if crate::agent::persist::is_real_user_turn(rec) {
+            exchanges += 1;
+            best = turns; // a window starting at this user turn fits the budget
+            if exchanges >= TAIL_USER_TURNS {
+                break;
+            }
+        }
+    }
+    best
+}
+
+/// Compact the conversation history by spawning a subagent to read the JSONL
+/// file and produce a summary. The subagent has a completely fresh context.
+/// The last `TAIL_USER_TURNS` exchanges are kept verbatim (recorded as
+/// `tail_turns` on the Compacted marker). Returns the generated summary.
+pub async fn compact_history(
+    config: &AgentConfig,
+    store: &SessionStore,
+    ctx: &ToolContext,
+    event_tx: &Channel<AgentEvent>,
+    approvals: &ApprovalMap,
+    answers: &AnswerMap,
+    session_id: &str,
+    steering: &Arc<SteeringCtl>,
+) -> Result<String, String> {
+    let jsonl_path = store.path.to_string_lossy().to_string();
+    let records = crate::agent::persist::load_records(&store.path).unwrap_or_default();
+    let tail_turns = compute_tail_turns(&records);
+
+    let summary = subagent::run_summary_agent(
+        config,
+        ctx,
+        &jsonl_path,
+        tail_turns,
+        event_tx,
+        approvals,
+        answers,
+        session_id,
+        steering,
+    )
+    .await?;
+
+    // If the summary agent somehow found an existing Compacted record and
+    // returned it, still write ours — the format is append-only and the
+    // history_from_records logic picks the LAST one.
+    store.append(&SessionRecord::Compacted {
+        summary: summary.clone(),
+        tail_turns,
+        ts: now_ms(),
+    })?;
+
+    // Record the post-compaction context size so the UI meter drops even for
+    // manual compaction (no run in flight). The estimate excludes the system
+    // prompt/tools; the next run's Status corrects it with the real number.
+    let new_recs = crate::agent::persist::load_records(&store.path).unwrap_or_default();
+    let new_history = crate::agent::persist::history_from_records(&new_recs);
+    let (ci, co, cc) = crate::agent::persist::cumulative_stats(&new_recs);
+    let new_context = estimate_tokens(&new_history, "", &[]);
+    write_status(store, session_id, ci, co, cc, Some(new_context));
+
+    Ok(summary)
+}
+
 /// Steering: a queue of mid-run user messages and an interrupt flag.
 /// Thread-safe; the Mutex is never held across await.
 pub struct SteeringCtl {
@@ -202,6 +317,21 @@ pub enum AgentEvent {
         subagent_id: String,
         event: Box<AgentEvent>,
     },
+    #[serde(rename = "SessionStats")]
+    SessionStats {
+        #[serde(rename = "inputTokens")]
+        input_tokens: u32,
+        #[serde(rename = "outputTokens")]
+        output_tokens: u32,
+        #[serde(rename = "cumulativeCost")]
+        cumulative_cost: Option<f64>,
+        #[serde(rename = "contextTokens")]
+        context_tokens: u64,
+        #[serde(rename = "maxContextTokens")]
+        max_context_tokens: u64,
+        #[serde(rename = "compactThreshold")]
+        compact_threshold: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +448,49 @@ fn reject_non_english(msg: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Write a Status record with cumulative token/cost stats and the size of
+/// the context for the next request.
+fn write_status(
+    store: &SessionStore,
+    session_id: &str,
+    cumul_in: u64,
+    cumul_out: u64,
+    cumul_cost: Option<f64>,
+    context_tokens: Option<u64>,
+) {
+    store.try_append(&SessionRecord::Status {
+        session_id: session_id.to_string(),
+        total_input_tokens: cumul_in,
+        total_output_tokens: cumul_out,
+        total_cost: cumul_cost,
+        context_tokens,
+        ts: now_ms(),
+    });
+}
+
+/// Per-million-token rates for a model (claudin.io official pricing).
+struct Pricing {
+    input: f64,
+    cache_read: f64,
+    output: f64,
+}
+
+fn model_pricing(model: &str) -> Pricing {
+    if model.contains("claudius") {
+        Pricing { input: 3.00, cache_read: 0.90, output: 8.00 }
+    } else {
+        // claudinio and unknown models: balanced tier
+        Pricing { input: 0.50, cache_read: 0.15, output: 2.00 }
+    }
+}
+
+/// Estimate cost for provider calls when the provider does not report cost.
+fn cost_for(model: &str, input: u32, cache_read: u32, output: u32) -> f64 {
+    let p = model_pricing(model);
+    (input as f64 * p.input + cache_read as f64 * p.cache_read + output as f64 * p.output)
+        / 1_000_000.0
+}
+
 pub async fn run_workflow(
     config: &AgentConfig,
     history: &mut Vec<Message>,
@@ -343,9 +516,74 @@ pub async fn run_workflow(
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref());
     let tools = api_tools();
+
+    // Auto-compact when the context exceeds the threshold. Prefer the real
+    // input_tokens the API reported for the last request; the char-based
+    // estimate is the fallback (take the max of the two for safety).
+    let records = crate::agent::persist::load_records(&store.path).unwrap_or_default();
+    let estimated = estimate_tokens(history, &system, &tools)
+        .max(crate::agent::persist::last_context_tokens(&records).unwrap_or(0));
+    if estimated >= COMPACT_THRESHOLD {
+        let _ = event_tx.send(AgentEvent::TextStep {
+            text: format!(
+                "📦 Contexto em ~{}k/{}k tokens — compactando…",
+                estimated / 1000,
+                MAX_CONTEXT_TOKENS / 1000
+            ),
+        });
+        match compact_history(config, store, ctx, event_tx, approvals, answers, session_id, steering).await {
+            Ok(_) => {
+                // Rebuild the history exactly as a session reload would:
+                // summary + kept-verbatim tail (which already contains the
+                // just-persisted user message) + nothing else.
+                *history = crate::agent::persist::history_from_records(
+                    &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                );
+                let new_context = estimate_tokens(history, &system, &tools);
+                let (ci, co, cc) = crate::agent::persist::cumulative_stats(
+                    &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                );
+                write_status(store, session_id, ci, co, cc, Some(new_context));
+                let _ = event_tx.send(AgentEvent::SessionStats {
+                    input_tokens: ci as u32,
+                    output_tokens: co as u32,
+                    cumulative_cost: cc,
+                    context_tokens: new_context,
+                    max_context_tokens: MAX_CONTEXT_TOKENS,
+                    compact_threshold: COMPACT_THRESHOLD,
+                });
+                let _ = event_tx.send(AgentEvent::TextStep {
+                    text: format!(
+                        "✅ Contexto compactado: ~{}k → ~{}k tokens.",
+                        estimated / 1000,
+                        new_context / 1000
+                    ),
+                });
+            }
+            Err(e) => {
+                let _ = event_tx.send(AgentEvent::TextStep {
+                    text: format!("⚠️ Falha na compactação: {e} — continuando com contexto cheio."),
+                });
+            }
+        }
+    }
+
+    // Load cumulative totals from the last Status record
+    let cumul = crate::agent::persist::cumulative_stats(
+        &crate::agent::persist::load_records(&store.path).unwrap_or_default()
+    );
+    let mut cumul_in: u64 = cumul.0;
+    let mut cumul_out: u64 = cumul.1;
+    let mut cumul_cost: Option<f64> = cumul.2;
+
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
+    let mut total_cache: u32 = 0;
+    let mut run_cost: Option<f64> = None;
     let mut last_text = String::new();
+    // Size of the context for the next request: the real number reported by
+    // the API when available, the char-based estimate otherwise.
+    let mut last_context: u64 = estimate_tokens(history, &system, &tools);
 
     for _ in 0..MAX_ROUNDS {
         let mut assistant_text = String::new();
@@ -367,7 +605,29 @@ pub async fn run_workflow(
         if let Some(u) = &stream_output.usage {
             total_in += u.input_tokens;
             total_out += u.output_tokens;
+            total_cache += u.cache_read_input_tokens;
+            // Use provider-reported cost if available, otherwise estimate
+            if let Some(c) = u.cost {
+                run_cost = Some(run_cost.unwrap_or(0.0) + c);
+            }
+            // input(+cache) of this request plus its output = next context
+            if u.input_tokens + u.cache_read_input_tokens > 0 {
+                last_context =
+                    (u.input_tokens + u.cache_read_input_tokens + u.output_tokens) as u64;
+            }
         }
+
+        // Live stats for the context bar
+        let round_cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+        let live_cost = cumul_cost.unwrap_or(0.0) + round_cost;
+        let _ = event_tx.send(AgentEvent::SessionStats {
+            input_tokens: total_in + cumul_in as u32,
+            output_tokens: total_out + cumul_out as u32,
+            cumulative_cost: Some(live_cost),
+            context_tokens: last_context,
+            max_context_tokens: MAX_CONTEXT_TOKENS,
+            compact_threshold: COMPACT_THRESHOLD,
+        });
 
         // A — Interrupt no meio do stream: persistir texto parcial se não vazio,
         //     resetar flag, tentar steering ou pausar.
@@ -395,6 +655,11 @@ pub async fn run_workflow(
                 output_tokens: total_out,
                 ts: now_ms(),
             });
+            cumul_in += total_in as u64;
+            cumul_out += total_out as u64;
+            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
+            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -431,6 +696,11 @@ pub async fn run_workflow(
                 output_tokens: total_out,
                 ts: now_ms(),
             });
+            cumul_in += total_in as u64;
+            cumul_out += total_out as u64;
+            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
+            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "end_turn".into(),
                 text_output: last_text,
@@ -566,6 +836,11 @@ pub async fn run_workflow(
                 output_tokens: total_out,
                 ts: now_ms(),
             });
+            cumul_in += total_in as u64;
+            cumul_out += total_out as u64;
+            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
+            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -589,6 +864,11 @@ pub async fn run_workflow(
         output_tokens: total_out,
         ts: now_ms(),
     });
+    cumul_in += total_in as u64;
+    cumul_out += total_out as u64;
+    let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+    cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
+    write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
     let _ = event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
@@ -1178,5 +1458,155 @@ mod tests {
             }
             _ => panic!("expected AskUser"),
         }
+    }
+
+    #[test]
+    fn agent_event_round_trip_session_stats() {
+        let ev = AgentEvent::SessionStats {
+            input_tokens: 500,
+            output_tokens: 200,
+            cumulative_cost: Some(0.003),
+            context_tokens: 42_000,
+            max_context_tokens: MAX_CONTEXT_TOKENS,
+            compact_threshold: COMPACT_THRESHOLD,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["data"]["contextTokens"], 42_000);
+        assert_eq!(json["data"]["maxContextTokens"], 256_000);
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::SessionStats {
+                input_tokens,
+                output_tokens,
+                cumulative_cost,
+                context_tokens,
+                ..
+            } => {
+                assert_eq!(input_tokens, 500);
+                assert_eq!(output_tokens, 200);
+                assert_eq!(cumulative_cost, Some(0.003));
+                assert_eq!(context_tokens, 42_000);
+            }
+            _ => panic!("expected SessionStats"),
+        }
+    }
+
+    #[test]
+    fn session_stats_without_cost() {
+        let ev = AgentEvent::SessionStats {
+            input_tokens: 100,
+            output_tokens: 50,
+            cumulative_cost: None,
+            context_tokens: 0,
+            max_context_tokens: MAX_CONTEXT_TOKENS,
+            compact_threshold: COMPACT_THRESHOLD,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::SessionStats { cumulative_cost, .. } => {
+                assert_eq!(cumulative_cost, None);
+            }
+            _ => panic!("expected SessionStats"),
+        }
+    }
+
+    #[test]
+    fn estimate_tokens_returns_reasonable_value() {
+        let msg = Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text("hello world")],
+        };
+        let history = vec![msg];
+        let system = "You are a helpful assistant.";
+        let tools = vec![];
+        let estimated = estimate_tokens(&history, system, &tools);
+        assert!(estimated > 0, "should estimate some tokens");
+        assert!(estimated < 1000, "short message should be < 1k tokens");
+    }
+
+    #[test]
+    fn estimate_tokens_increases_with_history() {
+        let msg1 = Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text("a".repeat(1000))],
+        };
+        let msg2 = Message {
+            role: "assistant".into(),
+            content: vec![ContentBlock::text("b".repeat(1000))],
+        };
+        let small = estimate_tokens(&[msg1.clone()], "", &[]);
+        let large = estimate_tokens(&[msg1, msg2], "", &[]);
+        assert!(large > small, "more history should mean more tokens");
+    }
+
+    #[test]
+    fn compute_tail_turns_covers_last_two_exchanges() {
+        let user = |t: &str| SessionRecord::Turn {
+            message: Message { role: "user".into(), content: vec![ContentBlock::text(t)] },
+            ts: 0,
+        };
+        let asst = |t: &str| SessionRecord::Turn {
+            message: Message { role: "assistant".into(), content: vec![ContentBlock::text(t)] },
+            ts: 0,
+        };
+        let recs = vec![
+            user("q1"), asst("a1"),
+            user("q2"), asst("a2"),
+            user("q3"), asst("a3"),
+        ];
+        // Last 2 exchanges = q2..a3 = 4 Turn records
+        assert_eq!(compute_tail_turns(&recs), 4);
+    }
+
+    #[test]
+    fn compute_tail_turns_shrinks_when_over_budget() {
+        let big = "x".repeat((TAIL_MAX_TOKENS as usize) * 4); // way over budget alone
+        let recs = vec![
+            SessionRecord::Turn {
+                message: Message { role: "user".into(), content: vec![ContentBlock::text(big)] },
+                ts: 0,
+            },
+            SessionRecord::Turn {
+                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("a")] },
+                ts: 0,
+            },
+        ];
+        assert_eq!(compute_tail_turns(&recs), 0, "oversized tail must be dropped");
+    }
+
+    #[test]
+    fn cost_claudinio_rates() {
+        // claudinio: $0.50/M input, $0.15/M cache read, $2.00/M output
+        let cost = cost_for("claudinio", 1000, 0, 500);
+        assert!((cost - 0.0015).abs() < 0.0001, "expected ~$0.0015, got {cost}");
+    }
+
+    #[test]
+    fn cost_claudius_rates() {
+        // claudius: $3.00/M input, $0.90/M cache read, $8.00/M output
+        let cost = cost_for("claudius", 1000, 0, 500);
+        assert!((cost - 0.007).abs() < 0.0001, "expected ~$0.007, got {cost}");
+    }
+
+    #[test]
+    fn cost_includes_cache_read() {
+        // 1M cache-read tokens at claudinio rates = $0.15
+        let cost = cost_for("claudinio", 0, 1_000_000, 0);
+        assert!((cost - 0.15).abs() < 0.0001, "expected ~$0.15, got {cost}");
+    }
+
+    #[test]
+    fn cost_unknown_model_falls_back_to_claudinio() {
+        assert_eq!(
+            cost_for("some-other-model", 1000, 100, 500),
+            cost_for("claudinio", 1000, 100, 500)
+        );
+    }
+
+    #[test]
+    fn compact_threshold_is_75_percent_of_window() {
+        assert_eq!(MAX_CONTEXT_TOKENS, 256_000);
+        assert_eq!(COMPACT_THRESHOLD, 192_000);
     }
 }

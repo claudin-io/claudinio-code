@@ -9,6 +9,9 @@ import {
   loadSession,
   queueSteering,
   interruptSession,
+  compactSession,
+  getSessionStats,
+  getConfig,
   type AgentEvent,
   type AskUserData,
   type ToolCallData,
@@ -43,11 +46,17 @@ marked.use({
 
 type Status = "idle" | "thinking" | "awaiting_approval" | "awaiting_input" | "done" | "error";
 
+interface ArchivedBlock {
+  summary: string;
+  messages: ChatMessage[];
+}
+
 interface ChatMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "archived";
   text: string;
   steps?: TimelineItem[];
   done?: DoneData;
+  archived?: ArchivedBlock;
 }
 
 interface SubagentTimelineState {
@@ -113,20 +122,90 @@ interface ContentBlockJson {
   content?: string;
 }
 
+// Mirror of persist.rs is_real_user_turn: a turn record that starts a real
+// user exchange (role "user", first content block is plain text).
+function isRealUserTurn(rec: SessionRecord): boolean {
+  if (rec.kind !== "turn" || rec.role !== "user") return false;
+  const content = (rec.content as ContentBlockJson[]) ?? [];
+  return content.length > 0 && content[0].type === "text";
+}
+
+// Mirror of persist.rs tail_start_index: where the kept-verbatim tail of a
+// Compacted marker begins. Expands backwards so the tail starts on a real
+// user turn; drops the tail (returns compactIdx) when none exists.
+function tailStartIndex(recs: SessionRecord[], compactIdx: number, tailTurns: number): number {
+  if (tailTurns <= 0) return compactIdx;
+  let start = compactIdx;
+  let count = 0;
+  for (let i = compactIdx - 1; i >= 0; i--) {
+    if (recs[i].kind === "turn") {
+      start = i;
+      count++;
+      if (count >= tailTurns) break;
+    }
+  }
+  if (count === 0) return compactIdx;
+  for (;;) {
+    if (isRealUserTurn(recs[start])) break;
+    let prev = -1;
+    for (let i = start - 1; i >= 0; i--) {
+      if (recs[i].kind === "turn") {
+        prev = i;
+        break;
+      }
+    }
+    if (prev < 0) return compactIdx;
+    start = prev;
+  }
+  // Pull in the raw user/steering records that precede the tail's user turn
+  // so the "Você" bubble renders in the active view, not the archive.
+  while (start > 0 && (recs[start - 1].kind === "user" || recs[start - 1].kind === "steering")) {
+    start--;
+  }
+  return start;
+}
+
+// Relocate each Compacted marker to before its kept-verbatim tail so the fold
+// logic below archives only what the backend actually summarized.
+function normalizeCompactTails(records: SessionRecord[]): SessionRecord[] {
+  const recs = [...records];
+  for (let i = 0; i < recs.length; i++) {
+    const rec = recs[i];
+    if (rec.kind !== "compacted") continue;
+    const tailTurns = Number(rec.tail_turns ?? 0);
+    if (tailTurns <= 0) continue;
+    const start = tailStartIndex(recs, i, tailTurns);
+    if (start < i) {
+      recs.splice(i, 1);
+      recs.splice(start, 0, rec);
+    }
+  }
+  return recs;
+}
+
 // Rebuild the chat transcript from a reopened session's JSONL records. User
 // turns become user bubbles; everything between them folds into one assistant
 // message with a phase/tool timeline. Tool results are paired to their calls by
 // tool_use_id across turn records.
-function recordsToMessages(records: SessionRecord[]): ChatMessage[] {
+//
+// Compacted records are rendered as an ArchivedBlock: the messages the
+// compaction summarized fold into a collapsible section; the kept-verbatim
+// tail (tail_turns) stays in the active view.
+function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
+  const records = normalizeCompactTails(rawRecords);
   const out: ChatMessage[] = [];
   let steps: TimelineItem[] = [];
   let assistantText = "";
   let done: DoneData | undefined;
   const toolIndex = new Map<string, number>();
+  // Pile of messages accumulated before a Compacted record
+  let preCompact: ChatMessage[] = [];
 
   const flush = () => {
     if (steps.length || assistantText || done) {
-      out.push({ role: "assistant", text: assistantText, steps: [...steps], done });
+      const msg: ChatMessage = { role: "assistant", text: assistantText, steps: [...steps] };
+      if (done) msg.done = done;
+      preCompact.push(msg);
       steps = [];
       assistantText = "";
       done = undefined;
@@ -134,11 +213,34 @@ function recordsToMessages(records: SessionRecord[]): ChatMessage[] {
     }
   };
 
+  const flushToOut = () => {
+    flush();
+    if (preCompact.length > 0) {
+      out.push(...preCompact);
+      preCompact = [];
+    }
+  };
+
   for (const rec of records) {
     const kind = rec.kind;
-    if (kind === "user") {
+    if (kind === "compacted") {
+      // Flush current assistant message into preCompact pile
       flush();
-      out.push({ role: "user", text: String(rec.text ?? "") });
+      // Wrap all pre-compact messages into an ArchivedBlock
+      if (preCompact.length > 0) {
+        out.push({
+          role: "archived",
+          text: "",
+          archived: {
+            summary: String(rec.summary ?? ""),
+            messages: [...preCompact],
+          },
+        });
+        preCompact = [];
+      }
+    } else if (kind === "user") {
+      flush();
+      preCompact.push({ role: "user", text: String(rec.text ?? "") });
     } else if (kind === "phase") {
       steps.push({ type: "phase", phase: rec.phase as Phase });
     } else if (kind === "phase_result") {
@@ -212,7 +314,7 @@ function recordsToMessages(records: SessionRecord[]): ChatMessage[] {
       };
     }
   }
-  flush();
+  flushToOut();
   return out;
 }
 
@@ -231,6 +333,70 @@ export const ChatPanel: Component = () => {
   const [showSessions, setShowSessions] = createSignal(false);
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   const [queuedSteering, setQueuedSteering] = createSignal<string[]>([]);
+  // Two distinct numbers, both computed by the backend (single source of
+  // truth): contextTokens = size of the NEXT request's context (drops after
+  // compaction); cumulative totals/cost never reset.
+  const [contextStats, setContextStats] = createSignal<{
+    contextTokens: number;
+    cumulativeTokens: number;
+    estimatedCost?: number;
+  }>({ contextTokens: 0, cumulativeTokens: 0 });
+  const [maxContextTokens, setMaxContextTokens] = createSignal(256_000);
+  const [compactThreshold, setCompactThreshold] = createSignal(192_000);
+  const [isCompacting, setIsCompacting] = createSignal(false);
+
+  onMount(() => {
+    getConfig()
+      .then((cfg) => {
+        if (cfg.maxContextTokens) setMaxContextTokens(cfg.maxContextTokens);
+        if (cfg.compactThreshold) setCompactThreshold(cfg.compactThreshold);
+      })
+      .catch(() => {});
+  });
+
+  const statsFromRecords = (records: SessionRecord[]) => {
+    const s = getSessionStats(records);
+    setContextStats({
+      contextTokens: s.contextTokens ?? 0,
+      cumulativeTokens: s.totalInputTokens + s.totalOutputTokens,
+      estimatedCost: s.totalCost,
+    });
+  };
+
+  const doCompact = async () => {
+    if (isCompacting() || !activeSessionId()) return;
+    // Never compact mid-stream: the running workflow already auto-compacts.
+    if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
+    setIsCompacting(true);
+    try {
+      await compactSession(activeSessionId()!, (event) => {
+        if (event.event === "TextStep") {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.role === "archived") {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                ...last,
+                text: event.data.text,
+              };
+              return updated;
+            }
+            return prev;
+          });
+        }
+      });
+      // Reload session to get the updated view and the new (smaller) context
+      const records = await loadSession(activeSessionId()!);
+      setMessages(recordsToMessages(records));
+      statsFromRecords(records);
+      setCurrentSteps([]);
+      scrollToBottom();
+    } catch (e) {
+      setMessages((prev) => [...prev, { role: "user", text: `Compactação falhou: ${e}` }]);
+    } finally {
+      setIsCompacting(false);
+    }
+  };
 
   let messagesEndRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
@@ -445,9 +611,11 @@ export const ChatPanel: Component = () => {
         }
         return s;
       });
+      // Stats are NOT recomputed here: the last SessionStats event from the
+      // backend already carries the authoritative numbers.
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", text: data.textOutput, steps: final, done: data },
+        { role: "assistant" as const, text: data.textOutput, steps: final, done: data },
       ]);
       setCurrentSteps([]);
       setQueuedSteering([]);
@@ -456,6 +624,15 @@ export const ChatPanel: Component = () => {
       setThinkingStart(0);
       setStatus("done");
       scrollToBottom();
+    } else if (event.event === "SessionStats") {
+      const data = event.data;
+      setContextStats({
+        contextTokens: data.contextTokens,
+        cumulativeTokens: data.inputTokens + data.outputTokens,
+        estimatedCost: data.cumulativeCost,
+      });
+      if (data.maxContextTokens) setMaxContextTokens(data.maxContextTokens);
+      if (data.compactThreshold) setCompactThreshold(data.compactThreshold);
     } else if (event.event === "Error") {
       setMessages((prev) => [...prev, { role: "user", text: `Erro: ${event.data}` }]);
       setCurrentSteps([]);
@@ -467,7 +644,7 @@ export const ChatPanel: Component = () => {
 
   const send = async () => {
     const text = input().trim();
-    if (!text || status() === "awaiting_approval" || status() === "awaiting_input") return;
+    if (!text || isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input") return;
 
     // If the agent is currently thinking, queue the message as steering
     if (status() === "thinking") {
@@ -543,6 +720,7 @@ export const ChatPanel: Component = () => {
     setMessages([]);
     setCurrentSteps([]);
     setThinkingStart(0);
+    setContextStats({ contextTokens: 0, cumulativeTokens: 0 });
     setStatus("idle");
     setShowSessions(false);
   };
@@ -564,6 +742,8 @@ export const ChatPanel: Component = () => {
     try {
       const records = await loadSession(id);
       setMessages(recordsToMessages(records));
+      statsFromRecords(records);
+      setActiveSessionId(id);
       setCurrentSteps([]);
       setThinkingStart(0);
       setStatus("idle");
@@ -717,6 +897,13 @@ export const ChatPanel: Component = () => {
                     />
                   </Show>
                 </Show>
+
+                <Show when={msg.role === "archived" && msg.archived}>
+                  <ArchivedBlock
+                    summary={msg.archived!.summary}
+                    messages={msg.archived!.messages}
+                  />
+                </Show>
               </div>
             )}
           </For>
@@ -799,15 +986,17 @@ export const ChatPanel: Component = () => {
                 autoResize();
               }}
               onKeyDown={handleKeyDown}
-              disabled={status() === "awaiting_approval" || status() === "awaiting_input"}
+              disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
               placeholder={
-                status() === "awaiting_approval"
-                  ? "Aprove ou rejeite a edição primeiro…"
-                  : status() === "awaiting_input"
-                    ? "Responda as perguntas acima primeiro…"
-                    : status() === "thinking"
-                      ? "Digite para orientar o agente… (Esc para pausar)"
-                      : "Pergunte algo sobre o código…"
+                isCompacting()
+                  ? "Compactando contexto…"
+                  : status() === "awaiting_approval"
+                    ? "Aprove ou rejeite a edição primeiro…"
+                    : status() === "awaiting_input"
+                      ? "Responda as perguntas acima primeiro…"
+                      : status() === "thinking"
+                        ? "Digite para orientar o agente… (Esc para pausar)"
+                        : "Pergunte algo sobre o código…"
               }
               class="max-h-[156px] min-h-[36px] flex-1 resize-none border-0 bg-transparent p-1 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
               rows={1}
@@ -816,6 +1005,7 @@ export const ChatPanel: Component = () => {
               onClick={send}
               disabled={
                 !input().trim() ||
+                isCompacting() ||
                 status() === "awaiting_approval" ||
                 status() === "awaiting_input"
               }
@@ -826,6 +1016,146 @@ export const ChatPanel: Component = () => {
           </div>
         </div>
       </div>
+
+      <ContextFooter
+        contextTokens={contextStats().contextTokens}
+        maxTokens={maxContextTokens()}
+        cumulativeTokens={contextStats().cumulativeTokens}
+        estimatedCost={contextStats().estimatedCost}
+        isCompacting={isCompacting()}
+        onCompact={doCompact}
+        showCompact={
+          contextStats().contextTokens > compactThreshold() * 0.85 &&
+          status() !== "thinking" &&
+          status() !== "awaiting_approval" &&
+          status() !== "awaiting_input"
+        }
+      />
+    </div>
+  );
+};
+
+const ArchivedBlock: Component<{
+  summary: string;
+  messages: ChatMessage[];
+}> = (props) => {
+  const [expanded, setExpanded] = createSignal(false);
+
+  return (
+    <div class="mb-6 overflow-hidden rounded-lg border border-border-subtle bg-surface-1">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-surface-2"
+      >
+        <Icon
+          name="compress"
+          class={`h-3.5 w-3.5 shrink-0 text-ink-faint transition-transform duration-120 ${expanded() ? "rotate-90" : ""}`}
+        />
+        <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
+          Histórico compactado
+        </span>
+        <div class="h-px flex-1 bg-border-subtle" />
+        <span class="text-[11px] text-ink-faint">
+          {props.messages.length} mensagens
+        </span>
+        <Icon
+          name="chevron-right"
+          class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${expanded() ? "rotate-90" : ""}`}
+        />
+      </button>
+
+      <Show when={expanded()}>
+        <div class="border-t border-border-subtle px-3 py-2">
+          <div class="mb-3 text-[12px] leading-[1.6] text-ink-muted">
+            {props.summary}
+          </div>
+          <div class="space-y-2 opacity-60">
+            <For each={props.messages}>
+              {(msg) => (
+                <div class="rounded bg-surface-0 px-2 py-1.5">
+                  <span class="mr-2 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+                    {msg.role === "user" ? "Você" : "Agente"}
+                  </span>
+                  <span class="text-[12px] text-ink-muted">
+                    {msg.text.length > 120 ? `${msg.text.slice(0, 120)}…` : msg.text}
+                  </span>
+                </div>
+              )}
+            </For>
+          </div>
+        </div>
+      </Show>
+    </div>
+  );
+};
+
+const ContextFooter: Component<{
+  contextTokens: number;
+  maxTokens: number;
+  cumulativeTokens: number;
+  estimatedCost?: number;
+  isCompacting: boolean;
+  onCompact: () => void;
+  showCompact: boolean;
+}> = (props) => {
+  const pct = () => Math.min((props.contextTokens / props.maxTokens) * 100, 100);
+  const barColor = () => {
+    if (pct() < 50) return "bg-success";
+    if (pct() < 80) return "bg-[#d9a05b]";
+    if (pct() < 95) return "bg-accent";
+    return "bg-danger";
+  };
+
+  const formatTokens = (n: number) => {
+    if (n < 1000) return `${n}`;
+    return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+  };
+
+  return (
+    <div class="flex items-center gap-3 border-t border-border-subtle bg-surface-2 px-6 py-1.5">
+      <div class="flex flex-1 items-center gap-2" title="Contexto da próxima requisição">
+        <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-0">
+          <div
+            class={`h-full rounded-full transition-[width] duration-300 ease-out ${barColor()}`}
+            style={{ width: `${pct()}%` }}
+          />
+        </div>
+        <span class="font-mono text-[11px] text-ink-faint whitespace-nowrap">
+          {formatTokens(props.contextTokens)} / {formatTokens(props.maxTokens)}
+        </span>
+      </div>
+
+      <Show when={props.cumulativeTokens > 0}>
+        <span
+          class="font-mono text-[11px] text-ink-faint whitespace-nowrap"
+          title="Tokens acumulados da sessão"
+        >
+          total: {formatTokens(props.cumulativeTokens)}
+        </span>
+      </Show>
+
+      <Show when={props.estimatedCost !== undefined}>
+        <span class="font-mono text-[11px] text-ink-faint" title="Custo acumulado da sessão">
+          ~${props.estimatedCost!.toFixed(2)}
+        </span>
+      </Show>
+
+      <Show when={props.showCompact && !props.isCompacting}>
+        <button
+          onClick={props.onCompact}
+          class="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-ink-muted hover:bg-surface-3 hover:text-accent"
+        >
+          <Icon name="compress" class="h-3 w-3" />
+          Compactar
+        </button>
+      </Show>
+
+      <Show when={props.isCompacting}>
+        <span class="flex items-center gap-1 text-[11px] text-accent">
+          <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
+          Compactando…
+        </span>
+      </Show>
     </div>
   );
 };

@@ -28,6 +28,8 @@ export interface AgentConfig {
   baseUrl: string;
   model: string;
   hasApiKey: boolean;
+  maxContextTokens: number;
+  compactThreshold: number;
 }
 
 export interface SetConfigArgs {
@@ -72,7 +74,18 @@ export type AgentEvent =
   | { event: "Error"; data: string }
   | { event: "SubagentStarted"; data: SubagentStartedData }
   | { event: "SubagentDone"; data: SubagentDoneData }
-  | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } };
+  | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } }
+  | {
+      event: "SessionStats";
+      data: {
+        inputTokens: number;
+        outputTokens: number;
+        cumulativeCost?: number;
+        contextTokens: number;
+        maxContextTokens: number;
+        compactThreshold: number;
+      };
+    };
 
 export interface AskUserQuestion {
   question: string;
@@ -150,7 +163,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status";
   [key: string]: unknown;
 };
 
@@ -188,6 +201,42 @@ export function queueSteering(sessionId: string, text: string): Promise<void> {
 
 export function interruptSession(sessionId: string): Promise<void> {
   return invoke<void>("interrupt_session", { sessionId });
+}
+
+export function compactSession(
+  sessionId: string,
+  onEvent: (event: AgentEvent) => void,
+): Promise<string> {
+  const channel = new Channel<AgentEvent>();
+  channel.onmessage = onEvent;
+  return invoke<string>("compact_session", { sessionId, eventChannel: channel });
+}
+
+/// Cumulative token/cost stats and current context size from the last Status
+/// record in a session.
+export function getSessionStats(records: SessionRecord[]): {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCost?: number;
+  contextTokens?: number;
+} {
+  let totalInput = 0;
+  let totalOutput = 0;
+  let totalCost: number | undefined;
+  let contextTokens: number | undefined;
+  for (const rec of records) {
+    if (rec.kind === "status") {
+      totalInput = Number(rec.total_input_tokens ?? 0);
+      totalOutput = Number(rec.total_output_tokens ?? 0);
+      if (rec.total_cost != null) {
+        totalCost = Number(rec.total_cost);
+      }
+      if (rec.context_tokens != null) {
+        contextTokens = Number(rec.context_tokens);
+      }
+    }
+  }
+  return { totalInputTokens: totalInput, totalOutputTokens: totalOutput, totalCost, contextTokens };
 }
 
 export function setConfig(args: SetConfigArgs): Promise<void> {

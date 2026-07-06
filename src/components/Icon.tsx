@@ -30,6 +30,8 @@ const PATHS: Record<string, string> = {
   clock: "M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10zM12 6v6l4 2",
   layers: "M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",
   "external-link": "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6m4-3h6v6m-5 8L21 3",
+  compress:
+    "M8 4v4H4m16 0h-4V4M4 16h4v4m12-4h-4v4",
 };
 
 export type IconName = keyof typeof PATHS;

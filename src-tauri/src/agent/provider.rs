@@ -130,10 +130,44 @@ struct RequestBody {
     system: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
+    /// Cost in USD as returned by the provider (if supported), otherwise None.
+    /// We calculate an estimate when the provider does not supply it.
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+/// Merge usage fields from an SSE event into the accumulated usage.
+/// Anthropic reports input_tokens in message_start and output_tokens in
+/// message_delta; other providers (claudin.io) send everything in
+/// message_delta with zeros in message_start — so merge, never replace,
+/// and only take token counts that are > 0.
+fn merge_usage(usage: &mut Option<Usage>, value: &Value) {
+    let Some(obj) = value.as_object() else { return };
+    let u = usage.get_or_insert_with(Usage::default);
+    if let Some(v) = obj.get("input_tokens").and_then(|v| v.as_u64()) {
+        if v > 0 {
+            u.input_tokens = v as u32;
+        }
+    }
+    if let Some(v) = obj.get("output_tokens").and_then(|v| v.as_u64()) {
+        if v > 0 {
+            u.output_tokens = v as u32;
+        }
+    }
+    if let Some(v) = obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+        if v > 0 {
+            u.cache_read_input_tokens = v as u32;
+        }
+    }
+    if let Some(v) = obj.get("cost").and_then(|v| v.as_f64()) {
+        u.cost = Some(v);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,10 +222,14 @@ pub async fn stream_message(
         return Err(err_msg);
     }
 
-    let dump_path = std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));
-    let mut dump = std::fs::File::create(&dump_path)
-        .map(|f| std::io::BufWriter::new(f))
-        .ok();
+    let mut dump = if std::env::var("CLAUDINIO_DEBUG_DUMP").is_ok() {
+        let dump_path = std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));
+        std::fs::File::create(&dump_path)
+            .map(|f| std::io::BufWriter::new(f))
+            .ok()
+    } else {
+        None
+    };
     if let Some(ref mut f) = dump {
         use std::io::Write;
         let _ = writeln!(f, "--- API RAW DUMP session={session_id} ---");
@@ -320,7 +358,7 @@ pub async fn stream_message(
                 stop_reason = Some(reason.to_string());
             }
             if let Some(u) = full.get("usage") {
-                usage = serde_json::from_value(u.clone()).ok();
+                merge_usage(&mut usage, u);
             }
         }
     }
@@ -436,10 +474,15 @@ fn process_line(
                 }
             }
             if let Some(u) = value.get("usage") {
-                *usage = serde_json::from_value(u.clone()).ok();
+                merge_usage(usage, u);
             }
         }
-        "message_start" | "ping" => {}
+        "message_start" => {
+            if let Some(u) = value.pointer("/message/usage") {
+                merge_usage(usage, u);
+            }
+        }
+        "ping" => {}
         _ => {}
     }
 
@@ -458,6 +501,69 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tauri::ipc::InvokeResponseBody;
+
+    #[test]
+    fn test_usage_merged_across_message_start_and_delta_anthropic_style() {
+        // Anthropic: input_tokens in message_start, output_tokens in message_delta
+        let mut usage: Option<Usage> = None;
+        merge_usage(
+            &mut usage,
+            &json!({"input_tokens": 1200, "output_tokens": 0, "cache_read_input_tokens": 300}),
+        );
+        merge_usage(&mut usage, &json!({"output_tokens": 64}));
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 1200);
+        assert_eq!(u.output_tokens, 64);
+        assert_eq!(u.cache_read_input_tokens, 300);
+        assert_eq!(u.cost, None);
+    }
+
+    #[test]
+    fn test_usage_merged_claudinio_style_delta_only() {
+        // claudin.io: zeros in message_start, full usage in message_delta
+        let mut usage: Option<Usage> = None;
+        merge_usage(
+            &mut usage,
+            &json!({"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}),
+        );
+        merge_usage(&mut usage, &json!({"input_tokens": 15, "output_tokens": 64}));
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 15);
+        assert_eq!(u.output_tokens, 64);
+        assert_eq!(u.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_process_line_populates_usage_from_message_start() {
+        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let mut text_deltas = Vec::new();
+        let mut tool_uses = Vec::new();
+        let mut tool_inputs = std::collections::HashMap::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut assistant_text = String::new();
+        let mut thinking_text = String::new();
+
+        process_line(
+            "message_start",
+            r#"{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":500,"output_tokens":0}}}"#,
+            &chan, "s1", &mut assistant_text, &mut thinking_text,
+            &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+        process_line(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#,
+            &chan, "s1", &mut assistant_text, &mut thinking_text,
+            &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 500);
+        assert_eq!(u.output_tokens, 42);
+        assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+    }
 
     #[test]
     fn test_input_json_delta_accumulates_tool_args() {
