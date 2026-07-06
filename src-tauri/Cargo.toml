@@ -38,4 +38,5 @@ tokenizers = "0.23"
 serde_yaml = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
+image = "0.25"
 
