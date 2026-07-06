@@ -767,29 +767,12 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
     let ts_language = match get_language(lang) {
         Ok(l) => l,
         Err(_) => {
-            // Fallback: sem tree-sitter, criamos um símbolo sintético do arquivo
-            // para que o arquivo apareça na semantic search (embedding do conteúdo)
-            // e na busca FTS (keyword search no nome do arquivo).
-            let file_name = Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
-                .to_string();
-            let line_count = content.lines().count() as i64;
+            // Fallback: sem tree-sitter, usamos chunkers inteligentes baseados
+            // em padrões de cada linguagem (Kotlin, Gleam, Fish, SCSS, Less, DOT, Org).
+            let symbols = crate::code_intel::fallback::chunk_fallback(lang, path, content);
             return ParseResult {
                 language: lang.into(),
-                symbols: vec![ParsedSymbol {
-                    name: file_name,
-                    kind: "file".into(),
-                    parent_context: None,
-                    signature: None,
-                    doc_comment: None,
-                    body_text: Some(content.to_string()),
-                    start_line: 1,
-                    start_col: 1,
-                    end_line: line_count.max(1),
-                    end_col: 1,
-                }],
+                symbols,
                 calls: vec![],
                 error: None,
             };
