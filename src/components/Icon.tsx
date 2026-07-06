@@ -62,6 +62,15 @@ const PATHS: Record<string, string[]> = {
   plus: [
     "M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z",
   ],
+  // codicon:thinking by Microsoft (16×16 — viewBox prop handles scaling)
+  // https://github.com/microsoft/vscode-codicons
+  "thinking-face": [
+    "M9.813 1c1.172 0 2.139.872 2.291 2.002a2.5 2.5 0 0 1 1.467 4.442A3 3 0 0 1 15 10.001v.25a2.75 2.75 0 0 1-2.375 2.724l-.084.271a2.5 2.5 0 0 1-2.386 1.755H10a2.5 2.5 0 0 1-2-1c-.456.607-1.182 1-2 1h-.155a2.5 2.5 0 0 1-2.386-1.755l-.084-.271A2.75 2.75 0 0 1 1 10.25V10c0-1.082.572-2.029 1.429-2.557a2.5 2.5 0 0 1 1.467-4.442a2.313 2.313 0 0 1 4.103-1.126A2.3 2.3 0 0 1 9.811 1zM6.188 2c-.725 0-1.312.588-1.312 1.312V3.5a.5.5 0 0 1-.5.5h-.375a1.5 1.5 0 0 0-.077 2.998L4.001 7h.5a.5.5 0 0 1 0 1h-.5l-.103.002a2 2 0 0 0-1.897 1.999v.25c0 .966.783 1.75 1.75 1.75c.192 0 .364.109.447.277l.03.073l.187.596a1.5 1.5 0 0 0 1.432 1.054h.155a1.5 1.5 0 0 0 1.5-1.5V3.312C7.502 2.587 6.914 2 6.19 2zm3.625 0c-.725 0-1.312.588-1.312 1.312v9.189a1.5 1.5 0 0 0 1.5 1.5h.155c.656 0 1.236-.428 1.432-1.053l.187-.597l.03-.074a.5.5 0 0 1 .447-.276a1.75 1.75 0 0 0 1.75-1.75V10a2 2 0 0 0-1.897-1.999L12.002 8h-.5a.5.5 0 0 1 0-1h.5l.077-.002A1.5 1.5 0 0 0 12.002 4h-.375a.5.5 0 0 1-.5-.5v-.188c0-.725-.588-1.312-1.312-1.312z",
+  ],
+  // carbon:tool-box (24×24)
+  "construction-worker": [
+    "M27 9h-3V6a2 2 0 0 0-2-2H10a2 2 0 0 0-2 2v3H5a3 3 0 0 0-3 3v14a2 2 0 0 0 2 2h24a2 2 0 0 0 2-2V12a3 3 0 0 0-3-3M10 6h12v3H10Zm18 20H4v-9h8v5h8v-5h8Zm-14-9h4v3h-4ZM4 15v-3a1 1 0 0 1 1-1h22a1 1 0 0 1 1 1v3Z",
+  ],
   clock: [
     "M6 2h12v2H6zM2 6h2v12H2zm18 0h2v12h-2zm-2-2h2v2h-2zM4 4h2v2H4zm2 18h12v-2H6zm12-2h2v-2h-2zM4 20h2v-2H4zm7-14h2v7h-2zm2 7h2v2h-2zm2 2h2v2h-2z",
   ],
@@ -111,6 +120,12 @@ const PATHS: Record<string, string[]> = {
 
 export type IconName = keyof typeof PATHS;
 
+// Icons that use a non-standard viewBox (e.g. 16×16 codicon glyphs)
+const VIEWBOX: Partial<Record<IconName, string>> = {
+  "thinking-face": "0 0 16 16",
+  "construction-worker": "0 0 32 32",
+};
+
 export const Icon: Component<{ name: IconName; class?: string; stroke?: boolean }> = (props) => {
   const paths = PATHS[props.name];
   if (!paths) return null;
@@ -119,7 +134,7 @@ export const Icon: Component<{ name: IconName; class?: string; stroke?: boolean 
       xmlns="http://www.w3.org/2000/svg"
       width="24"
       height="24"
-      viewBox="0 0 24 24"
+      viewBox={VIEWBOX[props.name] ?? "0 0 24 24"}
       fill={props.stroke ? "none" : "currentColor"}
       stroke={props.stroke ? "currentColor" : undefined}
       stroke-width={props.stroke ? "1.5" : undefined}
