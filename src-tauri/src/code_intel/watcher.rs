@@ -1,5 +1,7 @@
 use crate::code_intel::db::IndexDb;
+use crate::code_intel::embeddings::SharedEmbedder;
 use crate::code_intel::indexer;
+use crate::state::AppState;
 use notify::Config;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
@@ -7,6 +9,13 @@ use notify::Watcher;
 use std::path::Path;
 use std::time::Duration;
 use tauri::Emitter;
+use tauri::Manager;
+
+fn resolve_embedder(handle: &tauri::AppHandle) -> Option<SharedEmbedder> {
+    let state = handle.state::<AppState>();
+    let guard = state.embedding_model.blocking_lock();
+    guard.clone()
+}
 
 pub struct FileWatcher {
     _watcher: RecommendedWatcher,
@@ -54,6 +63,8 @@ impl FileWatcher {
                         Err(_) => return,
                     };
 
+                    let embedder = resolve_embedder(&h);
+
                     for path_str in &paths {
                         let p = Path::new(path_str);
                         if !p.exists() {
@@ -72,7 +83,8 @@ impl FileWatcher {
                             "file": path_str,
                         }));
 
-                        match indexer::reindex_file(&db, path_str, None) {
+                        let mut emb = embedder.as_ref().and_then(|e| e.lock().ok());
+                        match indexer::reindex_file(&db, path_str, emb.as_deref_mut()) {
                             Ok(Some(result)) => {
                                 let _ = h.emit("index-progress", serde_json::json!({
                                     "status": "reindexed",

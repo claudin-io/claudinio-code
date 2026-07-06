@@ -17,7 +17,9 @@ pub struct ToolContext {
     pub db_path: Option<String>,
     pub lsp_manager: Option<Arc<Mutex<LspManager>>>,
     pub workspace_root: Option<String>,
-    pub embedding_model: Option<SharedEmbedder>,
+    /// Live handle into AppState so a model that finishes loading mid-session
+    /// becomes visible without recreating the context.
+    pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -317,12 +319,16 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(15);
             let db = open_db(&ctx.db_path)?;
-            let model = ctx
-                .embedding_model
-                .as_ref()
-                .ok_or("semantic search not available — open a workspace or wait for the embedding model to load")?;
-            let mut model = model.lock().map_err(|e| format!("embedder lock: {e}"))?;
-            let query_vec = model.encode_query(query)?;
+            let model = ctx.embedding_model.lock().await.clone().ok_or(
+                "semantic search not available — the embedding model is still loading or failed to load (check app logs)",
+            )?;
+            let query = query.to_string();
+            let query_vec = tokio::task::spawn_blocking(move || {
+                let mut model = model.lock().map_err(|e| format!("embedder lock: {e}"))?;
+                model.encode_query(&query)
+            })
+            .await
+            .map_err(|e| format!("encode task panicked: {e}"))??;
             let results = db.search_by_embedding(&query_vec, limit as usize)?;
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }
@@ -430,7 +436,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -444,7 +450,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -458,7 +464,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -470,7 +476,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -485,7 +491,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -500,7 +506,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -514,7 +520,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -531,7 +537,7 @@ mod tests {
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
-            embedding_model: None,
+            embedding_model: Arc::new(Mutex::new(None)),
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));

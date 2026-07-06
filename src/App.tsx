@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onMount } from "solid-js";
+import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
 import { pickFolder, openWorkspace, setConfig, getConfig, type IndexProgress } from "./lib/ipc";
@@ -41,10 +41,22 @@ function App() {
   const [showTree, setShowTree] = createSignal(false);
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
 
-  // Listen for global index-progress events (model loading, watcher re-indexing)
+  // Listen for global index-progress events (model loading, embedding
+  // generation, watcher re-indexing)
   onMount(() => {
     const unlisten = listen<IndexProgress>("index-progress", (event) => {
       setProgress(event.payload);
+      const st = event.payload.status;
+      if (st === "embeddings_done") {
+        setIndexStatus((prev) =>
+          prev
+            ? `${prev} · ${event.payload.symbolsIndexed} embeddings`
+            : `${event.payload.symbolsIndexed} embeddings`,
+        );
+        setTimeout(() => setProgress((p) => (p?.status === st ? null : p)), 1500);
+      } else if (st === "embeddings_error" || st === "embedding_model_error") {
+        setTimeout(() => setProgress((p) => (p?.status === st ? null : p)), 4000);
+      }
     });
     return () => { unlisten.then((f) => f()); };
   });
@@ -83,7 +95,12 @@ function App() {
     try {
       const s = await openWorkspace(folder, (p) => setProgress(p));
       setIndexStatus(`${s.filesCount} arquivos, ${s.symbolsCount} símbolos`);
-      setTimeout(() => setProgress(null), 800);
+      // Only clear scan progress — the embedding phase keeps reporting after
+      // openWorkspace returns and clears itself on its terminal statuses.
+      setTimeout(
+        () => setProgress((p) => (p && p.status !== "done" && p.status !== "indexing" ? p : null)),
+        800,
+      );
     } catch (e) {
       setIndexStatus(`erro: ${e}`);
       setProgress(null);
@@ -269,36 +286,57 @@ function App() {
                   </div>
                 }
               >
-                <Show when={progress()!.totalFiles > 0}
+                <Switch
                   fallback={
                     <div class="font-mono text-[10px] text-ink-faint">
                       Carregando modelo…
                     </div>
                   }
                 >
-                  <div class="flex flex-col gap-1">
-                    <div class="flex items-center justify-between text-[10px]">
-                      <span class="text-ink-muted">Indexando</span>
-                      <span class="font-mono text-ink-faint">
-                        {progress()!.filesIndexed}/{progress()!.totalFiles}
-                      </span>
+                  <Match when={progress()!.status === "embeddings_done"}>
+                    <div class="font-mono text-[10px] text-ink-faint">
+                      Embeddings prontos · {progress()!.symbolsIndexed} símbolos
                     </div>
-                    <div class="h-1 w-full overflow-hidden rounded-full bg-surface-0">
-                      <div
-                        class="h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
-                        style={{
-                          width:
-                            progress()!.totalFiles > 0
-                              ? `${(progress()!.filesIndexed / progress()!.totalFiles) * 100}%`
-                              : "0%",
-                        }}
-                      />
+                  </Match>
+                  <Match
+                    when={
+                      progress()!.status === "embeddings_error" ||
+                      progress()!.status === "embedding_model_error"
+                    }
+                  >
+                    <div class="font-mono text-[10px] text-red-400">
+                      Falha nos embeddings — busca semântica indisponível
                     </div>
-                    <div class="font-mono text-[9px] text-ink-faint">
-                      {progress()!.symbolsIndexed} símbolos
+                  </Match>
+                  <Match when={progress()!.totalFiles > 0}>
+                    <div class="flex flex-col gap-1">
+                      <div class="flex items-center justify-between text-[10px]">
+                        <span class="text-ink-muted">
+                          {progress()!.status === "embedding"
+                            ? "Gerando embeddings"
+                            : "Indexando"}
+                        </span>
+                        <span class="font-mono text-ink-faint">
+                          {progress()!.filesIndexed}/{progress()!.totalFiles}
+                        </span>
+                      </div>
+                      <div class="h-1 w-full overflow-hidden rounded-full bg-surface-0">
+                        <div
+                          class="h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
+                          style={{
+                            width:
+                              progress()!.totalFiles > 0
+                                ? `${(progress()!.filesIndexed / progress()!.totalFiles) * 100}%`
+                                : "0%",
+                          }}
+                        />
+                      </div>
+                      <div class="font-mono text-[9px] text-ink-faint">
+                        {progress()!.symbolsIndexed} símbolos
+                      </div>
                     </div>
-                  </div>
-                </Show>
+                  </Match>
+                </Switch>
               </Show>
             </div>
           </Show>

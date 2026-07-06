@@ -26,7 +26,7 @@ pub struct AppState {
     pub lsp_manager: Arc<Mutex<LspManager>>,
     pub active_session: Mutex<Option<SessionHandle>>,
     pub steering: Arc<SteeringCtl>,
-    pub embedding_model: Mutex<Option<SharedEmbedder>>,
+    pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
 }
 
 impl AppState {
@@ -41,7 +41,7 @@ impl AppState {
             lsp_manager: Arc::new(Mutex::new(LspManager::new())),
             active_session: Mutex::new(None),
             steering: Arc::new(SteeringCtl::new()),
-            embedding_model: Mutex::new(None),
+            embedding_model: Arc::new(Mutex::new(None)),
         }
     }
 }

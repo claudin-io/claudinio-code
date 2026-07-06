@@ -1,5 +1,5 @@
 use crate::code_intel::db::{IndexDb, SearchResult, SymbolRecord};
-use crate::code_intel::embeddings::{self, SharedEmbedder};
+use crate::code_intel::embeddings;
 use crate::code_intel::indexer;
 use crate::code_intel::watcher::FileWatcher;
 use crate::state::AppState;
@@ -70,6 +70,12 @@ pub async fn open_workspace(
         let cache = cache_model_dir();
         if let Err(e) = embeddings::ensure_model_downloaded(&cache).await {
             eprintln!("[open_workspace] failed to download embedding model: {e}");
+            let _ = app_handle.emit("index-progress", indexer::IndexProgress {
+                status: "embedding_model_error".into(),
+                files_indexed: 0,
+                symbols_indexed: 0,
+                total_files: 0,
+            });
         }
     }
 
@@ -93,9 +99,18 @@ pub async fn open_workspace(
     // Phase 2: In parallel, try to load the embedding model
     let model_handle = spawn_blocking({
         let app_handle = app_handle.clone();
-        move || {
-            let model_dir = resolve_model_dir(&app_handle);
-            model_dir.and_then(|d| embeddings::load_shared(&d).ok())
+        move || match resolve_model_dir(&app_handle) {
+            Some(d) => match embeddings::load_shared(&d) {
+                Ok(shared) => Some(shared),
+                Err(e) => {
+                    eprintln!("[open_workspace] embedding model load failed: {e}");
+                    None
+                }
+            },
+            None => {
+                eprintln!("[open_workspace] embedding model not found (bundle, dev dir and cache all missing)");
+                None
+            }
         }
     });
 
@@ -112,6 +127,44 @@ pub async fn open_workspace(
         .and_then(|r| r.ok())
         .flatten();
 
+    // Publish the model as soon as it's available so agent tools can use it,
+    // even while Phase 5 is still generating embeddings.
+    {
+        let mut em = state.embedding_model.lock().await;
+        *em = embedder.clone();
+    }
+
+    // Phase 5: If model loaded, generate embeddings for all indexed symbols
+    if let Some(ref shared) = embedder {
+        let shared = std::sync::Arc::clone(shared);
+        let db2 = Arc::clone(&db);
+        let emit_handle = app_handle.clone();
+        let join = spawn_blocking(move || {
+            indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle))
+        });
+        let emit_handle = app_handle.clone();
+        tokio::spawn(async move {
+            let result = join.await;
+            let (status, files, symbols) = match result {
+                Ok(Ok((processed, total))) => ("embeddings_done", processed, total),
+                Ok(Err(e)) => {
+                    eprintln!("[open_workspace] embedding generation failed: {e}");
+                    ("embeddings_error", 0, 0)
+                }
+                Err(e) => {
+                    eprintln!("[open_workspace] embedding task panicked: {e}");
+                    ("embeddings_error", 0, 0)
+                }
+            };
+            let _ = emit_handle.emit("index-progress", indexer::IndexProgress {
+                status: status.into(),
+                files_indexed: files,
+                symbols_indexed: symbols,
+                total_files: files,
+            });
+        });
+    }
+
     let watcher = FileWatcher::start(&path, &db_path, app_handle.clone())?;
 
     {
@@ -125,10 +178,6 @@ pub async fn open_workspace(
     {
         let mut w = state._watcher.lock().await;
         *w = Some(watcher);
-    }
-    {
-        let mut em = state.embedding_model.lock().await;
-        *em = embedder;
     }
     {
         let mut lsp = state.lsp_manager.lock().await;

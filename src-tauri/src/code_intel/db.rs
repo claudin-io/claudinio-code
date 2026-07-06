@@ -56,11 +56,40 @@ pub struct SemanticSearchResult {
     pub score: f32,
 }
 
+/// Bump when the index format changes (schema, embedding layout, ignore
+/// rules). A mismatched on-disk index is deleted and rebuilt from scratch.
+const SCHEMA_VERSION: i64 = 1;
+
 impl IndexDb {
     pub fn open(db_path: &Path) -> Result<Self, String> {
-        let conn = Connection::open(db_path).map_err(|e| format!("db open: {e}"))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .map_err(|e| format!("pragma: {e}"))?;
+        let mut conn = Connection::open(db_path).map_err(|e| format!("db open: {e}"))?;
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+        let is_empty: bool = conn
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|c| c == 0)
+            .unwrap_or(true);
+        if !is_empty && version != SCHEMA_VERSION {
+            eprintln!(
+                "[index] stale index (version {version}, expected {SCHEMA_VERSION}) — rebuilding {}",
+                db_path.display()
+            );
+            drop(conn);
+            let _ = std::fs::remove_file(db_path);
+            let base = db_path.display();
+            let _ = std::fs::remove_file(format!("{base}-wal"));
+            let _ = std::fs::remove_file(format!("{base}-shm"));
+            conn = Connection::open(db_path).map_err(|e| format!("db reopen: {e}"))?;
+        }
+
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA user_version={SCHEMA_VERSION};"
+        ))
+        .map_err(|e| format!("pragma: {e}"))?;
         let db = IndexDb {
             conn: Mutex::new(conn),
         };
@@ -159,6 +188,59 @@ impl IndexDb {
             .query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))
             .map_err(|e| format!("get file id: {e}"))?;
         Ok(id)
+    }
+
+    pub fn all_files(&self) -> Result<Vec<FileRecord>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id, path, language, hash, last_modified, size FROM files ORDER BY id")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let results = stmt
+            .query_map([], |row| {
+                Ok(FileRecord {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    language: row.get(2)?,
+                    hash: row.get(3)?,
+                    last_modified: row.get(4)?,
+                    size: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("query: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
+    /// Remove file rows (and, via cascade, their symbols/relations/embeddings)
+    /// whose path is not in the current scan set — e.g. node_modules leftovers
+    /// indexed before ignore rules existed.
+    pub fn prune_files_not_in(&self, keep: &std::collections::HashSet<String>) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let stale_ids: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT id, path FROM files")
+                .map_err(|e| format!("prepare: {e}"))?;
+            let ids: Vec<i64> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| format!("query: {e}"))?
+                .filter_map(|r| r.ok())
+                .filter(|(_, path)| !keep.contains(path))
+                .map(|(id, _)| id)
+                .collect();
+            ids
+        };
+        for id in &stale_ids {
+            conn.execute("DELETE FROM files WHERE id = ?1", params![id])
+                .map_err(|e| format!("prune file: {e}"))?;
+        }
+        if !stale_ids.is_empty() {
+            // External-content FTS keeps ghost rows after cascade deletes.
+            let _ = conn.execute("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')", []);
+        }
+        Ok(stale_ids.len() as i64)
     }
 
     pub fn file_by_path(&self, path: &str) -> Result<Option<FileRecord>, String> {
@@ -362,7 +444,6 @@ impl IndexDb {
 
     pub fn load_all_embeddings(&self) -> Result<Vec<(SymbolRecord, Vec<f32>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let dim = 48;
         let mut stmt = conn
             .prepare(
                 "SELECT s.id, s.file_id, s.name, s.kind, s.signature,
@@ -376,11 +457,11 @@ impl IndexDb {
         let results = stmt
             .query_map([], |row| {
                 let blob: Vec<u8> = row.get(10)?;
-                let mut embedding = vec![0f32; dim];
-                for (i, chunk) in blob.chunks_exact(4).enumerate().take(dim) {
-                    let arr: [u8; 4] = chunk.try_into().unwrap_or([0; 4]);
-                    embedding[i] = f32::from_le_bytes(arr);
-                }
+                // Blob length defines the dimension — self-describing across model swaps.
+                let embedding: Vec<f32> = blob
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap_or([0; 4])))
+                    .collect();
                 Ok((
                     SymbolRecord {
                         id: row.get(0)?,
@@ -407,6 +488,7 @@ impl IndexDb {
         let all = self.load_all_embeddings()?;
         let mut scored: Vec<(f32, SemanticSearchResult)> = all
             .into_iter()
+            .filter(|(_, emb)| emb.len() == query_vec.len())
             .map(|(sym, emb)| {
                 let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
                 let score = dot.max(0.0).min(1.0);
