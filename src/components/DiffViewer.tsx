@@ -7,19 +7,37 @@ export const DiffViewer: Component<{
   original: string;
   modified: string;
   language?: string;
+  inline?: boolean;
+  maxHeight?: string;
 }> = (props) => {
   let containerRef: HTMLDivElement | undefined;
   let editor: monaco.editor.IStandaloneDiffEditor | undefined;
 
+  const estimateHeight = (): number => {
+    const origLines = props.original.split("\n").length;
+    const modLines = props.modified.split("\n").length;
+    const maxLines = Math.max(origLines, modLines);
+    // ~20px per line at 13px font + ~30px for Monaco's header/gutter padding
+    const contentHeight = maxLines * 20 + 30;
+    const clamped = Math.max(contentHeight, 100);
+    return props.maxHeight ? Math.min(clamped, parseInt(props.maxHeight)) : clamped;
+  };
+
   onMount(() => {
     if (!containerRef) return;
     defineMonacoThemes();
+
+    // Set container height to match content before creating editor
+    if (props.inline) {
+      containerRef.style.height = `${estimateHeight()}px`;
+    }
+
     editor = monaco.editor.createDiffEditor(containerRef, {
       theme: theme() === "dark" ? "claudinio-dark" : "claudinio-light",
       fontSize: 13,
       fontFamily: "'JetBrains Mono', monospace",
       readOnly: true,
-      renderSideBySide: true,
+      renderSideBySide: !props.inline,
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
       automaticLayout: true,

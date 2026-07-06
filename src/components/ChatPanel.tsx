@@ -120,6 +120,18 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function detectLanguageFromPath(path: string): string {
+  if (path.endsWith(".ts") || path.endsWith(".tsx")) return "typescript";
+  if (path.endsWith(".rs")) return "rust";
+  if (path.endsWith(".py")) return "python";
+  if (path.endsWith(".swift")) return "swift";
+  if (path.endsWith(".js") || path.endsWith(".jsx")) return "javascript";
+  if (path.endsWith(".css")) return "css";
+  if (path.endsWith(".json")) return "json";
+  if (path.endsWith(".html")) return "html";
+  return "plaintext";
+}
+
 interface ContentBlockJson {
   type: string;
   text?: string;
@@ -1665,6 +1677,7 @@ const ToolRow: Component<{
   const icon = () => toolIcon(props.tool.call.toolName) as IconName;
   const label = () => props.tool.call.toolName;
   const summary = () => summarizeArgs(props.tool.call.args);
+  const isEditFile = () => props.tool.call.toolName === "edit_file";
 
   const statusIcon = () => {
     if (props.tool.status === "running") return "loader";
@@ -1681,8 +1694,9 @@ const ToolRow: Component<{
   return (
     <div>
       <button
-        onClick={props.onToggle}
+        onClick={isEditFile() ? undefined : props.onToggle}
         class="flex h-7 w-full items-center gap-2 rounded px-1 text-xs hover:bg-surface-2"
+        classList={{ "cursor-default": isEditFile() }}
       >
         <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
           <Icon name={icon()} class="h-[14px] w-[14px] text-ink-muted" />
@@ -1693,12 +1707,22 @@ const ToolRow: Component<{
           <Icon name={statusIcon() as IconName} class={`h-3 w-3 ${statusClass()}`} />
           <Icon
             name="chevron-right"
-            class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${props.isExpanded ? "rotate-90" : ""}`}
+            class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${isEditFile() || props.isExpanded ? "rotate-90" : ""}`}
           />
         </div>
       </button>
-      <Show when={props.isExpanded}>
+      <Show when={isEditFile() || props.isExpanded}>
         <div class="ml-6 rounded-md bg-surface-1 p-2 text-xs">
+          <Show when={isEditFile()}>
+            <div class="mb-3 overflow-hidden rounded border border-border-subtle">
+              <DiffViewer
+                original={props.tool.call.args.old_string as string ?? ""}
+                modified={props.tool.call.args.new_string as string ?? ""}
+                language={detectLanguageFromPath(props.tool.call.args.path as string ?? "")}
+                inline
+              />
+            </div>
+          </Show>
           <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.args")}</div>
           <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
             {JSON.stringify(props.tool.call.args, null, 2)}
@@ -1880,18 +1904,6 @@ const ApprovalCard: Component<{
   onMount(() => document.addEventListener("keydown", onKey));
   onCleanup(() => document.removeEventListener("keydown", onKey));
 
-  const detectLanguage = (path: string): string => {
-    if (path.endsWith(".ts") || path.endsWith(".tsx")) return "typescript";
-    if (path.endsWith(".rs")) return "rust";
-    if (path.endsWith(".py")) return "python";
-    if (path.endsWith(".swift")) return "swift";
-    if (path.endsWith(".js") || path.endsWith(".jsx")) return "javascript";
-    if (path.endsWith(".css")) return "css";
-    if (path.endsWith(".json")) return "json";
-    if (path.endsWith(".html")) return "html";
-    return "plaintext";
-  };
-
   return (
     <div class="rounded-lg border border-accent/50 bg-surface-1 p-3">
       <div class="mb-2 flex items-center justify-between">
@@ -1930,11 +1942,12 @@ const ApprovalCard: Component<{
 
       <Show when={!isBash() && proposal()}>
         {(p) => (
-          <div class="mb-3 h-56 overflow-hidden rounded border border-border-subtle">
+          <div class="mb-3 overflow-hidden rounded border border-border-subtle">
             <DiffViewer
               original={p().oldString}
               modified={p().newString}
-              language={detectLanguage(p().path)}
+              language={detectLanguageFromPath(p().path)}
+              inline
             />
           </div>
         )}
