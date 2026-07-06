@@ -192,7 +192,10 @@ pub async fn stream_message(
     let client = reqwest::Client::new();
     let body = RequestBody {
         model: config.model.clone(),
-        max_tokens: 8192,
+        // Large tasks (thinking + a whole-file edit in one tool call) easily
+        // blow past 8k output tokens; a truncated stream ends the turn with
+        // the work half-done. 32k fits every current Claude model's cap.
+        max_tokens: 32_000,
         stream: true,
         messages: messages.to_vec(),
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
@@ -375,6 +378,29 @@ pub async fn stream_message(
         let _ = writeln!(f, "--- END --- tool_uses={} text_deltas={}", tool_uses.len(), text_deltas.len());
     }
 
+    // Blocks still in tool_inputs never got their content_block_stop — the
+    // stream was cut mid-input (e.g. max_tokens). Salvage what parses, drop
+    // the rest so a half-written tool call never executes.
+    for (idx, accumulated) in tool_inputs.drain() {
+        match serde_json::from_str::<Value>(&accumulated) {
+            Ok(parsed) => {
+                if let Some(tool) = tool_uses.iter_mut().find(|t| {
+                    t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize) == Some(idx)
+                }) {
+                    if let Some(obj) = tool.as_object_mut() {
+                        obj.insert("input".into(), parsed);
+                    }
+                }
+            }
+            Err(_) if !accumulated.is_empty() => {
+                tool_uses.retain(|t| {
+                    t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize) != Some(idx)
+                });
+            }
+            Err(_) => {}
+        }
+    }
+
     Ok(StreamOutput {
         text_deltas,
         tool_uses,
@@ -455,14 +481,28 @@ fn process_line(
         "content_block_stop" => {
             if let Some(idx) = index {
                 if let Some(accumulated) = tool_inputs.remove(&idx) {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&accumulated) {
-                        if let Some(tool) = tool_uses.iter_mut().find(|t| {
-                            t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize) == Some(idx)
-                        }) {
-                            if let Some(obj) = tool.as_object_mut() {
-                                obj.insert("input".into(), parsed);
+                    match serde_json::from_str::<Value>(&accumulated) {
+                        Ok(parsed) => {
+                            if let Some(tool) = tool_uses.iter_mut().find(|t| {
+                                t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize) == Some(idx)
+                            }) {
+                                if let Some(obj) = tool.as_object_mut() {
+                                    obj.insert("input".into(), parsed);
+                                }
                             }
                         }
+                        // Empty accumulation is a no-arg tool: keep the {}
+                        // input from content_block_start. Non-empty JSON that
+                        // fails to parse means the stream was cut mid-input
+                        // (max_tokens) — drop the block instead of running the
+                        // tool with a bogus empty input.
+                        Err(_) if !accumulated.is_empty() => {
+                            tool_uses.retain(|t| {
+                                t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize)
+                                    != Some(idx)
+                            });
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -630,6 +670,47 @@ mod tests {
             tool_uses[0]["input"],
             json!({"path": "/home/user/project"})
         );
+    }
+
+    #[test]
+    fn test_truncated_tool_input_drops_block() {
+        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+
+        let mut text_deltas = Vec::new();
+        let mut tool_uses = Vec::new();
+        let mut tool_inputs = std::collections::HashMap::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage: Option<Usage> = None;
+        let mut assistant_text = String::new();
+        let mut thinking_text = String::new();
+
+        process_line(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cut","name":"edit_file","input":{}}}"#,
+            &chan, "s1", &mut assistant_text, &mut thinking_text,
+            &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // Stream hits max_tokens mid-input: the JSON never closes.
+        process_line(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\": \"/workspace/Icon.tsx\", \"content\": \"const icons = "}}"#,
+            &chan, "s1", &mut assistant_text, &mut thinking_text,
+            &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        process_line(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+            &chan, "s1", &mut assistant_text, &mut thinking_text,
+            &mut text_deltas, &mut tool_uses, &mut tool_inputs,
+            &mut stop_reason, &mut usage,
+        ).unwrap();
+
+        // The half-written tool call must not survive to execution.
+        assert!(tool_uses.is_empty());
     }
 
     #[test]

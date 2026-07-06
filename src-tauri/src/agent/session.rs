@@ -584,6 +584,7 @@ pub async fn run_workflow(
     // Size of the context for the next request: the real number reported by
     // the API when available, the char-based estimate otherwise.
     let mut last_context: u64 = estimate_tokens(history, &system, &tools);
+    let mut truncation_streak: u32 = 0;
 
     for _ in 0..MAX_ROUNDS {
         let mut assistant_text = String::new();
@@ -678,6 +679,72 @@ pub async fn run_workflow(
                 output_tokens: total_out,
             });
             return Ok(());
+        }
+
+        // Truncated at the output-token cap (stop_reason "max_tokens"): the
+        // model was cut off mid-generation, so an empty tool list here does
+        // NOT mean the turn is done. Persist any partial text and nudge the
+        // model to continue instead of silently abandoning the task. When
+        // complete tool calls did come through, fall through and run them —
+        // the loop continues naturally.
+        let truncated = stream_output.stop_reason.as_deref() == Some("max_tokens");
+        if truncated && tool_uses.is_empty() {
+            truncation_streak += 1;
+            if !text_output.is_empty() {
+                push_turn(
+                    history,
+                    store,
+                    Message {
+                        role: "assistant".into(),
+                        content: vec![ContentBlock::text(&text_output)],
+                    },
+                );
+                last_text = text_output;
+            }
+            if truncation_streak < 3 {
+                push_user_blocks(
+                    history,
+                    store,
+                    vec![ContentBlock::text(
+                        "[system] Your previous response was cut off at the output token \
+                         limit before completing a tool call or final answer. Continue from \
+                         where you stopped, working in smaller steps — if you were emitting \
+                         a large tool call (e.g. a whole-file edit), split it into several \
+                         smaller edits.",
+                    )],
+                );
+                continue;
+            }
+            // Three consecutive fruitless truncations: stop honestly instead
+            // of burning the whole round budget.
+            if last_text.is_empty() {
+                last_text = "A resposta estourou o limite de tokens repetidamente sem concluir. \
+                             Tente dividir o pedido em partes menores."
+                    .into();
+            } else {
+                last_text =
+                    format!("{last_text}\n\n(Resposta truncada no limite de tokens — pode não estar completa.)");
+            }
+            store.try_append(&SessionRecord::Done {
+                input_tokens: total_in,
+                output_tokens: total_out,
+                ts: now_ms(),
+            });
+            cumul_in += total_in as u64;
+            cumul_out += total_out as u64;
+            let cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
+            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
+            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
+            let _ = event_tx.send(AgentEvent::Done {
+                stop_reason: "max_tokens".into(),
+                text_output: last_text,
+                input_tokens: total_in,
+                output_tokens: total_out,
+            });
+            return Ok(());
+        }
+        if !truncated {
+            truncation_streak = 0;
         }
 
         // Terminal turn: no tool calls — the loop is done, this text is the reply.
