@@ -1038,17 +1038,47 @@ pub(crate) async fn run_tool(
                     });
                     ContentBlock::tool_result(tool_use_id, &content)
                 }
-                Ok(ToolOutput::EditProposal { .. }) => {
-                    let err_msg = format!(
-                        "edit_file for {tool_name} requires UI approval — not applied automatically"
-                    );
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                Ok(ToolOutput::EditProposal { path, old_string, new_string, unified_diff }) => {
+                    let proposal = EditProposalData {
+                        path: path.clone(),
+                        old_string: old_string.clone(),
+                        new_string: new_string.clone(),
+                        unified_diff,
+                    };
+                    // Reconstruct args since tool_input was moved into execute()
+                    let args = serde_json::json!({
+                        "path": path,
+                        "old_string": old_string,
+                        "new_string": new_string,
+                    });
+                    let _ = event_tx.send(AgentEvent::ToolCall {
+                        session_id: session_id.to_string(),
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
-                        output: err_msg.clone(),
-                        error: Some("requires approval".into()),
+                        args: args.clone(),
+                        permission: "auto".into(),
+                        edit_proposal: Some(proposal),
                     });
-                    ContentBlock::tool_result(tool_use_id, &err_msg)
+                    match tools::apply_edit_with_ctx(args, ctx).await {
+                        Ok(msg) => {
+                            let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                output: msg.clone(),
+                                error: None,
+                            });
+                            ContentBlock::tool_result(tool_use_id, &msg)
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                output: String::new(),
+                                error: Some(e.clone()),
+                            });
+                            ContentBlock::tool_result(tool_use_id, &format!("Error applying: {e}"))
+                        }
+                    }
                 }
                 Err(e) => {
                     let _ = event_tx.send(AgentEvent::ToolResult {
