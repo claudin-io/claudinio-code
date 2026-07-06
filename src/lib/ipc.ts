@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 
 export interface DirEntry {
   name: string;
@@ -519,4 +520,8 @@ export function lspReferences(workspace: string, args: LspPositionArgs): Promise
 
 export function lspHover(workspace: string, args: LspPositionArgs): Promise<HoverInfo | null> {
   return invoke<HoverInfo | null>("lsp_hover", { workspace, args });
+}
+
+export function openExternal(path: string): void {
+  openPath(path).catch(() => {});
 }

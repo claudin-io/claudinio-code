@@ -5,6 +5,7 @@ const TreeNode: Component<{
   entry: DirEntry;
   depth: number;
   onOpenFile: (path: string) => void;
+  onOpenExternal: (path: string) => void;
   selectedPath: () => string | null;
 }> = (props) => {
   const [expanded, setExpanded] = createSignal(false);
@@ -18,6 +19,10 @@ const TreeNode: Component<{
     else props.onOpenFile(props.entry.path);
   };
 
+  const handleDblClick = () => {
+    if (!props.entry.isDir) props.onOpenExternal(props.entry.path);
+  };
+
   return (
     <>
       <button
@@ -25,6 +30,7 @@ const TreeNode: Component<{
         classList={{ "bg-surface-2 text-accent": props.selectedPath() === props.entry.path }}
         style={{ "padding-left": `${8 + props.depth * 14}px` }}
         onClick={handleClick}
+        onDblClick={handleDblClick}
       >
         <span class="w-3 shrink-0 text-ink-muted">
           {props.entry.isDir ? (expanded() ? "▾" : "▸") : ""}
@@ -38,6 +44,7 @@ const TreeNode: Component<{
               entry={child}
               depth={props.depth + 1}
               onOpenFile={props.onOpenFile}
+              onOpenExternal={props.onOpenExternal}
               selectedPath={props.selectedPath}
             />
           )}
@@ -50,6 +57,7 @@ const TreeNode: Component<{
 export const FileTree: Component<{
   root: string;
   onOpenFile: (path: string) => void;
+  onOpenExternal: (path: string) => void;
   selectedPath: () => string | null;
 }> = (props) => {
   const [entries] = createResource(() => props.root, listDir);
@@ -65,6 +73,7 @@ export const FileTree: Component<{
             entry={entry}
             depth={0}
             onOpenFile={props.onOpenFile}
+            onOpenExternal={props.onOpenExternal}
             selectedPath={props.selectedPath}
           />
         )}

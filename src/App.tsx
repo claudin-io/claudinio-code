@@ -1,7 +1,7 @@
 import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, type IndexProgress } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, type IndexProgress } from "./lib/ipc";
 import { workspaceStatus, isBusy } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
@@ -551,6 +551,7 @@ function App() {
               <FileTree
                 root={activeWorkspace()!}
                 onOpenFile={setSelectedFile}
+                onOpenExternal={openExternal}
                 selectedPath={selectedFile}
               />
             </div>
