@@ -766,13 +766,33 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
 
     let ts_language = match get_language(lang) {
         Ok(l) => l,
-        Err(e) => {
+        Err(_) => {
+            // Fallback: sem tree-sitter, criamos um símbolo sintético do arquivo
+            // para que o arquivo apareça na semantic search (embedding do conteúdo)
+            // e na busca FTS (keyword search no nome do arquivo).
+            let file_name = Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            let line_count = content.lines().count() as i64;
             return ParseResult {
                 language: lang.into(),
-                symbols: vec![],
+                symbols: vec![ParsedSymbol {
+                    name: file_name,
+                    kind: "file".into(),
+                    parent_context: None,
+                    signature: None,
+                    doc_comment: None,
+                    body_text: Some(content.to_string()),
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: line_count.max(1),
+                    end_col: 1,
+                }],
                 calls: vec![],
-                error: Some(e),
-            }
+                error: None,
+            };
         }
     };
 
