@@ -243,17 +243,17 @@ function App() {
   return (
     <div class="flex h-full flex-col">
       <header
-        class="flex h-11 shrink-0 items-center gap-2 border-b border-border-subtle bg-surface-1 px-3"
-        classList={{ "pl-[78px]": isMac() }}
+        class="flex h-16 shrink-0 items-center border-b border-border-subtle bg-surface-1 pl-2 pr-3"
         data-tauri-drag-region
       >
-        <span class="whitespace-nowrap text-[13px] font-semibold" data-tauri-drag-region>
+        <span class="flex items-center gap-2 rounded-full border border-accent/30 px-3 py-1 text-[13px] font-semibold" data-tauri-drag-region>
+          <img src="/reddit_icon_256.png" alt="Claudinio" class="h-8 w-8" />
           Claudinio <span class="text-accent">Code</span>
         </span>
-        <span class="max-w-[280px] truncate font-mono text-[12px] text-ink-faint" data-tauri-drag-region>
-          {activeWorkspace()}
-        </span>
-        <div class="ml-auto flex items-center gap-1.5">
+        <div class="ml-auto flex items-center gap-3">
+          <span class="max-w-[280px] truncate font-mono text-[12px] text-ink-faint" data-tauri-drag-region>
+            {activeWorkspace()}
+          </span>
           <button
             onClick={openConfig}
             class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
