@@ -1,5 +1,5 @@
 use crate::code_intel::db::{IndexDb, SearchResult, SymbolRecord};
-use crate::code_intel::embeddings;
+use crate::code_intel::embeddings::{self, SharedEmbedder};
 use crate::code_intel::indexer;
 use crate::code_intel::watcher::FileWatcher;
 use crate::state::AppState;
@@ -96,23 +96,34 @@ pub async fn open_workspace(
         }
     });
 
-    // Phase 2: In parallel, try to load the embedding model
-    let model_handle = spawn_blocking({
-        let app_handle = app_handle.clone();
-        move || match resolve_model_dir(&app_handle) {
-            Some(d) => match embeddings::load_shared(&d) {
-                Ok(shared) => Some(shared),
-                Err(e) => {
-                    eprintln!("[open_workspace] embedding model load failed: {e}");
-                    None
+    // Phase 2: Reuse existing embedding model if already loaded — it is the
+    // same `LateOn-Code-edge` model for every workspace. On the very first
+    // call, spawn the load in parallel with the scan (same as before).
+    let model_handle = {
+        let guard = state.embedding_model.lock().await;
+        if guard.is_some() {
+            // Already loaded — no disk I/O needed, reuse the same Arc.
+            None
+        } else {
+            // First load: spawn in background (parallel with scan).
+            Some(spawn_blocking({
+                let app_handle = app_handle.clone();
+                move || match resolve_model_dir(&app_handle) {
+                    Some(d) => match embeddings::load_shared(&d) {
+                        Ok(shared) => Some(shared),
+                        Err(e) => {
+                            eprintln!("[open_workspace] embedding model load failed: {e}");
+                            None
+                        }
+                    },
+                    None => {
+                        eprintln!("[open_workspace] embedding model not found (bundle, dev dir and cache all missing)");
+                        None
+                    }
                 }
-            },
-            None => {
-                eprintln!("[open_workspace] embedding model not found (bundle, dev dir and cache all missing)");
-                None
-            }
+            }))
         }
-    });
+    };
 
     // Phase 3: Wait for scan to complete (this is what the user sees)
     let (files_count, symbols_count) = scan_handle
@@ -120,12 +131,18 @@ pub async fn open_workspace(
         .map_err(|e| format!("scan task panicked: {e}"))?
         .map_err(|e| e)?;
 
-    // Phase 4: Try to get embedder with a generous timeout
-    let embedder = tokio::time::timeout(std::time::Duration::from_secs(30), model_handle)
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .flatten();
+    // Phase 4: If we spawned a load in Phase 2, await it with timeout.
+    // Otherwise reuse the model already in state.
+    let embedder: Option<SharedEmbedder> = if let Some(handle) = model_handle {
+        tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+    } else {
+        let guard = state.embedding_model.lock().await;
+        guard.clone()
+    };
 
     // Publish the model as soon as it's available so agent tools can use it,
     // even while Phase 5 is still generating embeddings.

@@ -6,6 +6,7 @@ use std::path::Path;
 pub struct ParsedSymbol {
     pub name: String,
     pub kind: String,
+    pub parent_context: Option<String>,
     pub signature: Option<String>,
     pub doc_comment: Option<String>,
     pub body_text: Option<String>,
@@ -181,6 +182,7 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                     symbols.push(ParsedSymbol {
                         name,
                         kind: kind.into(),
+                        parent_context: collect_parent_context(&node, content),
                         signature: Some(sig_text),
                         doc_comment: extract_doc_comment(content, sl),
                         body_text: extract_body_text(content, sl, el),
@@ -232,6 +234,7 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                 symbols.push(ParsedSymbol {
                     name,
                     kind: "import".into(),
+                    parent_context: None,
                     signature: Some(sig_text),
                     doc_comment: extract_doc_comment(content, sl),
                     body_text: extract_body_text(content, sl, el),
@@ -264,6 +267,57 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
         symbols,
         calls,
         error: None,
+    }
+}
+
+/// Walk up the AST from `node` collecting container kinds+names that enclose it
+/// (e.g., a method inside a class inside a module). Stops at the file root.
+/// Returns `None` if the node is a top-level declaration (no parents).
+fn collect_parent_context(node: &tree_sitter::Node, content: &str) -> Option<String> {
+    let mut ctx_parts: Vec<String> = Vec::new();
+    let mut current = node.parent()?;
+
+    loop {
+        let k = current.kind();
+        // Only collect named container declarations, not anonymous/expressions.
+        let is_container = matches!(
+            k,
+            "class_declaration" | "struct_item" | "enum_item" | "trait_item"
+                | "impl_item" | "impl_declaration"
+                | "class_definition" | "struct_declaration" | "enum_declaration"
+                | "interface_declaration" | "protocol_declaration"
+                | "module" | "mod_item" | "namespace_definition"
+        );
+        if is_container {
+            if let Some(n) = current.child_by_field_name("name") {
+                let name = n.utf8_text(content.as_bytes()).unwrap_or("?").to_string();
+                // Map Tree-sitter node kinds to readable short kinds.
+                let short_kind = match k {
+                    "class_declaration" | "class_definition" => "class",
+                    "struct_item" | "struct_declaration" => "struct",
+                    "enum_item" | "enum_declaration" => "enum",
+                    "trait_item" => "trait",
+                    "impl_item" | "impl_declaration" => "impl",
+                    "interface_declaration" => "interface",
+                    "protocol_declaration" => "protocol",
+                    "module" | "mod_item" => "module",
+                    "namespace_definition" => "ns",
+                    _ => &k,
+                };
+                ctx_parts.push(format!("{short_kind}:{name}"));
+            }
+        }
+        match current.parent() {
+            Some(p) => current = p,
+            None => break,
+        }
+    }
+
+    if ctx_parts.is_empty() {
+        None
+    } else {
+        ctx_parts.reverse(); // outermost first: "class:Database > method:connect"
+        Some(ctx_parts.join(" > "))
     }
 }
 

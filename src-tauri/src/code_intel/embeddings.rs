@@ -164,10 +164,17 @@ const MAX_BODY_CHARS: usize = 800;
 pub fn build_embedding_text(
     kind: &str,
     name: &str,
+    parent_context: Option<&str>,
     doc: Option<&str>,
     body: Option<&str>,
 ) -> String {
     let mut parts = vec![format!("{kind}: {name}")];
+    if let Some(ctx) = parent_context {
+        let trimmed = ctx.trim();
+        if !trimmed.is_empty() {
+            parts.push(format!("context: {trimmed}"));
+        }
+    }
     if let Some(d) = doc {
         let trimmed = d.trim();
         if !trimmed.is_empty() {

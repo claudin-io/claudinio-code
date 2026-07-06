@@ -84,6 +84,7 @@ pub fn index_file(
                 build_embedding_text(
                     &sym.kind,
                     &sym.name,
+                    sym.parent_context.as_deref(),
                     sym.doc_comment.as_deref(),
                     sym.body_text.as_deref(),
                 )
@@ -245,6 +246,7 @@ pub fn generate_all_embeddings(
                 build_embedding_text(
                     &sym.kind,
                     &sym.name,
+                    sym.parent_context.as_deref(),
                     sym.doc_comment.as_deref(),
                     sym.body_text.as_deref(),
                 )
