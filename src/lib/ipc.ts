@@ -453,6 +453,30 @@ export function installRemoteSkill(workspace: string, args: InstallRemoteSkillAr
   return invoke<SkillEntry>("install_remote_skill", { workspace, args });
 }
 
+// --- Context Warning ---
+
+export interface SkillTokenEntry {
+  name: string;
+  description: string;
+  estimatedTokens: number;
+  location: string;
+}
+
+export interface ContextWarningData {
+  agentsMdSize: number;
+  agentsMdLines: number;
+  agentsMdTokens: number;
+  agentsMdIssues: number;
+  agentsMdPath: string | null;
+  skillsCount: number;
+  skillsTotalTokens: number;
+  skillsBreakdown: SkillTokenEntry[];
+}
+
+export function getContextWarning(workspace: string): Promise<ContextWarningData> {
+  return invoke<ContextWarningData>("get_context_warning", { workspace });
+}
+
 export function lspDefinition(workspace: string, args: LspPositionArgs): Promise<LspLocation[]> {
   return invoke<LspLocation[]>("lsp_definition", { workspace, args });
 }
