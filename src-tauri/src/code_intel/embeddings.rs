@@ -8,7 +8,10 @@ const MODEL_FILES: &[(&str, &str)] = &[
     ("tokenizer.json", "tokenizer.json"),
     ("config.json", "config.json"),
 ];
-const MAX_LENGTH: usize = 2047;
+// Bounded low: attention memory grows with seq^2, and embedding texts are
+// already capped to ~800 chars of body (see MAX_BODY_CHARS below), so a much
+// larger window only inflates padding and peak memory without adding signal.
+const MAX_LENGTH: usize = 512;
 
 pub struct CodeEmbedder {
     session: Session,
@@ -36,6 +39,12 @@ impl CodeEmbedder {
 
         let session = Session::builder()
             .map_err(|e| format!("ort builder: {e}"))?
+            // Memory pattern pre-allocates and retains buffers sized for the
+            // largest batch ever seen, so peak memory never shrinks back down.
+            // We batch inputs ourselves (see EMBED_BATCH_SIZE in indexer.rs),
+            // so disable it and let the allocator release memory between runs.
+            .with_memory_pattern(false)
+            .map_err(|e| format!("ort memory pattern: {e}"))?
             .commit_from_file(&model_path)
             .map_err(|e| format!("ort load model: {e}"))?;
 

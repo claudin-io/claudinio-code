@@ -94,17 +94,31 @@ pub fn index_file(
             })
             .collect();
 
-        if !texts.is_empty() {
-            let str_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-            if let Ok(vectors) = emb.encode(&str_refs) {
-                for ((_, sid), vec) in symbol_ids.iter().zip(vectors.iter()) {
-                    let _ = db.upsert_embedding(*sid, vec);
-                }
-            }
-        }
+        encode_and_store_batched(db, emb, &symbol_ids, &texts);
     }
 
     Ok(parse_result)
+}
+
+/// Encode+store embeddings in bounded-size chunks so memory stays flat
+/// regardless of how many symbols a single file produces (e.g. a minified
+/// bundle can yield thousands of "symbols" in one shot).
+const EMBED_BATCH_SIZE: usize = 16;
+
+fn encode_and_store_batched(
+    db: &IndexDb,
+    emb: &mut CodeEmbedder,
+    symbol_ids: &[(String, i64)],
+    texts: &[String],
+) {
+    for (chunk_ids, chunk_texts) in symbol_ids.chunks(EMBED_BATCH_SIZE).zip(texts.chunks(EMBED_BATCH_SIZE)) {
+        let str_refs: Vec<&str> = chunk_texts.iter().map(|s| s.as_str()).collect();
+        if let Ok(vectors) = emb.encode(&str_refs) {
+            for ((_, sid), vec) in chunk_ids.iter().zip(vectors.iter()) {
+                let _ = db.upsert_embedding(*sid, vec);
+            }
+        }
+    }
 }
 
 pub fn scan_workspace(
@@ -266,8 +280,8 @@ pub fn generate_all_embeddings(
             // semantic_search never wait long and memory stays bounded.
             for (chunk_syms, chunk_texts) in parse_result
                 .symbols
-                .chunks(16)
-                .zip(texts.chunks(16))
+                .chunks(EMBED_BATCH_SIZE)
+                .zip(texts.chunks(EMBED_BATCH_SIZE))
             {
                 let str_refs: Vec<&str> = chunk_texts.iter().map(|s| s.as_str()).collect();
                 let vectors = {

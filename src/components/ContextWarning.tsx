@@ -199,7 +199,7 @@ const ContextWarning: Component<{
               </Show>
             </div>
           </div>
-        </>
+        </Show>
       </>
     </Show>
   );
