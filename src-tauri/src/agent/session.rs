@@ -337,11 +337,10 @@ pub async fn run_workflow(
     });
     push_user_blocks(history, store, vec![ContentBlock::text(&user_message)]);
 
-    let skills_section = crate::agent::skills::build_skills_system_prompt_section(
-        &crate::agent::skills::SkillManager::new(
-            ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
-        ).catalog()
+    let skill_mgr = crate::agent::skills::SkillManager::new(
+        ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
     );
+    let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref());
     let tools = api_tools();
     let mut total_in: u32 = 0;

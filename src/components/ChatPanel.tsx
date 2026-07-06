@@ -689,7 +689,7 @@ export const ChatPanel: Component = () => {
         <div class="w-full px-6 py-4">
           <For each={messages()}>
             {(msg) => (
-              <div class="mb-6 max-w-[70ch]">
+              <div class="mb-6">
                 <Show when={msg.role === "user"}>
                   <div class="mb-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wider text-accent">
@@ -722,7 +722,7 @@ export const ChatPanel: Component = () => {
           </For>
 
           <Show when={status() === "thinking" || status() === "done" || status() === "awaiting_input"}>
-            <div class="mb-6 max-w-[70ch]">
+            <div class="mb-6">
               <div class="trajectory-rail flex flex-col gap-0.5">
                 <TimelineSteps
                   steps={currentSteps()}
@@ -736,7 +736,7 @@ export const ChatPanel: Component = () => {
           </Show>
 
           <Show when={pendingApprovals().length > 0 && status() === "awaiting_approval"}>
-            <div class="mb-6 max-w-[70ch] flex flex-col gap-3">
+            <div class="mb-6 flex flex-col gap-3">
               <For each={pendingApprovals()}>
                 {(tc) => (
                   <div>
@@ -759,7 +759,7 @@ export const ChatPanel: Component = () => {
           </Show>
 
           <Show when={currentAskUser() && status() === "awaiting_input"}>
-            <div class="mb-6 max-w-[70ch]">
+            <div class="mb-6">
               <QuestionCard ask={currentAskUser()!} onSubmit={handleAnswers} />
             </div>
           </Show>

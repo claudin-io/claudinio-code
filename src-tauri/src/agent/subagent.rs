@@ -242,11 +242,10 @@ async fn run_subagent(
     steering: &Arc<SteeringCtl>,
 ) -> SubagentResult {
     let tools = api_tools(spec.mode);
-    let skills_section = crate::agent::skills::build_skills_system_prompt_section(
-        &crate::agent::skills::SkillManager::new(
-            ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
-        ).catalog()
+    let skill_mgr = crate::agent::skills::SkillManager::new(
+        ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
     );
+    let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let skills_hint = match &skills_section {
         Some(s) => format!("\n{s}"),
         None => String::new(),

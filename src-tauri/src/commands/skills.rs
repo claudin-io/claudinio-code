@@ -26,8 +26,7 @@ pub async fn list_skills(state: State<'_, AppState>) -> Result<SkillsResponse, S
 #[tauri::command]
 pub async fn get_skill_catalog(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let mgr = state.skills_manager.lock().await;
-    let catalog = mgr.catalog();
-    let section = build_skills_system_prompt_section(&catalog);
+    let section = build_skills_system_prompt_section(&mgr);
     Ok(vec![section.unwrap_or_default()])
 }
 

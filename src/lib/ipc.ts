@@ -293,7 +293,7 @@ export interface SkillEntry {
   name: string;
   description: string;
   location: string;
-  scope: "project" | "subfolder" | "user";
+  scope: "builtin" | "project" | "subfolder" | "user";
   body?: string;
 }
 
@@ -301,7 +301,7 @@ export interface SkillCatalogEntry {
   name: string;
   description: string;
   location: string;
-  scope: "project" | "subfolder" | "user";
+  scope: "builtin" | "project" | "subfolder" | "user";
 }
 
 export interface SkillsResponse {

@@ -35,6 +35,7 @@ pub struct SkillEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum SkillScope {
+    Builtin,
     Project,
     Subfolder,
     User,
@@ -139,17 +140,45 @@ fn scan_skills_dir(
     }
 }
 
-/// Priority order: Project > Subfolder > User
+/// Priority order: Project > Subfolder > User > Builtin (fallback)
 fn has_higher_priority(current: &SkillScope, incoming: &SkillScope) -> bool {
     fn rank(s: &SkillScope) -> u8 {
         match s {
             SkillScope::Project => 3,
             SkillScope::Subfolder => 2,
             SkillScope::User => 1,
+            SkillScope::Builtin => 0,
         }
     }
     rank(current) >= rank(incoming)
 }
+
+// ─── Built-in Skills ──────────────────────────────────────────────────────────
+
+const BUILTIN_FIND_SKILLS: &str = "---\n\
+name: find-skills\n\
+description: Helps users discover and install agent skills when they ask questions like \"how do I do X\", \"find a skill for X\", \"is there a skill that can...\", or express interest in extending capabilities. This skill should be used when the user is looking for functionality that might exist as an installable skill.\n\
+---\n\
+\n\
+# find-skills\n\
+\n\
+When the user asks about doing something that sounds like a common development task (formatting, linting, deploying, testing, etc.) or explicitly asks \"is there a skill for X\" / \"find a skill for X\":\n\
+\n\
+1. Use the `read_file` tool to load the remote skills index from `https://raw.githubusercontent.com/vercel-labs/skills/refs/heads/main/llms.txt`.\n\
+2. Parse the markdown link list to find skills matching the user's request.\n\
+3. Present the matching skills to the user with name, description, and a brief note on how to install.\n\
+4. If the user wants to install a skill, use `bash` to run:\n\
+   ```\n\
+   mkdir -p ~/.claudinio/skills/<skill-name>\n\
+   curl -L <skill-url> -o ~/.claudinio/skills/<skill-name>/SKILL.md\n\
+   ```\n\
+\n\
+Note: If the user asks about customizing opencode itself (config, agents, subagents, MCP servers, permission rules), do NOT use this skill — refer them to the customize-opencode skill instead.";
+
+/// All built-in skills shipped with the binary.
+const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    ("find-skills", BUILTIN_FIND_SKILLS),
+];
 
 // ─── Skill Manager ────────────────────────────────────────────────────────────
 
@@ -177,7 +206,27 @@ impl SkillManager {
     pub fn scan(&mut self) -> usize {
         let mut all: HashMap<String, (SkillEntry, SkillScope)> = HashMap::new();
 
-        // 1. Project-level skills (highest priority)
+        // 0. Built-in skills (lowest priority — fallback if no filesystem version exists)
+        for (name, content) in BUILTIN_SKILLS {
+            let source = std::path::Path::new("builtin");
+            match Self::parse_skill_md_from_str(content, source) {
+                Ok((meta, body)) => {
+                    let entry = SkillEntry {
+                        name: name.to_string(),
+                        description: meta.description.clone(),
+                        location: "<built-in>".into(),
+                        scope: SkillScope::Builtin,
+                        body: Some(body),
+                    };
+                    all.insert(entry.name.clone(), (entry, SkillScope::Builtin));
+                }
+                Err(e) => {
+                    eprintln!("[skills] failed to parse built-in skill '{}': {e}", name);
+                }
+            }
+        }
+
+        // 1. Project-level skills
         if let Some(ref root) = self.workspace_root {
             scan_for_skills(root, SkillScope::Project, &mut all);
 
@@ -515,7 +564,9 @@ pub async fn preview_remote_skill(url: &str) -> Result<SkillEntry, String> {
 
 /// Build the skills section to inject into the system prompt.
 /// Returns None if no skills are available.
-pub fn build_skills_system_prompt_section(catalog: &[SkillCatalogEntry]) -> Option<String> {
+/// Built-in skills have their full body inlined so no read_file call is needed.
+pub fn build_skills_system_prompt_section(mgr: &SkillManager) -> Option<String> {
+    let catalog = mgr.catalog();
     if catalog.is_empty() {
         return None;
     }
@@ -524,21 +575,41 @@ pub fn build_skills_system_prompt_section(catalog: &[SkillCatalogEntry]) -> Opti
         "\n\n<available_skills>\n"
     );
 
-    for skill in catalog {
+    let mut has_builtin = false;
+    for skill in &catalog {
         xml.push_str("  <skill>\n");
         xml.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
         xml.push_str(&format!("    <description>{}</description>\n", escape_xml(&skill.description)));
         xml.push_str(&format!("    <location>{}</location>\n", escape_xml(&skill.location)));
+
+        // Built-in skills have their body inlined so the AI doesn't need read_file
+        if skill.scope == SkillScope::Builtin {
+            has_builtin = true;
+            if let Some(body) = mgr.get_body(&skill.name) {
+                xml.push_str("    <body>\n");
+                xml.push_str(&escape_xml(&body));
+                xml.push_str("\n    </body>\n");
+            }
+        }
+
         xml.push_str("  </skill>\n");
     }
     xml.push_str("</available_skills>\n\n");
+
     xml.push_str(
         "The following skills provide specialized instructions for specific tasks.\n\
          When a task matches a skill's description, use your read_file tool to load\n\
          the SKILL.md at the listed location before proceeding.\n\
          When a skill references relative paths, resolve them against the skill's\n\
-         directory (the parent of SKILL.md) and use absolute paths in tool calls."
+         directory (the parent of SKILL.md) and use absolute paths in tool calls.\n"
     );
+
+    if has_builtin {
+        xml.push_str(
+            "Built-in skills (location \"<built-in>\") have their full content inlined\n\
+             above inside a <body> tag — no read_file call is needed for them.\n"
+        );
+    }
 
     Some(xml)
 }
@@ -601,26 +672,37 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_none() {
-        let result = build_skills_system_prompt_section(&[]);
+        let empty = SkillManager {
+            workspace_root: None,
+            skills: HashMap::new(),
+            frontmatter_cache: HashMap::new(),
+        };
+        let result = build_skills_system_prompt_section(&empty);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_build_system_prompt_with_skills() {
-        let catalog = vec![
-            SkillCatalogEntry {
-                name: "pdf".into(),
-                description: "PDF processing".into(),
-                location: "/home/user/.agents/skills/pdf/SKILL.md".into(),
-                scope: SkillScope::User,
-            },
-        ];
-        let result = build_skills_system_prompt_section(&catalog);
+        let mut mgr = SkillManager {
+            workspace_root: None,
+            skills: HashMap::new(),
+            frontmatter_cache: HashMap::new(),
+        };
+        let entry = SkillEntry {
+            name: "pdf".into(),
+            description: "PDF processing".into(),
+            location: "/home/user/.agents/skills/pdf/SKILL.md".into(),
+            scope: SkillScope::User,
+            body: None,
+        };
+        mgr.skills.insert("pdf".into(), entry);
+        let result = build_skills_system_prompt_section(&mgr);
         assert!(result.is_some());
         let text = result.unwrap();
         assert!(text.contains("pdf"));
         assert!(text.contains("PDF processing"));
         assert!(text.contains("SKILL.md"));
+        assert!(!text.contains("<body>"));
     }
 
     #[test]
