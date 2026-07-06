@@ -386,7 +386,7 @@ export const ChatPanel: Component<{
   // When this panel becomes visible again, restore the scroll position —
   // scrollIntoView is a no-op while the panel is display:none.
   createEffect(() => {
-    if (props.isActive()) scrollToBottom();
+    if (props.isActive()) scrollToBottom(true);
   });
 
   const addAttachment = async (filePath: string) => {
@@ -473,7 +473,7 @@ export const ChatPanel: Component<{
       setMessages(recordsToMessages(records));
       statsFromRecords(records);
       setCurrentSteps([]);
-      scrollToBottom();
+      scrollToBottom(true);
     } catch (e) {
       setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToCompact", String(e)) }]);
     } finally {
@@ -482,9 +482,33 @@ export const ChatPanel: Component<{
   };
 
   let messagesEndRef: HTMLDivElement | undefined;
+  let scrollContainerRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
 
-  const scrollToBottom = () => {
+  // Smart scroll: only auto-follow new content while the user is at the
+  // bottom. Growing scrollHeight doesn't fire scroll events, so isAtBottom
+  // reflects the last position the user (or an auto-scroll) settled on.
+  const [isAtBottom, setIsAtBottom] = createSignal(true);
+  let autoScrolling = false;
+  const NEAR_BOTTOM_PX = 80;
+
+  const handleScroll = () => {
+    const el = scrollContainerRef;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    if (autoScrolling) {
+      // Events fired by the smooth animation aren't user intent; release
+      // the guard only once the animation reaches the bottom.
+      if (atBottom) autoScrolling = false;
+      return;
+    }
+    setIsAtBottom(atBottom);
+  };
+
+  const scrollToBottom = (force = false) => {
+    if (!force && !isAtBottom()) return;
+    autoScrolling = true;
+    setIsAtBottom(true);
     setTimeout(() => messagesEndRef?.scrollIntoView({ behavior: "smooth" }), 50);
   };
 
@@ -773,6 +797,7 @@ export const ChatPanel: Component<{
     setCurrentSteps([]);
     setThinkingStart(0);
     setStatus("thinking");
+    scrollToBottom(true);
 
     try {
       const atts = attachments();
@@ -862,7 +887,7 @@ export const ChatPanel: Component<{
       setThinkingStart(0);
       setStatus("idle");
       setShowSessions(false);
-      scrollToBottom();
+      scrollToBottom(true);
     } catch (e) {
       setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToReopen", String(e)) }]);
     }
@@ -974,8 +999,13 @@ export const ChatPanel: Component<{
         </Show>
       </div>
 
-      <div class="flex flex-1 flex-col overflow-y-auto">
-        <div class="w-full px-6 py-4">
+      <div class="relative flex flex-1 flex-col overflow-hidden">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          class="flex flex-1 flex-col overflow-y-auto"
+        >
+          <div class="w-full px-6 py-4">
           <For each={messages()}>
             {(msg) => (
               <div class="mb-6">
@@ -1084,7 +1114,18 @@ export const ChatPanel: Component<{
           </Show>
 
           <div ref={messagesEndRef} />
+          </div>
         </div>
+
+        <Show when={!isAtBottom()}>
+          <button
+            class="absolute bottom-4 right-6 z-10 flex h-8 w-8 items-center justify-center rounded-full border border-border-subtle bg-surface text-ink-muted shadow-md transition-colors hover:text-ink"
+            onClick={() => scrollToBottom(true)}
+            title={t("chat.scrollToBottom")}
+          >
+            <Icon name="chevron-down" class="h-4 w-4" />
+          </button>
+        </Show>
       </div>
 
       <Show when={openSubagentId()}>

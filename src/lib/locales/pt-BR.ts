@@ -66,6 +66,7 @@ const dict: LocaleDict = {
   "chat.message.failedToSend": "Falha ao enviar: {0}",
   "chat.message.failedToReopen": "Falha ao reabrir: {0}",
   "chat.message.failedToCompact": "Compactação falhou: {0}",
+  "chat.scrollToBottom": "Ir para o fim",
 
   // ── ChatPanel - Phases ────────────────────────────────────────────
   "chat.phase.plan": "Planejamento",
