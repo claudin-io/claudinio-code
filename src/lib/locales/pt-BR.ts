@@ -19,6 +19,7 @@ const dict: LocaleDict = {
   "app.sidebar.openFolder": "Abrir pasta",
   "app.sidebar.browseFiles": "Explorar arquivos",
   "app.sidebar.back": "Voltar",
+  "app.sidebar.closeWorkspace": "Fechar workspace",
   "app.index.loadingModel": "Carregando modelo…",
   "app.index.indexing": "Indexando",
   "app.index.generatingEmbeddings": "Gerando embeddings",

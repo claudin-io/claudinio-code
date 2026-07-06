@@ -1,7 +1,8 @@
 import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, setConfig, getConfig, type IndexProgress } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, type IndexProgress } from "./lib/ipc";
+import { workspaceStatus, isBusy } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -12,6 +13,7 @@ import { TasksPanel } from "./components/TasksPanel";
 import { Icon } from "./components/Icon";
 
 const RECENT_KEY = "claudinio_recent_projects";
+const OPEN_KEY = "claudinio_open_workspaces";
 
 function loadRecent(): string[] {
   try {
@@ -26,6 +28,19 @@ function saveRecent(projects: string[]) {
   localStorage.setItem(RECENT_KEY, JSON.stringify(projects));
 }
 
+function loadOpenWorkspaces(): string[] {
+  try {
+    const raw = localStorage.getItem(OPEN_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveOpenWorkspaces(workspaces: string[]) {
+  localStorage.setItem(OPEN_KEY, JSON.stringify(workspaces));
+}
+
 function addRecent(projects: () => string[], setter: (v: string[]) => void, path: string) {
   const updated = [path, ...projects().filter((p) => p !== path)].slice(0, 10);
   setter(updated);
@@ -33,10 +48,11 @@ function addRecent(projects: () => string[], setter: (v: string[]) => void, path
 }
 
 function App() {
-  const [root, setRoot] = createSignal<string | null>(null);
+  const [openWorkspaces, setOpenWorkspaces] = createSignal<string[]>([]);
+  const [activeWorkspace, setActiveWorkspace] = createSignal<string | null>(null);
   const [selectedFile, setSelectedFile] = createSignal<string | null>(null);
-  const [indexStatus, setIndexStatus] = createSignal("");
-  const [progress, setProgress] = createSignal<IndexProgress | null>(null);
+  const [indexStatusMap, setIndexStatusMap] = createSignal<Record<string, string>>({});
+  const [progressMap, setProgressMap] = createSignal<Record<string, IndexProgress | null>>({});
   const [showConfig, setShowConfig] = createSignal(false);
   const [configApiKey, setConfigApiKey] = createSignal("");
   const [configBaseUrl, setConfigBaseUrl] = createSignal("https://api.claudin.io");
@@ -46,27 +62,65 @@ function App() {
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [showTree, setShowTree] = createSignal(false);
-  const [taskCount, setTaskCount] = createSignal(0);
+  const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
 
+  // Convenience views scoped to the currently visible workspace.
+  const progress = () => {
+    const ws = activeWorkspace();
+    return ws ? progressMap()[ws] ?? null : null;
+  };
+  const indexStatus = () => {
+    const ws = activeWorkspace();
+    return ws ? indexStatusMap()[ws] ?? "" : "";
+  };
+  const taskCount = () => {
+    const ws = activeWorkspace();
+    return ws ? taskCounts()[ws] ?? 0 : 0;
+  };
+  const setWsProgress = (ws: string, p: IndexProgress | null) =>
+    setProgressMap((m) => ({ ...m, [ws]: p }));
+  const setWsIndexStatus = (ws: string, s: string) =>
+    setIndexStatusMap((m) => ({ ...m, [ws]: s }));
+
   // Listen for global index-progress events (model loading, embedding
-  // generation, watcher re-indexing)
+  // generation, watcher re-indexing). Events carry the workspace root so each
+  // one lands on the right workspace's progress slot.
   onMount(() => {
     const unlisten = listen<IndexProgress>("index-progress", (event) => {
-      setProgress(event.payload);
+      const ws = event.payload.workspace;
+      if (!ws) return;
+      setWsProgress(ws, event.payload);
       const st = event.payload.status;
-      if (st === "embeddings_done") {
-        setIndexStatus((prev) =>
-          prev
-            ? `${prev} · ${event.payload.symbolsIndexed} embeddings`
-            : `${event.payload.symbolsIndexed} embeddings`,
+      const clearIf = (delay: number) =>
+        setTimeout(
+          () => setProgressMap((m) => (m[ws]?.status === st ? { ...m, [ws]: null } : m)),
+          delay,
         );
-        setTimeout(() => setProgress((p) => (p?.status === st ? null : p)), 1500);
+      if (st === "embeddings_done") {
+        setIndexStatusMap((m) => ({
+          ...m,
+          [ws]: m[ws]
+            ? `${m[ws]} · ${event.payload.symbolsIndexed} embeddings`
+            : `${event.payload.symbolsIndexed} embeddings`,
+        }));
+        clearIf(1500);
       } else if (st === "embeddings_error" || st === "embedding_model_error") {
-        setTimeout(() => setProgress((p) => (p?.status === st ? null : p)), 4000);
+        clearIf(4000);
       }
     });
     return () => { unlisten.then((f) => f()); };
+  });
+
+  // Restore workspaces that were open in the previous run.
+  onMount(() => {
+    const stored = loadOpenWorkspaces();
+    if (stored.length === 0) return;
+    setOpenWorkspaces(stored);
+    setActiveWorkspace(stored[0]);
+    for (const ws of stored) {
+      void indexProject(ws, { activate: false });
+    }
   });
 
   const openConfig = async () => {
@@ -105,38 +159,83 @@ function App() {
     }
   };
 
-  const indexProject = async (folder: string) => {
-    setSelectedFile(null);
-    setRoot(folder);
-    setShowTree(false);
-    setIndexStatus(t("app.index.indexingStatus"));
-    setProgress(null);
+  const addOpenWorkspace = (folder: string) => {
+    setOpenWorkspaces((prev) => {
+      if (prev.includes(folder)) return prev;
+      const updated = [...prev, folder];
+      saveOpenWorkspaces(updated);
+      return updated;
+    });
+  };
+
+  const indexProject = async (folder: string, opts?: { activate?: boolean }) => {
+    const activate = opts?.activate ?? true;
+    addOpenWorkspace(folder);
+    if (activate) {
+      setSelectedFile(null);
+      setActiveWorkspace(folder);
+      setShowTree(false);
+    }
+    setWsIndexStatus(folder, t("app.index.indexingStatus"));
+    setWsProgress(folder, null);
     try {
-      const s = await openWorkspace(folder, (p) => setProgress(p));
-      setIndexStatus(t("app.index.filesCount", s.filesCount, s.symbolsCount));
+      const s = await openWorkspace(folder, (p) => setWsProgress(folder, p));
+      setWsIndexStatus(folder, t("app.index.filesCount", s.filesCount, s.symbolsCount));
       // Only clear scan progress — the embedding phase keeps reporting after
       // openWorkspace returns and clears itself on its terminal statuses.
       setTimeout(
-        () => setProgress((p) => (p && p.status !== "done" && p.status !== "indexing" ? p : null)),
+        () =>
+          setProgressMap((m) => {
+            const p = m[folder];
+            return p && p.status !== "done" && p.status !== "indexing" ? m : { ...m, [folder]: null };
+          }),
         800,
       );
     } catch (e) {
-      setIndexStatus(`${t("chat.status.error")}: ${e}`);
-      setProgress(null);
+      setWsIndexStatus(folder, `${t("chat.status.error")}: ${e}`);
+      setWsProgress(folder, null);
     }
+  };
+
+  /// Bring an already-open workspace to the front (no re-index — the backend
+  /// short-circuits anyway, but we avoid even the IPC round-trip).
+  const activateWorkspace = (folder: string) => {
+    setSelectedFile(null);
+    setShowTree(false);
+    setActiveWorkspace(folder);
+  };
+
+  const closeOpenWorkspace = async (folder: string) => {
+    const updated = openWorkspaces().filter((w) => w !== folder);
+    setOpenWorkspaces(updated);
+    saveOpenWorkspaces(updated);
+    if (activeWorkspace() === folder) {
+      setActiveWorkspace(updated[0] ?? null);
+    }
+    try {
+      await closeWorkspace(folder);
+    } catch {}
   };
 
   const openFolder = async () => {
     const folder = await pickFolder();
     if (folder) {
       addRecent(recentProjects, setRecentProjects, folder);
-      await indexProject(folder);
+      if (openWorkspaces().includes(folder)) {
+        activateWorkspace(folder);
+      } else {
+        await indexProject(folder);
+      }
     }
   };
 
   const openRecent = async (folder: string) => {
     addRecent(recentProjects, setRecentProjects, folder);
-    await indexProject(folder);
+    if (openWorkspaces().includes(folder)) {
+      activateWorkspace(folder);
+    } else {
+      await indexProject(folder);
+    }
   };
 
   const isMac = () => document.documentElement.classList.contains("is-macos");
@@ -152,7 +251,7 @@ function App() {
           Claudinio <span class="text-accent">Code</span>
         </span>
         <span class="max-w-[280px] truncate font-mono text-[12px] text-ink-faint" data-tauri-drag-region>
-          {root()}
+          {activeWorkspace()}
         </span>
         <div class="ml-auto flex items-center gap-1.5">
           <button
@@ -281,7 +380,7 @@ function App() {
       <div class="flex min-h-0 flex-1">
         <aside class="flex w-60 shrink-0 flex-col border-r border-border-subtle bg-surface-1">
           <Show
-            when={showTree() && root()}
+            when={showTree() && activeWorkspace()}
             fallback={
               <>
                 <div class="flex items-center justify-between border-b border-border-subtle px-3 py-2">
@@ -291,13 +390,73 @@ function App() {
                 </div>
 
                 <div class="flex-1 overflow-y-auto">
-                  <For each={recentProjects()}>
+                  {/* Open workspaces — clicking switches the visible chat; each
+                      entry shows its agent status so a background workspace's
+                      run stays visible. */}
+                  <For each={openWorkspaces()}>
+                    {(proj) => (
+                      <div
+                        class="group flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm hover:bg-surface-2"
+                        classList={{
+                          "border-accent bg-surface-2": activeWorkspace() === proj,
+                        }}
+                      >
+                        <button
+                          class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          onClick={() => activateWorkspace(proj)}
+                        >
+                          <span class="relative shrink-0">
+                            <Icon name="folder" class="text-ink-muted" />
+                            <Show when={workspaceStatus[proj]}>
+                              <span
+                                class="absolute -right-1 -top-1 block h-2 w-2 rounded-full"
+                                classList={{
+                                  "bg-accent animate-pulse": workspaceStatus[proj] === "thinking",
+                                  "bg-amber-400 animate-pulse":
+                                    workspaceStatus[proj] === "awaiting_approval" ||
+                                    workspaceStatus[proj] === "awaiting_input",
+                                  "bg-success": workspaceStatus[proj] === "done",
+                                  "bg-red-400": workspaceStatus[proj] === "error",
+                                  hidden: workspaceStatus[proj] === "idle",
+                                }}
+                                title={workspaceStatus[proj]}
+                              />
+                            </Show>
+                          </span>
+                          <div class="min-w-0">
+                            <div class="truncate text-[13px] text-ink">
+                              {proj.split("/").pop()}
+                            </div>
+                            <div class="truncate text-[11px] text-ink-faint">
+                              {workspaceStatus[proj] === "thinking"
+                                ? t("chat.status.thinking")
+                                : workspaceStatus[proj] === "awaiting_approval"
+                                  ? t("chat.status.awaitingApproval")
+                                  : workspaceStatus[proj] === "awaiting_input"
+                                    ? t("chat.status.awaitingInput")
+                                    : proj}
+                            </div>
+                          </div>
+                        </button>
+                        <button
+                          class="hidden shrink-0 rounded p-0.5 text-ink-faint hover:bg-surface-3 hover:text-ink group-hover:block"
+                          title={t("app.sidebar.closeWorkspace")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeOpenWorkspace(proj);
+                          }}
+                        >
+                          <Icon name="x" class="h-3 w-3" />
+                        </button>
+                      </div>
+                    )}
+                  </For>
+
+                  {/* Recent projects not currently open */}
+                  <For each={recentProjects().filter((p) => !openWorkspaces().includes(p))}>
                     {(proj) => (
                       <button
-                        class="flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm hover:bg-surface-2"
-                        classList={{
-                          "border-accent bg-surface-2": root() === proj,
-                        }}
+                        class="flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm opacity-70 hover:bg-surface-2 hover:opacity-100"
                         onClick={() => openRecent(proj)}
                       >
                         <Icon name="folder" class="shrink-0 text-ink-muted" />
@@ -313,7 +472,7 @@ function App() {
                     )}
                   </For>
 
-                  <Show when={recentProjects().length === 0}>
+                  <Show when={recentProjects().length === 0 && openWorkspaces().length === 0}>
                     <div class="px-3 py-8 text-center text-xs text-ink-faint">
                       {t("app.sidebar.noRecent")}
                     </div>
@@ -328,7 +487,7 @@ function App() {
                     <Icon name="plus" class="h-3.5 w-3.5" />
                     {t("app.sidebar.openFolder")}
                   </button>
-                  <Show when={root()}>
+                  <Show when={activeWorkspace()}>
                     <button
                       onClick={() => setShowTree(true)}
                       class="mt-1 flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
@@ -350,19 +509,19 @@ function App() {
                 {t("app.sidebar.back")}
               </button>
               <span class="truncate text-xs font-semibold text-ink">
-                {root()?.split("/").pop()}
+                {activeWorkspace()?.split("/").pop()}
               </span>
             </div>
             <div class="flex-1 overflow-hidden">
               <FileTree
-                root={root()!}
+                root={activeWorkspace()!}
                 onOpenFile={setSelectedFile}
                 selectedPath={selectedFile}
               />
             </div>
           </Show>
 
-          <Show when={root() && !showTree() && (progress() || indexStatus())}>
+          <Show when={activeWorkspace() && !showTree() && (progress() || indexStatus())}>
             <div class="border-t border-border-subtle px-3 py-2">
               <Show when={progress() !== null}
                 fallback={
@@ -428,23 +587,47 @@ function App() {
         </aside>
 
         <main class="min-w-0 flex-1">
-          <Show when={root()} fallback={
+          <Show when={activeWorkspace()} fallback={
             <EmptyState
               recentProjects={recentProjects()}
               openRecent={openRecent}
               openFolder={openFolder}
             />
           }>
-            <ChatPanel />
+            {/* One ChatPanel per open workspace, all kept mounted: hidden
+                panels keep receiving their run's Channel events, so agents in
+                background workspaces stream in parallel without losing state. */}
+            <For each={openWorkspaces()}>
+              {(ws) => (
+                <div
+                  class="h-full"
+                  style={{ display: activeWorkspace() === ws ? "block" : "none" }}
+                >
+                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} />
+                </div>
+              )}
+            </For>
           </Show>
         </main>
 
-        <Show when={root()}>
+        <Show when={activeWorkspace()}>
           <aside
             class="shrink-0 border-l border-border-subtle bg-surface-1 overflow-hidden transition-[width] duration-100"
             classList={{ "w-10": taskCount() > 0, "w-0": taskCount() === 0 }}
           >
-            <TasksPanel onTasksChange={setTaskCount} />
+            <For each={openWorkspaces()}>
+              {(ws) => (
+                <div
+                  class="h-full"
+                  style={{ display: activeWorkspace() === ws ? "block" : "none" }}
+                >
+                  <TasksPanel
+                    workspace={ws}
+                    onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
+                  />
+                </div>
+              )}
+            </For>
           </aside>
         </Show>
       </div>

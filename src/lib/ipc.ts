@@ -160,6 +160,7 @@ export interface DoneData {
 }
 
 export function sendMessage(
+  workspace: string,
   message: string,
   attachments: AttachmentInput[],
   onEvent: (event: AgentEvent) => void,
@@ -167,6 +168,7 @@ export function sendMessage(
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
   return invoke<SessionStarted>("send_message", {
+    workspace,
     message,
     attachments: attachments.length > 0 ? attachments : undefined,
     eventChannel: channel,
@@ -192,16 +194,16 @@ export type SessionRecord = {
   [key: string]: unknown;
 };
 
-export function newSession(): Promise<void> {
-  return invoke<void>("new_session");
+export function newSession(workspace: string): Promise<void> {
+  return invoke<void>("new_session", { workspace });
 }
 
-export function listSessions(): Promise<SessionSummary[]> {
-  return invoke<SessionSummary[]>("list_sessions");
+export function listSessions(workspace: string): Promise<SessionSummary[]> {
+  return invoke<SessionSummary[]>("list_sessions", { workspace });
 }
 
-export function loadSession(sessionId: string): Promise<SessionRecord[]> {
-  return invoke<SessionRecord[]>("load_session", { sessionId });
+export function loadSession(workspace: string, sessionId: string): Promise<SessionRecord[]> {
+  return invoke<SessionRecord[]>("load_session", { workspace, sessionId });
 }
 
 export function approveTool(sessionId: string, toolId: string): Promise<void> {
@@ -229,12 +231,13 @@ export function interruptSession(sessionId: string): Promise<void> {
 }
 
 export function compactSession(
+  workspace: string,
   sessionId: string,
   onEvent: (event: AgentEvent) => void,
 ): Promise<string> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  return invoke<string>("compact_session", { sessionId, eventChannel: channel });
+  return invoke<string>("compact_session", { workspace, sessionId, eventChannel: channel });
 }
 
 /// Cumulative token/cost stats and current context size from the last Status
@@ -286,6 +289,8 @@ export interface IndexProgress {
   symbolsIndexed: number;
   totalFiles: number;
   file?: string;
+  /** Root path of the workspace this progress event belongs to. */
+  workspace: string;
 }
 
 export interface SearchResult {
@@ -316,19 +321,24 @@ export function openWorkspace(path: string, onProgress?: (p: IndexProgress) => v
   return invoke<IndexStatus>("open_workspace", { path, progressChannel: channel });
 }
 
+export function closeWorkspace(path: string): Promise<void> {
+  return invoke<void>("close_workspace", { path });
+}
+
 export function searchSymbols(
+  workspace: string,
   query: string,
   limit?: number,
 ): Promise<SearchResult[]> {
-  return invoke<SearchResult[]>("search_symbols", { query, limit });
+  return invoke<SearchResult[]>("search_symbols", { workspace, query, limit });
 }
 
-export function symbolLookup(name: string): Promise<SearchResult[]> {
-  return invoke<SearchResult[]>("symbol_lookup", { name });
+export function symbolLookup(workspace: string, name: string): Promise<SearchResult[]> {
+  return invoke<SearchResult[]>("symbol_lookup", { workspace, name });
 }
 
-export function fileOutline(filePath: string): Promise<SymbolRecord[]> {
-  return invoke<SymbolRecord[]>("file_outline", { filePath });
+export function fileOutline(workspace: string, filePath: string): Promise<SymbolRecord[]> {
+  return invoke<SymbolRecord[]>("file_outline", { workspace, filePath });
 }
 
 // --- File write ---
@@ -372,12 +382,12 @@ export interface TaskItem {
   status: "todo" | "doing" | "done";
 }
 
-export function getTasks(): Promise<TaskItem[]> {
-  return invoke<TaskItem[]>("get_tasks");
+export function getTasks(workspace: string): Promise<TaskItem[]> {
+  return invoke<TaskItem[]>("get_tasks", { workspace });
 }
 
-export function setTasks(tasks: TaskItem[]): Promise<void> {
-  return invoke<void>("set_tasks", { tasks });
+export function setTasks(workspace: string, tasks: TaskItem[]): Promise<void> {
+  return invoke<void>("set_tasks", { workspace, tasks });
 }
 
 // --- Skills ---
@@ -415,20 +425,20 @@ export interface InstallRemoteSkillArgs {
   description: string;
 }
 
-export function listSkills(): Promise<SkillsResponse> {
-  return invoke<SkillsResponse>("list_skills");
+export function listSkills(workspace: string): Promise<SkillsResponse> {
+  return invoke<SkillsResponse>("list_skills", { workspace });
 }
 
-export function getSkillCatalog(): Promise<string[]> {
-  return invoke<string[]>("get_skill_catalog");
+export function getSkillCatalog(workspace: string): Promise<string[]> {
+  return invoke<string[]>("get_skill_catalog", { workspace });
 }
 
-export function getSkillContent(name: string): Promise<SkillEntry & { body: string }> {
-  return invoke("get_skill_content", { name });
+export function getSkillContent(workspace: string, name: string): Promise<SkillEntry & { body: string }> {
+  return invoke("get_skill_content", { workspace, name });
 }
 
-export function rescanSkills(): Promise<SkillsResponse> {
-  return invoke<SkillsResponse>("rescan_skills");
+export function rescanSkills(workspace: string): Promise<SkillsResponse> {
+  return invoke<SkillsResponse>("rescan_skills", { workspace });
 }
 
 export function findRemoteSkills(query?: string): Promise<RemoteSkill[]> {
@@ -439,18 +449,18 @@ export function previewRemoteSkill(url: string): Promise<SkillEntry> {
   return invoke<SkillEntry>("preview_remote_skill", { url });
 }
 
-export function installRemoteSkill(args: InstallRemoteSkillArgs): Promise<SkillEntry> {
-  return invoke<SkillEntry>("install_remote_skill", { args });
+export function installRemoteSkill(workspace: string, args: InstallRemoteSkillArgs): Promise<SkillEntry> {
+  return invoke<SkillEntry>("install_remote_skill", { workspace, args });
 }
 
-export function lspDefinition(args: LspPositionArgs): Promise<LspLocation[]> {
-  return invoke<LspLocation[]>("lsp_definition", { args });
+export function lspDefinition(workspace: string, args: LspPositionArgs): Promise<LspLocation[]> {
+  return invoke<LspLocation[]>("lsp_definition", { workspace, args });
 }
 
-export function lspReferences(args: LspPositionArgs): Promise<LspLocation[]> {
-  return invoke<LspLocation[]>("lsp_references", { args });
+export function lspReferences(workspace: string, args: LspPositionArgs): Promise<LspLocation[]> {
+  return invoke<LspLocation[]>("lsp_references", { workspace, args });
 }
 
-export function lspHover(args: LspPositionArgs): Promise<HoverInfo | null> {
-  return invoke<HoverInfo | null>("lsp_hover", { args });
+export function lspHover(workspace: string, args: LspPositionArgs): Promise<HoverInfo | null> {
+  return invoke<HoverInfo | null>("lsp_hover", { workspace, args });
 }

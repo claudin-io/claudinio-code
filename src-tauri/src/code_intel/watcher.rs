@@ -29,6 +29,7 @@ impl FileWatcher {
     ) -> Result<Self, String> {
         let db_path = db_path.to_path_buf();
         let handle = app_handle.clone();
+        let root_owned = root.to_string();
 
         let mut watcher = notify::recommended_watcher(
             move |event: Result<notify::Event, notify::Error>| {
@@ -55,6 +56,7 @@ impl FileWatcher {
 
                 let db_p = db_path.clone();
                 let h = handle.clone();
+                let ws = root_owned.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(1500));
 
@@ -81,6 +83,7 @@ impl FileWatcher {
                         let _ = h.emit("index-progress", serde_json::json!({
                             "status": "reindexing",
                             "file": path_str,
+                            "workspace": ws,
                         }));
 
                         let mut emb = embedder.as_ref().and_then(|e| e.lock().ok());
@@ -90,6 +93,7 @@ impl FileWatcher {
                                     "status": "reindexed",
                                     "file": path_str,
                                     "symbols": result.symbols.len(),
+                                    "workspace": ws,
                                 }));
                             }
                             Ok(None) => {}
@@ -98,6 +102,7 @@ impl FileWatcher {
                                     "status": "reindex_error",
                                     "file": path_str,
                                     "error": e,
+                                    "workspace": ws,
                                 }));
                             }
                         }

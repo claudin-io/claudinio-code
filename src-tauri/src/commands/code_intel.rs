@@ -2,7 +2,7 @@ use crate::code_intel::db::{IndexDb, SearchResult, SymbolRecord};
 use crate::code_intel::embeddings::{self, SharedEmbedder};
 use crate::code_intel::indexer;
 use crate::code_intel::watcher::FileWatcher;
-use crate::state::AppState;
+use crate::state::{AppState, WorkspaceState};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -55,6 +55,17 @@ pub async fn open_workspace(
     state: State<'_, AppState>,
     progress_channel: Channel<indexer::IndexProgress>,
 ) -> Result<IndexStatus, String> {
+    // Already open: switching back to this workspace must be cheap and must
+    // not restart indexing/watcher/LSP under a possibly-running agent.
+    if let Ok(ws) = state.workspace(&path).await {
+        let (files_count, symbols_count) = ws.index_db.index_stats().unwrap_or((0, 0));
+        return Ok(IndexStatus {
+            status: "ok".into(),
+            files_count,
+            symbols_count,
+        });
+    }
+
     let db_path = Path::new(&path).join(".claudinio_index.db");
     let db = Arc::new(IndexDb::open(&db_path)?);
 
@@ -63,6 +74,7 @@ pub async fn open_workspace(
         files_indexed: 0,
         symbols_indexed: 0,
         total_files: 0,
+        workspace: path.clone(),
     });
 
     // Download model to cache if not bundled
@@ -75,6 +87,7 @@ pub async fn open_workspace(
                 files_indexed: 0,
                 symbols_indexed: 0,
                 total_files: 0,
+                workspace: path.clone(),
             });
         }
     }
@@ -156,10 +169,12 @@ pub async fn open_workspace(
         let shared = std::sync::Arc::clone(shared);
         let db2 = Arc::clone(&db);
         let emit_handle = app_handle.clone();
+        let ws_path = path.clone();
         let join = spawn_blocking(move || {
-            indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle))
+            indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle), &ws_path)
         });
         let emit_handle = app_handle.clone();
+        let ws_path = path.clone();
         tokio::spawn(async move {
             let result = join.await;
             let (status, files, symbols) = match result {
@@ -178,32 +193,34 @@ pub async fn open_workspace(
                 files_indexed: files,
                 symbols_indexed: symbols,
                 total_files: files,
+                workspace: ws_path,
             });
         });
     }
 
     let watcher = FileWatcher::start(&path, &db_path, app_handle.clone())?;
 
+    let root = std::path::PathBuf::from(&path);
+    let lsp_manager = Arc::new(tokio::sync::Mutex::new(crate::lsp::manager::LspManager::new()));
     {
-        let mut state_db = state.index_db.lock().await;
-        *state_db = Some(db);
-    }
-    {
-        let mut ws = state.workspace_root.lock().await;
-        *ws = Some(std::path::PathBuf::from(&path));
-    }
-    {
-        // Update the SkillManager with the new workspace root
-        let mut skills = state.skills_manager.lock().await;
-        *skills = crate::agent::skills::SkillManager::new(Some(std::path::PathBuf::from(&path)));
-    }
-    {
-        let mut w = state._watcher.lock().await;
-        *w = Some(watcher);
-    }
-    {
-        let mut lsp = state.lsp_manager.lock().await;
+        let mut lsp = lsp_manager.lock().await;
         let _ = lsp.start_for_workspace(&path);
+    }
+
+    let workspace = Arc::new(WorkspaceState {
+        root: root.clone(),
+        index_db: db,
+        skills_manager: Arc::new(tokio::sync::Mutex::new(
+            crate::agent::skills::SkillManager::new(Some(root.clone())),
+        )),
+        lsp_manager,
+        _watcher: tokio::sync::Mutex::new(Some(watcher)),
+        active_session: tokio::sync::Mutex::new(None),
+    });
+
+    {
+        let mut map = state.workspaces.lock().await;
+        map.insert(root, workspace);
     }
 
     Ok(IndexStatus {
@@ -213,33 +230,45 @@ pub async fn open_workspace(
     })
 }
 
+/// Close an open workspace: drops its watcher, LSP servers and index handle.
+/// Any in-flight agent run keeps its own snapshot of these and finishes.
+#[tauri::command]
+pub async fn close_workspace(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut map = state.workspaces.lock().await;
+    map.remove(Path::new(&path));
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn search_symbols(
+    workspace: String,
     query: String,
     limit: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<Vec<SearchResult>, String> {
-    let db_guard = state.index_db.lock().await;
-    let db = db_guard.as_ref().ok_or("no workspace open")?;
-    db.search_symbols(&query, limit.unwrap_or(30))
+    let ws = state.workspace(&workspace).await?;
+    ws.index_db.search_symbols(&query, limit.unwrap_or(30))
 }
 
 #[tauri::command]
 pub async fn symbol_lookup(
+    workspace: String,
     name: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<SearchResult>, String> {
-    let db_guard = state.index_db.lock().await;
-    let db = db_guard.as_ref().ok_or("no workspace open")?;
-    db.search_symbols(&name, 20)
+    let ws = state.workspace(&workspace).await?;
+    ws.index_db.search_symbols(&name, 20)
 }
 
 #[tauri::command]
 pub async fn file_outline(
+    workspace: String,
     file_path: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<SymbolRecord>, String> {
-    let db_guard = state.index_db.lock().await;
-    let db = db_guard.as_ref().ok_or("no workspace open")?;
-    db.symbols_in_file(&file_path)
+    let ws = state.workspace(&workspace).await?;
+    ws.index_db.symbols_in_file(&file_path)
 }

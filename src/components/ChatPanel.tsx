@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
 import {
   sendMessage,
   approveTool,
@@ -33,6 +33,7 @@ import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
+import { setWorkspaceStatus } from "../lib/workspaceStatus";
 
 marked.use({
   renderer: {
@@ -342,7 +343,14 @@ function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
   return out;
 }
 
-export const ChatPanel: Component = () => {
+export const ChatPanel: Component<{
+  /// Root path of the workspace this panel belongs to. One panel is mounted
+  /// per open workspace; hidden ones keep streaming their run's events.
+  workspace: string;
+  /// Whether this panel is the visible one. Global listeners (ESC interrupt,
+  /// drag-drop) must only act on the active panel.
+  isActive: () => boolean;
+}> = (props) => {
   const [input, setInput] = createSignal("");
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [status, setStatus] = createSignal<Status>("idle");
@@ -372,6 +380,15 @@ export const ChatPanel: Component = () => {
   const [compactThreshold, setCompactThreshold] = createSignal(192_000);
   const [isCompacting, setIsCompacting] = createSignal(false);
 
+  // Feed the sidebar's per-workspace running indicator.
+  createEffect(() => setWorkspaceStatus(props.workspace, status()));
+
+  // When this panel becomes visible again, restore the scroll position —
+  // scrollIntoView is a no-op while the panel is display:none.
+  createEffect(() => {
+    if (props.isActive()) scrollToBottom();
+  });
+
   const addAttachment = async (filePath: string) => {
     try {
       const data = await readAttachment(filePath);
@@ -398,8 +415,10 @@ export const ChatPanel: Component = () => {
       })
       .catch(() => {});
 
-    // Listen for native file drop events via Tauri window API
+    // Listen for native file drop events via Tauri window API. Every mounted
+    // panel receives these, so only the visible one may react.
     const unlistenDrop = getCurrentWindow().onDragDropEvent(async (event) => {
+      if (!props.isActive()) return;
       const payload = event.payload;
       if (payload.type === "over") {
         setIsDragging(true);
@@ -433,7 +452,7 @@ export const ChatPanel: Component = () => {
     if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
     setIsCompacting(true);
     try {
-      await compactSession(activeSessionId()!, (event) => {
+      await compactSession(props.workspace, activeSessionId()!, (event) => {
         if (event.event === "TextStep") {
           setMessages((prev) => {
             const last = prev[prev.length - 1];
@@ -450,7 +469,7 @@ export const ChatPanel: Component = () => {
         }
       });
       // Reload session to get the updated view and the new (smaller) context
-      const records = await loadSession(activeSessionId()!);
+      const records = await loadSession(props.workspace, activeSessionId()!);
       setMessages(recordsToMessages(records));
       statsFromRecords(records);
       setCurrentSteps([]);
@@ -758,6 +777,7 @@ export const ChatPanel: Component = () => {
     try {
       const atts = attachments();
       const result = await sendMessage(
+        props.workspace,
         text,
         atts.map((a) => ({ path: a.path })),
         handleEvent,
@@ -807,7 +827,7 @@ export const ChatPanel: Component = () => {
   const startNewSession = async () => {
     if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
     try {
-      await newSession();
+      await newSession(props.workspace);
     } catch {
       /* fresh session is best-effort */
     }
@@ -824,7 +844,7 @@ export const ChatPanel: Component = () => {
     setShowSessions(next);
     if (next) {
       try {
-        setSessions(await listSessions());
+        setSessions(await listSessions(props.workspace));
       } catch {
         setSessions([]);
       }
@@ -834,7 +854,7 @@ export const ChatPanel: Component = () => {
   const reopenSession = async (id: string) => {
     if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
     try {
-      const records = await loadSession(id);
+      const records = await loadSession(props.workspace, id);
       setMessages(recordsToMessages(records));
       statsFromRecords(records);
       setActiveSessionId(id);
@@ -855,9 +875,11 @@ export const ChatPanel: Component = () => {
     }
   };
 
-  // Global ESC handler: only fires when status is "thinking"
+  // Global ESC handler: only fires on the visible panel while it's thinking,
+  // otherwise ESC would interrupt every workspace running in parallel.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!props.isActive()) return;
       if (e.key === "Escape" && status() === "thinking") {
         e.preventDefault();
         const sid = activeSessionId();
@@ -1045,6 +1067,7 @@ export const ChatPanel: Component = () => {
                     </Show>
                     <ApprovalCard
                       toolCall={tc}
+                      isActive={props.isActive}
                       onApprove={() => handleApprove(tc)}
                       onReject={() => handleReject(tc)}
                     />
@@ -1938,6 +1961,10 @@ const QuestionCard: Component<{
 
 const ApprovalCard: Component<{
   toolCall: ToolCallData;
+  /// Whether the owning ChatPanel is the visible one. Hidden panels keep
+  /// their pending ApprovalCards mounted, so without this guard Enter/Esc in
+  /// the visible workspace would resolve another workspace's approval.
+  isActive: () => boolean;
   onApprove: () => void;
   onReject: () => void;
 }> = (props) => {
@@ -1947,6 +1974,7 @@ const ApprovalCard: Component<{
   // The chat input is disabled while an approval is pending, so a global
   // listener is safe: Enter approves, Esc rejects.
   const onKey = (e: KeyboardEvent) => {
+    if (!props.isActive()) return;
     if (e.key === "Enter") {
       e.preventDefault();
       props.onApprove();

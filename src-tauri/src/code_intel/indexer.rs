@@ -15,6 +15,9 @@ pub struct IndexProgress {
     pub files_indexed: i64,
     pub symbols_indexed: i64,
     pub total_files: i64,
+    /// Root path of the workspace this progress belongs to, so the frontend
+    /// can route global "index-progress" events to the right workspace entry.
+    pub workspace: String,
 }
 
 pub fn compute_hash(content: &str) -> String {
@@ -140,6 +143,7 @@ pub fn scan_workspace(
         files_indexed: 0,
         symbols_indexed: 0,
         total_files: total,
+        workspace: root.to_string(),
     };
     if let Some(handle) = app_handle.as_ref() {
         let _ = handle.emit("index-progress", initial_progress.clone());
@@ -178,6 +182,7 @@ pub fn scan_workspace(
                 files_indexed: counted,
                 symbols_indexed: total_symbols,
                 total_files: total,
+                workspace: root.to_string(),
             };
             if let Some(handle) = app_handle {
                 let _ = handle.emit("index-progress", prog.clone());
@@ -202,6 +207,7 @@ pub fn scan_workspace(
         files_indexed: total_files,
         symbols_indexed: total_symbols,
         total_files: total,
+        workspace: root.to_string(),
     };
     if let Some(handle) = app_handle {
         let _ = handle.emit("index-progress", done_progress.clone());
@@ -217,6 +223,7 @@ pub fn generate_all_embeddings(
     db: &IndexDb,
     embedder: &SharedEmbedder,
     app_handle: Option<&tauri::AppHandle>,
+    workspace: &str,
 ) -> Result<(i64, i64), String> {
     let files = db.all_files()?;
     let total = files.len() as i64;
@@ -302,6 +309,7 @@ pub fn generate_all_embeddings(
                     files_indexed: processed,
                     symbols_indexed: total_embeddings,
                     total_files: total,
+                    workspace: workspace.to_string(),
                 });
             }
         }

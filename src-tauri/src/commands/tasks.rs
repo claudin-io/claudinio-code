@@ -48,23 +48,32 @@ pub fn append_tasks(path: &Path, tasks: &[TaskItem]) -> Result<(), String> {
     Ok(())
 }
 
-/// Return all current tasks from the active session JSONL.
+/// Return all current tasks from a workspace's active session JSONL.
 #[tauri::command]
-pub async fn get_tasks(state: State<'_, AppState>) -> Result<Vec<TaskItem>, String> {
-    let guard = state.active_session.lock().await;
+pub async fn get_tasks(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TaskItem>, String> {
+    let ws = match state.workspace(&workspace).await {
+        Ok(ws) => ws,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let guard = ws.active_session.lock().await;
     match guard.as_ref() {
         Some(handle) => load_last_tasks(&handle.store_path),
         None => Ok(Vec::new()),
     }
 }
 
-/// Append tasks to the active session JSONL.
+/// Append tasks to a workspace's active session JSONL.
 #[tauri::command]
 pub async fn set_tasks(
+    workspace: String,
     tasks: Vec<TaskItem>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let guard = state.active_session.lock().await;
+    let ws = state.workspace(&workspace).await?;
+    let guard = ws.active_session.lock().await;
     match guard.as_ref() {
         Some(handle) => append_tasks(&handle.store_path, &tasks),
         None => Ok(()),

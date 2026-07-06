@@ -42,30 +42,36 @@ fn convert(loc: &Location) -> LspLocation {
 
 #[tauri::command]
 pub async fn lsp_definition(
+    workspace: String,
     args: LspPositionArgs,
     state: State<'_, AppState>,
 ) -> Result<Vec<LspLocation>, String> {
-    let mut mgr = state.lsp_manager.lock().await;
+    let ws = state.workspace(&workspace).await?;
+    let mut mgr = ws.lsp_manager.lock().await;
     let locations = mgr.goto_definition(&args.file_path, args.line, args.character)?;
     Ok(locations.iter().map(convert).collect())
 }
 
 #[tauri::command]
 pub async fn lsp_references(
+    workspace: String,
     args: LspPositionArgs,
     state: State<'_, AppState>,
 ) -> Result<Vec<LspLocation>, String> {
-    let mut mgr = state.lsp_manager.lock().await;
+    let ws = state.workspace(&workspace).await?;
+    let mut mgr = ws.lsp_manager.lock().await;
     let locations = mgr.find_references(&args.file_path, args.line, args.character)?;
     Ok(locations.iter().map(convert).collect())
 }
 
 #[tauri::command]
 pub async fn lsp_hover(
+    workspace: String,
     args: LspPositionArgs,
     state: State<'_, AppState>,
 ) -> Result<Option<HoverInfo>, String> {
-    let mut mgr = state.lsp_manager.lock().await;
+    let ws = state.workspace(&workspace).await?;
+    let mut mgr = ws.lsp_manager.lock().await;
     let result = mgr.hover(&args.file_path, args.line, args.character)?;
     Ok(result.map(|h| HoverInfo {
         contents: h.contents,

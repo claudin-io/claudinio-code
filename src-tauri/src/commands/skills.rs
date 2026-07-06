@@ -13,10 +13,14 @@ pub struct SkillsResponse {
     pub count: usize,
 }
 
-/// List all locally discovered skills.
+/// List all locally discovered skills for a workspace.
 #[tauri::command]
-pub async fn list_skills(state: State<'_, AppState>) -> Result<SkillsResponse, String> {
-    let mgr = state.skills_manager.lock().await;
+pub async fn list_skills(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<SkillsResponse, String> {
+    let ws = state.workspace(&workspace).await?;
+    let mgr = ws.skills_manager.lock().await;
     let skills = mgr.list();
     let count = skills.len();
     Ok(SkillsResponse { skills, count })
@@ -24,8 +28,12 @@ pub async fn list_skills(state: State<'_, AppState>) -> Result<SkillsResponse, S
 
 /// Get the catalog (name + description only) for system prompt injection.
 #[tauri::command]
-pub async fn get_skill_catalog(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let mgr = state.skills_manager.lock().await;
+pub async fn get_skill_catalog(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let ws = state.workspace(&workspace).await?;
+    let mgr = ws.skills_manager.lock().await;
     let section = build_skills_system_prompt_section(&mgr);
     Ok(vec![section.unwrap_or_default()])
 }
@@ -33,10 +41,12 @@ pub async fn get_skill_catalog(state: State<'_, AppState>) -> Result<Vec<String>
 /// Get the full SKILL.md content for a skill by name.
 #[tauri::command]
 pub async fn get_skill_content(
+    workspace: String,
     name: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let mgr = state.skills_manager.lock().await;
+    let ws = state.workspace(&workspace).await?;
+    let mgr = ws.skills_manager.lock().await;
     match mgr.get(&name) {
         Some(entry) => {
             let body = mgr.get_body(&name).unwrap_or_default();
@@ -52,10 +62,14 @@ pub async fn get_skill_content(
     }
 }
 
-/// Re-scan all skill directories.
+/// Re-scan all skill directories for a workspace.
 #[tauri::command]
-pub async fn rescan_skills(state: State<'_, AppState>) -> Result<SkillsResponse, String> {
-    let mut mgr = state.skills_manager.lock().await;
+pub async fn rescan_skills(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<SkillsResponse, String> {
+    let ws = state.workspace(&workspace).await?;
+    let mut mgr = ws.skills_manager.lock().await;
     let count = mgr.scan();
     let skills = mgr.list();
     Ok(SkillsResponse { skills, count })
@@ -86,6 +100,7 @@ pub struct InstallRemoteSkillArgs {
 /// Install a remote skill (with user approval already obtained on frontend).
 #[tauri::command]
 pub async fn install_remote_skill(
+    workspace: String,
     args: InstallRemoteSkillArgs,
     state: State<'_, AppState>,
 ) -> Result<SkillEntry, String> {
@@ -99,7 +114,8 @@ pub async fn install_remote_skill(
     let entry = skills::install_remote_skill(&remote).await?;
 
     // Re-scan so the new skill is available immediately
-    let mut mgr = state.skills_manager.lock().await;
+    let ws = state.workspace(&workspace).await?;
+    let mut mgr = ws.skills_manager.lock().await;
     mgr.scan();
 
     Ok(entry)

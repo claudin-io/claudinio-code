@@ -3,7 +3,10 @@ import { Portal } from "solid-js/web";
 import { getTasks, setTasks, type TaskItem } from "../lib/ipc";
 import { t } from "../lib/grill-me";
 
-export const TasksPanel: Component<{ onTasksChange?: (count: number) => void }> = (props) => {
+export const TasksPanel: Component<{
+  workspace: string;
+  onTasksChange?: (count: number) => void;
+}> = (props) => {
   const [tasks, setTasksState] = createSignal<TaskItem[]>([]);
   const [hoveredId, setHoveredId] = createSignal<string | null>(null);
   const [hoveredTop, setHoveredTop] = createSignal(0);
@@ -12,7 +15,7 @@ export const TasksPanel: Component<{ onTasksChange?: (count: number) => void }> 
 
   const load = async () => {
     try {
-      const t = await getTasks();
+      const t = await getTasks(props.workspace);
       setTasksState(t);
       props.onTasksChange?.(t.length);
     } catch {
@@ -42,7 +45,7 @@ export const TasksPanel: Component<{ onTasksChange?: (count: number) => void }> 
     );
     setTasksState(updated);
     try {
-      await setTasks(updated);
+      await setTasks(props.workspace, updated);
     } catch {
       load();
     }

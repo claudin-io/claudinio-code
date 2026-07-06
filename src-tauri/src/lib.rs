@@ -27,6 +27,7 @@ pub fn run() {
             commands::agent::set_config,
             commands::agent::get_config,
             commands::code_intel::open_workspace,
+            commands::code_intel::close_workspace,
             commands::code_intel::search_symbols,
             commands::code_intel::symbol_lookup,
             commands::code_intel::file_outline,

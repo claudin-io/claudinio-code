@@ -74,13 +74,9 @@ pub struct AttachmentInput {
     pub path: String,
 }
 
-async fn workspace_string(state: &State<'_, AppState>) -> Option<String> {
-    let ws = state.workspace_root.lock().await;
-    ws.as_ref().map(|p| p.to_string_lossy().to_string())
-}
-
 #[tauri::command]
 pub async fn send_message(
+    workspace: String,
     message: String,
     attachments: Option<Vec<AttachmentInput>>,
     event_channel: Channel<AgentEvent>,
@@ -94,12 +90,13 @@ pub async fn send_message(
         cfg.clone()
     };
 
-    let workspace_root = workspace_string(&state).await;
+    let ws = state.workspace(&workspace).await?;
+    let workspace_root = Some(ws.root.to_string_lossy().to_string());
 
-    // Continue the active session, or start a fresh one persisted to its own
-    // JSONL file.
+    // Continue the workspace's active session, or start a fresh one persisted
+    // to its own JSONL file.
     let handle = {
-        let mut guard = state.active_session.lock().await;
+        let mut guard = ws.active_session.lock().await;
         match guard.as_ref() {
             Some(h) => h.clone(),
             None => {
@@ -131,15 +128,17 @@ pub async fn send_message(
 
     let ctx = ToolContext {
         db_path,
-        lsp_manager: Some(state.lsp_manager.clone()),
+        lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
     };
 
-    // Reset steering for the new run, then drain any residual from a race.
-    state.steering.clear();
-    let residual = state.steering.drain();
+    // Reset this session's steering for the new run, then drain any residual
+    // from a race.
+    let steering = state.steering_for(&handle.id).await;
+    steering.clear();
+    let residual = steering.drain();
     let mut message = if residual.is_empty() {
         message
     } else {
@@ -230,7 +229,7 @@ pub async fn send_message(
     let chan = event_channel;
     let appr = state.approvals.clone();
     let answ = state.answers.clone();
-    let steering = state.steering.clone();
+    let steering_map = state.steering_map();
 
     tokio::spawn(async move {
         if let Err(e) = session::run_workflow(
@@ -244,6 +243,10 @@ pub async fn send_message(
             });
             let _ = chan.send(AgentEvent::Error(e));
         }
+        // Run finished (success, error or panic-free return): drop the
+        // steering entry so interrupt/steer report "session not running".
+        let mut map = steering_map.lock().await;
+        map.remove(&sid);
     });
 
     Ok(SessionStarted {
@@ -251,39 +254,51 @@ pub async fn send_message(
     })
 }
 
-/// Start a new conversation: the next `send_message` opens a fresh JSONL session.
+/// Start a new conversation in a workspace: the next `send_message` opens a
+/// fresh JSONL session there.
 #[tauri::command]
-pub async fn new_session(state: State<'_, AppState>) -> Result<(), String> {
-    state.steering.clear();
-    let mut guard = state.active_session.lock().await;
+pub async fn new_session(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let ws = state.workspace(&workspace).await?;
+    let mut guard = ws.active_session.lock().await;
+    if let Some(h) = guard.as_ref() {
+        state.remove_steering(&h.id).await;
+    }
     *guard = None;
     Ok(())
 }
 
-/// List saved sessions for the current workspace, newest first.
+/// List saved sessions for a workspace, newest first.
 #[tauri::command]
-pub async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
-    let workspace_root = workspace_string(&state).await;
-    persist::list_sessions(workspace_root.as_deref())
+pub async fn list_sessions(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SessionSummary>, String> {
+    let ws = state.workspace(&workspace).await?;
+    let root = ws.root.to_string_lossy().to_string();
+    persist::list_sessions(Some(&root))
 }
 
-/// Reopen a saved session: makes it the active conversation and returns its full
-/// record stream so the frontend can replay the transcript.
+/// Reopen a saved session: makes it the workspace's active conversation and
+/// returns its full record stream so the frontend can replay the transcript.
 #[tauri::command]
 pub async fn load_session(
+    workspace: String,
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<SessionRecord>, String> {
-    let workspace_root = workspace_string(&state).await;
-    let dir = persist::sessions_dir(workspace_root.as_deref())?;
+    let ws = state.workspace(&workspace).await?;
+    let root = ws.root.to_string_lossy().to_string();
+    let dir = persist::sessions_dir(Some(&root))?;
     let path = dir.join(format!("{session_id}.jsonl"));
     if !path.exists() {
         return Err(format!("session '{session_id}' not found"));
     }
     let records = load_records(&path)?;
-    state.steering.clear();
     {
-        let mut guard = state.active_session.lock().await;
+        let mut guard = ws.active_session.lock().await;
         *guard = Some(SessionHandle {
             id: session_id,
             store_path: path,
@@ -413,28 +428,31 @@ pub async fn get_config(
     }))
 }
 
-/// Push a steering message into the queue for the active session.
+/// Push a steering message into the queue for a running session.
 #[tauri::command]
 pub async fn queue_steering(
     session_id: String,
     text: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    {
-        let guard = state.active_session.lock().await;
-        match guard.as_ref() {
-            Some(h) if h.id == session_id => {}
-            _ => return Err("no active session or session mismatch".into()),
+    let ctl = {
+        let map = state.steering.lock().await;
+        map.get(&session_id).cloned()
+    };
+    match ctl {
+        Some(ctl) => {
+            ctl.push(text);
+            Ok(())
         }
+        None => Err("session not running".into()),
     }
-    state.steering.push(text);
-    Ok(())
 }
 
-/// Manually force context compaction for the active session.
+/// Manually force context compaction for a workspace's active session.
 /// Returns the generated summary.
 #[tauri::command]
 pub async fn compact_session(
+    workspace: String,
     session_id: String,
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
@@ -447,9 +465,10 @@ pub async fn compact_session(
         cfg.clone()
     };
 
-    let workspace_root = workspace_string(&state).await;
+    let ws = state.workspace(&workspace).await?;
+    let workspace_root = Some(ws.root.to_string_lossy().to_string());
     let handle = {
-        let guard = state.active_session.lock().await;
+        let guard = ws.active_session.lock().await;
         match guard.as_ref() {
             Some(h) if h.id == session_id => h.clone(),
             _ => return Err("no active session or session mismatch".into()),
@@ -466,12 +485,19 @@ pub async fn compact_session(
 
     let ctx = ToolContext {
         db_path,
-        lsp_manager: Some(state.lsp_manager.clone()),
+        lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
     };
 
+    // Reuse the running session's controller if present; otherwise use a
+    // throwaway one so we don't leave a stale "running" entry in the map.
+    let steering = {
+        let map = state.steering.lock().await;
+        map.get(&handle.id).cloned()
+    }
+    .unwrap_or_else(|| std::sync::Arc::new(crate::agent::session::SteeringCtl::new()));
     let summary = session::compact_history(
         &config,
         &store,
@@ -480,29 +506,29 @@ pub async fn compact_session(
         &state.approvals,
         &state.answers,
         &handle.id,
-        &state.steering,
+        &steering,
     )
     .await?;
 
     Ok(summary)
 }
 
-/// Set the interrupt flag on the active session's steering controller.
+/// Set the interrupt flag on a running session's steering controller.
 #[tauri::command]
 pub async fn interrupt_session(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    {
-        let guard = state.active_session.lock().await;
-        match guard.as_ref() {
-            Some(h) if h.id == session_id => {}
-            _ => return Err("no active session or session mismatch".into()),
+    let ctl = {
+        let map = state.steering.lock().await;
+        map.get(&session_id).cloned()
+    };
+    match ctl {
+        Some(ctl) => {
+            ctl.interrupt
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }
+        None => Err("session not running".into()),
     }
-    state
-        .steering
-        .interrupt
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    Ok(())
 }

@@ -4,6 +4,7 @@ use crate::agent::skills::SkillManager;
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
 use crate::lsp::manager::LspManager;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -17,18 +18,31 @@ pub struct SessionHandle {
     pub store_path: PathBuf,
 }
 
+/// Everything scoped to one open workspace (folder). Each open folder gets its
+/// own entry so multiple workspaces can run agents in parallel without
+/// clobbering each other's index, LSP servers, or active session.
+pub struct WorkspaceState {
+    pub root: PathBuf,
+    pub index_db: Arc<IndexDb>,
+    pub skills_manager: Arc<Mutex<SkillManager>>,
+    /// One LSP manager per workspace: `LspManager` keys servers by language,
+    /// so a shared manager would answer workspace B from workspace A's root.
+    pub lsp_manager: Arc<Mutex<LspManager>>,
+    pub _watcher: Mutex<Option<crate::code_intel::watcher::FileWatcher>>,
+    pub active_session: Mutex<Option<SessionHandle>>,
+}
+
 pub struct AppState {
     pub config: Mutex<AgentConfig>,
     pub approvals: ApprovalMap,
     pub answers: AnswerMap,
-    pub index_db: Mutex<Option<Arc<IndexDb>>>,
-    pub workspace_root: Mutex<Option<PathBuf>>,
-    pub _watcher: Mutex<Option<crate::code_intel::watcher::FileWatcher>>,
-    pub lsp_manager: Arc<Mutex<LspManager>>,
-    pub active_session: Mutex<Option<SessionHandle>>,
-    pub steering: Arc<SteeringCtl>,
+    pub workspaces: Mutex<HashMap<PathBuf, Arc<WorkspaceState>>>,
+    /// Steering controllers keyed by session id, so interrupt/steer target the
+    /// right run when multiple workspaces execute in parallel. Entries are
+    /// removed when the run's workflow task finishes. Arc so the workflow task
+    /// can clean up its own entry after the Tauri state borrow ends.
+    pub steering: Arc<Mutex<HashMap<String, Arc<SteeringCtl>>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
-    pub skills_manager: Arc<Mutex<SkillManager>>,
 }
 
 impl AppState {
@@ -37,14 +51,32 @@ impl AppState {
             config: Mutex::new(crate::agent::provider::load_config()),
             approvals: Arc::new(Mutex::new(std::collections::HashMap::new())),
             answers: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            index_db: Mutex::new(None),
-            workspace_root: Mutex::new(None),
-            _watcher: Mutex::new(None),
-            lsp_manager: Arc::new(Mutex::new(LspManager::new())),
-            active_session: Mutex::new(None),
-            steering: Arc::new(SteeringCtl::new()),
+            workspaces: Mutex::new(HashMap::new()),
+            steering: Arc::new(Mutex::new(HashMap::new())),
             embedding_model: Arc::new(Mutex::new(None)),
-            skills_manager: Arc::new(Mutex::new(SkillManager::new(None))),
         }
+    }
+
+    pub async fn workspace(&self, path: &str) -> Result<Arc<WorkspaceState>, String> {
+        let map = self.workspaces.lock().await;
+        map.get(std::path::Path::new(path))
+            .cloned()
+            .ok_or_else(|| format!("workspace not open: {path}"))
+    }
+
+    pub async fn steering_for(&self, session_id: &str) -> Arc<SteeringCtl> {
+        let mut map = self.steering.lock().await;
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(SteeringCtl::new()))
+            .clone()
+    }
+
+    pub async fn remove_steering(&self, session_id: &str) {
+        let mut map = self.steering.lock().await;
+        map.remove(session_id);
+    }
+
+    pub fn steering_map(&self) -> Arc<Mutex<HashMap<String, Arc<SteeringCtl>>>> {
+        self.steering.clone()
     }
 }
