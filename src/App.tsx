@@ -217,6 +217,16 @@ function App() {
     } catch {}
   };
 
+  /// Remove o projeto da lista do sidebar sem fechar o workspace no backend.
+  const removeFromSidebar = (folder: string) => {
+    const updated = openWorkspaces().filter((w) => w !== folder);
+    setOpenWorkspaces(updated);
+    saveOpenWorkspaces(updated);
+    if (activeWorkspace() === folder) {
+      setActiveWorkspace(updated[0] ?? null);
+    }
+  };
+
   const openFolder = async () => {
     const folder = await pickFolder();
     if (folder) {
@@ -443,7 +453,7 @@ function App() {
                           title={t("app.sidebar.closeWorkspace")}
                           onClick={(e) => {
                             e.stopPropagation();
-                            closeOpenWorkspace(proj);
+                            removeFromSidebar(proj);
                           }}
                         >
                           <Icon name="x" class="h-3 w-3" />
