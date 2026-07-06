@@ -610,12 +610,23 @@ pub async fn run_workflow(
             if let Some(c) = u.cost {
                 run_cost = Some(run_cost.unwrap_or(0.0) + c);
             }
-            // input(+cache) of this request plus its output = next context
-            if u.input_tokens + u.cache_read_input_tokens > 0 {
-                last_context =
-                    (u.input_tokens + u.cache_read_input_tokens + u.output_tokens) as u64;
-            }
         }
+        // Context for the next request = the history just sent + this round's
+        // output. Providers behind a prefix cache (claudin.io) report only
+        // cache-miss tokens in input_tokens — verified: a fully cached 3k
+        // prompt reports input_tokens=74 — so the char-based estimate is the
+        // floor and the API number can only raise it, never shrink it.
+        let out_tok = stream_output
+            .usage
+            .as_ref()
+            .map(|u| u.output_tokens as u64)
+            .unwrap_or(0);
+        let api_ctx = stream_output
+            .usage
+            .as_ref()
+            .map(|u| (u.input_tokens + u.cache_read_input_tokens + u.output_tokens) as u64)
+            .unwrap_or(0);
+        last_context = (estimate_tokens(history, &system, &tools) + out_tok).max(api_ctx);
 
         // Live stats for the context bar
         let round_cost = run_cost.unwrap_or_else(|| cost_for(&config.model, total_in, total_cache, total_out));
