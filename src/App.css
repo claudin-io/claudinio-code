@@ -86,6 +86,13 @@ body,
   user-select: none;
 }
 
+/* Allow text selection in chat messages and prose content areas */
+.prose-content,
+.whitespace-pre-wrap {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   @keyframes rise-in {
     from {
