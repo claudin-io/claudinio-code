@@ -1137,6 +1137,18 @@ export const ChatPanel: Component = () => {
               class="max-h-[156px] min-h-[36px] flex-1 resize-none border-0 bg-transparent p-1 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
               rows={1}
             />
+            <Show when={status() === "thinking" || status() === "awaiting_approval"}>
+              <button
+                onClick={() => {
+                  const sid = activeSessionId();
+                  if (sid) interruptSession(sid).catch(() => {});
+                }}
+                class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-danger/20 text-danger hover:bg-danger/40"
+                title={t("chat.input.stop")}
+              >
+                <Icon name="stop" class="h-4 w-4" />
+              </button>
+            </Show>
             <button
               onClick={send}
               disabled={

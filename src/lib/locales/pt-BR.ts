@@ -91,6 +91,7 @@ const dict: LocaleDict = {
   "chat.input.approveFirst": "Aprove ou rejeite a edição primeiro…",
   "chat.input.answerFirst": "Responda as perguntas acima primeiro…",
   "chat.input.steerAgent": "Digite para orientar o agente… (Esc para pausar)",
+  "chat.input.stop": "Parar",
   "chat.input.askCode": "Pergunte algo sobre o código…",
   "chat.input.dropToAttach": "Solte o arquivo para anexar",
   "chat.input.dropHint": "Imagens, PDFs, documentos, código e mais",
