@@ -45,6 +45,22 @@ export interface ApproveArgs {
 // phase records on disk. No new session emits these.
 export type Phase = "plan" | "execute" | "summary";
 
+export interface SubagentStartedData {
+  subagentId: string;
+  parentToolId: string;
+  name: string;
+  goal: string;
+  mode: string;
+}
+
+export interface SubagentDoneData {
+  subagentId: string;
+  status: string;
+  rounds: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
   | { event: "Thinking"; data: string }
@@ -53,7 +69,10 @@ export type AgentEvent =
   | { event: "AskUser"; data: AskUserData }
   | { event: "Done"; data: DoneData }
   | { event: "SteeringInjected"; data: { text: string } }
-  | { event: "Error"; data: string };
+  | { event: "Error"; data: string }
+  | { event: "SubagentStarted"; data: SubagentStartedData }
+  | { event: "SubagentDone"; data: SubagentDoneData }
+  | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } };
 
 export interface AskUserQuestion {
   question: string;

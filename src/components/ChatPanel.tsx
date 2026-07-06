@@ -15,6 +15,8 @@ import {
   type EditProposalData,
   type DoneData,
   type ToolResultData,
+  type SubagentStartedData,
+  type SubagentDoneData,
   type Phase,
   type SessionSummary,
   type SessionRecord,
@@ -48,8 +50,20 @@ interface ChatMessage {
   done?: DoneData;
 }
 
+interface SubagentTimelineState {
+  id: string;
+  name: string;
+  goal: string;
+  mode: string;
+  status: "running" | "completed" | "failed" | "interrupted" | "max_rounds";
+  rounds: number;
+  inputTokens: number;
+  outputTokens: number;
+  steps: TimelineItem[];
+}
+
 interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering";
+  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent";
   thinking?: { text: string; startedAt: number; endedAt?: number };
   tool?: {
     call: ToolCallData;
@@ -60,6 +74,7 @@ interface TimelineItem {
   phaseResult?: { phase: Phase; text: string };
   text?: string;
   steering?: { text: string };
+  subagent?: SubagentTimelineState;
 }
 
 const PHASE_LABEL: Record<Phase, string> = {
@@ -205,9 +220,11 @@ export const ChatPanel: Component = () => {
   const [input, setInput] = createSignal("");
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [status, setStatus] = createSignal<Status>("idle");
-  const [currentToolCall, setCurrentToolCall] = createSignal<ToolCallData | null>(null);
+  const [pendingApprovals, setPendingApprovals] = createSignal<(ToolCallData & { subagentName?: string })[]>([]);
   const [currentAskUser, setCurrentAskUser] = createSignal<AskUserData | null>(null);
   const [currentSteps, setCurrentSteps] = createSignal<TimelineItem[]>([]);
+  const [subagentState, setSubagentState] = createSignal<Record<string, SubagentTimelineState>>({});
+  const [openSubagentId, setOpenSubagentId] = createSignal<string | null>(null);
   const [thinkingStart, setThinkingStart] = createSignal(0);
   const [liveExpandedStep, setLiveExpandedStep] = createSignal<number | null>(null);
   const [sessions, setSessions] = createSignal<SessionSummary[]>([]);
@@ -222,35 +239,84 @@ export const ChatPanel: Component = () => {
     setTimeout(() => messagesEndRef?.scrollIntoView({ behavior: "smooth" }), 50);
   };
 
-  const addOrUpdateTool = (item: TimelineItem) => {
-    setCurrentSteps((prev) => {
-      const idx = prev.findIndex(
-        (s) => s.type === "tool" && s.tool?.call.toolId === item.tool?.call.toolId,
-      );
-      if (idx >= 0) {
-        const next = [...prev];
-        next[idx] = item;
-        return next;
-      }
-      return [...prev, item];
-    });
+  const addOrUpdateToolIn = (steps: TimelineItem[], item: TimelineItem): TimelineItem[] => {
+    const idx = steps.findIndex(
+      (s) => s.type === "tool" && s.tool?.call.toolId === item.tool?.call.toolId,
+    );
+    if (idx >= 0) {
+      const next = [...steps];
+      next[idx] = item;
+      return next;
+    }
+    return [...steps, item];
   };
 
-  const applyToolResult = (data: ToolResultData) => {
-    setCurrentSteps((prev) => {
-      const idx = prev.findIndex(
-        (s) => s.type === "tool" && s.tool?.call.toolId === data.toolId,
-      );
-      if (idx === -1) return prev;
-      const next = [...prev];
-      const t = next[idx];
-      if (t.type !== "tool" || !t.tool) return prev;
-      next[idx] = {
+  const applyToolResultIn = (steps: TimelineItem[], data: ToolResultData): TimelineItem[] => {
+    const idx = steps.findIndex(
+      (s) => s.type === "tool" && s.tool?.call.toolId === data.toolId,
+    );
+    if (idx === -1) return steps;
+    const next = [...steps];
+    const t = next[idx];
+    if (t.type !== "tool" || !t.tool) return steps;
+    next[idx] = {
+      type: "tool",
+      tool: { ...t.tool, result: data, status: data.error ? "error" : "ok" },
+    };
+    return next;
+  };
+
+  const updateSubagentTimelineItem = (subagents: Record<string, SubagentTimelineState>): TimelineItem[] | null => {
+    const values = Object.values(subagents);
+    if (values.length === 0) return null;
+    return values.map((sa) => ({
+      type: "subagent" as const,
+      subagent: sa,
+    }));
+  };
+
+  const processSubagentEvent = (
+    subagents: Record<string, SubagentTimelineState>,
+    subagentId: string,
+    event: AgentEvent,
+  ): { subagents: Record<string, SubagentTimelineState>; approval?: ToolCallData & { subagentName?: string } } => {
+    const sa = subagents[subagentId];
+    if (!sa) return { subagents };
+
+    let steps = [...sa.steps];
+    let approval: (ToolCallData & { subagentName?: string }) | undefined;
+
+    if (event.event === "TextStep") {
+      steps = [...steps, { type: "text", text: event.data.text }];
+    } else if (event.event === "Thinking") {
+      const now = Date.now();
+      const last = steps[steps.length - 1];
+      if (last?.type === "thinking") {
+        steps = steps.map((s, i) =>
+          i === steps.length - 1
+            ? { type: "thinking" as const, thinking: { ...s.thinking!, text: event.data } }
+            : s,
+        );
+      } else {
+        steps = [...steps, { type: "thinking" as const, thinking: { text: event.data, startedAt: now } }];
+      }
+    } else if (event.event === "ToolCall") {
+      const data = event.data as ToolCallData;
+      steps = addOrUpdateToolIn(steps, {
         type: "tool",
-        tool: { ...t.tool, result: data, status: data.error ? "error" : "ok" },
-      };
-      return next;
-    });
+        tool: { call: data, status: "running" },
+      });
+      if (data.permission === "requires_approval") {
+        approval = { ...data, subagentName: sa.name };
+      }
+    } else if (event.event === "ToolResult") {
+      steps = applyToolResultIn(steps, event.data as ToolResultData);
+    }
+
+    return {
+      subagents: { ...subagents, [subagentId]: { ...sa, steps } },
+      approval,
+    };
   };
 
   const handleEvent = (event: AgentEvent) => {
@@ -278,18 +344,18 @@ export const ChatPanel: Component = () => {
       scrollToBottom();
     } else if (event.event === "ToolCall") {
       const data = event.data as ToolCallData;
-      addOrUpdateTool({
+      setCurrentSteps((prev) => addOrUpdateToolIn(prev, {
         type: "tool",
         tool: { call: data, status: "running" },
-      });
+      }));
       if (data.permission === "requires_approval") {
         setStatus("awaiting_approval");
-        setCurrentToolCall(data);
+        setPendingApprovals((prev) => [...prev, data]);
       }
       scrollToBottom();
     } else if (event.event === "ToolResult") {
       const data = event.data as ToolResultData;
-      applyToolResult(data);
+      setCurrentSteps((prev) => applyToolResultIn(prev, data));
       scrollToBottom();
     } else if (event.event === "AskUser") {
       setCurrentAskUser(event.data as AskUserData);
@@ -301,6 +367,74 @@ export const ChatPanel: Component = () => {
         ...prev,
         { type: "steering" as const, steering: { text: event.data.text } } as TimelineItem,
       ]);
+      scrollToBottom();
+    } else if (event.event === "SubagentStarted") {
+      const d = event.data as SubagentStartedData;
+      const now = Date.now();
+      setSubagentState((prev) => ({
+        ...prev,
+        [d.subagentId]: {
+          id: d.subagentId,
+          name: d.name,
+          goal: d.goal,
+          mode: d.mode,
+          status: "running",
+          rounds: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          steps: [{ type: "thinking" as const, thinking: { text: "Aguardando resposta...", startedAt: now } }],
+        },
+      }));
+      setCurrentSteps((prev) => [
+        ...prev,
+        { type: "subagent" as const, subagent: { id: d.subagentId, name: d.name, goal: d.goal, mode: d.mode, status: "running", rounds: 0, inputTokens: 0, outputTokens: 0, steps: [] } },
+      ]);
+      scrollToBottom();
+    } else if (event.event === "SubagentDone") {
+      const d = event.data as SubagentDoneData;
+      setSubagentState((prev) => {
+        const sa = prev[d.subagentId];
+        if (!sa) return prev;
+        const status = d.status === "completed" ? "completed" as const
+          : d.status === "failed" ? "failed" as const
+          : d.status === "interrupted" ? "interrupted" as const
+          : d.status === "max_rounds" ? "max_rounds" as const
+          : "completed" as const;
+        const finalSteps = sa.steps.map((s) => {
+          if (s.type === "thinking") {
+            return { ...s, thinking: { ...s.thinking!, endedAt: Date.now() } };
+          }
+          return s;
+        });
+        return {
+          ...prev,
+          [d.subagentId]: { ...sa, status, rounds: d.rounds, inputTokens: d.inputTokens, outputTokens: d.outputTokens, steps: finalSteps },
+        };
+      });
+      scrollToBottom();
+    } else if (event.event === "Subagent") {
+      const d = event.data;
+      const result = processSubagentEvent(subagentState(), d.subagentId, d.event);
+      setSubagentState(result.subagents);
+      // sync timeline items
+      const items = updateSubagentTimelineItem(result.subagents);
+      if (items) {
+        setCurrentSteps((prev) => {
+          // replace subagent items in-place
+          const newSteps = prev.map((s) => {
+            if (s.type === "subagent") {
+              const found = items.find((i) => i.subagent?.id === s.subagent?.id);
+              return found ?? s;
+            }
+            return s;
+          });
+          return newSteps;
+        });
+      }
+      if (result.approval) {
+        setPendingApprovals((prev) => [...prev, result.approval!]);
+        setStatus("awaiting_approval");
+      }
       scrollToBottom();
     } else if (event.event === "Done") {
       const data = event.data as DoneData;
@@ -317,13 +451,16 @@ export const ChatPanel: Component = () => {
       ]);
       setCurrentSteps([]);
       setQueuedSteering([]);
+      setSubagentState({});
+      setPendingApprovals([]);
       setThinkingStart(0);
-      setStatus(data.stopReason === "interrupted" ? "done" : "done");
+      setStatus("done");
       scrollToBottom();
     } else if (event.event === "Error") {
       setMessages((prev) => [...prev, { role: "user", text: `Erro: ${event.data}` }]);
       setCurrentSteps([]);
       setThinkingStart(0);
+      setSubagentState({});
       setStatus("error");
     }
   };
@@ -362,11 +499,10 @@ export const ChatPanel: Component = () => {
     }
   };
 
-  const handleApprove = async () => {
-    const tc = currentToolCall();
+  const handleApprove = async (tc: ToolCallData) => {
     if (!tc) return;
-    setStatus("thinking");
-    setCurrentToolCall(null);
+    setPendingApprovals((prev) => prev.filter((p) => p.toolId !== tc.toolId));
+    if (pendingApprovals().length <= 1) setStatus("thinking");
     try {
       await approveTool(tc.sessionId, tc.toolId);
     } catch (e) {
@@ -386,11 +522,10 @@ export const ChatPanel: Component = () => {
     }
   };
 
-  const handleReject = async () => {
-    const tc = currentToolCall();
+  const handleReject = async (tc: ToolCallData) => {
     if (!tc) return;
-    setStatus("thinking");
-    setCurrentToolCall(null);
+    setPendingApprovals((prev) => prev.filter((p) => p.toolId !== tc.toolId));
+    if (pendingApprovals().length <= 1) setStatus("thinking");
     try {
       await rejectTool(tc.sessionId, tc.toolId);
     } catch (e) {
@@ -572,6 +707,7 @@ export const ChatPanel: Component = () => {
                   <Trajectory
                     steps={msg.steps!}
                     tokens={msg.done ? { input: msg.done.inputTokens, output: msg.done.outputTokens } : undefined}
+                    onViewDetails={(id) => setOpenSubagentId(id)}
                   />
 
                   <Show when={msg.text}>
@@ -593,18 +729,32 @@ export const ChatPanel: Component = () => {
                   expandedStep={liveExpandedStep()}
                   onToggle={(i) => setLiveExpandedStep(liveExpandedStep() === i ? null : i)}
                   isLive={status() === "thinking"}
+                  onViewDetails={(id) => setOpenSubagentId(id)}
                 />
               </div>
             </div>
           </Show>
 
-          <Show when={currentToolCall() && status() === "awaiting_approval"}>
-            <div class="mb-6 max-w-[70ch]">
-              <ApprovalCard
-                toolCall={currentToolCall()!}
-                onApprove={handleApprove}
-                onReject={handleReject}
-              />
+          <Show when={pendingApprovals().length > 0 && status() === "awaiting_approval"}>
+            <div class="mb-6 max-w-[70ch] flex flex-col gap-3">
+              <For each={pendingApprovals()}>
+                {(tc) => (
+                  <div>
+                    <Show when={tc.subagentName}>
+                      <div class="mb-1 flex items-center gap-1.5">
+                        <span class="text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+                          Subagent: {tc.subagentName}
+                        </span>
+                      </div>
+                    </Show>
+                    <ApprovalCard
+                      toolCall={tc}
+                      onApprove={() => handleApprove(tc)}
+                      onReject={() => handleReject(tc)}
+                    />
+                  </div>
+                )}
+              </For>
             </div>
           </Show>
 
@@ -617,6 +767,13 @@ export const ChatPanel: Component = () => {
           <div ref={messagesEndRef} />
         </div>
       </div>
+
+      <Show when={openSubagentId()}>
+        <SubagentModal
+          subagent={subagentState()[openSubagentId()!]}
+          onClose={() => setOpenSubagentId(null)}
+        />
+      </Show>
 
       <Show when={queuedSteering().length > 0}>
         <div class="flex flex-wrap gap-1.5 border-t border-border-subtle px-6 py-1.5">
@@ -676,6 +833,7 @@ export const ChatPanel: Component = () => {
 const Trajectory: Component<{
   steps: TimelineItem[];
   tokens?: { input: number; output: number };
+  onViewDetails?: (id: string) => void;
 }> = (props) => {
   const [expanded, setExpanded] = createSignal(false);
   const [expandedStep, setExpandedStep] = createSignal<number | null>(null);
@@ -717,6 +875,7 @@ const Trajectory: Component<{
               expandedStep={expandedStep()}
               onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
               isLive={false}
+              onViewDetails={props.onViewDetails}
             />
           </div>
           <Show when={props.tokens}>
@@ -744,6 +903,7 @@ const Trajectory: Component<{
                 expandedStep={expandedStep()}
                 onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
                 isLive={false}
+                onViewDetails={props.onViewDetails}
               />
             </div>
           </div>
@@ -758,6 +918,7 @@ const TimelineSteps: Component<{
   expandedStep: number | null;
   onToggle: (index: number) => void;
   isLive: boolean;
+  onViewDetails?: (id: string) => void;
 }> = (props) => {
   return (
     <For each={props.steps}>
@@ -799,9 +960,134 @@ const TimelineSteps: Component<{
               <span class="text-[10px] text-ink-faint">orientação</span>
             </div>
           </Show>
+          <Show when={step.type === "subagent" && step.subagent}>
+            <SubagentRow subagent={step.subagent!} onViewDetails={props.onViewDetails} />
+          </Show>
         </>
       )}
     </For>
+  );
+};
+
+const SubagentRow: Component<{
+  subagent: SubagentTimelineState;
+  onViewDetails?: (id: string) => void;
+}> = (props) => {
+  const badgeClass = () => {
+    switch (props.subagent.status) {
+      case "running": return "bg-accent/15 text-accent";
+      case "completed": return "bg-success/15 text-success";
+      case "failed": return "bg-danger/15 text-danger";
+      case "interrupted": return "bg-amber-500/15 text-amber-500";
+      case "max_rounds": return "bg-amber-500/15 text-amber-500";
+    }
+  };
+
+  const statusLabel = () => {
+    switch (props.subagent.status) {
+      case "running": return "Trabalhando";
+      case "completed": return `${props.subagent.rounds} rounds`;
+      case "failed": return "Falhou";
+      case "interrupted": return "Interrompido";
+      case "max_rounds": return "Limite de rounds";
+    }
+  };
+
+  return (
+    <div class="my-2 ml-4 border-l-2 border-accent/30 pl-2">
+      <button
+        onClick={() => props.onViewDetails?.(props.subagent.id)}
+        class="flex w-full items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-surface-2"
+      >
+        <span class="trajectory-node flex h-4 w-4 shrink-0 items-center justify-center">
+          <Icon name="layers" class="h-[11px] w-[11px] text-accent" />
+        </span>
+        <span class="font-mono text-[12px] text-ink-muted">{props.subagent.name}</span>
+        <span class={`rounded px-1 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
+          {props.subagent.mode}
+        </span>
+        <span class="text-[11px] text-ink-faint">{statusLabel()}</span>
+        <Show when={props.subagent.status === "running"}>
+          <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
+        </Show>
+        <div class="ml-auto flex items-center gap-2">
+          <Show when={props.subagent.inputTokens > 0}>
+            <span class="font-mono text-[10px] text-ink-faint">
+              {formatTokens(props.subagent.inputTokens)}→{formatTokens(props.subagent.outputTokens)}
+            </span>
+          </Show>
+          <Icon name="external-link" class="h-3 w-3 text-ink-faint" />
+        </div>
+      </button>
+    </div>
+  );
+};
+
+const SubagentModal: Component<{
+  subagent: SubagentTimelineState;
+  onClose: () => void;
+}> = (props) => {
+  const [expandedStep, setExpandedStep] = createSignal<number | null>(null);
+
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => document.removeEventListener("keydown", onKey));
+  });
+
+  const badgeClass = () => {
+    switch (props.subagent.status) {
+      case "running": return "bg-accent/15 text-accent";
+      case "completed": return "bg-success/15 text-success";
+      case "failed": return "bg-danger/15 text-danger";
+      case "interrupted": return "bg-amber-500/15 text-amber-500";
+      case "max_rounds": return "bg-amber-500/15 text-amber-500";
+    }
+  };
+
+  const statusLabel = () => {
+    switch (props.subagent.status) {
+      case "running": return "Trabalhando";
+      case "completed": return `${props.subagent.rounds} rounds`;
+      case "failed": return "Falhou";
+      case "interrupted": return "Interrompido";
+      case "max_rounds": return "Limite de rounds";
+    }
+  };
+
+  return (
+    <div
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={(e) => { if (e.target === e.currentTarget) props.onClose(); }}
+    >
+      <div class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl bg-surface-0 shadow-2xl">
+        <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
+          <div class="flex items-center gap-2">
+            <span class="font-mono text-[14px] font-semibold text-ink">{props.subagent.name}</span>
+            <span class={`rounded px-1.5 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
+              {props.subagent.mode}
+            </span>
+            <span class="text-[12px] text-ink-faint">{statusLabel()}</span>
+          </div>
+          <button
+            onClick={props.onClose}
+            class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2"
+          >
+            <Icon name="x" class="h-4 w-4" />
+          </button>
+        </div>
+        <div class="overflow-y-auto px-5 py-3">
+          <TimelineSteps
+            steps={props.subagent.steps}
+            expandedStep={expandedStep()}
+            onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
+            isLive={props.subagent.status === "running"}
+          />
+        </div>
+      </div>
+    </div>
   );
 };
 

@@ -1,8 +1,9 @@
 use crate::agent::permissions;
 use crate::agent::persist::{now_ms, SessionRecord, SessionStore};
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
+use crate::agent::subagent;
 use crate::agent::tools::{self, ToolContext, ToolOutput};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,6 +73,27 @@ Use grep only when the index doesn't cover what you need. \
 Example: to understand an unfamiliar file, call file_outline first, not read_file. \
 \
 Be focused and concrete. \
+\
+You can delegate work to parallel subagents with the spawn_agents tool. A subagent is a copy of you with \
+a fresh, empty context, its own goal, and the same tools (except spawn_agents and ask_user — subagents \
+cannot ask the user anything or spawn further agents). Each subagent runs independently and returns only \
+its final report to you; its intermediate work never enters your context. Use subagents to keep your own \
+context clean and to parallelize. \
+WHEN to use subagents: (1) broad investigation that would require reading many files — spawn 2-4 'explore' \
+agents, each covering a distinct area, and synthesize their reports; (2) independent, atomic code tasks \
+that touch disjoint files — spawn 'code' agents, one per task; (3) any task whose intermediate output \
+would bloat your context but whose conclusion is short. WHEN NOT to: trivial lookups (a single read_file \
+or grep is faster and cheaper), tasks that depend on each other's results (run them yourself sequentially, \
+or spawn in sequential waves), or anything needing a user decision mid-task — resolve that with ask_user \
+BEFORE spawning. \
+HOW to write good subagent goals: each goal must be fully self-contained — the subagent knows nothing \
+about this conversation. Include the concrete question or change, relevant file paths and symbol names \
+you already know, constraints, and what to leave alone. Always set expected_output to describe the report \
+you need (e.g. 'list of file:line locations with a one-line explanation each'). Modes: 'explore' = \
+read-only investigation; 'code' = may edit files and run commands (edits still require user approval). \
+Prefer 'explore' unless the agent must change something. Spawn all independent agents in ONE spawn_agents \
+call so they run in parallel; give agents non-overlapping scopes so parallel workers never edit the same file. \
+\
 IMPORTANT — Language policy: ALL communication must be in English. Write in English and ONLY in English, \
 regardless of the language the user writes in. If the user writes in a non-English language, \
 treat it as if they asked in English — respond in English only.";
@@ -93,7 +115,7 @@ File tools take absolute paths inside this root."
 /// Safety cap on tool-call rounds per user message to bound runaway loops.
 const MAX_ROUNDS: usize = 30;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data")]
 pub enum AgentEvent {
     #[serde(rename = "TextStep")]
@@ -149,9 +171,36 @@ pub enum AgentEvent {
     },
     #[serde(rename = "Error")]
     Error(String),
+    #[serde(rename = "SubagentStarted")]
+    SubagentStarted {
+        #[serde(rename = "subagentId")]
+        subagent_id: String,
+        #[serde(rename = "parentToolId")]
+        parent_tool_id: String,
+        name: String,
+        goal: String,
+        mode: String,
+    },
+    #[serde(rename = "SubagentDone")]
+    SubagentDone {
+        #[serde(rename = "subagentId")]
+        subagent_id: String,
+        status: String,
+        rounds: u32,
+        #[serde(rename = "inputTokens")]
+        input_tokens: u32,
+        #[serde(rename = "outputTokens")]
+        output_tokens: u32,
+    },
+    #[serde(rename = "Subagent")]
+    Subagent {
+        #[serde(rename = "subagentId")]
+        subagent_id: String,
+        event: Box<AgentEvent>,
+    },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditProposalData {
     pub path: String,
@@ -446,18 +495,36 @@ pub async fn run_workflow(
                 tool_input.clone(),
             ));
 
-            let block = run_tool(
-                &tool_name,
-                &tool_use_id,
-                tool_input,
-                permissions::tool_permission(&tool_name),
-                event_tx,
-                approvals,
-                answers,
-                session_id,
-                ctx,
-            )
-            .await;
+            let block = if tool_name == "spawn_agents" {
+                let (block, sub_in, sub_out) = subagent::run_spawn_agents(
+                    config,
+                    ctx,
+                    &tool_use_id,
+                    tool_input,
+                    event_tx,
+                    approvals,
+                    answers,
+                    session_id,
+                    steering,
+                )
+                .await;
+                total_in += sub_in;
+                total_out += sub_out;
+                block
+            } else {
+                run_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    tool_input,
+                    permissions::tool_permission(&tool_name),
+                    event_tx,
+                    approvals,
+                    answers,
+                    session_id,
+                    ctx,
+                )
+                .await
+            };
             tool_result_blocks.push(block);
         }
 
@@ -526,7 +593,7 @@ pub async fn run_workflow(
 /// Execute one tool call (honoring its permission level) and return the
 /// `tool_result` block to feed back to the model. Emits the matching UI events.
 #[allow(clippy::too_many_arguments)]
-async fn run_tool(
+pub(crate) async fn run_tool(
     tool_name: &str,
     tool_use_id: &str,
     tool_input: Value,
@@ -897,6 +964,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn tmp_store() -> SessionStore {
         SessionStore {
@@ -938,5 +1006,169 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content.len(), 1, "no phase directive should be folded in");
         let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn agent_event_round_trip_text_step() {
+        let ev = AgentEvent::TextStep { text: "hello".into() };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::TextStep { text } if text == "hello"));
+    }
+
+    #[test]
+    fn agent_event_round_trip_thinking() {
+        let ev = AgentEvent::Thinking("thinking text".into());
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::Thinking(t) if t == "thinking text"));
+    }
+
+    #[test]
+    fn agent_event_round_trip_tool_call() {
+        let ev = AgentEvent::ToolCall {
+            session_id: "s1".into(),
+            tool_id: "t1".into(),
+            tool_name: "read_file".into(),
+            args: json!({"path": "/foo"}),
+            permission: "auto".into(),
+            edit_proposal: None,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::ToolCall { session_id, tool_id, tool_name, .. } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(tool_id, "t1");
+                assert_eq!(tool_name, "read_file");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn agent_event_round_trip_tool_result() {
+        let ev = AgentEvent::ToolResult {
+            tool_id: "t1".into(),
+            tool_name: "read_file".into(),
+            output: "content".into(),
+            error: None,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::ToolResult { tool_id, .. } if tool_id == "t1"));
+    }
+
+    #[test]
+    fn agent_event_round_trip_done() {
+        let ev = AgentEvent::Done {
+            stop_reason: "end_turn".into(),
+            text_output: "done".into(),
+            input_tokens: 10,
+            output_tokens: 20,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::Done { stop_reason, input_tokens, output_tokens, .. } => {
+                assert_eq!(stop_reason, "end_turn");
+                assert_eq!(input_tokens, 10);
+                assert_eq!(output_tokens, 20);
+            }
+            _ => panic!("expected Done"),
+        }
+    }
+
+    #[test]
+    fn agent_event_round_trip_subagent_started() {
+        let ev = AgentEvent::SubagentStarted {
+            subagent_id: "sa1".into(),
+            parent_tool_id: "pt1".into(),
+            name: "explorer".into(),
+            goal: "find stuff".into(),
+            mode: "explore".into(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::SubagentStarted { subagent_id, name, .. } => {
+                assert_eq!(subagent_id, "sa1");
+                assert_eq!(name, "explorer");
+            }
+            _ => panic!("expected SubagentStarted"),
+        }
+    }
+
+    #[test]
+    fn agent_event_round_trip_subagent_done() {
+        let ev = AgentEvent::SubagentDone {
+            subagent_id: "sa1".into(),
+            status: "completed".into(),
+            rounds: 5,
+            input_tokens: 100,
+            output_tokens: 50,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::SubagentDone { subagent_id, status, rounds, .. } => {
+                assert_eq!(subagent_id, "sa1");
+                assert_eq!(status, "completed");
+                assert_eq!(rounds, 5);
+            }
+            _ => panic!("expected SubagentDone"),
+        }
+    }
+
+    #[test]
+    fn agent_event_round_trip_subagent_wrapped() {
+        let inner = AgentEvent::Thinking("inner thought".into());
+        let ev = AgentEvent::Subagent {
+            subagent_id: "sa1".into(),
+            event: Box::new(inner),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::Subagent { subagent_id, event } => {
+                assert_eq!(subagent_id, "sa1");
+                assert!(matches!(*event, AgentEvent::Thinking(t) if t == "inner thought"));
+            }
+            _ => panic!("expected Subagent"),
+        }
+    }
+
+    #[test]
+    fn agent_event_round_trip_error() {
+        let ev = AgentEvent::Error("something broke".into());
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::Error(e) if e == "something broke"));
+    }
+
+    #[test]
+    fn agent_event_round_trip_steering_injected() {
+        let ev = AgentEvent::SteeringInjected { text: "steer".into() };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::SteeringInjected { text } if text == "steer"));
+    }
+
+    #[test]
+    fn agent_event_round_trip_ask_user() {
+        let ev = AgentEvent::AskUser {
+            session_id: "s1".into(),
+            tool_id: "t1".into(),
+            questions: json!([{"question": "q?", "options": ["a", "b"]}]),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        match back {
+            AgentEvent::AskUser { session_id, tool_id, .. } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(tool_id, "t1");
+            }
+            _ => panic!("expected AskUser"),
+        }
     }
 }

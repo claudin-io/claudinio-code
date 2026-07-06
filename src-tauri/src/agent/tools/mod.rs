@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[derive(Clone)]
 pub struct ToolContext {
     pub db_path: Option<String>,
     pub lsp_manager: Option<Arc<Mutex<LspManager>>>,
@@ -224,8 +225,33 @@ the exact symbol name. Ranking: go_to_definition (precise) → semantic_search \
                 "required": ["questions"]
             }),
         },
+        ToolDef {
+            name: "spawn_agents".into(),
+            description: "Spawn 1-4 parallel subagents, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints. All agents in one call run in parallel.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["agents"],
+                "properties": {
+                    "agents": {
+                        "type": "array", "minItems": 1, "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "goal", "mode"],
+                            "properties": {
+                                "name": { "type": "string", "description": "Short label shown to the user, e.g. 'auth-flow-investigator'" },
+                                "goal": { "type": "string", "description": "Self-contained instructions: task, known file paths/symbols, constraints" },
+                                "mode": { "type": "string", "enum": ["explore", "code"], "description": "explore = read-only tools; code = can edit files and run bash (with user approval)" },
+                                "expected_output": { "type": "string", "description": "What the final report must contain" }
+                            }
+                        }
+                    }
+                }
+            }),
+        },
     ]
 }
+
+
 
 pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
     match name {
@@ -339,6 +365,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             }
             let content = bash::execute(a).await?;
             Ok(ToolOutput::Text { content })
+        }
+        "spawn_agents" => {
+            Err("spawn_agents is handled by the session orchestrator".into())
         }
         _ => Err(format!("unknown tool: {name}")),
     }
