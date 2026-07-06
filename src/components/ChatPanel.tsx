@@ -78,7 +78,7 @@ interface SubagentTimelineState {
 }
 
 interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent";
+  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction";
   thinking?: { text: string; startedAt: number; endedAt?: number };
   tool?: {
     call: ToolCallData;
@@ -90,6 +90,10 @@ interface TimelineItem {
   text?: string;
   steering?: { text: string };
   subagent?: SubagentTimelineState;
+  compaction?: {
+    kind: "start" | "done" | "fail";
+    args: string[];
+  };
 }
 
 const PHASE_LABEL = (phase: Phase): string => {
@@ -547,7 +551,20 @@ export const ChatPanel: Component = () => {
 
   const handleEvent = (event: AgentEvent) => {
     if (event.event === "TextStep") {
-      setCurrentSteps((prev) => [...prev, { type: "text", text: event.data.text }]);
+      // Check for compaction markers
+      const text = event.data.text;
+      if (text.startsWith("__compact_start__:")) {
+        const args = text.slice("__compact_start__:".length).split("/");
+        setCurrentSteps((prev) => [...prev, { type: "compaction", compaction: { kind: "start", args } }]);
+      } else if (text.startsWith("__compact_done__:")) {
+        const args = text.slice("__compact_done__:".length).split("/");
+        setCurrentSteps((prev) => [...prev, { type: "compaction", compaction: { kind: "done", args } }]);
+      } else if (text.startsWith("__compact_fail__:")) {
+        const args = [text.slice("__compact_fail__:".length)];
+        setCurrentSteps((prev) => [...prev, { type: "compaction", compaction: { kind: "fail", args } }]);
+      } else {
+        setCurrentSteps((prev) => [...prev, { type: "text", text }]);
+      }
       scrollToBottom();
     } else if (event.event === "Thinking") {
       if (!event.data) return;
@@ -1416,6 +1433,9 @@ const TimelineSteps: Component<{
     <For each={props.steps}>
       {(step, i) => (
         <>
+          <Show when={step.type === "compaction" && step.compaction}>
+            <CompactionRow compaction={step.compaction!} />
+          </Show>
           <Show when={step.type === "phase" && step.phase}>
             <PhaseRow phase={step.phase!} />
           </Show>
@@ -1619,6 +1639,46 @@ const TextRow: Component<{ text: string }> = (props) => {
   );
 };
 
+const CompactionRow: Component<{ compaction: { kind: "start" | "done" | "fail"; args: string[] } }> = (props) => {
+  const iconName = (): IconName => {
+    if (props.compaction.kind === "start") return "package-process" as IconName;
+    if (props.compaction.kind === "done") return "package" as IconName;
+    return "package-out-of-stock" as IconName;
+  };
+
+  const label = () => {
+    if (props.compaction.kind === "start") return t("chat.compact.start", props.compaction.args[0], props.compaction.args[1]);
+    if (props.compaction.kind === "done") return t("chat.compact.done", props.compaction.args[0], props.compaction.args[1]);
+    return t("chat.compact.fail", props.compaction.args[0]);
+  };
+
+  const colorClass = () => {
+    if (props.compaction.kind === "start") return "text-accent";
+    if (props.compaction.kind === "done") return "text-success";
+    return "text-danger";
+  };
+
+  const isStroke = () => props.compaction.kind === "start" || props.compaction.kind === "fail";
+
+  return (
+    <div class="my-2 ml-4 border-l-2 border-current pl-2" classList={{
+      "border-accent/40": props.compaction.kind === "start",
+      "border-success/40": props.compaction.kind === "done",
+      "border-danger/40": props.compaction.kind === "fail",
+    }}>
+      <div class="flex items-center gap-2 px-1 py-1 text-[12px]">
+        <span class={`trajectory-node flex h-5 w-5 shrink-0 items-center justify-center ${colorClass()}`}>
+          <Icon name={iconName()} class={`h-[14px] w-[14px] ${colorClass()}`} stroke={isStroke()} />
+        </span>
+        <span class="text-ink-muted">{label()}</span>
+        <Show when={props.compaction.kind === "start"}>
+          <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
+        </Show>
+      </div>
+    </div>
+  );
+};
+
 const ThinkingRow: Component<{
   thinking: { text: string; startedAt: number; endedAt?: number };
   isLive: boolean;
@@ -1715,10 +1775,12 @@ const ToolRow: Component<{
               />
             </div>
           </Show>
-          <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.args")}</div>
-          <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
-            {JSON.stringify(props.tool.call.args, null, 2)}
-          </pre>
+          <Show when={!isEditFile()}>
+            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.args")}</div>
+            <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
+              {JSON.stringify(props.tool.call.args, null, 2)}
+            </pre>
+          </Show>
           <Show when={props.tool.result}>
             <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.result")}</div>
             <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
