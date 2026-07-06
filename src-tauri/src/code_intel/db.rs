@@ -52,8 +52,11 @@ pub struct SemanticSearchResult {
     pub kind: String,
     pub file_path: String,
     pub start_line: i64,
+    pub end_line: i64,
     pub signature: Option<String>,
     pub score: f32,
+    /// Source excerpt of the symbol, filled in by the tool layer for top hits.
+    pub snippet: Option<String>,
 }
 
 /// Bump when the index format changes (schema, embedding layout, ignore
@@ -500,8 +503,10 @@ impl IndexDb {
                         kind: sym.kind,
                         file_path: sym.file_path.unwrap_or_default(),
                         start_line: sym.start_line,
+                        end_line: sym.end_line,
                         signature: sym.signature,
                         score,
+                        snippet: None,
                     },
                 )
             })

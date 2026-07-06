@@ -178,15 +178,17 @@ pub fn get_defs() -> Vec<ToolDef> {
         ToolDef {
             name: "semantic_search".into(),
             description: "Semantic (concept-based) code search using CodeBERT embeddings. \
-Finds code by meaning and behavior, not keywords — e.g. 'message queue system' or \
-'sistema de filas de mensagens' finds SteeringCtl.drain/push/queue even without \
-identifier match. Prefer this when you can describe the functionality but don't know \
-the exact symbol name. Ranking: go_to_definition (precise) → semantic_search \
-(conceptual) → code_search (keyword) → grep (fallback).".into(),
+Finds code by meaning and behavior, not keywords — e.g. 'message queue system' finds \
+SteeringCtl.drain/push/queue even without identifier match. Prefer this when you can \
+describe the functionality but don't know the exact symbol name. The embedding model \
+is ENGLISH-ONLY: always translate the user's phrasing to English before querying — \
+never pass a query in another language. Top results include a source snippet. \
+Ranking: go_to_definition (precise) → semantic_search (conceptual) → \
+code_search (keyword) → grep (fallback).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Natural language description of what the code does (English or Portuguese)" },
+                    "query": { "type": "string", "description": "Natural language description of what the code does. MUST be in English — translate first if the user wrote in another language." },
                     "limit": { "type": "integer", "default": 15 }
                 },
                 "required": ["query"]
@@ -389,7 +391,8 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             })
             .await
             .map_err(|e| format!("encode task panicked: {e}"))??;
-            let results = db.search_by_embedding(&query_vec, limit as usize)?;
+            let mut results = db.search_by_embedding(&query_vec, limit as usize)?;
+            attach_snippets(&mut results);
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }
         "bash" => {
@@ -421,6 +424,40 @@ pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<Strin
     validate_path(&a.path, ctx)?;
     let diff = edit_file::preview(&a)?;
     edit_file::apply(&diff)
+}
+
+/// How many top semantic hits get a source snippet, and how large each can be.
+/// A bare name+signature is usually too little context to judge relevance, but
+/// full bodies for every hit would blow up the tool result.
+const SNIPPET_TOP_HITS: usize = 5;
+const SNIPPET_MAX_LINES: usize = 40;
+const SNIPPET_MAX_CHARS: usize = 2400;
+
+fn attach_snippets(results: &mut [crate::code_intel::db::SemanticSearchResult]) {
+    for r in results.iter_mut().take(SNIPPET_TOP_HITS) {
+        let Ok(content) = std::fs::read_to_string(&r.file_path) else { continue };
+        let start = (r.start_line.max(0)) as usize;
+        let end = (r.end_line.max(r.start_line)) as usize;
+        let mut snippet: String = content
+            .lines()
+            .skip(start)
+            .take((end - start + 1).min(SNIPPET_MAX_LINES))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if snippet.len() > SNIPPET_MAX_CHARS {
+            let cut = snippet
+                .char_indices()
+                .take_while(|(i, _)| *i < SNIPPET_MAX_CHARS)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            snippet.truncate(cut);
+            snippet.push_str("\n… [truncated — read_file for the rest]");
+        }
+        if !snippet.is_empty() {
+            r.snippet = Some(snippet);
+        }
+    }
 }
 
 fn open_db(db_path: &Option<String>) -> Result<IndexDb, String> {
