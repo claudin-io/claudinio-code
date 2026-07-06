@@ -838,13 +838,6 @@ export const ChatPanel: Component = () => {
     }
   };
 
-  const autoResize = () => {
-    if (inputRef) {
-      inputRef.style.height = "auto";
-      inputRef.style.height = `${Math.min(inputRef.scrollHeight, 156)}px`;
-    }
-  };
-
   // Global ESC handler: only fires when status is "thinking"
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1105,7 +1098,7 @@ export const ChatPanel: Component = () => {
 
       <div class="border-t border-border-subtle px-6 py-3">
         <div class="w-full">
-          <div class="flex items-end gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
+          <div class="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
             <button
               onClick={async () => {
                 // Use Tauri dialog to pick files
@@ -1131,7 +1124,6 @@ export const ChatPanel: Component = () => {
               value={input()}
               onInput={(e) => {
                 setInput(e.currentTarget.value);
-                autoResize();
               }}
               onKeyDown={handleKeyDown}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
@@ -1146,7 +1138,7 @@ export const ChatPanel: Component = () => {
                         ? t("chat.input.steerAgent")
                         : t("chat.input.askCode")
               }
-              class="max-h-[156px] min-h-[36px] flex-1 resize-none border-0 bg-transparent p-1 text-[13px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
+              class="max-h-[156px] min-h-[32px] flex-1 resize-none border-0 bg-transparent px-1 py-1.5 text-[13px] leading-[18px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
               rows={1}
             />
             <Show when={status() === "thinking" || status() === "awaiting_approval"}>
