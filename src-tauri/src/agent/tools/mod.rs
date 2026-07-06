@@ -208,7 +208,7 @@ the exact symbol name. Ranking: go_to_definition (precise) → semantic_search \
         },
         ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Each question carries concrete options; the UI automatically appends a final free-text option, so never add an 'Other' option yourself. Blocks until answered and returns the compiled question/answer pairs.".into(),
+            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text ends the turn unanswered and stalls the task. Each question carries concrete options; the UI automatically appends a final free-text option, so never add an 'Other' option yourself. Blocks until answered and returns the compiled question/answer pairs.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
