@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -8,6 +10,93 @@ use crate::agent::tools::ToolContext;
 
 const MAX_OUTPUT_BYTES: u64 = 100 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Cache for the resolved login PATH (with nvm, cargo, etc.).
+/// Resolved once on first `execute()` call, reused for all subsequent calls.
+static LOGIN_PATH: OnceLock<String> = OnceLock::new();
+
+/// Build a PATH that includes the user's login shell PATH (from .zshrc / .bashrc etc.).
+///
+/// Platform behavior:
+/// - **macOS**: runs `$SHELL -l -c 'echo $PATH'` once to extract the full login PATH
+///   (nvm, cargo, homebrew, etc.), avoiding TCC prompts that macOS shows when `sh`
+///   inherits a PATH referencing protected directories.
+/// - **Linux**: same login-shell extraction — works transparently.
+/// - **Windows**: returns the current process PATH directly (no login-shell concept).
+///
+/// The result is cached in a `OnceLock` after the first call.
+fn resolve_login_path() -> String {
+    // Windows: no login-shell concept, just use current PATH
+    if cfg!(target_os = "windows") {
+        return std::env::var("PATH").unwrap_or_default();
+    }
+
+    // macOS / Linux: extract PATH from the user's configured login shell
+    // so that nvm, cargo, homebrew, and other custom paths are available
+    // without the LLM needing to prepend `export PATH=...` manually.
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+
+    let output = std::process::Command::new(&shell)
+        .arg("-l")
+        .arg("-c")
+        .arg("echo $PATH")
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+        _ => { /* fall through to curated fallback */ }
+    }
+
+    // Fallback: scan known binary directories for this machine.
+    // Used when the login-shell call fails (e.g. macOS TCC blocks it on first launch).
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/victortavernari".into());
+    let mut paths: Vec<String> = Vec::new();
+
+    // NVM node bins (sorted by version, latest first)
+    if cfg!(unix) {
+        let nvm_base = format!("{}/.nvm/versions/node", home);
+        if let Ok(entries) = std::fs::read_dir(&nvm_base) {
+            let mut version_bins: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.path().join("bin"))
+                .filter(|p| p.exists())
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            version_bins.sort_by(|a, b| b.cmp(a));
+            paths.extend(version_bins);
+        }
+    }
+
+    // Cargo bin
+    if cfg!(unix) {
+        let cargo_bin = format!("{}/.cargo/bin", home);
+        if Path::new(&cargo_bin).exists() {
+            paths.push(cargo_bin);
+        }
+    }
+
+    // Homebrew (macOS)
+    if cfg!(target_os = "macos") {
+        for dir in &["/opt/homebrew/bin", "/opt/homebrew/sbin"] {
+            if Path::new(dir).exists() {
+                paths.push(dir.to_string());
+            }
+        }
+    }
+
+    // Current process PATH as tail (always — works on all platforms)
+    if let Ok(existing) = std::env::var("PATH") {
+        paths.push(existing);
+    }
+
+    paths.join(":")
+}
 
 #[derive(Deserialize)]
 pub struct BashArgs {
@@ -23,9 +112,15 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
 
     let timeout_secs = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+    // Resolve and inject the login PATH (cached in OnceLock after first call).
+    // This avoids the LLM needing to prepend `export PATH=...` to every command,
+    // which on macOS triggers repeated TCC permission prompts.
+    let login_path = LOGIN_PATH.get_or_init(resolve_login_path);
+
     let mut child = Command::new(shell)
         .arg(shell_flag)
         .arg(&args.command)
+        .env("PATH", login_path)
         .current_dir(args.workdir.as_deref().unwrap_or("."))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
