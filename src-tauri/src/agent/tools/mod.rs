@@ -431,13 +431,13 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         }
         "file_outline" => {
             let db = open_db(&ctx.db_path)?;
-            let file_path = args.get("file_path").and_then(|v| v.as_str()).ok_or("missing file_path")?;
+            let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
             validate_path(file_path, ctx)?;
             let results = db.symbols_in_file(file_path)?;
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }
         "go_to_definition" => {
-            let file_path = args.get("file_path").and_then(|v| v.as_str()).ok_or("missing file_path")?;
+            let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
             let line = args.get("line").and_then(|v| v.as_u64()).ok_or("missing line")?;
             let character = args.get("character").and_then(|v| v.as_u64()).ok_or("missing character")?;
 
@@ -455,7 +455,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             heuristically_find_definition(file_path, line, character, &ctx.db_path)
         }
         "find_references" => {
-            let file_path = args.get("file_path").and_then(|v| v.as_str()).ok_or("missing file_path")?;
+            let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
             let line = args.get("line").and_then(|v| v.as_u64()).ok_or("missing line")?;
             let character = args.get("character").and_then(|v| v.as_u64()).ok_or("missing character")?;
 
@@ -1205,6 +1205,52 @@ mod tests {
                 assert!(!content.contains("FILE SIZE WARNING"), "should NOT have truncation warning");
             }
             _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+    // ── file_path ↔ path fallback tests ──
+
+    #[test]
+    fn test_read_file_accepts_file_path_fallback() {
+        let p = write_20line_file("fallback_file_path");
+        let ctx = test_ctx();
+        let args = serde_json::json!({"file_path": p.to_string_lossy()});
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file with file_path should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert_eq!(content.lines().count(), 20, "should return all 20 lines");
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_list_dir_accepts_file_path_fallback() {
+        let tmp = std::env::temp_dir().join("claudinio_test_list_dir_fallback");
+        let _ = std::fs::create_dir_all(&tmp);
+        let ctx = test_ctx();
+        let args = serde_json::json!({"file_path": tmp.to_string_lossy()});
+        let result = futures::executor::block_on(execute("list_dir", args, &ctx));
+        result.expect("list_dir with file_path should succeed");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_file_outline_accepts_path_fallback() {
+        let p = write_20line_file("fallback_outline_path");
+        let ctx = test_ctx();
+        let args = serde_json::json!({"path": p.to_string_lossy()});
+        let result = futures::executor::block_on(execute("file_outline", args, &ctx));
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                assert!(
+                    !e.contains("missing file_path"),
+                    "should NOT fail with 'missing file_path', got: {e}"
+                );
+            }
         }
         let _ = std::fs::remove_file(&p);
     }

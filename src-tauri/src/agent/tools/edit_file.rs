@@ -3,6 +3,7 @@ use serde::Serialize;
 
 #[derive(Deserialize)]
 pub struct EditFileArgs {
+    #[serde(alias = "file_path")]
     pub path: String,
     pub old_string: String,
     pub new_string: String,

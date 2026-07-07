@@ -3,6 +3,7 @@ use serde::Serialize;
 
 #[derive(Deserialize)]
 pub struct ListDirArgs {
+    #[serde(alias = "file_path")]
     pub path: String,
 }
 

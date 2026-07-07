@@ -5,6 +5,7 @@ use std::process::Command;
 #[derive(Deserialize)]
 pub struct GrepArgs {
     pub pattern: String,
+    #[serde(alias = "file_path")]
     pub path: Option<String>,
 }
 

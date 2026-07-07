@@ -6,6 +6,7 @@ const MAX_TOKENS: usize = 25000;
 
 #[derive(Deserialize)]
 pub struct ReadFileArgs {
+    #[serde(alias = "file_path")]
     pub path: String,
     /// Optional 1-based start line (inclusive). If None, reads from line 1.
     pub start_line: Option<usize>,
