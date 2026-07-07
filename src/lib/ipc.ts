@@ -49,6 +49,8 @@ export interface AgentConfig {
   yoloBlacklist?: string[];
   accountLogin?: string | null;
   accountTier?: string | null;
+  maxGoldenCycles?: number | null;
+  maxGoldenStalls?: number | null;
 }
 
 export interface SetConfigArgs {
@@ -60,6 +62,8 @@ export interface SetConfigArgs {
   subMaxRounds?: number | null;
   yoloMode?: boolean;
   yoloBlacklist?: string[];
+  maxGoldenCycles?: number | null;
+  maxGoldenStalls?: number | null;
 }
 
 export interface ApproveArgs {
@@ -103,9 +107,17 @@ export interface ModeChangedData {
   reason?: string | null;
 }
 
+export interface GoldenLoopData {
+  cycle: number;
+  maxCycles: number;
+  pending: string[];
+  mode: SessionMode;
+}
+
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
   | { event: "ModeChanged"; data: ModeChangedData }
+  | { event: "GoldenLoop"; data: GoldenLoopData }
   | { event: "Thinking"; data: string }
   | { event: "ToolCall"; data: ToolCallData }
   | { event: "ToolResult"; data: ToolResultData }
@@ -225,7 +237,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks" | "golden_cycle";
   [key: string]: unknown;
 };
 

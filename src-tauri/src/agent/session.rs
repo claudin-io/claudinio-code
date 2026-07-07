@@ -22,6 +22,10 @@ pub const COMPACT_THRESHOLD: u64 = MAX_CONTEXT_TOKENS * 75 / 100;
 /// Prefix that identifies a golden task.
 pub const GOLDEN_TASK_PREFIX: &str = "golden-";
 
+/// Golden-loop safety caps used when the config leaves them unset.
+const DEFAULT_MAX_GOLDEN_CYCLES: usize = 5;
+const DEFAULT_MAX_GOLDEN_STALLS: usize = 2;
+
 /// Parse <goal>...</goal> tags from user input.
 /// Returns (cleaned_text, list_of_goals).
 pub fn parse_goals(text: &str) -> (String, Vec<String>) {
@@ -397,6 +401,18 @@ If a request turns out to be genuinely hard or ambiguous — unclear requirement
 space, conflicting constraints — call enter_plan_mode to switch yourself into Brain mode and \
 design first instead of guessing.";
 
+/// Appended to the system prompt in BOTH modes: golden tasks are mandatory
+/// goals the session must reach before it is allowed to finish for real.
+const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS (MANDATORY GOALS)\n\
+Tasks whose id starts with 'golden-' are mandatory goals set by the user via <goal> tags:\n\
+- They are the success criteria of the session: work is only finished when every golden task \
+has status='done'.\n\
+- Only mark a golden task 'done' after you VERIFIED the goal it describes is actually met \
+(run the checks — build, tests, coverage, whatever the goal requires) — never on intention.\n\
+- If you end your turn while golden tasks are pending, the system automatically switches mode \
+(Brain to plan, Builder to execute) and sends you back to work on them, up to a cycle limit.\n\
+- Never delete golden tasks in tasks_set; keep them in the list and update their status.";
+
 /// Build the per-session system prompt. The base is byte-identical for every
 /// request in the same workspace so the provider's prefix cache stays warm;
 /// the mode block is appended last and only changes when the mode switches.
@@ -419,8 +435,8 @@ File tools take absolute paths inside this root."
         _ => base,
     };
     match mode {
-        SessionMode::Brain => format!("{base}{BRAIN_PROMPT}"),
-        SessionMode::Builder => format!("{base}{BUILDER_PROMPT}"),
+        SessionMode::Brain => format!("{base}{GOLDEN_PROMPT}{BRAIN_PROMPT}"),
+        SessionMode::Builder => format!("{base}{GOLDEN_PROMPT}{BUILDER_PROMPT}"),
     }
 }
 
@@ -516,6 +532,16 @@ pub enum AgentEvent {
         mode: String,
         origin: String,
         reason: Option<String>,
+    },
+    /// The run tried to finish with golden tasks still pending: a new golden
+    /// cycle starts in `mode`. `pending` lists the unfinished golden task ids.
+    #[serde(rename = "GoldenLoop")]
+    GoldenLoop {
+        cycle: u32,
+        #[serde(rename = "maxCycles")]
+        max_cycles: u32,
+        pending: Vec<String>,
+        mode: String,
     },
     #[serde(rename = "SessionStats")]
     SessionStats {
@@ -899,6 +925,14 @@ pub async fn run_workflow(
     let mut truncation_streak: u32 = 0;
     let mut empty_streak: u32 = 0;
 
+    // Golden-goals loop state. The cycle counter resumes from the session's
+    // records so a restart doesn't reset the cap mid-loop.
+    let mut golden_cycle: u32 = crate::agent::persist::golden_cycle_count(
+        &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+    );
+    let mut golden_last_pending: Vec<String> = Vec::new();
+    let mut golden_stalls: usize = 0;
+
     let max_rounds = config.max_rounds.unwrap_or(usize::MAX);
     for _ in 0..max_rounds {
         // The mode can change mid-run (human toggle, or the agent's own
@@ -1142,6 +1176,88 @@ pub async fn run_workflow(
             if inject_steering(history, store, steering, event_tx) {
                 continue;
             }
+            // Golden verification: an end_turn with golden tasks still pending
+            // is not a real finish — flip Brain↔Builder and send the model
+            // back to work, bounded by the cycle and stall caps.
+            let mut stop_reason = "end_turn";
+            let golden_pending: Vec<String> = ctx
+                .session_store_path
+                .as_deref()
+                .and_then(|p| {
+                    crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok()
+                })
+                .map(|t| crate::agent::tools::tasks::golden_pending_ids(&t))
+                .unwrap_or_default();
+            if !golden_pending.is_empty() {
+                let max_cycles = config.max_golden_cycles.unwrap_or(DEFAULT_MAX_GOLDEN_CYCLES);
+                let max_stalls = config.max_golden_stalls.unwrap_or(DEFAULT_MAX_GOLDEN_STALLS);
+                if golden_pending == golden_last_pending {
+                    golden_stalls += 1;
+                } else {
+                    golden_stalls = 0;
+                }
+                golden_last_pending = golden_pending.clone();
+                if (golden_cycle as usize) < max_cycles && golden_stalls < max_stalls {
+                    golden_cycle += 1;
+                    let next = match cur_mode {
+                        SessionMode::Brain => SessionMode::Builder,
+                        SessionMode::Builder => SessionMode::Brain,
+                    };
+                    mode_ctl.set(next, ModeOrigin::Agent);
+                    store.try_append(&SessionRecord::Mode {
+                        mode: next.as_str().into(),
+                        origin: ModeOrigin::Agent.as_str().into(),
+                        ts: now_ms(),
+                    });
+                    let _ = event_tx.send(AgentEvent::ModeChanged {
+                        mode: next.as_str().into(),
+                        origin: ModeOrigin::Agent.as_str().into(),
+                        reason: Some(format!("golden cycle {golden_cycle}")),
+                    });
+                    store.try_append(&SessionRecord::GoldenCycle {
+                        cycle: golden_cycle,
+                        mode: next.as_str().into(),
+                        goals: golden_pending.clone(),
+                        ts: now_ms(),
+                    });
+                    let _ = event_tx.send(AgentEvent::GoldenLoop {
+                        cycle: golden_cycle,
+                        max_cycles: max_cycles as u32,
+                        pending: golden_pending.clone(),
+                        mode: next.as_str().into(),
+                    });
+                    push_user_blocks(
+                        history,
+                        store,
+                        vec![ContentBlock::text(format!(
+                            "[system] Golden tasks are still pending: {}. The session \
+                             switched to {} mode (golden cycle {golden_cycle}/{max_cycles}). \
+                             Resume work on the pending goals — plan or execute what is \
+                             missing, and only mark a golden task 'done' after verifying \
+                             the goal is truly met.",
+                            golden_pending.join(", "),
+                            next.as_str(),
+                        ))],
+                    );
+                    continue;
+                }
+                // Cap hit: stop honestly with a specific reason so the user
+                // sees WHY the loop gave up with goals unmet.
+                stop_reason = if golden_stalls >= max_stalls {
+                    "golden_stalled"
+                } else {
+                    "max_golden_cycles"
+                };
+                last_text = format!(
+                    "{last_text}\n\n⚠️ Golden goals não concluídos ({}): {}",
+                    if stop_reason == "golden_stalled" {
+                        "sem progresso por ciclos consecutivos"
+                    } else {
+                        "limite de ciclos atingido"
+                    },
+                    golden_pending.join(", "),
+                );
+            }
             // If the model didn't produce a final text response, provide a
             // generic closing so the user doesn't see a blank answer.
             if last_text.is_empty() {
@@ -1164,7 +1280,7 @@ pub async fn run_workflow(
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
             let _ = event_tx.send(AgentEvent::Done {
-                stop_reason: "end_turn".into(),
+                stop_reason: stop_reason.into(),
                 text_output: last_text,
                 input_tokens: total_in,
                 output_tokens: total_out,

@@ -91,6 +91,29 @@ pub enum SessionRecord {
         context_tokens: Option<u64>,
         ts: u64,
     },
+    /// One iteration of the golden-goals loop: the run ended with golden
+    /// tasks still pending, so the workflow flipped mode and continued.
+    /// `goals` holds the pending golden task ids at the moment of the flip.
+    #[serde(rename = "golden_cycle")]
+    GoldenCycle {
+        cycle: u32,
+        mode: String,
+        goals: Vec<String>,
+        ts: u64,
+    },
+}
+
+/// Number of golden cycles already run in this session (the highest
+/// `cycle` recorded, or 0 when the loop never ran).
+pub fn golden_cycle_count(records: &[SessionRecord]) -> u32 {
+    records
+        .iter()
+        .filter_map(|r| match r {
+            SessionRecord::GoldenCycle { cycle, .. } => Some(*cycle),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 pub fn now_ms() -> u64 {
@@ -428,7 +451,8 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Compacted { ts, .. }
                 | SessionRecord::Tasks { ts, .. }
                 | SessionRecord::Mode { ts, .. }
-                | SessionRecord::Status { ts, .. } => {
+                | SessionRecord::Status { ts, .. }
+                | SessionRecord::GoldenCycle { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
             }
@@ -452,6 +476,27 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
 mod tests {
     use super::*;
     use crate::agent::provider::ContentBlock;
+
+    #[test]
+    fn golden_cycle_roundtrip_and_count() {
+        let rec = SessionRecord::GoldenCycle {
+            cycle: 2,
+            mode: "brain".into(),
+            goals: vec!["golden-coverage-80-0".into()],
+            ts: 42,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"golden_cycle\""));
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, SessionRecord::GoldenCycle { cycle: 2, .. }));
+
+        let recs = vec![
+            SessionRecord::GoldenCycle { cycle: 1, mode: "brain".into(), goals: vec![], ts: 1 },
+            rec,
+        ];
+        assert_eq!(golden_cycle_count(&recs), 2);
+        assert_eq!(golden_cycle_count(&[]), 0);
+    }
 
     #[test]
     fn roundtrip_history_from_records() {

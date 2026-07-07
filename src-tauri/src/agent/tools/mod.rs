@@ -3,7 +3,7 @@ mod edit_file;
 mod grep;
 mod list_dir;
 mod read_file;
-mod tasks;
+pub mod tasks;
 mod web_search;
 mod write_plan;
 

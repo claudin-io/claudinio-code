@@ -57,6 +57,8 @@ export const TasksPanel: Component<{
     return "bg-ink-faint";
   };
 
+  const isGolden = (task: TaskItem) => task.id.startsWith("golden-");
+
   const statusLabel = (s: string) => {
     if (s === "done") return t("tasks.status.done");
     if (s === "doing") return t("tasks.status.doing");
@@ -98,7 +100,12 @@ export const TasksPanel: Component<{
               }}
               onMouseLeave={scheduleClose}
               class="shrink-0 rounded-full hover:ring-2 hover:ring-accent/40"
-              title={`${task.title} — ${task.status}`}
+              classList={{ "ring-1 ring-amber-500/70": isGolden(task) }}
+              title={
+                isGolden(task)
+                  ? `⭐ ${task.title} (${t("golden.task.badge")}) — ${task.status}`
+                  : `${task.title} — ${task.status}`
+              }
             >
               <span
                 class={`block h-2.5 w-2.5 rounded-full ${dotColor(task.status)}`}
@@ -130,8 +137,18 @@ export const TasksPanel: Component<{
               }}
               onMouseEnter={cancelClose}
               onMouseLeave={scheduleClose}
-              class="w-64 rounded-lg border border-border-subtle bg-surface-1 p-3 shadow-modal"
+              class="w-64 rounded-lg border bg-surface-1 p-3 shadow-modal"
+              classList={{
+                "border-amber-500/60": isGolden(task),
+                "border-border-subtle": !isGolden(task),
+              }}
             >
+              {/* Golden badge */}
+              <Show when={isGolden(task)}>
+                <span class="mb-1 inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-500">
+                  ⭐ {t("golden.task.badge")}
+                </span>
+              </Show>
               {/* Title + status */}
               <div class="flex items-start justify-between gap-2">
                 <span

@@ -49,9 +49,9 @@ pub fn create_golden_tasks(goals: &[String]) -> Vec<TaskItem> {
     tasks
 }
 
-/// Check if a task is a golden task (id starts with "golden-").
+/// Check if a task is a golden task (id starts with the golden prefix).
 pub fn is_golden(task: &TaskItem) -> bool {
-    task.id.starts_with("golden-")
+    task.id.starts_with(crate::agent::session::GOLDEN_TASK_PREFIX)
 }
 
 /// Get all golden tasks that are not yet 'done'.
@@ -61,10 +61,7 @@ pub fn golden_tasks_remaining(tasks: &[TaskItem]) -> Vec<&TaskItem> {
 
 /// Get IDs of golden tasks that are not yet 'done'.
 pub fn golden_pending_ids(tasks: &[TaskItem]) -> Vec<String> {
-    tasks.iter()
-        .filter(|t| is_golden(t) && t.status != "done")
-        .map(|t| t.id.clone())
-        .collect()
+    golden_tasks_remaining(tasks).into_iter().map(|t| t.id.clone()).collect()
 }
 
 /// Create a simple slug from a string: lowercase, replace non-alphanumeric with hyphens, truncate to 40 chars.

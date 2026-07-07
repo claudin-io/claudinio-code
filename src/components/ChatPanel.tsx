@@ -18,6 +18,7 @@ import {
   normalizeSessionMode,
   type SessionMode,
   type ModeChangedData,
+  type GoldenLoopData,
   type AgentEvent,
   type AskUserData,
   type ToolCallData,
@@ -89,7 +90,7 @@ interface SubagentTimelineState {
 }
 
 interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode";
+  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode" | "golden";
   thinking?: { text: string; startedAt: number; endedAt?: number };
   tool?: {
     call: ToolCallData;
@@ -106,6 +107,7 @@ interface TimelineItem {
     args: string[];
   };
   modeChange?: ModeChangedData;
+  golden?: GoldenLoopData;
 }
 
 function modeChangeLabel(mc: ModeChangedData): string {
@@ -381,6 +383,16 @@ function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
         modeChange: {
           mode: normalizeSessionMode(rec.mode),
           origin: rec.origin as ModeChangedData["origin"],
+        },
+      });
+    } else if (kind === "golden_cycle") {
+      steps.push({
+        type: "golden",
+        golden: {
+          cycle: Number(rec.cycle ?? 0),
+          maxCycles: 0,
+          pending: (rec.goals as string[]) ?? [],
+          mode: normalizeSessionMode(rec.mode),
         },
       });
     } else if (kind === "done") {
@@ -917,6 +929,14 @@ export const ChatPanel: Component<{
       setCurrentSteps((prev) => [
         ...prev,
         { type: "mode" as const, modeChange: data } as TimelineItem,
+      ]);
+      scrollToBottom();
+    } else if (event.event === "GoldenLoop") {
+      const data = event.data as GoldenLoopData;
+      setMode(data.mode);
+      setCurrentSteps((prev) => [
+        ...prev,
+        { type: "golden" as const, golden: data } as TimelineItem,
       ]);
       scrollToBottom();
     } else if (event.event === "SteeringInjected") {
@@ -2075,6 +2095,19 @@ const TimelineSteps: Component<{
                   class="h-3 w-3"
                 />
                 {modeChangeLabel(step.modeChange!)}
+              </span>
+            </div>
+          </Show>
+          <Show when={step.type === "golden" && step.golden}>
+            <div class="my-1 ml-6 flex items-center gap-1.5">
+              <span
+                class="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-500"
+                title={step.golden!.pending.join(", ")}
+              >
+                🎯
+                {step.golden!.maxCycles > 0
+                  ? t("golden.loop", String(step.golden!.cycle), String(step.golden!.maxCycles), String(step.golden!.pending.length))
+                  : t("golden.loop.replay", String(step.golden!.cycle), String(step.golden!.pending.length))}
               </span>
             </div>
           </Show>

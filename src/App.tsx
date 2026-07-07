@@ -61,6 +61,8 @@ function App() {
   const [availableModels, setAvailableModels] = createSignal<string[]>(["claudinio", "claudius"]);
   const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
+  const [configMaxGoldenCycles, setConfigMaxGoldenCycles] = createSignal<number | null>(null);
+  const [configMaxGoldenStalls, setConfigMaxGoldenStalls] = createSignal<number | null>(null);
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
@@ -140,6 +142,8 @@ function App() {
         setConfigBuilderModel(cfg.builderModel);
         setConfigMaxRounds(cfg.maxRounds ?? null);
         setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
+        setConfigMaxGoldenCycles(cfg.maxGoldenCycles ?? null);
+        setConfigMaxGoldenStalls(cfg.maxGoldenStalls ?? null);
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
         setAccountLogin(cfg.accountLogin ?? null);
@@ -160,6 +164,8 @@ function App() {
         builderModel: configBuilderModel() || undefined,
         maxRounds: configMaxRounds(),
         subMaxRounds: configSubMaxRounds(),
+        maxGoldenCycles: configMaxGoldenCycles(),
+        maxGoldenStalls: configMaxGoldenStalls(),
         yoloMode: configYoloMode(),
         yoloBlacklist: configYoloBlacklist()
           .split(",")
@@ -418,6 +424,34 @@ function App() {
               class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
             <p class="mb-4 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
+
+            <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenCycles")}</label>
+            <input
+              type="number"
+              min="0"
+              value={configMaxGoldenCycles() ?? ""}
+              onInput={(e) => {
+                const v = e.currentTarget.value;
+                setConfigMaxGoldenCycles(v === "" ? null : Math.max(0, parseInt(v, 10) || 0));
+              }}
+              placeholder="5"
+              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <p class="mb-3 text-[11px] text-ink-faint">{t("settings.maxGoldenCyclesHint")}</p>
+
+            <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenStalls")}</label>
+            <input
+              type="number"
+              min="0"
+              value={configMaxGoldenStalls() ?? ""}
+              onInput={(e) => {
+                const v = e.currentTarget.value;
+                setConfigMaxGoldenStalls(v === "" ? null : Math.max(0, parseInt(v, 10) || 0));
+              }}
+              placeholder="2"
+              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <p class="mb-4 text-[11px] text-ink-faint">{t("settings.maxGoldenStallsHint")}</p>
 
             <hr class="mb-4 border-border-subtle" />
 

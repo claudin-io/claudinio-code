@@ -4,6 +4,7 @@ use crate::agent::persist::{
 use crate::agent::provider::{save_config, ContentBlock};
 use crate::agent::session::{self, AgentEvent};
 use crate::agent::tools::{ReadTracker, ToolContext};
+use crate::commands::tasks as tasks_cmd;
 use crate::state::{AppState, SessionHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -171,6 +172,30 @@ pub async fn send_message(
         }
         prefix.push_str(&message);
         prefix
+    };
+
+    // Golden goals: extract <goal>...</goal> tags, strip them from the text
+    // sent to the model, and materialize each goal as golden tasks the
+    // workflow's golden loop will enforce until done.
+    let (cleaned, goals) = session::parse_goals(&message);
+    let message = if goals.is_empty() {
+        message
+    } else {
+        let mut tasks = tasks_cmd::load_last_tasks(&handle.store_path).unwrap_or_default();
+        // New goals replace previous golden tasks; normal tasks are preserved.
+        tasks.retain(|t| !crate::agent::tools::tasks::is_golden(t));
+        tasks.extend(crate::agent::tools::tasks::create_golden_tasks(&goals));
+        if let Err(e) = tasks_cmd::append_tasks(&handle.store_path, &tasks) {
+            eprintln!("failed to persist golden tasks: {e}");
+        }
+        if cleaned.is_empty() {
+            format!(
+                "Reach the following mandatory goals (tracked as golden tasks): {}",
+                goals.join("; ")
+            )
+        } else {
+            cleaned
+        }
     };
 
     // Process attachments into content blocks to prepend to the user message
@@ -401,6 +426,8 @@ pub struct SetConfigArgs {
     pub sub_max_rounds: Option<Option<usize>>,
     pub yolo_mode: Option<bool>,
     pub yolo_blacklist: Option<Vec<String>>,
+    pub max_golden_cycles: Option<Option<usize>>,
+    pub max_golden_stalls: Option<Option<usize>>,
 }
 
 #[tauri::command]
@@ -433,6 +460,12 @@ pub async fn set_config(
     if let Some(yolo_blacklist) = args.yolo_blacklist {
         cfg.yolo_blacklist = yolo_blacklist;
     }
+    if let Some(max_golden_cycles) = args.max_golden_cycles {
+        cfg.max_golden_cycles = max_golden_cycles;
+    }
+    if let Some(max_golden_stalls) = args.max_golden_stalls {
+        cfg.max_golden_stalls = max_golden_stalls;
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -455,6 +488,8 @@ pub async fn get_config(
         "yoloBlacklist": cfg.yolo_blacklist,
         "accountLogin": cfg.account_login,
         "accountTier": cfg.account_tier,
+        "maxGoldenCycles": cfg.max_golden_cycles,
+        "maxGoldenStalls": cfg.max_golden_stalls,
     }))
 }
 

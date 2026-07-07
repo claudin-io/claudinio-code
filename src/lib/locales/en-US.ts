@@ -196,6 +196,13 @@ const dict: LocaleDict = {
   "mode.changed.brain.agent": "The agent entered Brain mode",
   "mode.changed.builder.agent": "The agent returned to Builder mode",
   "mode.changed.reason": "Reason: {0}",
+  "golden.loop": "Golden loop: cycle {0} of {1} — {2} goal(s) pending",
+  "golden.loop.replay": "Golden loop: cycle {0} — {1} goal(s) pending",
+  "golden.task.badge": "Golden — mandatory goal",
+  "settings.maxGoldenCycles": "Max golden cycles",
+  "settings.maxGoldenCyclesHint": "How many automatic Brain↔Builder cycles to run while golden goals (<goal> tags) are pending. Empty = 5.",
+  "settings.maxGoldenStalls": "Max golden stalls",
+  "settings.maxGoldenStallsHint": "Stop the golden loop after this many cycles without progress. Empty = 2.",
 };
 
 export default dict;

@@ -43,6 +43,14 @@ pub struct AgentConfig {
     /// Subscription tier of the linked account, as reported at login time.
     #[serde(default)]
     pub account_tier: Option<String>,
+    /// Max golden-loop cycles before the run stops with "max_golden_cycles".
+    /// None falls back to the built-in default (5); Some(0) disables the loop.
+    #[serde(default)]
+    pub max_golden_cycles: Option<usize>,
+    /// Max consecutive cycles without golden-task progress before the run
+    /// stops with "golden_stalled". None falls back to the default (2).
+    #[serde(default)]
+    pub max_golden_stalls: Option<usize>,
 }
 
 fn default_claudinio() -> String {
@@ -68,6 +76,8 @@ impl Default for AgentConfig {
             services_url: default_services_url(),
             account_login: None,
             account_tier: None,
+            max_golden_cycles: None,
+            max_golden_stalls: None,
         }
     }
 }
