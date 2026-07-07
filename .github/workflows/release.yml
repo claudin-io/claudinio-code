@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bundle-args: ''
+            artifact-name: Claudinio-Code-Windows-x64
+
+          - platform: macos-x64
+            target: x86_64-apple-darwin
+            os: macos-13
+            bundle-args: ''
+            artifact-name: Claudinio-Code-macOS-x64
+
+          - platform: macos-arm64
+            target: aarch64-apple-darwin
+            os: macos-latest
+            bundle-args: ''
+            artifact-name: Claudinio-Code-macOS-arm64
+
+          - platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            bundle-args: ''
+            artifact-name: Claudinio-Code-Linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: short
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libssl-dev
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Determine version from tag
+        id: version
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          TAG="${TAG#v}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Tauri app
+        run: pnpm tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}-${{ steps.version.outputs.version }}
+          path: |
+            src-tauri/target/release/bundle/**/*
+
+  create-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          TAG="${TAG#v}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Claudinio-Code-*
+          merge-multiple: false
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          mkdir -p release-files
+          find . -type d -name 'Claudinio-Code-*' | while read dir; do
+            name=$(basename "$dir")
+            find "$dir" -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.tar.xz' \) | while read file; do
+              base=$(basename "$file")
+              cp "$file" "release-files/${name}-${base}"
+            done
+          done
+          echo "=== Collected release files ==="
+          ls -lh release-files/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Claudinio Code v${{ steps.version.outputs.version }}
+          body: |
+            ## Claudinio Code v${{ steps.version.outputs.version }}
+
+            ### Downloads
+
+            | Platform | File |
+            |----------|------|
+            | Windows (x64) | `Claudinio-Code-Windows-x64-*.msi` / `*.exe` |
+            | macOS (Intel) | `Claudinio-Code-macOS-x64-*.dmg` |
+            | macOS (Apple Silicon) | `Claudinio-Code-macOS-arm64-*.dmg` |
+            | Linux (x64) | `Claudinio-Code-Linux-x64-*.deb` / `*.AppImage` |
+
+            ---
+
+            *Built with [Tauri v2](https://v2.tauri.app)*
+          files: release-files/*
+          draft: false
+          prerelease: false
