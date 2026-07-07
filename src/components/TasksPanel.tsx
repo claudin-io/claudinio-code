@@ -60,6 +60,17 @@ export const TasksPanel: Component<{
 
   const isGolden = (task: TaskItem) => task.id.startsWith("golden-");
 
+  // Golden task ids end in -0 (plan) or -1 (execute); the backend keeps the
+  // raw goal text in `title` so the visible label is composed here, localized.
+  const goldenPhase = (task: TaskItem): "plan" | "execute" =>
+    task.id.endsWith("-0") ? "plan" : "execute";
+
+  const displayTitle = (task: TaskItem) =>
+    isGolden(task) ? t(`golden.task.${goldenPhase(task)}`, task.title) : task.title;
+
+  const displayDescription = (task: TaskItem) =>
+    isGolden(task) ? t(`golden.task.${goldenPhase(task)}.desc`, task.title) : task.description;
+
   const statusLabel = (s: string) => {
     if (s === "done") return t("tasks.status.done");
     if (s === "doing") return t("tasks.status.doing");
@@ -104,7 +115,7 @@ export const TasksPanel: Component<{
               classList={{ "gold-outline p-px": isGolden(task) }}
               title={
                 isGolden(task)
-                  ? `${task.title} (${t("golden.task.badge")}) — ${task.status}`
+                  ? `${displayTitle(task)} (${t("golden.task.badge")}) — ${task.status}`
                   : `${task.title} — ${task.status}`
               }
             >
@@ -164,7 +175,7 @@ export const TasksPanel: Component<{
                     "text-ink-faint line-through": task.status === "done",
                   }}
                 >
-                  {task.title}
+                  {displayTitle(task)}
                 </span>
                 <span
                   class="shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-medium"
@@ -179,9 +190,9 @@ export const TasksPanel: Component<{
               </div>
 
               {/* Description */}
-              <Show when={task.description}>
+              <Show when={displayDescription(task)}>
                 <p class="mt-2 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink-muted">
-                  {task.description}
+                  {displayDescription(task)}
                 </p>
               </Show>
 

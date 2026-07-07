@@ -31,16 +31,20 @@ pub fn create_golden_tasks(goals: &[String]) -> Vec<TaskItem> {
     let mut tasks = Vec::new();
     for goal in goals {
         let slug = slugify(goal);
+        // Title carries the raw goal text only; the phase lives in the id
+        // suffix (-0 plan, -1 execute). The UI localizes the visible label
+        // from those two facts, so no user-facing language is baked in here.
+        // The description is model-facing (tasks_get) and stays English.
         tasks.push(TaskItem {
             id: format!("golden-{}-0", slug),
-            title: format!("Plan: {}", goal),
+            title: goal.clone(),
             description: format!("Create a detailed plan to achieve the goal: {}", goal),
             journal: Vec::new(),
             status: "todo".to_string(),
         });
         tasks.push(TaskItem {
             id: format!("golden-{}-1", slug),
-            title: format!("Execute: {}", goal),
+            title: goal.clone(),
             description: format!("Execute the plan and verify the goal is met: {}", goal),
             journal: Vec::new(),
             status: "todo".to_string(),
