@@ -1249,11 +1249,11 @@ pub async fn run_workflow(
                     "max_golden_cycles"
                 };
                 last_text = format!(
-                    "{last_text}\n\n⚠️ Golden goals não concluídos ({}): {}",
+                    "{last_text}\n\n⚠️ Golden goals not achieved ({}): {}",
                     if stop_reason == "golden_stalled" {
-                        "sem progresso por ciclos consecutivos"
+                        "no progress across consecutive cycles"
                     } else {
-                        "limite de ciclos atingido"
+                        "cycle limit reached"
                     },
                     golden_pending.join(", "),
                 );

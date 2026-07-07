@@ -33,15 +33,15 @@ pub fn create_golden_tasks(goals: &[String]) -> Vec<TaskItem> {
         let slug = slugify(goal);
         tasks.push(TaskItem {
             id: format!("golden-{}-0", slug),
-            title: format!("Planejar: {}", goal),
-            description: format!("Criar um plano detalhado para atingir o goal: {}", goal),
+            title: format!("Plan: {}", goal),
+            description: format!("Create a detailed plan to achieve the goal: {}", goal),
             journal: Vec::new(),
             status: "todo".to_string(),
         });
         tasks.push(TaskItem {
             id: format!("golden-{}-1", slug),
-            title: format!("Executar: {}", goal),
-            description: format!("Executar o plano e verificar se o goal foi atingido: {}", goal),
+            title: format!("Execute: {}", goal),
+            description: format!("Execute the plan and verify the goal is met: {}", goal),
             journal: Vec::new(),
             status: "todo".to_string(),
         });
