@@ -3,13 +3,15 @@ use crate::agent::persist::{
 };
 use crate::agent::provider::{save_config, ContentBlock};
 use crate::agent::session::{self, AgentEvent};
-use crate::agent::tools::ToolContext;
+use crate::agent::tools::{ReadTracker, ToolContext};
 use crate::state::{AppState, SessionHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::State;
+use tokio::sync::Mutex;
 use base64::Engine;
 use std::io::Cursor;
 use image::GenericImageView;
@@ -133,6 +135,7 @@ pub async fn send_message(
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
+        read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
     };
 
     // Sync the session's mode with what the UI toggle sent: a human-set value
@@ -574,6 +577,7 @@ pub async fn compact_session(
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
+        read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
     };
 
     // Reuse the running session's controller if present; otherwise use a

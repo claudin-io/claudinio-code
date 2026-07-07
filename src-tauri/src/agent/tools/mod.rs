@@ -26,6 +26,9 @@ pub struct ToolContext {
     /// Path to the active session's JSONL file. Used by tasks_get/tasks_set
     /// tools to persist the task list as SessionRecord::Tasks lines.
     pub session_store_path: Option<String>,
+    /// Tracks which files the agent has read via the read_file tool.
+    /// edit_file checks this before allowing edits.
+    pub read_tracker: Arc<Mutex<ReadTracker>>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -71,11 +74,13 @@ pub fn get_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read_file".into(),
-            description: "Read a text file (project workspace only, max 2MB). Use the absolute path within the project.".into(),
+            description: "Read a text file (project workspace only, max 2MB). Use the absolute path within the project. Optionally specify start_line and end_line (1-based, inclusive) to read only a subset of lines. Reading a file is REQUIRED before you can edit it with edit_file.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to the file within the project workspace" }
+                    "path": { "type": "string", "description": "Absolute path to the file within the project workspace" },
+                    "start_line": { "type": "integer", "description": "Optional 1-based start line (inclusive). If omitted, reads from the beginning." },
+                    "end_line": { "type": "integer", "description": "Optional 1-based end line (inclusive). If omitted, reads to the end." }
                 },
                 "required": ["path"]
             }),
@@ -105,7 +110,7 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit_file".into(),
-            description: "Propose a change to a file in the project workspace. Replaces the FIRST occurrence of old_string with new_string. NOT applied until you approve.".into(),
+            description: "Propose a change to a file in the project workspace. Replaces the FIRST occurrence of old_string with new_string. NOT applied until you approve. IMPORTANT: You MUST call read_file on the file first (or at least the line range containing the edit) before using edit_file — otherwise the edit will be rejected with an error.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -345,7 +350,15 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "read_file" => {
             let a: read_file::ReadFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             validate_path(&a.path, ctx)?;
+            let path = a.path.clone();
+            let start_line = a.start_line;
+            let end_line = a.end_line;
             let content = read_file::execute(a)?;
+            // Record the read for edit_file validation
+            {
+                let mut tracker = ctx.read_tracker.lock().await;
+                tracker.record_read(&path, start_line, end_line);
+            }
             Ok(ToolOutput::Text { content })
         }
         "list_dir" => {
@@ -369,6 +382,11 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "edit_file" => {
             let a: edit_file::EditFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             validate_path(&a.path, ctx)?;
+            // Enforce read-before-edit
+            {
+                let tracker = ctx.read_tracker.lock().await;
+                tracker.check_can_edit(&a.path, &a.old_string)?;
+            }
             let diff = edit_file::preview(&a)?;
             Ok(ToolOutput::EditProposal { path: diff.path, old_string: diff.old_string, new_string: diff.new_string, unified_diff: diff.unified_diff })
         }
@@ -481,6 +499,11 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<String, String> {
     let a: edit_file::EditFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
     validate_path(&a.path, ctx)?;
+    // Enforce read-before-edit
+    {
+        let tracker = ctx.read_tracker.lock().await;
+        tracker.check_can_edit(&a.path, &a.old_string)?;
+    }
     let diff = edit_file::preview(&a)?;
     edit_file::apply(&diff)
 }
@@ -594,10 +617,328 @@ fn heuristically_find_references(
     Ok(ToolOutput::Text { content })
 }
 
+// ── ReadTracker: enforce read_file before edit_file ──
+
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Default)]
+pub struct ReadFileRecord {
+    pub full_read: bool,
+    pub ranges: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReadTracker {
+    pub files: HashMap<String, ReadFileRecord>,
+}
+
+impl ReadTracker {
+    pub fn record_read(&mut self, path: &str, start_line: Option<usize>, end_line: Option<usize>) {
+        let entry = self.files.entry(path.to_string()).or_default();
+        match (start_line, end_line) {
+            (Some(s), Some(e)) => {
+                entry.ranges.push((s, e));
+            }
+            _ => {
+                // No range or incomplete range = full file read
+                entry.full_read = true;
+                entry.ranges.clear();
+            }
+        }
+    }
+
+    /// Check whether editing `old_string` in `path` is allowed based on
+    /// previously recorded reads. Returns Ok if the file was fully read or
+    /// the old_string's first line falls within a recorded range.
+    pub fn check_can_edit(&self, path: &str, old_string: &str) -> Result<(), String> {
+        let entry = self.files.get(path).ok_or_else(|| {
+            format!(
+                "read_file must be called on {} before editing it",
+                path
+            )
+        })?;
+
+        if entry.full_read {
+            return Ok(());
+        }
+
+        // Read the file to find which line old_string starts on
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+
+        let first_line_text = old_string.lines().next().unwrap_or("");
+        if first_line_text.is_empty() {
+            return Err("old_string cannot be empty".to_string());
+        }
+
+        let line_num = content
+            .lines()
+            .position(|l| l.contains(first_line_text))
+            .map(|idx| idx + 1) // 1-based
+            .ok_or_else(|| format!("old_string not found in {path}"))?;
+
+        if entry.ranges.iter().any(|(start, end)| line_num >= *start && line_num <= *end) {
+            Ok(())
+        } else {
+            let ranges_str = entry
+                .ranges
+                .iter()
+                .map(|(s, e)| format!("{s}-{e}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "read_file was called on {path}, but the old_string's first line ({line_num}) \
+                 is outside the read range(s) ({ranges_str}). \
+                 Call read_file on the relevant lines before editing."
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Helper: a ToolContext with a fresh ReadTracker and no workspace root
+    /// (so any path is valid).
+    fn test_ctx() -> ToolContext {
+        ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        }
+    }
+
+    /// Write a temp file with 20 numbered lines, return its path.
+    fn write_20line_file(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("claudinio_test_{name}"));
+        let lines: Vec<String> = (1..=20).map(|i| format!("line{i}")).collect();
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p
+    }
+
+    // ── read_file range tests ──
+
+    #[test]
+    fn test_read_file_no_range_returns_all() {
+        let p = write_20line_file("no_range_returns_all");
+        let ctx = test_ctx();
+        let args = serde_json::json!({"path": p.to_string_lossy()});
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert_eq!(content.lines().count(), 20, "should return all 20 lines");
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_read_file_range_1based() {
+        let p = write_20line_file("range_1based");
+        let ctx = test_ctx();
+        let args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 1,
+            "end_line": 3,
+        });
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                let lines: Vec<&str> = content.lines().collect();
+                assert_eq!(lines.len(), 3, "should return 3 lines");
+                assert_eq!(lines[0], "line1");
+                assert_eq!(lines[1], "line2");
+                assert_eq!(lines[2], "line3");
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // ── edit_file read-before-edit tests ──
+
+    #[test]
+    fn test_edit_file_rejected_without_read() {
+        let p = write_20line_file("rejected_no_read");
+        let ctx = test_ctx();
+        let args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line7",
+            "new_string": "line7_edited",
+        });
+        let result = futures::executor::block_on(execute("edit_file", args, &ctx));
+        assert!(result.is_err(), "edit_file should be rejected without read_file");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("read_file must be called"),
+            "error should mention read_file: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_edit_file_accepted_after_full_read() {
+        let p = write_20line_file("accepted_full_read");
+        let ctx = test_ctx();
+
+        // First read the whole file
+        let read_args = serde_json::json!({"path": p.to_string_lossy()});
+        let read_result = futures::executor::block_on(execute("read_file", read_args, &ctx));
+        assert!(read_result.is_ok(), "read_file should succeed");
+
+        // Now edit should work
+        let edit_args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line7",
+            "new_string": "line7_edited",
+        });
+        let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
+        assert!(result.is_ok(), "edit_file should be accepted after full read");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_edit_file_accepted_after_range_read() {
+        let p = write_20line_file("accepted_range");
+        let ctx = test_ctx();
+
+        // Read lines 3-5
+        let read_args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 3,
+            "end_line": 5,
+        });
+        let read_result = futures::executor::block_on(execute("read_file", read_args, &ctx));
+        assert!(read_result.is_ok(), "read_file should succeed");
+
+        // Edit at line 4 (within range)
+        let edit_args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line4",
+            "new_string": "line4_edited",
+        });
+        let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
+        assert!(result.is_ok(), "edit at line 4 (within range 3-5) should be accepted");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_edit_file_rejected_outside_range() {
+        let p = write_20line_file("rejected_outside_range");
+        let ctx = test_ctx();
+
+        // Read lines 3-5
+        let read_args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 3,
+            "end_line": 5,
+        });
+        let read_result = futures::executor::block_on(execute("read_file", read_args, &ctx));
+        assert!(read_result.is_ok(), "read_file should succeed");
+
+        // Edit at line 10 (outside range)
+        let edit_args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line10",
+            "new_string": "line10_edited",
+        });
+        let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
+        assert!(result.is_err(), "edit at line 10 (outside range 3-5) should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("outside the read range"),
+            "error should mention outside range: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_edit_file_read_whole_after_partial() {
+        let p = write_20line_file("whole_after_partial");
+        let ctx = test_ctx();
+
+        // First read a range
+        let r1 = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 3,
+            "end_line": 5,
+        });
+        futures::executor::block_on(execute("read_file", r1, &ctx)).unwrap();
+
+        // Then read the whole file
+        let r2 = serde_json::json!({"path": p.to_string_lossy()});
+        futures::executor::block_on(execute("read_file", r2, &ctx)).unwrap();
+
+        // Edit anywhere should work
+        let edit_args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line18",
+            "new_string": "line18_edited",
+        });
+        let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
+        assert!(result.is_ok(), "edit anywhere should work after full read");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_edit_file_multiple_ranges_overlap() {
+        let p = write_20line_file("multi_range");
+        let ctx = test_ctx();
+
+        // Read lines 1-5
+        let r1 = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 1,
+            "end_line": 5,
+        });
+        futures::executor::block_on(execute("read_file", r1, &ctx)).unwrap();
+
+        // Read lines 15-20
+        let r2 = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 15,
+            "end_line": 20,
+        });
+        futures::executor::block_on(execute("read_file", r2, &ctx)).unwrap();
+
+        // Edit at line 18 (within second range)
+        let edit_args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line18",
+            "new_string": "line18_edited",
+        });
+        let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
+        assert!(result.is_ok(), "edit at line 18 should be accepted (within 15-20)");
+
+        // Edit at line 3 (within first range)
+        let edit2 = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line3",
+            "new_string": "line3_edited",
+        });
+        let result2 = futures::executor::block_on(execute("edit_file", edit2, &ctx));
+        assert!(result2.is_ok(), "edit at line 3 should be accepted (within 1-5)");
+
+        // Edit at line 10 (outside both)
+        let edit3 = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "old_string": "line10",
+            "new_string": "line10_edited",
+        });
+        let result3 = futures::executor::block_on(execute("edit_file", edit3, &ctx));
+        assert!(result3.is_err(), "edit at line 10 (outside both ranges) should be rejected");
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // Existing tests (unchanged)
     #[test]
     fn test_validate_path_allows_within_workspace() {
         let ctx = ToolContext {
@@ -606,6 +947,7 @@ mod tests {
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -621,6 +963,7 @@ mod tests {
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -636,6 +979,7 @@ mod tests {
             workspace_root: None,
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -649,6 +993,7 @@ mod tests {
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -665,6 +1010,7 @@ mod tests {
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -681,6 +1027,7 @@ mod tests {
             workspace_root: Some("/home/user/project".into()),
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -696,6 +1043,7 @@ mod tests {
             workspace_root: None,
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -714,6 +1062,7 @@ mod tests {
             workspace_root: None,
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
