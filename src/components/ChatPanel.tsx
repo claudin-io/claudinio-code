@@ -1037,8 +1037,29 @@ export const ChatPanel: Component<{
       const pending = pendingMessage();
       if (pending) {
         setPendingMessage(null);
-        setInput(pending);
-        await send();
+        // Don't call send() — the original message is already in the messages array.
+        // Call sendMessage() directly via IPC so we don't duplicate the message bubble.
+        setCurrentSteps([]);
+        setThinkingStart(0);
+        setStatus("thinking");
+        scrollToBottom(true);
+        try {
+          const result = await sendMessage(
+            props.workspace,
+            pending,
+            [],
+            handleEvent,
+            mode(),
+          );
+          setActiveSessionId(result.sessionId);
+        } catch (e) {
+          if (String(e).includes("API key not configured")) {
+            setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
+          } else {
+            setMessages((prev) => [...prev, { role: "user" as const, text: t("chat.message.failedToSend", String(e)) }]);
+          }
+          setStatus("idle");
+        }
       }
     } catch {
       // Login failed — card stays visible, user can retry
