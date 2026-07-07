@@ -308,8 +308,10 @@ HOW to write good subagent goals: each goal must be fully self-contained — the
 about this conversation. Always set expected_output to describe the report \
 you need. Modes: 'explore' = \
 read-only investigation; 'code' = may edit files and run commands (edits still require user approval). \
-Prefer 'explore' unless the agent must change something. Spawn all independent agents in ONE spawn_agents \
-call so they run in parallel; give agents non-overlapping scopes so parallel workers never edit the same file. \
+Prefer 'explore' unless the agent must change something. Spawn independent agents in ONE spawn_agents \
+call so they run in parallel — but the hard limit is 4 agents per call; with more than 4 independent \
+tasks, spawn the first 4 and run the rest as follow-up waves. \
+Give agents non-overlapping scopes so parallel workers never edit the same file. \
 \
 ## TURN COMPLETION (MANDATORY) \
 \
@@ -895,6 +897,7 @@ pub async fn run_workflow(
     // the API when available, the char-based estimate otherwise.
     let mut last_context: u64 = estimate_tokens(history, &system, &tools);
     let mut truncation_streak: u32 = 0;
+    let mut empty_streak: u32 = 0;
 
     let max_rounds = config.max_rounds.unwrap_or(usize::MAX);
     for _ in 0..max_rounds {
@@ -1097,6 +1100,29 @@ pub async fn run_workflow(
         }
         if !truncated {
             truncation_streak = 0;
+        }
+
+        // Empty response: no text AND no tool calls, without truncation. A real
+        // final turn always carries text, so mid-task this is a model glitch —
+        // nudge it to continue instead of silently ending the run (same pattern
+        // as the truncation nudge above). Give up after repeated empties.
+        if tool_uses.is_empty() && text_output.is_empty() {
+            empty_streak += 1;
+            if empty_streak < 3 {
+                push_user_blocks(
+                    history,
+                    store,
+                    vec![ContentBlock::text(
+                        "[system] Your previous response was empty (no text and no \
+                         tool calls). If the task is not finished, continue from \
+                         where you stopped; otherwise reply with a short final \
+                         summary of what was done.",
+                    )],
+                );
+                continue;
+            }
+        } else {
+            empty_streak = 0;
         }
 
         // Terminal turn: no tool calls — the loop is done, this text is the reply.

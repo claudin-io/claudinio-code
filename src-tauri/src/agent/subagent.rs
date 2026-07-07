@@ -122,11 +122,20 @@ pub async fn run_spawn_agents(
 ) -> (ContentBlock, u32, u32) {
     let agents = match tool_input.get("agents").and_then(|v| v.as_array()) {
         Some(a) if !a.is_empty() && a.len() <= MAX_PARALLEL_AGENTS => a,
-        _ => {
-            let msg = format!(
-                "spawn_agents requires 1-{} agents in the 'agents' array",
-                MAX_PARALLEL_AGENTS
-            );
+        other => {
+            let msg = match other {
+                Some(a) if a.len() > MAX_PARALLEL_AGENTS => format!(
+                    "spawn_agents got {} agents; the maximum is {max} per call. \
+                     Nothing was spawned. Re-issue the call now with at most {max} \
+                     agents and run the remainder as a follow-up wave — do not stop.",
+                    a.len(),
+                    max = MAX_PARALLEL_AGENTS
+                ),
+                _ => format!(
+                    "spawn_agents requires 1-{} agents in the 'agents' array",
+                    MAX_PARALLEL_AGENTS
+                ),
+            };
             let _ = event_tx.send(AgentEvent::ToolResult {
                 tool_id: parent_tool_use_id.to_string(),
                 tool_name: "spawn_agents".into(),
