@@ -82,6 +82,12 @@ pub enum SessionRecord {
         total_output_tokens: u64,
         total_cost: Option<f64>,
         #[serde(default)]
+        total_cost_input: Option<f64>,
+        #[serde(default)]
+        total_cost_output: Option<f64>,
+        #[serde(default)]
+        total_cost_cache_read: Option<f64>,
+        #[serde(default)]
         context_tokens: Option<u64>,
         ts: u64,
     },
@@ -307,22 +313,59 @@ pub fn last_context_tokens(records: &[SessionRecord]) -> Option<u64> {
 }
 
 /// Compute cumulative token/cost stats from Status records.
-pub fn cumulative_stats(records: &[SessionRecord]) -> (u64, u64, Option<f64>) {
+/// Returns (input_tokens, output_tokens, total_cost, cost_input, cost_output, cost_cache_read).
+pub fn cumulative_stats(
+    records: &[SessionRecord],
+) -> (u64, u64, Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
     let mut total_in = 0u64;
     let mut total_out = 0u64;
     let mut total_cost = 0.0f64;
     let mut has_cost = false;
+    let mut cost_input = 0.0f64;
+    let mut has_cost_input = false;
+    let mut cost_output = 0.0f64;
+    let mut has_cost_output = false;
+    let mut cost_cache_read = 0.0f64;
+    let mut has_cost_cache_read = false;
     for rec in records {
-        if let SessionRecord::Status { total_input_tokens, total_output_tokens, total_cost: cost, .. } = rec {
+        if let SessionRecord::Status {
+            total_input_tokens,
+            total_output_tokens,
+            total_cost: cost,
+            total_cost_input: ci,
+            total_cost_output: co,
+            total_cost_cache_read: cc,
+            ..
+        } = rec
+        {
             total_in = *total_input_tokens;
             total_out = *total_output_tokens;
             if let Some(c) = cost {
                 total_cost = *c;
                 has_cost = true;
             }
+            if let Some(c) = ci {
+                cost_input = *c;
+                has_cost_input = true;
+            }
+            if let Some(c) = co {
+                cost_output = *c;
+                has_cost_output = true;
+            }
+            if let Some(c) = cc {
+                cost_cache_read = *c;
+                has_cost_cache_read = true;
+            }
         }
     }
-    (total_in, total_out, if has_cost { Some(total_cost) } else { None })
+    (
+        total_in,
+        total_out,
+        if has_cost { Some(total_cost) } else { None },
+        if has_cost_input { Some(cost_input) } else { None },
+        if has_cost_output { Some(cost_output) } else { None },
+        if has_cost_cache_read { Some(cost_cache_read) } else { None },
+    )
 }
 
 /// Lightweight summary shown in the session list.
@@ -554,6 +597,9 @@ mod tests {
             total_output_tokens: 300,
             context_tokens: None,
             total_cost: Some(0.0045),
+            total_cost_input: None,
+            total_cost_output: None,
+            total_cost_cache_read: None,
             ts: 200,
         };
         let json = serde_json::to_string(&rec).unwrap();
@@ -600,6 +646,9 @@ mod tests {
                 total_input_tokens: 10,
                 total_output_tokens: 5,
                 total_cost: None,
+                total_cost_input: None,
+                total_cost_output: None,
+                total_cost_cache_read: None,
                 context_tokens: Some(9000),
                 ts: 1,
             },
@@ -608,6 +657,9 @@ mod tests {
                 total_input_tokens: 20,
                 total_output_tokens: 10,
                 total_cost: None,
+                total_cost_input: None,
+                total_cost_output: None,
+                total_cost_cache_read: None,
                 context_tokens: Some(1500),
                 ts: 2,
             },
@@ -784,6 +836,9 @@ mod tests {
                 total_output_tokens: 200,
                 context_tokens: None,
                 total_cost: Some(0.003),
+                total_cost_input: None,
+                total_cost_output: None,
+                total_cost_cache_read: None,
                 ts: 10,
             },
             SessionRecord::Status {
@@ -792,10 +847,13 @@ mod tests {
                 total_output_tokens: 500,
                 context_tokens: None,
                 total_cost: Some(0.009),
+                total_cost_input: None,
+                total_cost_output: None,
+                total_cost_cache_read: None,
                 ts: 20,
             },
         ];
-        let (input, output, cost) = cumulative_stats(&recs);
+        let (input, output, cost, ..) = cumulative_stats(&recs);
         assert_eq!(input, 2500, "should be the last Status value");
         assert_eq!(output, 500);
         assert_eq!(cost, Some(0.009));
@@ -806,7 +864,7 @@ mod tests {
         let recs = vec![
             SessionRecord::Meta { session_id: "s1".into(), created_at: 1, workspace: None },
         ];
-        let (input, output, cost) = cumulative_stats(&recs);
+        let (input, output, cost, ..) = cumulative_stats(&recs);
         assert_eq!(input, 0);
         assert_eq!(output, 0);
         assert_eq!(cost, None);
@@ -821,10 +879,13 @@ mod tests {
                 total_output_tokens: 100,
                 context_tokens: None,
                 total_cost: None,
+                total_cost_input: None,
+                total_cost_output: None,
+                total_cost_cache_read: None,
                 ts: 5,
             },
         ];
-        let (_, _, cost) = cumulative_stats(&recs);
+        let (_, _, cost, ..) = cumulative_stats(&recs);
         assert_eq!(cost, None);
     }
 }

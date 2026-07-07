@@ -440,6 +440,9 @@ export const ChatPanel: Component<{
     contextTokens: number;
     cumulativeTokens: number;
     estimatedCost?: number;
+    costInput?: number;
+    costOutput?: number;
+    costCacheRead?: number;
   }>({ contextTokens: 0, cumulativeTokens: 0 });
   const [maxContextTokens, setMaxContextTokens] = createSignal(256_000);
   const [compactThreshold, setCompactThreshold] = createSignal(192_000);
@@ -695,6 +698,9 @@ export const ChatPanel: Component<{
       contextTokens: s.contextTokens ?? 0,
       cumulativeTokens: s.totalInputTokens + s.totalOutputTokens,
       estimatedCost: s.totalCost,
+      costInput: s.costInput,
+      costOutput: s.costOutput,
+      costCacheRead: s.costCacheRead,
     });
   };
 
@@ -1017,6 +1023,9 @@ export const ChatPanel: Component<{
         contextTokens: data.contextTokens,
         cumulativeTokens: data.inputTokens + data.outputTokens,
         estimatedCost: data.cumulativeCost,
+        costInput: data.costInput,
+        costOutput: data.costOutput,
+        costCacheRead: data.costCacheRead,
       });
       if (data.maxContextTokens) setMaxContextTokens(data.maxContextTokens);
       if (data.compactThreshold) setCompactThreshold(data.compactThreshold);
@@ -1757,6 +1766,9 @@ export const ChatPanel: Component<{
         maxTokens={maxContextTokens()}
         cumulativeTokens={contextStats().cumulativeTokens}
         estimatedCost={contextStats().estimatedCost}
+        costInput={contextStats().costInput}
+        costOutput={contextStats().costOutput}
+        costCacheRead={contextStats().costCacheRead}
         isCompacting={isCompacting()}
         onCompact={doCompact}
         showCompact={
@@ -1839,10 +1851,24 @@ const ContextFooter: Component<{
   maxTokens: number;
   cumulativeTokens: number;
   estimatedCost?: number;
+  costInput?: number;
+  costOutput?: number;
+  costCacheRead?: number;
   isCompacting: boolean;
   onCompact: () => void;
   showCompact: boolean;
 }> = (props) => {
+  const hasBreakdown = () =>
+    props.costInput !== undefined && props.costOutput !== undefined && props.costCacheRead !== undefined;
+  const costTitle = () =>
+    hasBreakdown()
+      ? t(
+          "chat.context.costBreakdown",
+          props.costInput!.toFixed(2),
+          props.costOutput!.toFixed(2),
+          props.costCacheRead!.toFixed(2),
+        )
+      : t("chat.context.sessionCost");
   const pct = () => Math.min((props.contextTokens / props.maxTokens) * 100, 100);
   const barColor = () => {
     if (pct() < 50) return "bg-success";
@@ -1880,7 +1906,7 @@ const ContextFooter: Component<{
       </Show>
 
       <Show when={props.estimatedCost !== undefined}>
-        <span class="font-mono text-[11px] text-ink-faint" title={t("chat.context.sessionCost")}>
+        <span class="font-mono text-[11px] text-ink-faint" title={costTitle()}>
           ~${props.estimatedCost!.toFixed(2)}
         </span>
       </Show>

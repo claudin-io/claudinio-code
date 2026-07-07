@@ -246,6 +246,15 @@ pub struct Usage {
     /// We calculate an estimate when the provider does not supply it.
     #[serde(default)]
     pub cost: Option<f64>,
+    /// Markup cost breakdown in USD, as reported by the litellm proxy's
+    /// cost_injector middleware. None when the provider doesn't inject it
+    /// (unpriced model, older proxy deploy) — falls back to local estimate.
+    #[serde(default)]
+    pub cost_input: Option<f64>,
+    #[serde(default)]
+    pub cost_output: Option<f64>,
+    #[serde(default)]
+    pub cost_cache_read: Option<f64>,
 }
 
 /// Merge usage fields from an SSE event into the accumulated usage.
@@ -273,6 +282,15 @@ fn merge_usage(usage: &mut Option<Usage>, value: &Value) {
     }
     if let Some(v) = obj.get("cost").and_then(|v| v.as_f64()) {
         u.cost = Some(v);
+    }
+    if let Some(v) = obj.get("cost_input").and_then(|v| v.as_f64()) {
+        u.cost_input = Some(v);
+    }
+    if let Some(v) = obj.get("cost_output").and_then(|v| v.as_f64()) {
+        u.cost_output = Some(v);
+    }
+    if let Some(v) = obj.get("cost_cache_read").and_then(|v| v.as_f64()) {
+        u.cost_cache_read = Some(v);
     }
 }
 

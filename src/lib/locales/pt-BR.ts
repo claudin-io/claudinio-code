@@ -137,6 +137,7 @@ const dict: LocaleDict = {
   "chat.context.nextRequest": "Contexto da próxima requisição",
   "chat.context.sessionTokens": "Tokens acumulados da sessão",
   "chat.context.sessionCost": "Custo acumulado da sessão",
+  "chat.context.costBreakdown": "entrada ${0} · saída ${1} · cache ${2}",
   "chat.context.total": "total: {0}",
   "chat.context.compact": "Compactar",
   "chat.context.compacting": "Compactando…",

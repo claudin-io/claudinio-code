@@ -120,9 +120,9 @@ pub async fn compact_history(
     // prompt/tools; the next run's Status corrects it with the real number.
     let new_recs = crate::agent::persist::load_records(&store.path).unwrap_or_default();
     let new_history = crate::agent::persist::history_from_records(&new_recs);
-    let (ci, co, cc) = crate::agent::persist::cumulative_stats(&new_recs);
+    let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(&new_recs);
     let new_context = estimate_tokens(&new_history, "", &[]);
-    write_status(store, session_id, ci, co, cc, Some(new_context));
+    write_status(store, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
 
     Ok(summary)
 }
@@ -504,6 +504,12 @@ pub enum AgentEvent {
         output_tokens: u32,
         #[serde(rename = "cumulativeCost")]
         cumulative_cost: Option<f64>,
+        #[serde(rename = "costInput")]
+        cost_input: Option<f64>,
+        #[serde(rename = "costOutput")]
+        cost_output: Option<f64>,
+        #[serde(rename = "costCacheRead")]
+        cost_cache_read: Option<f64>,
         #[serde(rename = "contextTokens")]
         context_tokens: u64,
         #[serde(rename = "maxContextTokens")]
@@ -643,12 +649,16 @@ fn reject_non_english(msg: &str) -> Result<(), String> {
 
 /// Write a Status record with cumulative token/cost stats and the size of
 /// the context for the next request.
+#[allow(clippy::too_many_arguments)]
 fn write_status(
     store: &SessionStore,
     session_id: &str,
     cumul_in: u64,
     cumul_out: u64,
     cumul_cost: Option<f64>,
+    cumul_cost_input: Option<f64>,
+    cumul_cost_output: Option<f64>,
+    cumul_cost_cache_read: Option<f64>,
     context_tokens: Option<u64>,
 ) {
     store.try_append(&SessionRecord::Status {
@@ -656,12 +666,17 @@ fn write_status(
         total_input_tokens: cumul_in,
         total_output_tokens: cumul_out,
         total_cost: cumul_cost,
+        total_cost_input: cumul_cost_input,
+        total_cost_output: cumul_cost_output,
+        total_cost_cache_read: cumul_cost_cache_read,
         context_tokens,
         ts: now_ms(),
     });
 }
 
 /// Per-million-token rates for a model (claudin.io official pricing).
+/// Fallback estimate for when the litellm proxy's cost_injector middleware
+/// doesn't report a real breakdown (unpriced model, older proxy deploy).
 struct Pricing {
     input: f64,
     cache_read: f64,
@@ -675,6 +690,75 @@ fn model_pricing(model: &str) -> Pricing {
         // claudinio and unknown models: balanced tier
         Pricing { input: 0.50, cache_read: 0.15, output: 2.00 }
     }
+}
+
+/// Cost broken down by token category, in USD.
+struct CostBreakdown {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+}
+
+/// Estimate cost breakdown for provider calls when the provider does not
+/// report a real cost breakdown.
+fn cost_breakdown_for(model: &str, input: u32, cache_read: u32, output: u32) -> CostBreakdown {
+    let p = model_pricing(model);
+    CostBreakdown {
+        input: input as f64 * p.input / 1_000_000.0,
+        output: output as f64 * p.output / 1_000_000.0,
+        cache_read: cache_read as f64 * p.cache_read / 1_000_000.0,
+    }
+}
+
+/// This round's cost breakdown: the provider-reported values when present,
+/// otherwise the local per-million-token estimate.
+#[allow(clippy::too_many_arguments)]
+fn cost_or_estimate(
+    model: &str,
+    total_in: u32,
+    total_cache: u32,
+    total_out: u32,
+    run_cost_input: Option<f64>,
+    run_cost_output: Option<f64>,
+    run_cost_cache: Option<f64>,
+) -> (f64, f64, f64) {
+    if run_cost_input.is_none() && run_cost_output.is_none() && run_cost_cache.is_none() {
+        let b = cost_breakdown_for(model, total_in, total_cache, total_out);
+        (b.input, b.output, b.cache_read)
+    } else {
+        (
+            run_cost_input.unwrap_or(0.0),
+            run_cost_output.unwrap_or(0.0),
+            run_cost_cache.unwrap_or(0.0),
+        )
+    }
+}
+
+/// Roll this round's cost into the cumulative totals — both the blended
+/// `cumul_cost` (kept independent so sessions persisted before the breakdown
+/// existed don't lose their historical total) and the per-category breakdown.
+#[allow(clippy::too_many_arguments)]
+fn roll_cost(
+    model: &str,
+    total_in: u32,
+    total_cache: u32,
+    total_out: u32,
+    run_cost_input: Option<f64>,
+    run_cost_output: Option<f64>,
+    run_cost_cache: Option<f64>,
+    cumul_cost: &mut Option<f64>,
+    cumul_cost_input: &mut Option<f64>,
+    cumul_cost_output: &mut Option<f64>,
+    cumul_cost_cache: &mut Option<f64>,
+) {
+    let (ci, co, cc) = cost_or_estimate(
+        model, total_in, total_cache, total_out,
+        run_cost_input, run_cost_output, run_cost_cache,
+    );
+    *cumul_cost = Some(cumul_cost.unwrap_or(0.0) + ci + co + cc);
+    *cumul_cost_input = Some(cumul_cost_input.unwrap_or(0.0) + ci);
+    *cumul_cost_output = Some(cumul_cost_output.unwrap_or(0.0) + co);
+    *cumul_cost_cache = Some(cumul_cost_cache.unwrap_or(0.0) + cc);
 }
 
 /// Estimate cost for provider calls when the provider does not report cost.
@@ -738,14 +822,17 @@ pub async fn run_workflow(
                     &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
                 );
                 let new_context = estimate_tokens(history, &system, &tools);
-                let (ci, co, cc) = crate::agent::persist::cumulative_stats(
+                let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
                     &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
                 );
-                write_status(store, session_id, ci, co, cc, Some(new_context));
+                write_status(store, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
                 let _ = event_tx.send(AgentEvent::SessionStats {
                     input_tokens: ci as u32,
                     output_tokens: co as u32,
                     cumulative_cost: cc,
+                    cost_input: cci,
+                    cost_output: cco,
+                    cost_cache_read: ccc,
                     context_tokens: new_context,
                     max_context_tokens: MAX_CONTEXT_TOKENS,
                     compact_threshold: COMPACT_THRESHOLD,
@@ -773,11 +860,17 @@ pub async fn run_workflow(
     let mut cumul_in: u64 = cumul.0;
     let mut cumul_out: u64 = cumul.1;
     let mut cumul_cost: Option<f64> = cumul.2;
+    let mut cumul_cost_input: Option<f64> = cumul.3;
+    let mut cumul_cost_output: Option<f64> = cumul.4;
+    let mut cumul_cost_cache: Option<f64> = cumul.5;
 
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
     let mut total_cache: u32 = 0;
     let mut run_cost: Option<f64> = None;
+    let mut run_cost_input: Option<f64> = None;
+    let mut run_cost_output: Option<f64> = None;
+    let mut run_cost_cache: Option<f64> = None;
     let mut last_text = String::new();
     // Size of the context for the next request: the real number reported by
     // the API when available, the char-based estimate otherwise.
@@ -822,6 +915,15 @@ pub async fn run_workflow(
             if let Some(c) = u.cost {
                 run_cost = Some(run_cost.unwrap_or(0.0) + c);
             }
+            if let Some(c) = u.cost_input {
+                run_cost_input = Some(run_cost_input.unwrap_or(0.0) + c);
+            }
+            if let Some(c) = u.cost_output {
+                run_cost_output = Some(run_cost_output.unwrap_or(0.0) + c);
+            }
+            if let Some(c) = u.cost_cache_read {
+                run_cost_cache = Some(run_cost_cache.unwrap_or(0.0) + c);
+            }
         }
         // Context for the next request = the history just sent + this round's
         // output. Providers behind a prefix cache (claudin.io) report only
@@ -841,12 +943,20 @@ pub async fn run_workflow(
         last_context = (estimate_tokens(history, &system, &tools) + out_tok).max(api_ctx);
 
         // Live stats for the context bar
-        let round_cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
-        let live_cost = cumul_cost.unwrap_or(0.0) + round_cost;
+        let (round_ci, round_co, round_cc) = cost_or_estimate(
+            resolved_model, total_in, total_cache, total_out,
+            run_cost_input, run_cost_output, run_cost_cache,
+        );
+        let live_cost_input = cumul_cost_input.unwrap_or(0.0) + round_ci;
+        let live_cost_output = cumul_cost_output.unwrap_or(0.0) + round_co;
+        let live_cost_cache = cumul_cost_cache.unwrap_or(0.0) + round_cc;
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: total_in + cumul_in as u32,
             output_tokens: total_out + cumul_out as u32,
-            cumulative_cost: Some(live_cost),
+            cumulative_cost: Some(live_cost_input + live_cost_output + live_cost_cache),
+            cost_input: Some(live_cost_input),
+            cost_output: Some(live_cost_output),
+            cost_cache_read: Some(live_cost_cache),
             context_tokens: last_context,
             max_context_tokens: MAX_CONTEXT_TOKENS,
             compact_threshold: COMPACT_THRESHOLD,
@@ -880,9 +990,15 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
-            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
-            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
+            roll_cost(
+                resolved_model, total_in, total_cache, total_out,
+                run_cost_input, run_cost_output, run_cost_cache,
+                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+            );
+            write_status(
+                store, session_id, cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -943,9 +1059,15 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
-            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
-            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
+            roll_cost(
+                resolved_model, total_in, total_cache, total_out,
+                run_cost_input, run_cost_output, run_cost_cache,
+                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+            );
+            write_status(
+                store, session_id, cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "max_tokens".into(),
                 text_output: last_text,
@@ -987,9 +1109,15 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
-            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
-            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
+            roll_cost(
+                resolved_model, total_in, total_cache, total_out,
+                run_cost_input, run_cost_output, run_cost_cache,
+                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+            );
+            write_status(
+                store, session_id, cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "end_turn".into(),
                 text_output: last_text,
@@ -1173,9 +1301,15 @@ pub async fn run_workflow(
             });
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
-            let cost = run_cost.unwrap_or_else(|| cost_for(resolved_model, total_in, total_cache, total_out));
-            cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
-            write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
+            roll_cost(
+                resolved_model, total_in, total_cache, total_out,
+                run_cost_input, run_cost_output, run_cost_cache,
+                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+            );
+            write_status(
+                store, session_id, cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -1201,9 +1335,15 @@ pub async fn run_workflow(
     });
     cumul_in += total_in as u64;
     cumul_out += total_out as u64;
-    let cost = run_cost.unwrap_or_else(|| cost_for(config.model_for_mode(cur_mode.as_str()), total_in, total_cache, total_out));
-    cumul_cost = Some(cumul_cost.unwrap_or(0.0) + cost);
-    write_status(store, session_id, cumul_in, cumul_out, cumul_cost, Some(last_context));
+    roll_cost(
+        config.model_for_mode(cur_mode.as_str()), total_in, total_cache, total_out,
+        run_cost_input, run_cost_output, run_cost_cache,
+        &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+    );
+    write_status(
+        store, session_id, cumul_in, cumul_out, cumul_cost,
+        cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+    );
     let _ = event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
@@ -1993,6 +2133,9 @@ mod tests {
             input_tokens: 500,
             output_tokens: 200,
             cumulative_cost: Some(0.003),
+            cost_input: Some(0.001),
+            cost_output: Some(0.0015),
+            cost_cache_read: Some(0.0005),
             context_tokens: 42_000,
             max_context_tokens: MAX_CONTEXT_TOKENS,
             compact_threshold: COMPACT_THRESHOLD,
@@ -2024,6 +2167,9 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             cumulative_cost: None,
+            cost_input: None,
+            cost_output: None,
+            cost_cache_read: None,
             context_tokens: 0,
             max_context_tokens: MAX_CONTEXT_TOKENS,
             compact_threshold: COMPACT_THRESHOLD,

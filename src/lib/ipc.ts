@@ -122,6 +122,9 @@ export type AgentEvent =
         inputTokens: number;
         outputTokens: number;
         cumulativeCost?: number;
+        costInput?: number;
+        costOutput?: number;
+        costCacheRead?: number;
         contextTokens: number;
         maxContextTokens: number;
         compactThreshold: number;
@@ -278,11 +281,17 @@ export function getSessionStats(records: SessionRecord[]): {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCost?: number;
+  costInput?: number;
+  costOutput?: number;
+  costCacheRead?: number;
   contextTokens?: number;
 } {
   let totalInput = 0;
   let totalOutput = 0;
   let totalCost: number | undefined;
+  let costInput: number | undefined;
+  let costOutput: number | undefined;
+  let costCacheRead: number | undefined;
   let contextTokens: number | undefined;
   for (const rec of records) {
     if (rec.kind === "status") {
@@ -291,12 +300,29 @@ export function getSessionStats(records: SessionRecord[]): {
       if (rec.total_cost != null) {
         totalCost = Number(rec.total_cost);
       }
+      if (rec.total_cost_input != null) {
+        costInput = Number(rec.total_cost_input);
+      }
+      if (rec.total_cost_output != null) {
+        costOutput = Number(rec.total_cost_output);
+      }
+      if (rec.total_cost_cache_read != null) {
+        costCacheRead = Number(rec.total_cost_cache_read);
+      }
       if (rec.context_tokens != null) {
         contextTokens = Number(rec.context_tokens);
       }
     }
   }
-  return { totalInputTokens: totalInput, totalOutputTokens: totalOutput, totalCost, contextTokens };
+  return {
+    totalInputTokens: totalInput,
+    totalOutputTokens: totalOutput,
+    totalCost,
+    costInput,
+    costOutput,
+    costCacheRead,
+    contextTokens,
+  };
 }
 
 export function setConfig(args: SetConfigArgs): Promise<void> {
