@@ -19,6 +19,25 @@ pub const MAX_CONTEXT_TOKENS: u64 = 256_000;
 /// request, the history is compacted first (75% of the window).
 pub const COMPACT_THRESHOLD: u64 = MAX_CONTEXT_TOKENS * 75 / 100;
 
+/// Prefix that identifies a golden task.
+pub const GOLDEN_TASK_PREFIX: &str = "golden-";
+
+/// Parse <goal>...</goal> tags from user input.
+/// Returns (cleaned_text, list_of_goals).
+pub fn parse_goals(text: &str) -> (String, Vec<String>) {
+    let re = regex::Regex::new(r"<goal>(.*?)</goal>").unwrap();
+    let mut goals = Vec::new();
+    for cap in re.captures_iter(text) {
+        let goal_text = cap[1].trim().to_string();
+        if !goal_text.is_empty() {
+            goals.push(goal_text);
+        }
+    }
+    let cleaned = re.replace_all(text, "").to_string();
+    let cleaned = cleaned.trim().to_string();
+    (cleaned, goals)
+}
+
 /// Rough token estimation: count chars / 3 + per-message overhead + system prompt + tools.
 fn estimate_message_tokens(msg: &Message) -> u64 {
     let json = serde_json::to_string(msg).unwrap_or_default();
@@ -2281,5 +2300,40 @@ mod tests {
     fn compact_threshold_is_75_percent_of_window() {
         assert_eq!(MAX_CONTEXT_TOKENS, 256_000);
         assert_eq!(COMPACT_THRESHOLD, 192_000);
+    }
+}
+
+#[cfg(test)]
+mod golden_goal_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_goals_no_goals() {
+        let (cleaned, goals) = parse_goals("hello world");
+        assert_eq!(cleaned, "hello world");
+        assert!(goals.is_empty());
+    }
+
+    #[test]
+    fn test_parse_goals_single() {
+        let (cleaned, goals) = parse_goals("do <goal>code coverage in 80%</goal> please");
+        assert_eq!(goals, vec!["code coverage in 80%"]);
+        assert!(!cleaned.contains("<goal>"));
+    }
+
+    #[test]
+    fn test_parse_goals_multiple() {
+        let (cleaned, goals) = parse_goals("<goal>coverage 80%</goal> and <goal>no lint errors</goal>");
+        assert_eq!(goals.len(), 2);
+        assert_eq!(goals[0], "coverage 80%");
+        assert_eq!(goals[1], "no lint errors");
+        assert!(!cleaned.contains("<goal>"));
+    }
+
+    #[test]
+    fn test_parse_goals_empty_goal_text() {
+        let (cleaned, goals) = parse_goals("<goal>  </goal>");
+        assert!(goals.is_empty());
+        assert!(cleaned.is_empty());
     }
 }
