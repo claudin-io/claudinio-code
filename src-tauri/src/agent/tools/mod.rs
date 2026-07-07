@@ -4,6 +4,7 @@ mod grep;
 mod list_dir;
 mod read_file;
 mod tasks;
+mod web_search;
 mod write_plan;
 
 use crate::code_intel::db::IndexDb;
@@ -31,6 +32,9 @@ pub struct ToolContext {
     /// edit_file checks this before allowing edits.
     pub read_tracker: Arc<Mutex<ReadTracker>>,
     pub interrupt: Option<Arc<AtomicBool>>,
+    /// Loaded AgentConfig — used by tools that call claudin.io services
+    /// (currently just web_search). None when unavailable (e.g. some tests).
+    pub agent_config: Option<crate::agent::provider::AgentConfig>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -217,8 +221,28 @@ code_search (keyword) → grep (fallback).".into(),
             }),
         },
         ToolDef {
+            name: "web_search".into(),
+            description: "Search the web via claudin.io (requires being signed in). Returns a short answer plus a list of results with titles, URLs, and snippets. Rate limited per account tier — use it when you need current information not in your training data or the codebase.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query" },
+                    "max_results": { "type": "integer", "description": "Max results to return (1-10, default 5)" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text ends the turn unanswered and stalls the task. Each question carries concrete options; the UI automatically appends a final free-text option, so never add an 'Other' option yourself. Blocks until answered and returns the compiled question/answer pairs.".into(),
+            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text ends the turn unanswered and stalls the task.
+
+Each question can have:
+- `multi_select: false` (default): radio buttons, user picks exactly ONE option. Best for mutually exclusive decisions.
+- `multi_select: true`: checkboxes, user can pick SEVERAL options. The UI shows square indicators instead of circles.
+
+The UI automatically appends an \"Other\" option with a free-text input field to EVERY question (single and multi). When the user types in \"Other\", their text is appended to the chosen options. So NEVER add an \"Other\" option manually to your options list — it's always there automatically.
+
+Blocks until answered and returns the compiled question/answer pairs.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -229,8 +253,8 @@ code_search (keyword) → grep (fallback).".into(),
                             "type": "object",
                             "properties": {
                                 "question": { "type": "string", "description": "The complete question, ending with a question mark" },
-                                "options": { "type": "array", "items": { "type": "string" }, "description": "2-4 concise, mutually exclusive choices" },
-                                "multi_select": { "type": "boolean", "description": "Allow picking more than one option (default false)" }
+                                "options": { "type": "array", "items": { "type": "string" }, "description": "2-4 concise options the user can pick from. Do NOT include an 'Other' option — the UI adds it automatically." },
+                                "multi_select": { "type": "boolean", "description": "false (default) = radio buttons, user picks one. true = checkboxes, user picks several and can type free text via the auto-added 'Other' field." }
                             },
                             "required": ["question", "options"]
                         }
@@ -488,6 +512,15 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = write_plan::execute(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
+        "web_search" => {
+            let a: web_search::WebSearchArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let config = ctx
+                .agent_config
+                .as_ref()
+                .ok_or("web_search unavailable: no agent config loaded")?;
+            let content = web_search::execute(a, config).await?;
+            Ok(ToolOutput::Text { content })
+        }
         "spawn_agents" => {
             Err("spawn_agents is handled by the session orchestrator".into())
         }
@@ -712,6 +745,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         }
     }
 
@@ -952,6 +986,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -969,6 +1004,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -986,6 +1022,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -1001,6 +1038,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -1019,6 +1057,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -1037,6 +1076,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -1054,6 +1094,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -1074,6 +1115,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));

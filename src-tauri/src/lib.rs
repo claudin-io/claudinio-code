@@ -28,6 +28,8 @@ pub fn run() {
             commands::agent::set_config,
             commands::agent::get_config,
             commands::agent::list_models,
+            commands::auth::login_with_claudinio,
+            commands::auth::logout_claudinio,
             commands::code_intel::open_workspace,
             commands::code_intel::close_workspace,
             commands::code_intel::search_symbols,

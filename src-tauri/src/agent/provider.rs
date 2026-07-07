@@ -32,10 +32,25 @@ pub struct AgentConfig {
     /// Tool names that still require approval even when yolo_mode is on.
     #[serde(default)]
     pub yolo_blacklist: Vec<String>,
+    /// Base URL for account/app-bridge services (login exchange, websearch).
+    /// Distinct from `base_url`, which is the `/v1/*` inference endpoint.
+    #[serde(default = "default_services_url")]
+    pub services_url: String,
+    /// Login the active api_key is associated with, if it was obtained via
+    /// `login_with_claudinio` rather than pasted manually.
+    #[serde(default)]
+    pub account_login: Option<String>,
+    /// Subscription tier of the linked account, as reported at login time.
+    #[serde(default)]
+    pub account_tier: Option<String>,
 }
 
 fn default_claudinio() -> String {
     "claudinio".into()
+}
+
+fn default_services_url() -> String {
+    "https://claudin.io".into()
 }
 
 impl Default for AgentConfig {
@@ -50,6 +65,9 @@ impl Default for AgentConfig {
             sub_max_rounds: None,
             yolo_mode: false,
             yolo_blacklist: Vec::new(),
+            services_url: default_services_url(),
+            account_login: None,
+            account_tier: None,
         }
     }
 }

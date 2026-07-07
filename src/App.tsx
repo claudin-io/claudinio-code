@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, type IndexProgress } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, type IndexProgress } from "./lib/ipc";
 import { workspaceStatus, isBusy } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
@@ -63,6 +63,10 @@ function App() {
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
+  const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
+  const [accountTier, setAccountTier] = createSignal<string | null>(null);
+  const [loggingIn, setLoggingIn] = createSignal(false);
+  const [showAdvancedAuth, setShowAdvancedAuth] = createSignal(false);
   const [showTree, setShowTree] = createSignal(false);
   const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
@@ -138,6 +142,8 @@ function App() {
         setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
+        setAccountLogin(cfg.accountLogin ?? null);
+        setAccountTier(cfg.accountTier ?? null);
       }
       if (models && models.length > 0) {
         setAvailableModels(models);
@@ -165,6 +171,27 @@ function App() {
     } catch (e) {
       alert(t("app.config.saveError", String(e)));
     }
+  };
+
+  const doLogin = async () => {
+    setLoggingIn(true);
+    try {
+      const result = await loginWithClaudinio();
+      setAccountLogin(result.login);
+      setAccountTier(result.tier ?? null);
+    } catch (e) {
+      alert(t("app.config.loginError", String(e)));
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  const doLogout = async () => {
+    try {
+      await logoutClaudinio();
+    } catch {}
+    setAccountLogin(null);
+    setAccountTier(null);
   };
 
   const addOpenWorkspace = (folder: string) => {
@@ -297,14 +324,46 @@ function App() {
               <option value="en-US">🇺🇸 English</option>
             </select>
 
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.apiKey")}</label>
-            <input
-              type="password"
-              value={configApiKey()}
-              onInput={(e) => setConfigApiKey(e.currentTarget.value)}
-              placeholder="sk-..."
-              class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            />
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.account")}</label>
+            <Show
+              when={accountLogin()}
+              fallback={
+                <button
+                  onClick={doLogin}
+                  disabled={loggingIn()}
+                  class="mb-2 w-full rounded-md bg-accent p-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                >
+                  {loggingIn() ? t("app.config.signingIn") : t("app.config.signIn")}
+                </button>
+              }
+            >
+              <div class="mb-2 flex items-center justify-between rounded-md border border-border-subtle bg-surface-0 p-2 text-sm">
+                <span class="truncate text-ink">
+                  {t("app.config.signedInAs", accountLogin() ?? "")}
+                  <Show when={accountTier()}> — {accountTier()}</Show>
+                </span>
+                <button onClick={doLogout} class="ml-2 shrink-0 text-xs text-ink-muted hover:text-ink hover:underline">
+                  {t("app.config.signOut")}
+                </button>
+              </div>
+            </Show>
+
+            <button
+              onClick={() => setShowAdvancedAuth((v) => !v)}
+              class="mb-2 text-xs text-ink-muted hover:text-ink hover:underline"
+            >
+              {showAdvancedAuth() ? t("app.config.hideAdvanced") : t("app.config.showAdvanced")}
+            </button>
+            <Show when={showAdvancedAuth()}>
+              <label class="mb-1 block text-xs text-ink-muted">{t("app.config.apiKey")}</label>
+              <input
+                type="password"
+                value={configApiKey()}
+                onInput={(e) => setConfigApiKey(e.currentTarget.value)}
+                placeholder="sk-..."
+                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </Show>
 
             {/* Brain model selector */}
             <label class="mb-1 block text-xs text-ink-muted">{t("app.config.brainModel")}</label>
