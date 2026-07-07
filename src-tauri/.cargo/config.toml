@@ -1,4 +1,0 @@
-[target.x86_64-pc-windows-msvc]
-# Force static CRT to avoid LNK2005 conflicts between msvcprt.lib and libcpmt.lib
-# when mixing staticlib/cdylib/rlib crate types with Tauri + ONNX Runtime
-rustflags = ["-Ctarget-feature=+crt-static"]

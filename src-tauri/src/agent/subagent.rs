@@ -206,6 +206,7 @@ pub async fn run_spawn_agents(
             rounds: result.rounds,
             input_tokens: result.in_tok,
             output_tokens: result.out_tok,
+            report: result.report.clone(),
         });
 
         total_in += result.in_tok;

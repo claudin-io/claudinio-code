@@ -4,6 +4,7 @@ mod grep;
 mod list_dir;
 mod read_file;
 mod tasks;
+mod web_search;
 mod write_plan;
 
 use crate::code_intel::db::IndexDb;
@@ -31,6 +32,9 @@ pub struct ToolContext {
     /// edit_file checks this before allowing edits.
     pub read_tracker: Arc<Mutex<ReadTracker>>,
     pub interrupt: Option<Arc<AtomicBool>>,
+    /// Loaded AgentConfig — used by tools that call claudin.io services
+    /// (currently just web_search). None when unavailable (e.g. some tests).
+    pub agent_config: Option<crate::agent::provider::AgentConfig>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -217,8 +221,28 @@ code_search (keyword) → grep (fallback).".into(),
             }),
         },
         ToolDef {
+            name: "web_search".into(),
+            description: "Search the web via claudin.io (requires being signed in). Returns a short answer plus a list of results with titles, URLs, and snippets. Rate limited per account tier — use it when you need current information not in your training data or the codebase.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query" },
+                    "max_results": { "type": "integer", "description": "Max results to return (1-10, default 5)" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text ends the turn unanswered and stalls the task. Each question carries concrete options; the UI automatically appends a final free-text option, so never add an 'Other' option yourself. Blocks until answered and returns the compiled question/answer pairs.".into(),
+            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text ends the turn unanswered and stalls the task.
+
+Each question can have:
+- `multi_select: false` (default): radio buttons, user picks exactly ONE option. Best for mutually exclusive decisions.
+- `multi_select: true`: checkboxes, user can pick SEVERAL options. The UI shows square indicators instead of circles.
+
+The UI automatically appends an \"Other\" option with a free-text input field to EVERY question (single and multi). When the user types in \"Other\", their text is appended to the chosen options. So NEVER add an \"Other\" option manually to your options list — it's always there automatically.
+
+Blocks until answered and returns the compiled question/answer pairs.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -229,8 +253,8 @@ code_search (keyword) → grep (fallback).".into(),
                             "type": "object",
                             "properties": {
                                 "question": { "type": "string", "description": "The complete question, ending with a question mark" },
-                                "options": { "type": "array", "items": { "type": "string" }, "description": "2-4 concise, mutually exclusive choices" },
-                                "multi_select": { "type": "boolean", "description": "Allow picking more than one option (default false)" }
+                                "options": { "type": "array", "items": { "type": "string" }, "description": "2-4 concise options the user can pick from. Do NOT include an 'Other' option — the UI adds it automatically." },
+                                "multi_select": { "type": "boolean", "description": "false (default) = radio buttons, user picks one. true = checkboxes, user picks several and can type free text via the auto-added 'Other' field." }
                             },
                             "required": ["question", "options"]
                         }
@@ -488,6 +512,15 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = write_plan::execute(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
+        "web_search" => {
+            let a: web_search::WebSearchArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let config = ctx
+                .agent_config
+                .as_ref()
+                .ok_or("web_search unavailable: no agent config loaded")?;
+            let content = web_search::execute(a, config).await?;
+            Ok(ToolOutput::Text { content })
+        }
         "spawn_agents" => {
             Err("spawn_agents is handled by the session orchestrator".into())
         }
@@ -712,6 +745,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         }
     }
 
@@ -952,6 +986,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -969,6 +1004,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -986,6 +1022,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -1001,6 +1038,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -1019,6 +1057,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -1037,6 +1076,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -1054,6 +1094,7 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -1074,11 +1115,97 @@ mod tests {
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
+            agent_config: None,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("unknown tool"), "got: {err}");
+    }
+
+    // ── read_file large-file truncation tests ──
+
+    fn write_large_file(name: &str, line_count: usize) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("claudinio_test_{name}"));
+        let lines: Vec<String> = (1..=line_count).map(|i| format!("line{i}")).collect();
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p
+    }
+
+    #[test]
+    fn test_read_file_small_no_truncation() {
+        // Small file (< 5000 tokens) — should return full content, no warning.
+        let p = write_large_file("small_no_trunc", 20);
+        let ctx = test_ctx();
+        let args = serde_json::json!({"path": p.to_string_lossy()});
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert_eq!(content.lines().count(), 20, "should return all 20 lines");
+                assert!(!content.contains("FILE SIZE WARNING"), "should NOT have truncation warning");
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_read_file_large_truncated() {
+        // Large file (> 5000 tokens) — should return warning + truncated content.
+        // Each line "lineN" is ~7 chars → ~2 tokens per line in cl100k_base.
+        // With 5000 lines (~10000 tokens), truncation stops at ~2500 lines (~5000 tokens).
+        // Output = ~9 lines of warning + ~2500 lines content = ~2509 total.
+        let p = write_large_file("large_truncated", 5000);
+        let ctx = test_ctx();
+        let args = serde_json::json!({"path": p.to_string_lossy()});
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert!(
+                    content.contains("FILE SIZE WARNING"),
+                    "should have truncation warning"
+                );
+                assert!(
+                    content.contains("start_line/end_line"),
+                    "should suggest start_line/end_line"
+                );
+                let line_count = content.lines().count();
+                assert!(
+                    line_count < 4900,
+                    "truncated content should have far fewer than 4900 lines, got {line_count}"
+                );
+                assert!(
+                    line_count > 10,
+                    "truncated content should have more than 10 lines, got {line_count}"
+                );
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_read_file_large_with_explicit_range_no_truncation() {
+        // Large file with explicit start_line/end_line — no truncation even if file is huge.
+        let p = write_large_file("large_with_range", 5000);
+        let ctx = test_ctx();
+        let args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 1,
+            "end_line": 10,
+        });
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert_eq!(content.lines().count(), 10, "should return exactly 10 lines");
+                assert!(!content.contains("FILE SIZE WARNING"), "should NOT have truncation warning");
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
     }
 }

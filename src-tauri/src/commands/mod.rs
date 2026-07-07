@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod auth;
 pub mod code_intel;
 pub mod context;
 pub mod fs;

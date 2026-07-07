@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
@@ -29,5 +30,12 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri` and SQLite db files
       ignored: ["**/src-tauri/**", "**/.claudinio_index.db*"],
     },
+  },
+
+  // https://vitest.dev/config/
+  test: {
+    environment: "jsdom",
+    globals: true,
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 }));

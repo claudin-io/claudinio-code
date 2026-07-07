@@ -171,6 +171,7 @@ mod tests {
                     crate::agent::tools::ReadTracker::default(),
                 )),
                 interrupt: None,
+                agent_config: None,
             },
         ))
     }
@@ -194,6 +195,7 @@ mod tests {
                 crate::agent::tools::ReadTracker::default(),
             )),
             interrupt: None,
+            agent_config: None,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -229,6 +231,7 @@ mod tests {
                 crate::agent::tools::ReadTracker::default(),
             )),
             interrupt: None,
+            agent_config: None,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -263,6 +266,7 @@ mod tests {
                 crate::agent::tools::ReadTracker::default(),
             )),
             interrupt: None,
+            agent_config: None,
         };
         let result = rt.block_on(execute(
             BashArgs {

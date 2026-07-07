@@ -157,6 +157,7 @@ pub async fn send_message(
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         interrupt: Some(steering.interrupt.clone()),
+        agent_config: Some(config.clone()),
     };
 
     let residual = steering.drain();
@@ -452,6 +453,8 @@ pub async fn get_config(
         "subMaxRounds": cfg.sub_max_rounds,
         "yoloMode": cfg.yolo_mode,
         "yoloBlacklist": cfg.yolo_blacklist,
+        "accountLogin": cfg.account_login,
+        "accountTier": cfg.account_tier,
     }))
 }
 
@@ -589,6 +592,7 @@ pub async fn compact_session(
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         interrupt: Some(steering.interrupt.clone()),
+        agent_config: Some(config.clone()),
     };
 
     let summary = session::compact_history(

@@ -4,6 +4,14 @@ const dict: LocaleDict = {
   // ── App ───────────────────────────────────────────────────────────
   "app.title": "Claudinio Code",
   "app.config.title": "Configuração da API",
+  "app.config.account": "Conta",
+  "app.config.signIn": "Entrar com claudin.io",
+  "app.config.signingIn": "Aguardando login no navegador…",
+  "app.config.signedInAs": "Conectado como {0}",
+  "app.config.signOut": "Sair",
+  "app.config.loginError": "Falha ao entrar: {0}",
+  "app.config.showAdvanced": "Avançado: usar API key manualmente",
+  "app.config.hideAdvanced": "Ocultar opções avançadas",
   "app.config.apiKey": "API Key",
   "app.config.brainModel": "Modelo do Brain",
   "app.config.builderModel": "Modelo do Builder",
@@ -90,6 +98,8 @@ const dict: LocaleDict = {
   "chat.subagent.maxRounds": "Limite de rounds",
   "chat.subagent.rounds": "rounds",
   "chat.subagent.title": "Subagent: {0}",
+  "chat.subagent.goal": "Objetivo",
+  "chat.subagent.report": "Relatório",
 
   // ── ChatPanel - Input ─────────────────────────────────────────────
   "chat.input.attachFile": "Anexar arquivo",

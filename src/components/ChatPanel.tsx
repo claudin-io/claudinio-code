@@ -83,6 +83,7 @@ interface SubagentTimelineState {
   rounds: number;
   inputTokens: number;
   outputTokens: number;
+  report?: string;
   steps: TimelineItem[];
 }
 
@@ -952,7 +953,7 @@ export const ChatPanel: Component<{
         });
         return {
           ...prev,
-          [d.subagentId]: { ...sa, status, rounds: d.rounds, inputTokens: d.inputTokens, outputTokens: d.outputTokens, steps: finalSteps },
+          [d.subagentId]: { ...sa, status, rounds: d.rounds, inputTokens: d.inputTokens, outputTokens: d.outputTokens, report: d.report, steps: finalSteps },
         };
       });
       scrollToBottom();
@@ -2018,27 +2019,45 @@ const SubagentRow: Component<{
     <div class="my-2 ml-4 border-l-2 border-accent/30 pl-2">
       <button
         onClick={() => props.onViewDetails?.(props.subagent.id)}
-        class="flex w-full items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-surface-2"
+        class="flex w-full flex-col gap-0.5 rounded px-1 py-0.5 text-xs hover:bg-surface-2"
       >
-        <span class="trajectory-node flex h-4 w-4 shrink-0 items-center justify-center">
-          <Icon name="layers" class="h-[11px] w-[11px] text-accent" />
-        </span>
-        <span class="font-mono text-[12px] text-ink-muted">{props.subagent.name}</span>
-        <span class={`rounded px-1 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
-          {props.subagent.mode}
-        </span>
-        <span class="text-[11px] text-ink-faint">{statusLabel()}</span>
-        <Show when={props.subagent.status === "running"}>
-          <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
-        </Show>
-        <div class="ml-auto flex items-center gap-2">
-          <Show when={props.subagent.inputTokens > 0}>
-            <span class="font-mono text-[10px] text-ink-faint">
-              {formatTokens(props.subagent.inputTokens)}→{formatTokens(props.subagent.outputTokens)}
-            </span>
+        <div class="flex w-full items-center gap-2">
+          <span class="trajectory-node flex h-4 w-4 shrink-0 items-center justify-center">
+            <Icon name="layers" class="h-[11px] w-[11px] text-accent" />
+          </span>
+          <span class="font-mono text-[12px] text-ink-muted">{props.subagent.name}</span>
+          <span class={`rounded px-1 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
+            {props.subagent.mode}
+          </span>
+          <span class="text-[11px] text-ink-faint">{statusLabel()}</span>
+          <Show when={props.subagent.status === "running"}>
+            <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
           </Show>
-          <Icon name="external-link" class="h-3 w-3 text-ink-faint" />
+          <div class="ml-auto flex items-center gap-2">
+            <Show when={props.subagent.inputTokens > 0}>
+              <span class="font-mono text-[10px] text-ink-faint">
+                {formatTokens(props.subagent.inputTokens)}→{formatTokens(props.subagent.outputTokens)}
+              </span>
+            </Show>
+            <Icon name="external-link" class="h-3 w-3 text-ink-faint" />
+          </div>
         </div>
+        <Show when={props.subagent.goal}>
+          <div class="ml-6 flex items-start gap-1">
+            <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.goal")}</span>
+            <span class="truncate text-[11px] text-ink-muted">
+              {props.subagent.goal.length > 80 ? props.subagent.goal.slice(0, 80) + "…" : props.subagent.goal}
+            </span>
+          </div>
+        </Show>
+        <Show when={props.subagent.report}>
+          <div class="ml-6 flex items-start gap-1">
+            <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.report")}</span>
+            <span class="truncate text-[11px] text-ink-muted">
+              {props.subagent.report!.length > 120 ? props.subagent.report!.slice(0, 120) + "…" : props.subagent.report}
+            </span>
+          </div>
+        </Show>
       </button>
     </div>
   );
@@ -2099,13 +2118,32 @@ const SubagentModal: Component<{
             <Icon name="x" class="h-4 w-4" />
           </button>
         </div>
-        <div class="overflow-y-auto px-5 py-3">
+        <div class="overflow-y-auto px-5 py-3 space-y-4">
+          <Show when={props.subagent.goal}>
+            <div class="rounded-md bg-surface-1 p-3">
+              <span class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.goal")}</span>
+              <p class="whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.6] text-ink-muted">
+                {props.subagent.goal}
+              </p>
+            </div>
+          </Show>
+
           <TimelineSteps
             steps={props.subagent.steps}
             expandedStep={expandedStep()}
             onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
             isLive={props.subagent.status === "running"}
           />
+
+          <Show when={props.subagent.report}>
+            <div class="rounded-md bg-surface-1 p-3">
+              <span class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.report")}</span>
+              <div
+                class="prose-content text-[12px] leading-[1.6] text-ink-muted"
+                innerHTML={marked.parse(props.subagent.report!, { async: false }) as string}
+              />
+            </div>
+          </Show>
         </div>
       </div>
     </div>

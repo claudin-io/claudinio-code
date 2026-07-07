@@ -47,6 +47,8 @@ export interface AgentConfig {
   subMaxRounds?: number | null;
   yoloMode?: boolean;
   yoloBlacklist?: string[];
+  accountLogin?: string | null;
+  accountTier?: string | null;
 }
 
 export interface SetConfigArgs {
@@ -83,6 +85,7 @@ export interface SubagentDoneData {
   rounds: number;
   inputTokens: number;
   outputTokens: number;
+  report?: string;
 }
 
 export type SessionMode = "brain" | "builder";
@@ -306,6 +309,20 @@ export function getConfig(): Promise<AgentConfig> {
 
 export function listModels(): Promise<string[]> {
   return invoke<string[]>("list_models");
+}
+
+export interface LoginResult {
+  login: string;
+  tier?: string | null;
+}
+
+/** Opens the browser to sign in with claudin.io and links the active API key. */
+export function loginWithClaudinio(): Promise<LoginResult> {
+  return invoke<LoginResult>("login_with_claudinio");
+}
+
+export function logoutClaudinio(): Promise<void> {
+  return invoke<void>("logout_claudinio");
 }
 
 // --- Code Intelligence ---

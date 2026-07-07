@@ -481,6 +481,8 @@ pub enum AgentEvent {
         input_tokens: u32,
         #[serde(rename = "outputTokens")]
         output_tokens: u32,
+        #[serde(rename = "report")]
+        report: String,
     },
     #[serde(rename = "Subagent")]
     Subagent {
@@ -1919,6 +1921,7 @@ mod tests {
             rounds: 5,
             input_tokens: 100,
             output_tokens: 50,
+            report: String::new(),
         };
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
