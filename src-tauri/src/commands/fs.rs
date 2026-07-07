@@ -9,6 +9,13 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkEntry {
+    pub path: String,
+    pub is_dir: bool,
+}
+
 /// Read a file and return its base64-encoded content plus metadata.
 /// Used by the frontend to prepare attachments before sending to the agent.
 #[tauri::command]
@@ -115,6 +122,50 @@ pub fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
         .collect();
 
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+    Ok(entries)
+}
+
+/// Recursively walks a directory tree respecting .gitignore, returning a flat
+/// list of relative paths (from `root`) for files and folders. Skips hidden
+/// files and directories. Used by the frontend to build a fuzzy-searchable
+/// index for @-mention autocomplete.
+#[tauri::command]
+pub fn walk_dir(root: String) -> Result<Vec<WalkEntry>, String> {
+    let dir = Path::new(&root);
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+
+    let walker = ignore::WalkBuilder::new(dir)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .build();
+
+    let mut entries: Vec<WalkEntry> = walker
+        .filter_map(|e| e.ok())
+        // depth 0 is the root itself, skip it
+        .filter(|e| e.depth() > 0)
+        .map(|e| {
+            let abs_path = e.path();
+            let rel = abs_path
+                .strip_prefix(&root)
+                .unwrap_or(abs_path)
+                .to_string_lossy()
+                .into_owned();
+            WalkEntry {
+                path: rel,
+                is_dir: e.file_type().map(|t| t.is_dir()).unwrap_or(false),
+            }
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        a.is_dir
+            .cmp(&b.is_dir)
+            .reverse()
+            .then(a.path.cmp(&b.path))
+    });
     Ok(entries)
 }
 

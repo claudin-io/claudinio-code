@@ -17,6 +17,7 @@ pub fn run() {
             commands::fs::read_file,
             commands::fs::write_file,
             commands::fs::read_attachment,
+            commands::fs::walk_dir,
             commands::agent::send_message,
             commands::agent::new_session,
             commands::agent::list_sessions,

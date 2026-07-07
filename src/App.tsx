@@ -1,4 +1,5 @@
 import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
+import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
 import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, type IndexProgress } from "./lib/ipc";
@@ -188,6 +189,8 @@ function App() {
     try {
       const s = await openWorkspace(folder, (p) => setWsProgress(folder, p));
       setWsIndexStatus(folder, t("app.index.filesCount", s.filesCount, s.symbolsCount));
+      // Load the flat file list for @-mention autocomplete
+      await loadFileIndex(folder);
       // Only clear scan progress — the embedding phase keeps reporting after
       // openWorkspace returns and clears itself on its terminal statuses.
       setTimeout(
@@ -638,7 +641,7 @@ function App() {
                   class="h-full"
                   style={{ display: activeWorkspace() === ws ? "block" : "none" }}
                 >
-                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} />
+                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} />
                 </div>
               )}
             </For>

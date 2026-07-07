@@ -405,6 +405,17 @@ export interface HoverInfo {
 }
 
 
+// --- @-mention file autocomplete ---
+
+export interface WalkEntry {
+  path: string;
+  isDir: boolean;
+}
+
+export function walkDirectory(root: string): Promise<WalkEntry[]> {
+  return invoke<WalkEntry[]>("walk_dir", { root });
+}
+
 // --- Tasks ---
 
 export interface TaskItem {

@@ -35,6 +35,7 @@ import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
+import { FileMentionPopover } from "./FileMentionPopover";
 import ContextWarning from "./ContextWarning";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
@@ -398,6 +399,8 @@ export const ChatPanel: Component<{
   /// Whether this panel is the visible one. Global listeners (ESC interrupt,
   /// drag-drop) must only act on the active panel.
   isActive: () => boolean;
+  /// Flat list of all workspace files for @-mention autocomplete.
+  fileList: string[];
 }> = (props) => {
   const [input, setInput] = createSignal("");
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
@@ -416,6 +419,9 @@ export const ChatPanel: Component<{
   // Attachments to send with the next message
   const [attachments, setAttachments] = createSignal<{ name: string; path: string; mediaType: string; size: number }[]>([]);
   const [isDragging, setIsDragging] = createSignal(false);
+  // @-mention autocomplete state
+  const [mentionQuery, setMentionQuery] = createSignal("");
+  const [mentionPosition, setMentionPosition] = createSignal<{ top: number; left: number; height: number } | null>(null);
   // Two distinct numbers, both computed by the backend (single source of
   // truth): contextTokens = size of the NEXT request's context (drops after
   // compaction); cumulative totals/cost never reset.
@@ -472,6 +478,88 @@ export const ChatPanel: Component<{
   const removeAttachment = (index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   };
+
+  const handleMentionSelect = (path: string) => {
+    const text = input();
+    const caret = inputRef?.selectionStart ?? text.length;
+    // Scan backwards to find the @ that triggered the popover
+    let atIdx = -1;
+    for (let i = caret - 1; i >= 0; i--) {
+      const ch = text[i];
+      if (ch === " " || ch === "\n") break;
+      if (ch === "@") { atIdx = i; break; }
+    }
+    if (atIdx < 0) return;
+
+    const before = text.slice(0, atIdx + 1); // include the @
+    const after = text.slice(caret); // after the query
+    setInput(`${before}${path}${after}`);
+    setMentionQuery("");
+    setMentionPosition(null);
+    // Re-focus textarea and place cursor at end of inserted path
+    setTimeout(() => {
+      const el = inputRef;
+      if (el) {
+        el.focus();
+        const pos = atIdx + 1 + path.length;
+        el.setSelectionRange(pos, pos);
+      }
+    }, 0);
+  };
+
+  /**
+   * Compute pixel coordinates of a character position in a textarea by
+   * rendering a mirror div with the same font metrics. Adapted from the
+   * classic textarea-caret-position library.
+   */
+  function getCaretCoordinates(textarea: HTMLTextAreaElement, pos: number): { top: number; left: number; height: number } {
+    const textareaStyles = window.getComputedStyle(textarea);
+    const font = [
+      textareaStyles.fontSize,
+      textareaStyles.fontFamily,
+      textareaStyles.lineHeight,
+      textareaStyles.fontWeight,
+      textareaStyles.fontStyle,
+    ].join(" ");
+
+    const mirror = document.createElement("div");
+    mirror.style.cssText = [
+      "position: fixed",
+      "top: 0",
+      "left: 0",
+      "visibility: hidden",
+      "white-space: pre-wrap",
+      "word-wrap: break-word",
+      `width: ${textarea.offsetWidth}px`,
+      `font: ${font}`,
+      `padding: ${textareaStyles.padding}`,
+      `border: ${textareaStyles.border}`,
+      `box-sizing: ${textareaStyles.boxSizing}`,
+      `letter-spacing: ${textareaStyles.letterSpacing}`,
+    ].join(";");
+
+    const text = textarea.value.slice(0, pos);
+    mirror.textContent = text;
+    document.body.appendChild(mirror);
+
+    // Add a span at the caret position
+    const span = document.createElement("span");
+    span.textContent = ".";
+    mirror.appendChild(span);
+
+    const textareaRect = textarea.getBoundingClientRect();
+    const spanRect = span.getBoundingClientRect();
+
+    // Mirror sits at viewport origin (fixed; top:0; left:0). Shift to the
+    // textarea's actual viewport position and subtract scroll offsets.
+    const top = textareaRect.top + spanRect.top - textarea.scrollTop;
+    const height = spanRect.height;
+    const left = textareaRect.left + spanRect.left - textarea.scrollLeft;
+
+    document.body.removeChild(mirror);
+
+    return { top, left, height };
+  }
 
   onMount(() => {
     getConfig()
@@ -975,6 +1063,8 @@ export const ChatPanel: Component<{
 
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
+      // If @-mention popover is open, let it handle Enter instead of sending
+      if (mentionPosition() && mentionQuery().length >= 0) return;
       e.preventDefault();
       send();
     }
@@ -1311,7 +1401,48 @@ export const ChatPanel: Component<{
               ref={inputRef!}
               value={input()}
               onInput={(e) => {
-                setInput(e.currentTarget.value);
+                const textarea = e.currentTarget;
+                const text = textarea.value;
+                setInput(text);
+                // Detect @-mention trigger
+                const caret = textarea.selectionStart;
+                // Scan backwards from caret to find an active @
+                let atIdx = -1;
+                for (let i = caret - 1; i >= 0; i--) {
+                  const ch = text[i];
+                  if (ch === " " || ch === "\n") break;
+                  if (ch === "@") { atIdx = i; break; }
+                }
+                if (atIdx >= 0) {
+                  const query = text.slice(atIdx + 1, caret);
+                  // Compute caret pixel position using mirror div
+                  const pos = getCaretCoordinates(textarea, caret);
+                  // Smart positioning: default above, flip below if not enough room
+                  const POPOVER_ESTIMATED_HEIGHT = 260; // max list + padding + shadow
+                  const POPOVER_WIDTH = 280; // min-width
+                  const MARGIN = 8;
+
+                  let top: number;
+                  if (pos.top - POPOVER_ESTIMATED_HEIGHT >= MARGIN) {
+                    // Room above — show above
+                    top = pos.top - POPOVER_ESTIMATED_HEIGHT;
+                  } else {
+                    // Not enough above — show below
+                    top = pos.top + pos.height + 4;
+                  }
+
+                  // Clamp left so popover doesn't overflow viewport edges
+                  let left = pos.left;
+                  const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
+                  if (left > maxLeft) left = maxLeft;
+                  if (left < MARGIN) left = MARGIN;
+
+                  setMentionQuery(query);
+                  setMentionPosition({ top, left, height: pos.height });
+                } else {
+                  setMentionQuery("");
+                  setMentionPosition(null);
+                }
               }}
               onKeyDown={handleKeyDown}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
@@ -1356,6 +1487,16 @@ export const ChatPanel: Component<{
           </div>
         </div>
       </div>
+
+      <Show when={mentionPosition() !== null && props.fileList.length > 0}>
+        <FileMentionPopover
+          fileList={props.fileList}
+          position={mentionPosition()!}
+          query={mentionQuery()}
+          onSelect={handleMentionSelect}
+          onClose={() => setMentionPosition(null)}
+        />
+      </Show>
 
       <ContextFooter
         contextTokens={contextStats().contextTokens}
