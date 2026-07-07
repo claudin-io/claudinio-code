@@ -98,7 +98,7 @@ const dict: LocaleDict = {
   "chat.input.answerFirst": "Responda as perguntas acima primeiro…",
   "chat.input.steerAgent": "Digite para orientar o agente… (Esc para pausar)",
   "chat.input.stop": "Parar",
-  "chat.input.askCode": "Pergunte algo sobre o código…",
+  "chat.input.askCode": "Escreva algo… | @arquivo | <tag> | <skill>",
   "chat.input.dropToAttach": "Solte o arquivo para anexar",
   "chat.input.dropHint": "Imagens, PDFs, documentos, código e mais",
 
