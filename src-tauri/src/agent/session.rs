@@ -481,6 +481,8 @@ pub enum AgentEvent {
         input_tokens: u32,
         #[serde(rename = "outputTokens")]
         output_tokens: u32,
+        #[serde(rename = "report")]
+        report: String,
     },
     #[serde(rename = "Subagent")]
     Subagent {

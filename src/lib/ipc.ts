@@ -83,6 +83,7 @@ export interface SubagentDoneData {
   rounds: number;
   inputTokens: number;
   outputTokens: number;
+  report?: string;
 }
 
 export type SessionMode = "brain" | "builder";

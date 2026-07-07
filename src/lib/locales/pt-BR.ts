@@ -90,6 +90,8 @@ const dict: LocaleDict = {
   "chat.subagent.maxRounds": "Limite de rounds",
   "chat.subagent.rounds": "rounds",
   "chat.subagent.title": "Subagent: {0}",
+  "chat.subagent.goal": "Objetivo",
+  "chat.subagent.report": "Relatório",
 
   // ── ChatPanel - Input ─────────────────────────────────────────────
   "chat.input.attachFile": "Anexar arquivo",
