@@ -80,11 +80,11 @@ jobs:
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
 
-      - name: Set Windows CRT flags
+      - name: Set Windows linker flags
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          echo "RUSTFLAGS=-Ctarget-feature=+crt-static" >> "$GITHUB_ENV"
+          echo "CARGO_ENCODED_RUSTFLAGS=-Clink-args=/FORCE:MULTIPLE" >> "$GITHUB_ENV"
 
       - name: Build Tauri app
         run: pnpm tauri build
