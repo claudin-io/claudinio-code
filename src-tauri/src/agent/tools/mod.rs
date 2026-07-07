@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct ToolContext {
     /// Tracks which files the agent has read via the read_file tool.
     /// edit_file checks this before allowing edits.
     pub read_tracker: Arc<Mutex<ReadTracker>>,
+    pub interrupt: Option<Arc<AtomicBool>>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -469,7 +471,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             if a.workdir.is_none() {
                 a.workdir = ctx.workspace_root.clone();
             }
-            let content = bash::execute(a).await?;
+            let content = bash::execute(a, ctx).await?;
             Ok(ToolOutput::Text { content })
         }
         "tasks_get" => {
@@ -709,6 +711,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         }
     }
 
@@ -948,6 +951,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -964,6 +968,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -980,6 +985,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -994,6 +1000,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -1011,6 +1018,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -1028,6 +1036,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -1044,6 +1053,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -1063,6 +1073,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));

@@ -201,14 +201,14 @@ impl ModeCtl {
 /// Thread-safe; the Mutex is never held across await.
 pub struct SteeringCtl {
     pub queue: StdMutex<Vec<String>>,
-    pub interrupt: AtomicBool,
+    pub interrupt: Arc<AtomicBool>,
 }
 
 impl SteeringCtl {
     pub fn new() -> Self {
         Self {
             queue: StdMutex::new(Vec::new()),
-            interrupt: AtomicBool::new(false),
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 

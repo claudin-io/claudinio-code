@@ -1,5 +1,10 @@
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
+
+use crate::agent::tools::ToolContext;
 
 const MAX_OUTPUT_BYTES: u64 = 100 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -12,7 +17,7 @@ pub struct BashArgs {
     pub timeout_seconds: Option<u64>,
 }
 
-pub async fn execute(args: BashArgs) -> Result<String, String> {
+pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String> {
     let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
     let shell_flag = if cfg!(target_os = "windows") { "/c" } else { "-c" };
 
@@ -38,37 +43,68 @@ pub async fn execute(args: BashArgs) -> Result<String, String> {
         }
     }
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await;
+    // Take the stdout/stderr handles before the select loop so we can
+    // still read them after child.wait() completes.
+    let mut child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take();
 
-    let output = match result {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Err(format!("command failed: {e}")),
-        Err(_) => {
-            return Err(format!(
-                "command timed out after {timeout_secs}s and was killed"
-            ));
+    let interrupt = &ctx.interrupt;
+    let timeout_sleep = tokio::time::sleep(Duration::from_secs(timeout_secs));
+    tokio::pin!(timeout_sleep);
+
+    // Outer loop: only the interrupt branch loops (check every 200ms);
+    // the timeout and child-completion branches exit it.
+    let result = loop {
+        tokio::select! {
+            status = child.wait() => {
+                break status.map_err(|e| format!("command failed: {e}"));
+            }
+            _ = &mut timeout_sleep => {
+                return Err(format!(
+                    "command timed out after {timeout_secs}s and was killed"
+                ));
+            }
+            _ = poll_interrupt(interrupt) => {
+                // User hit pause/ESC: kill the child process eagerly
+                let _ = child.kill().await;
+                let _ = child.wait().await; // reap to avoid zombie
+                return Err("Interrupted by user".into());
+            }
         }
+    }?;
+
+    // Read captured stdout/stderr
+    use tokio::io::AsyncReadExt;
+    let stdout_text = match child_stdout.as_mut() {
+        Some(pipe) => {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf).await;
+            String::from_utf8_lossy(&buf).to_string()
+        }
+        None => String::new(),
+    };
+    let stderr_text = match child_stderr.as_mut() {
+        Some(pipe) => {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf).await;
+            String::from_utf8_lossy(&buf).to_string()
+        }
+        None => String::new(),
     };
 
     let mut text = String::new();
-    if !output.stdout.is_empty() {
-        let stdout_str = String::from_utf8_lossy(&output.stdout);
-        text.push_str(stdout_str.as_ref());
+    if !stdout_text.is_empty() {
+        text.push_str(&stdout_text);
     }
-    if !output.stderr.is_empty() {
+    if !stderr_text.is_empty() {
         if !text.is_empty() {
             text.push('\n');
         }
-        let stderr_str = String::from_utf8_lossy(&output.stderr);
-        text.push_str(stderr_str.as_ref());
+        text.push_str(&stderr_text);
     }
 
-    if !output.status.success() {
-        let exit_info = match output.status.code() {
+    if !result.success() {
+        let exit_info = match result.code() {
             Some(code) => format!("exit code {code}"),
             None => "terminated by signal".into(),
         };
@@ -93,6 +129,24 @@ pub async fn execute(args: BashArgs) -> Result<String, String> {
     Ok(text)
 }
 
+/// Poll the interrupt flag at ~200ms intervals until it becomes true.
+async fn poll_interrupt(interrupt: &Option<Arc<AtomicBool>>) {
+    let flag = match interrupt {
+        Some(f) => f,
+        None => {
+            // No interrupt available — wait forever (timeout or child end wins)
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    };
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,12 +154,25 @@ mod tests {
 
     fn run(cmd: &str) -> Result<String, String> {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(execute(BashArgs {
-            command: cmd.to_string(),
-            workdir: None,
-            stdin: None,
-            timeout_seconds: None,
-        }))
+        rt.block_on(execute(
+            BashArgs {
+                command: cmd.to_string(),
+                workdir: None,
+                stdin: None,
+                timeout_seconds: None,
+            },
+            &ToolContext {
+                db_path: None,
+                lsp_manager: None,
+                workspace_root: None,
+                embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                session_store_path: None,
+                read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    crate::agent::tools::ReadTracker::default(),
+                )),
+                interrupt: None,
+            },
+        ))
     }
 
     #[test]
@@ -117,12 +184,26 @@ mod tests {
     #[test]
     fn echo_with_stdin() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let out = rt.block_on(execute(BashArgs {
-            command: "cat".to_string(),
-            workdir: None,
-            stdin: Some("hello from stdin".to_string()),
-            timeout_seconds: Some(5),
-        }));
+        let ctx = crate::agent::tools::ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::agent::tools::ReadTracker::default(),
+            )),
+            interrupt: None,
+        };
+        let out = rt.block_on(execute(
+            BashArgs {
+                command: "cat".to_string(),
+                workdir: None,
+                stdin: Some("hello from stdin".to_string()),
+                timeout_seconds: Some(5),
+            },
+            &ctx,
+        ));
         let out = out.unwrap();
         assert!(out.contains("hello from stdin"), "got: {out}");
     }
@@ -138,12 +219,26 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let tmp = std::env::temp_dir();
         let canonical_tmp = std::fs::canonicalize(&tmp).unwrap_or(tmp.clone());
-        let out = rt.block_on(execute(BashArgs {
-            command: "pwd".to_string(),
-            workdir: Some(canonical_tmp.to_string_lossy().to_string()),
-            stdin: None,
-            timeout_seconds: Some(5),
-        }));
+        let ctx = crate::agent::tools::ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::agent::tools::ReadTracker::default(),
+            )),
+            interrupt: None,
+        };
+        let out = rt.block_on(execute(
+            BashArgs {
+                command: "pwd".to_string(),
+                workdir: Some(canonical_tmp.to_string_lossy().to_string()),
+                stdin: None,
+                timeout_seconds: Some(5),
+            },
+            &ctx,
+        ));
         let out = out.unwrap();
         let pwd = out.trim();
         assert!(
@@ -158,12 +253,26 @@ mod tests {
     fn timeout_kills_command() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let start = Instant::now();
-        let result = rt.block_on(execute(BashArgs {
-            command: "sleep 60".to_string(),
-            workdir: None,
-            stdin: None,
-            timeout_seconds: Some(1),
-        }));
+        let ctx = crate::agent::tools::ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::agent::tools::ReadTracker::default(),
+            )),
+            interrupt: None,
+        };
+        let result = rt.block_on(execute(
+            BashArgs {
+                command: "sleep 60".to_string(),
+                workdir: None,
+                stdin: None,
+                timeout_seconds: Some(1),
+            },
+            &ctx,
+        ));
         let elapsed = start.elapsed();
         assert!(result.is_err(), "expected timeout error, got: {result:?}");
         let err = result.unwrap_err();

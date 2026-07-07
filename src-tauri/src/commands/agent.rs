@@ -125,19 +125,6 @@ pub async fn send_message(
         path: handle.store_path.clone(),
     };
 
-    let db_path: Option<String> = workspace_root
-        .as_ref()
-        .map(|p| format!("{p}/.claudinio_index.db"));
-
-    let ctx = ToolContext {
-        db_path,
-        lsp_manager: Some(ws.lsp_manager.clone()),
-        workspace_root,
-        embedding_model: state.embedding_model.clone(),
-        session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
-        read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
-    };
-
     // Sync the session's mode with what the UI toggle sent: a human-set value
     // that differs from the current one is persisted before the run starts.
     let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
@@ -157,6 +144,21 @@ pub async fn send_message(
     // from a race.
     let steering = state.steering_for(&handle.id).await;
     steering.clear();
+
+    let db_path: Option<String> = workspace_root
+        .as_ref()
+        .map(|p| format!("{p}/.claudinio_index.db"));
+
+    let ctx = ToolContext {
+        db_path,
+        lsp_manager: Some(ws.lsp_manager.clone()),
+        workspace_root,
+        embedding_model: state.embedding_model.clone(),
+        session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
+        read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        interrupt: Some(steering.interrupt.clone()),
+    };
+
     let residual = steering.drain();
     let mut message = if residual.is_empty() {
         message
@@ -567,6 +569,14 @@ pub async fn compact_session(
         path: handle.store_path.clone(),
     };
 
+    // Reuse the running session's controller if present; otherwise use a
+    // throwaway one so we don't leave a stale "running" entry in the map.
+    let steering = {
+        let map = state.steering.lock().await;
+        map.get(&handle.id).cloned()
+    }
+    .unwrap_or_else(|| std::sync::Arc::new(crate::agent::session::SteeringCtl::new()));
+
     let db_path: Option<String> = workspace_root
         .as_ref()
         .map(|p| format!("{p}/.claudinio_index.db"));
@@ -578,15 +588,9 @@ pub async fn compact_session(
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        interrupt: Some(steering.interrupt.clone()),
     };
 
-    // Reuse the running session's controller if present; otherwise use a
-    // throwaway one so we don't leave a stale "running" entry in the map.
-    let steering = {
-        let map = state.steering.lock().await;
-        map.get(&handle.id).cloned()
-    }
-    .unwrap_or_else(|| std::sync::Arc::new(crate::agent::session::SteeringCtl::new()));
     let summary = session::compact_history(
         &config,
         &store,
