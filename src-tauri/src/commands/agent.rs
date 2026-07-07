@@ -161,7 +161,7 @@ pub async fn send_message(
     };
 
     let residual = steering.drain();
-    let mut message = if residual.is_empty() {
+    let message = if residual.is_empty() {
         message
     } else {
         let mut prefix = String::new();
@@ -192,7 +192,7 @@ pub async fn send_message(
                 "txt" | "md" | "csv" | "json" | "yaml" | "yml" | "toml"
                     | "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "swift"
                     | "go" | "rb" | "html" | "htm" | "css" | "sh" | "bash"
-                    | "sql" | "xml" | "toml" | "log"
+                    | "sql" | "xml" | "log"
             );
 
             if is_image {

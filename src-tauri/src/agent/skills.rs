@@ -187,8 +187,6 @@ pub struct SkillManager {
     workspace_root: Option<PathBuf>,
     /// Skills discovered at the last scan, keyed by name.
     skills: HashMap<String, SkillEntry>,
-    /// Cache of parsed frontmatter for loaded skills.
-    frontmatter_cache: HashMap<String, SkillMeta>,
 }
 
 impl SkillManager {
@@ -196,7 +194,6 @@ impl SkillManager {
         let mut mgr = Self {
             workspace_root,
             skills: HashMap::new(),
-            frontmatter_cache: HashMap::new(),
         };
         mgr.scan();
         mgr
@@ -325,36 +322,13 @@ impl SkillManager {
         self.skills.get(name).and_then(|s| s.body.clone())
     }
 
-    /// Reload the body for a skill from disk.
-    pub fn reload_body(&mut self, name: &str) -> Option<String> {
-        let location = self.skills.get(name)?.location.clone();
-        let path = Path::new(&location);
-        match Self::parse_skill_md(path) {
-            Ok((_meta, body)) => {
-                if let Some(entry) = self.skills.get_mut(name) {
-                    entry.body = Some(body.clone());
-                }
-                Some(body)
-            }
-            Err(_) => None,
-        }
-    }
-
     /// Get a skill entry by name.
     pub fn get(&self, name: &str) -> Option<&SkillEntry> {
         self.skills.get(name)
     }
-
-    /// Number of skills loaded.
-    pub fn len(&self) -> usize {
-        self.skills.len()
-    }
 }
 
 // ─── Remote Skill Registry ────────────────────────────────────────────────────
-
-/// Default registry URL. Points to the vercel-labs skills collection.
-const REMOTE_REGISTRY_BASE: &str = "https://raw.githubusercontent.com/vercel-labs/skills/refs/heads/main";
 
 const REMOTE_INDEX_URL: &str = "https://raw.githubusercontent.com/vercel-labs/skills/refs/heads/main/llms.txt";
 
@@ -675,7 +649,6 @@ mod tests {
         let empty = SkillManager {
             workspace_root: None,
             skills: HashMap::new(),
-            frontmatter_cache: HashMap::new(),
         };
         let result = build_skills_system_prompt_section(&empty);
         assert!(result.is_none());
@@ -686,7 +659,6 @@ mod tests {
         let mut mgr = SkillManager {
             workspace_root: None,
             skills: HashMap::new(),
-            frontmatter_cache: HashMap::new(),
         };
         let entry = SkillEntry {
             name: "pdf".into(),

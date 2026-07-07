@@ -290,46 +290,6 @@ pub fn tail_start_index(records: &[SessionRecord], compact_idx: usize, tail_turn
     }
 }
 
-/// Return the last `Compacted` summary, if any. Used by the frontend to
-/// render the archived-messages block.
-pub fn last_compacted_summary(records: &[SessionRecord]) -> Option<String> {
-    records.iter().rev().find_map(|r| match r {
-        SessionRecord::Compacted { summary, .. } => Some(summary.clone()),
-        _ => None,
-    })
-}
-
-/// Return all records that remain "active" after the last compaction: the
-/// kept-verbatim tail before the marker plus everything after it.
-pub fn records_since_compacted(records: &[SessionRecord]) -> Vec<&SessionRecord> {
-    match compact_boundary(records) {
-        Some((idx, tail_start)) => records[tail_start..idx]
-            .iter()
-            .chain(records.iter().skip(idx + 1))
-            .collect(),
-        None => records.iter().collect(),
-    }
-}
-
-/// Return all records archived by the last compaction (everything before the
-/// kept tail). Empty if no compaction has occurred.
-pub fn records_before_compacted(records: &[SessionRecord]) -> &[SessionRecord] {
-    match compact_boundary(records) {
-        Some((_, tail_start)) => &records[..tail_start],
-        None => &[],
-    }
-}
-
-/// (index of the last Compacted marker, index where its kept tail begins).
-fn compact_boundary(records: &[SessionRecord]) -> Option<(usize, usize)> {
-    let idx = records.iter().rposition(|r| matches!(r, SessionRecord::Compacted { .. }))?;
-    let tail_turns = match &records[idx] {
-        SessionRecord::Compacted { tail_turns, .. } => *tail_turns,
-        _ => 0,
-    };
-    Some((idx, tail_start_index(records, idx, tail_turns)))
-}
-
 /// The mode recorded by the most recent Mode record, if any: (mode, origin).
 pub fn last_mode(records: &[SessionRecord]) -> Option<(String, String)> {
     records.iter().rev().find_map(|r| match r {
@@ -729,22 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn records_before_and_since_respect_tail() {
-        let recs = vec![
-            user_turn("old", 1),
-            assistant_turn("old answer", 2),
-            user_turn("recent", 3),
-            assistant_turn("recent answer", 4),
-            SessionRecord::Compacted { summary: "S".into(), tail_turns: 2, ts: 5 },
-            user_turn("post", 6),
-        ];
-        let before = records_before_compacted(&recs);
-        assert_eq!(before.len(), 2, "only the pre-tail records are archived");
-        let since = records_since_compacted(&recs);
-        assert_eq!(since.len(), 3, "tail (2) + post-compact (1) stay active");
-    }
-
-    #[test]
     fn history_from_records_with_compacted_returns_only_messages_after() {
         let recs = vec![
             SessionRecord::Turn {
@@ -882,32 +826,5 @@ mod tests {
         ];
         let (_, _, cost) = cumulative_stats(&recs);
         assert_eq!(cost, None);
-    }
-
-    #[test]
-    fn records_after_and_before_compacted() {
-        let recs = vec![
-            SessionRecord::Meta { session_id: "s1".into(), created_at: 1, workspace: None },
-            SessionRecord::User { text: "old".into(), ts: 2 },
-            SessionRecord::Compacted { summary: "compact".into(), tail_turns: 0, ts: 3 },
-            SessionRecord::User { text: "new".into(), ts: 4 },
-        ];
-        let before = records_before_compacted(&recs);
-        assert_eq!(before.len(), 2, "meta + user before compact");
-        let after = records_since_compacted(&recs);
-        assert_eq!(after.len(), 1, "user after compact");
-        match &after[0] {
-            SessionRecord::User { text, .. } => assert_eq!(text, "new"),
-            _ => panic!("expected User"),
-        }
-    }
-
-    #[test]
-    fn records_after_and_before_without_compacted() {
-        let recs = vec![SessionRecord::User { text: "hello".into(), ts: 1 }];
-        let before = records_before_compacted(&recs);
-        assert!(before.is_empty());
-        let after = records_since_compacted(&recs);
-        assert_eq!(after.len(), 1);
     }
 }

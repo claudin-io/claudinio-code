@@ -175,37 +175,6 @@ impl LspClient {
         self.send_notification("initialized", serde_json::json!({}))
     }
 
-    pub fn did_open(&mut self, uri: &str, language_id: &str, text: &str) -> Result<(), String> {
-        self.send_notification(
-            "textDocument/didOpen",
-            serde_json::json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": language_id,
-                    "version": 1,
-                    "text": text
-                }
-            }),
-        )
-    }
-
-    pub fn did_change(&mut self, uri: &str, text: &str, version: i64) -> Result<(), String> {
-        self.send_notification(
-            "textDocument/didChange",
-            serde_json::json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": text }]
-            }),
-        )
-    }
-
-    pub fn did_close(&mut self, uri: &str) -> Result<(), String> {
-        self.send_notification(
-            "textDocument/didClose",
-            serde_json::json!({ "textDocument": { "uri": uri } }),
-        )
-    }
-
     pub fn goto_definition(&mut self, uri: &str, line: u64, character: u64) -> Result<Vec<Location>, String> {
         let result = self.send_request(
             "textDocument/definition",
@@ -255,13 +224,6 @@ impl LspClient {
         });
 
         Ok(Some(HoverResult { contents, range }))
-    }
-
-    pub fn shutdown(mut self) -> Result<(), String> {
-        let _ = self.send_request("shutdown", serde_json::json!({}));
-        let _ = self.send_notification("exit", serde_json::json!({}));
-        let _ = self.process.wait();
-        Ok(())
     }
 }
 

@@ -208,6 +208,8 @@ impl ContentBlock {
         }
     }
 
+    /// Extract text from a Text block. Used in tests.
+    #[allow(dead_code)]
     pub fn get_text(&self) -> Option<&str> {
         match self {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -447,7 +449,7 @@ pub async fn stream_message(
                         if let Some(input) = block.get("input") {
                             if !input.is_null() {
                                 let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                let _name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
                                 if let Some(existing) = tool_uses.iter_mut().find(|t| {
                                     t.get("id").and_then(|i| i.as_str()) == Some(id)
                                 }) {
@@ -520,7 +522,7 @@ fn process_line(
     event_type: &str,
     data: &str,
     event_tx: &Channel<AgentEvent>,
-    session_id: &str,
+    _session_id: &str,
     assistant_text: &mut String,
     thinking_text: &mut String,
     text_deltas: &mut Vec<String>,

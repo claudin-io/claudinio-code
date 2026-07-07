@@ -11,7 +11,6 @@ pub struct LspManager {
 
 struct LspServerInstance {
     client: LspClient,
-    language: String,
 }
 
 impl LspManager {
@@ -39,10 +38,7 @@ impl LspManager {
             Ok(client) => {
                 self.servers.insert(
                     "typescript".into(),
-                    LspServerInstance {
-                        client,
-                        language: "typescript".into(),
-                    },
+                    LspServerInstance { client },
                 );
                 Ok(())
             }
@@ -62,10 +58,7 @@ impl LspManager {
             Ok(client) => {
                 self.servers.insert(
                     "rust".into(),
-                    LspServerInstance {
-                        client,
-                        language: "rust".into(),
-                    },
+                    LspServerInstance { client },
                 );
                 Ok(())
             }
@@ -73,18 +66,6 @@ impl LspManager {
                 eprintln!("rust-analyzer failed to start (optional): {e}");
                 Ok(())
             }
-        }
-    }
-
-    pub fn detect_language(file_path: &str) -> Option<&'static str> {
-        let ext = Path::new(file_path).extension()?.to_str()?;
-        match ext {
-            "ts" | "tsx" => Some("typescript"),
-            "js" | "jsx" => Some("javascript"),
-            "rs" => Some("rust"),
-            "py" => Some("python"),
-            "swift" => Some("swift"),
-            _ => None,
         }
     }
 
@@ -99,69 +80,6 @@ impl LspManager {
 
     pub fn get_uri(file_path: &str) -> String {
         path_to_uri(file_path)
-    }
-
-    pub fn get_language_id(file_path: &str) -> Option<&'static str> {
-        let ext = Path::new(file_path).extension()?.to_str()?;
-        match ext {
-            "ts" => Some("typescript"),
-            "tsx" => Some("typescriptreact"),
-            "js" => Some("javascript"),
-            "jsx" => Some("javascriptreact"),
-            "rs" => Some("rust"),
-            "py" => Some("python"),
-            "swift" => Some("swift"),
-            _ => None,
-        }
-    }
-
-    pub fn with_server<F, R>(&mut self, file_path: &str, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut LspClient) -> R,
-    {
-        let key = Self::lsp_key(file_path)?;
-        let instance = self.servers.get_mut(key)?;
-        Some(f(&mut instance.client))
-    }
-
-    pub fn did_open(&mut self, file_path: &str, text: &str) {
-        let key = match Self::lsp_key(file_path) {
-            Some(k) => k,
-            None => return,
-        };
-        let instance = match self.servers.get_mut(key) {
-            Some(i) => i,
-            None => return,
-        };
-        let uri = Self::get_uri(file_path);
-        let lang_id = Self::get_language_id(file_path).unwrap_or("plaintext");
-        let _ = instance.client.did_open(&uri, lang_id, text);
-    }
-
-    pub fn did_change(&mut self, file_path: &str, text: &str, version: i64) {
-        let key = match Self::lsp_key(file_path) {
-            Some(k) => k,
-            None => return,
-        };
-        let instance = match self.servers.get_mut(key) {
-            Some(i) => i,
-            None => return,
-        };
-        let uri = Self::get_uri(file_path);
-        let _ = instance.client.did_change(&uri, text, version);
-    }
-
-    pub fn did_close(&mut self, file_path: &str) {
-        let key = match Self::lsp_key(file_path) {
-            Some(k) => k,
-            None => return,
-        };
-        let instance = match self.servers.get_mut(key) {
-            Some(i) => i,
-            None => return,
-        };
-        let uri = Self::get_uri(file_path);
-        let _ = instance.client.did_close(&uri);
     }
 
     pub fn goto_definition(

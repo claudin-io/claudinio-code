@@ -1,7 +1,6 @@
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::{build_embedding_text, CodeEmbedder, SharedEmbedder};
 use crate::code_intel::parser::{self, ParseResult};
-use std::path::Path;
 use std::time::SystemTime;
 use xxhash_rust::xxh3::xxh3_64;
 use tauri::Emitter;
