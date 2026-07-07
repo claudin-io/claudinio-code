@@ -1081,4 +1081,89 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("unknown tool"), "got: {err}");
     }
+
+    // ── read_file large-file truncation tests ──
+
+    fn write_large_file(name: &str, line_count: usize) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("claudinio_test_{name}"));
+        let lines: Vec<String> = (1..=line_count).map(|i| format!("line{i}")).collect();
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p
+    }
+
+    #[test]
+    fn test_read_file_small_no_truncation() {
+        // Small file (< 5000 tokens) — should return full content, no warning.
+        let p = write_large_file("small_no_trunc", 20);
+        let ctx = test_ctx();
+        let args = serde_json::json!({"path": p.to_string_lossy()});
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert_eq!(content.lines().count(), 20, "should return all 20 lines");
+                assert!(!content.contains("FILE SIZE WARNING"), "should NOT have truncation warning");
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_read_file_large_truncated() {
+        // Large file (> 5000 tokens) — should return warning + truncated content.
+        // Each line "lineN" is ~7 chars → ~2 tokens per line in cl100k_base.
+        // With 5000 lines (~10000 tokens), truncation stops at ~2500 lines (~5000 tokens).
+        // Output = ~9 lines of warning + ~2500 lines content = ~2509 total.
+        let p = write_large_file("large_truncated", 5000);
+        let ctx = test_ctx();
+        let args = serde_json::json!({"path": p.to_string_lossy()});
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert!(
+                    content.contains("FILE SIZE WARNING"),
+                    "should have truncation warning"
+                );
+                assert!(
+                    content.contains("start_line/end_line"),
+                    "should suggest start_line/end_line"
+                );
+                let line_count = content.lines().count();
+                assert!(
+                    line_count < 4900,
+                    "truncated content should have far fewer than 4900 lines, got {line_count}"
+                );
+                assert!(
+                    line_count > 10,
+                    "truncated content should have more than 10 lines, got {line_count}"
+                );
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_read_file_large_with_explicit_range_no_truncation() {
+        // Large file with explicit start_line/end_line — no truncation even if file is huge.
+        let p = write_large_file("large_with_range", 5000);
+        let ctx = test_ctx();
+        let args = serde_json::json!({
+            "path": p.to_string_lossy(),
+            "start_line": 1,
+            "end_line": 10,
+        });
+        let result = futures::executor::block_on(execute("read_file", args, &ctx));
+        let output = result.expect("read_file should succeed");
+        match output {
+            ToolOutput::Text { content } => {
+                assert_eq!(content.lines().count(), 10, "should return exactly 10 lines");
+                assert!(!content.contains("FILE SIZE WARNING"), "should NOT have truncation warning");
+            }
+            _ => panic!("expected Text variant"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
 }
