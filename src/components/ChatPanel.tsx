@@ -38,7 +38,6 @@ import { Icon, toolIcon, type IconName } from "./Icon";
 import { FileMentionPopover } from "./FileMentionPopover";
 import { TagMentionPopover } from "./TagMentionPopover";
 import { SkillMentionPopover } from "./SkillMentionPopover";
-import { SkillChipRenderer } from "./SkillChipRenderer";
 import ContextWarning from "./ContextWarning";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
@@ -1497,19 +1496,10 @@ export const ChatPanel: Component<{
                 <Icon name="construction-worker" class="h-4 w-4" />
               </button>
             </div>
-            <div class="relative flex-1">
-              <textarea
-                ref={inputRef!}
-                value={input()}
-                onScroll={() => {
-                  // Sync overlay scroll with textarea scroll
-                  const overlay = document.getElementById("skill-chip-overlay");
-                  if (overlay && inputRef) {
-                    overlay.scrollTop = inputRef.scrollTop;
-                    overlay.scrollLeft = inputRef.scrollLeft;
-                  }
-                }}
-                onInput={(e) => {
+            <textarea
+              ref={inputRef!}
+              value={input()}
+              onInput={(e) => {
                 const textarea = e.currentTarget;
                 const text = textarea.value;
                 setInput(text);
@@ -1632,18 +1622,9 @@ export const ChatPanel: Component<{
                         ? t("chat.input.steerAgent")
                         : t("chat.input.askCode")
               }
-              class="max-h-[156px] min-h-[32px] flex-1 resize-none border-0 bg-transparent px-1 py-1.5 text-[13px] leading-[18px] text-transparent placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
-              style="caret-color: var(--ink);"
+              class="max-h-[156px] min-h-[32px] flex-1 resize-none border-0 bg-transparent px-1 py-1.5 text-[13px] leading-[18px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
               rows={1}
             />
-            {/* Skill chip overlay on top — mirrors textarea, pointer-events: none, hidden overflow + scroll sync */}
-            <div
-              aria-hidden="true"
-              class="absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-1 py-1.5 text-[13px] leading-[18px] pointer-events-none text-ink"
-              id="skill-chip-overlay"
-            >
-              <SkillChipRenderer text={input()} />
-            </div>
             <Show when={status() === "thinking" || status() === "awaiting_approval"}>
               <button
                 onClick={() => {
