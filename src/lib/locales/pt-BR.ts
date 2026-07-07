@@ -74,6 +74,12 @@ const dict: LocaleDict = {
   "chat.message.failedToSend": "Falha ao enviar: {0}",
   "chat.message.failedToReopen": "Falha ao reabrir: {0}",
   "chat.message.failedToCompact": "Compactação falhou: {0}",
+
+  // ── ChatPanel - Auth Card ─────────────────────────────────
+  "chat.authCard.title": "Autenticação necessária",
+  "chat.authCard.description": "Faça login no claudin.io para enviar mensagens.",
+  "chat.authCard.signIn": "Entrar",
+  "chat.authCard.signingIn": "Entrando…",
   "chat.scrollToBottom": "Ir para o fim",
 
   // ── ChatPanel - Phases ────────────────────────────────────────────

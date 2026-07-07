@@ -12,6 +12,7 @@ import {
   compactSession,
   getSessionStats,
   getConfig,
+  loginWithClaudinio,
   readAttachment,
   setSessionMode,
   normalizeSessionMode,
@@ -726,7 +727,11 @@ export const ChatPanel: Component<{
       setCurrentSteps([]);
       scrollToBottom(true);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToCompact", String(e)) }]);
+      if (String(e).includes("API key not configured")) {
+        setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
+      } else {
+        setMessages((prev) => [...prev, { role: "user" as const, text: t("chat.message.failedToCompact", String(e)) }]);
+      }
     } finally {
       setIsCompacting(false);
     }
@@ -735,6 +740,8 @@ export const ChatPanel: Component<{
   let messagesEndRef: HTMLDivElement | undefined;
   let scrollContainerRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
+  const [pendingMessage, setPendingMessage] = createSignal<string | null>(null);
+  const [authSigningIn, setAuthSigningIn] = createSignal(false);
 
   // Smart scroll: only auto-follow new content while the user is at the
   // bottom. Growing scrollHeight doesn't fire scroll events, so isAtBottom
@@ -1022,6 +1029,24 @@ export const ChatPanel: Component<{
     }
   };
 
+  const handleAuthSignIn = async () => {
+    setAuthSigningIn(true);
+    try {
+      await loginWithClaudinio();
+      setMessages((prev) => prev.filter((m) => !m.text.startsWith('__auth_card__')));
+      const pending = pendingMessage();
+      if (pending) {
+        setPendingMessage(null);
+        setInput(pending);
+        await send();
+      }
+    } catch {
+      // Login failed — card stays visible, user can retry
+    } finally {
+      setAuthSigningIn(false);
+    }
+  };
+
   const send = async () => {
     const text = input().trim();
     if (!text || isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input") return;
@@ -1071,8 +1096,14 @@ export const ChatPanel: Component<{
       setActiveSessionId(result.sessionId);
       setAttachments([]);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToSend", String(e)) }]);
-      setStatus("error");
+      if (String(e).includes("API key not configured")) {
+        setPendingMessage(text);
+        setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
+        setStatus("idle");
+      } else {
+        setMessages((prev) => [...prev, { role: "user" as const, text: t("chat.message.failedToSend", String(e)) }]);
+        setStatus("error");
+      }
     }
   };
 
@@ -1286,6 +1317,20 @@ export const ChatPanel: Component<{
                       {t("chat.message.you")}
                     </span>
                   </div>
+                  <Show when={msg.text === "__auth_card__"}>
+                    <div class="rounded-lg border border-border-subtle bg-surface-1 p-4">
+                      <h3 class="mb-1 text-sm font-semibold text-ink">{t("chat.authCard.title")}</h3>
+                      <p class="mb-3 text-xs text-ink-muted">{t("chat.authCard.description")}</p>
+                      <button
+                        onClick={handleAuthSignIn}
+                        disabled={authSigningIn()}
+                        class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                      >
+                        {authSigningIn() ? t("chat.authCard.signingIn") : t("chat.authCard.signIn")}
+                      </button>
+                    </div>
+                  </Show>
+                  <Show when={msg.text !== "__auth_card__"}>
                   <div class="border-l-2 border-accent/60 pl-3">
                     <p class="whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink">
                       {msg.text}
@@ -1313,6 +1358,7 @@ export const ChatPanel: Component<{
                       </div>
                     </Show>
                   </div>
+                  </Show>
                 </Show>
 
                 <Show when={msg.role === "assistant" && (msg.text || (msg.steps && msg.steps!.length > 0))}>
