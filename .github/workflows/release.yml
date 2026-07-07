@@ -19,12 +19,7 @@ jobs:
             bundle-args: ''
             artifact-name: Claudinio-Code-Windows-x64
 
-          - platform: macos-x64
-            target: x86_64-apple-darwin
-            os: macos-13
-            bundle-args: ''
-            artifact-name: Claudinio-Code-macOS-x64
-
+          # macOS Apple Silicon only (Intel macOS dropped due to runner availability)
           - platform: macos-arm64
             target: aarch64-apple-darwin
             os: macos-latest
@@ -33,7 +28,7 @@ jobs:
 
           - platform: linux-x64
             target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             bundle-args: ''
             artifact-name: Claudinio-Code-Linux-x64
 
@@ -151,7 +146,6 @@ jobs:
             | Platform | File |
             |----------|------|
             | Windows (x64) | `Claudinio-Code-Windows-x64-*.msi` / `*.exe` |
-            | macOS (Intel) | `Claudinio-Code-macOS-x64-*.dmg` |
             | macOS (Apple Silicon) | `Claudinio-Code-macOS-arm64-*.dmg` |
             | Linux (x64) | `Claudinio-Code-Linux-x64-*.deb` / `*.AppImage` |
 
