@@ -36,6 +36,8 @@ import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
 import { FileMentionPopover } from "./FileMentionPopover";
+import { TagMentionPopover } from "./TagMentionPopover";
+import { SkillMentionPopover } from "./SkillMentionPopover";
 import ContextWarning from "./ContextWarning";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
@@ -422,6 +424,13 @@ export const ChatPanel: Component<{
   // @-mention autocomplete state
   const [mentionQuery, setMentionQuery] = createSignal("");
   const [mentionPosition, setMentionPosition] = createSignal<{ top: number; left: number; height: number } | null>(null);
+  // `<` tag / `<skill>` autocomplete state
+  const [tagQuery, setTagQuery] = createSignal("");
+  const [tagPosition, setTagPosition] = createSignal<{ top: number; left: number; height: number } | null>(null);
+  // .top is repurposed as "bottom" distance from viewport bottom for the tag popover
+  const [skillQuery, setSkillQuery] = createSignal("");
+  const [skillPosition, setSkillPosition] = createSignal<{ top: number; left: number; height: number } | null>(null);
+  const [tagFlowStep, setTagFlowStep] = createSignal<"tag" | "skill" | null>(null);
   // Two distinct numbers, both computed by the backend (single source of
   // truth): contextTokens = size of the NEXT request's context (drops after
   // compaction); cumulative totals/cost never reset.
@@ -505,6 +514,93 @@ export const ChatPanel: Component<{
         el.setSelectionRange(pos, pos);
       }
     }, 0);
+  };
+
+  // When user selects "skill" from the tag popover: replace <query with
+  // <skill> and open the skill picker.
+  const handleTagSelect = (tagType: string) => {
+    const text = input();
+    const caret = inputRef?.selectionStart ?? text.length;
+    // Scan backwards to find the < that triggered the popover
+    let atIdx = -1;
+    for (let i = caret - 1; i >= 0; i--) {
+      const ch = text[i];
+      if (ch === " " || ch === "\n" || ch === "@") break;
+      if (ch === "<") { atIdx = i; break; }
+    }
+    if (atIdx < 0) return;
+
+    const before = text.slice(0, atIdx + 1); // include the <
+    const after = text.slice(caret); // after the query
+    // Insert <tagname> (for skill it's <skill>)
+    setInput(`${before}${tagType}>${after}`);
+    setTagQuery("");
+    setTagPosition(null);
+    setTagFlowStep("skill");
+    // Compute new caret position: right after <skill>
+    const insertionEnd = atIdx + 1 + tagType.length + 1; // < + tagType + >
+    setTimeout(() => {
+      const el = inputRef;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(insertionEnd, insertionEnd);
+        // Compute caret pixel position for the skill popover
+        const pos = getCaretCoordinates(el, insertionEnd);
+        const POPOVER_WIDTH = 320;
+        const MARGIN = 8;
+        // Position above: compute bottom distance from viewport bottom
+        const bottom = window.innerHeight - pos.top + 4;
+        let left = pos.left;
+        const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
+        if (left > maxLeft) left = maxLeft;
+        if (left < MARGIN) left = MARGIN;
+        setSkillQuery("");
+        setSkillPosition({ top: bottom, left, height: pos.height });
+      }
+    }, 0);
+  };
+
+  // When user selects a skill: wrap with </skill> and place cursor between tags.
+  const handleSkillSelect = (skillName: string) => {
+    const text = input();
+    const caret = inputRef?.selectionStart ?? text.length;
+    // Find the opening <skill> tag before the caret
+    let skillStart = -1;
+    for (let i = caret - 1; i >= 0; i--) {
+      if (text[i] === " " || text[i] === "\n" || text[i] === "@") break;
+      if (text[i] === "<") { skillStart = i; break; }
+    }
+    if (skillStart < 0) return;
+
+    // <skill> starts at skillStart, length is 7. The query is between
+    // <skill> and the caret.
+    const beforeTag = text.slice(0, skillStart + 7); // up to <skill>
+    const queryStart = skillStart + 7; // right after <skill>
+    const after = text.slice(caret);
+    // Replace the query and close the tag: <skill>skillName</skill>
+    setInput(`${beforeTag}${skillName}</skill>${after}`);
+    // Clear all popover state
+    setSkillQuery("");
+    setSkillPosition(null);
+    setTagFlowStep(null);
+    // Place cursor right after </skill>
+    const cursorPos = queryStart + skillName.length + 8; // 8 = "</skill>".length
+    setTimeout(() => {
+      const el = inputRef;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(cursorPos, cursorPos);
+      }
+    }, 0);
+  };
+
+  // Close all tag/skill popovers
+  const handlePopoverClose = () => {
+    setTagQuery("");
+    setTagPosition(null);
+    setSkillQuery("");
+    setSkillPosition(null);
+    setTagFlowStep(null);
   };
 
   /**
@@ -1065,6 +1161,9 @@ export const ChatPanel: Component<{
     if (e.key === "Enter" && !e.shiftKey) {
       // If @-mention popover is open, let it handle Enter instead of sending
       if (mentionPosition() && mentionQuery().length >= 0) return;
+      // If tag or skill popover is open, let the popover handle Enter
+      if (tagPosition()) return;
+      if (skillPosition()) return;
       e.preventDefault();
       send();
     }
@@ -1439,9 +1538,75 @@ export const ChatPanel: Component<{
 
                   setMentionQuery(query);
                   setMentionPosition({ top, left, height: pos.height });
+                  // Clear tag/skill popovers while @-mention is active
+                  if (tagFlowStep()) handlePopoverClose();
                 } else {
                   setMentionQuery("");
                   setMentionPosition(null);
+                }
+
+                // Detect < tag trigger (only if @-mention popover is not active
+                // and we're not already in the skill selection step)
+                const ltIdx = tagFlowStep() === "skill" ? -1 : (() => {
+                  for (let i = caret - 1; i >= 0; i--) {
+                    const ch = text[i];
+                    if (ch === " " || ch === "\n" || ch === "@") return -1;
+                    if (ch === "<") return i;
+                  }
+                  return -1;
+                })();
+                if (ltIdx >= 0 && mentionPosition() === null) {
+                  const query = text.slice(ltIdx + 1, caret);
+                  // Position popover right above the < character (ltIdx),
+                  // not at the caret — so the popover hugs the < symbol.
+                  const pos = getCaretCoordinates(textarea, ltIdx + 1);
+                  const POPOVER_WIDTH = 220;
+                  const MARGIN = 8;
+                  // Use bottom positioning: popover grows upward from 4px above the < line
+                  const bottom = window.innerHeight - pos.top + 4;
+                  let left = pos.left;
+                  const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
+                  if (left > maxLeft) left = maxLeft;
+                  if (left < MARGIN) left = MARGIN;
+                  setTagQuery(query);
+                  setTagPosition({ top: bottom, left, height: pos.height }); // reuse as { bottom, left }
+                  setTagFlowStep("tag");
+                  // Clear skill popover if we're back to tag selection
+                  setSkillQuery("");
+                  setSkillPosition(null);
+                } else if (tagFlowStep() === "skill" && mentionPosition() === null) {
+                  // We're inside a <skill> context — update the skill query
+                  // Find the text after <skill> and before caret
+                  let skillClose = -1;
+                  for (let i = caret - 1; i >= 0; i--) {
+                    if (text.slice(i, i + 7) === "<skill>") { skillClose = i + 7; break; }
+                    if (text[i] === "\n") break;
+                  }
+                  if (skillClose >= 0) {
+                    const skillQ = text.slice(skillClose, caret);
+                    const pos = getCaretCoordinates(textarea, caret);
+                    const POPOVER_WIDTH = 340;
+                    const MARGIN = 8;
+                    // Position above: compute bottom distance from viewport bottom
+                    const bottom = window.innerHeight - pos.top + 4;
+                    let left = pos.left;
+                    const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
+                    if (left > maxLeft) left = maxLeft;
+                    if (left < MARGIN) left = MARGIN;
+                    setSkillQuery(skillQ);
+                    setSkillPosition({ top: bottom, left, height: pos.height });
+                  } else {
+                    // <skill> text no longer present — close everything
+                    handlePopoverClose();
+                  }
+                  // Clear tag popover
+                  setTagQuery("");
+                  setTagPosition(null);
+                } else if (ltIdx < 0 && tagFlowStep() !== "skill") {
+                  // Not inside any < trigger — close tag popover
+                  setTagQuery("");
+                  setTagPosition(null);
+                  if (tagFlowStep() !== "skill") setTagFlowStep(null);
                 }
               }}
               onKeyDown={handleKeyDown}
@@ -1495,6 +1660,27 @@ export const ChatPanel: Component<{
           query={mentionQuery()}
           onSelect={handleMentionSelect}
           onClose={() => setMentionPosition(null)}
+        />
+      </Show>
+
+      <Show when={tagPosition() !== null && tagFlowStep() === "tag"}>
+        <TagMentionPopover
+          bottom={tagPosition()!.top}
+          left={tagPosition()!.left}
+          query={tagQuery()}
+          onSelect={handleTagSelect}
+          onClose={handlePopoverClose}
+        />
+      </Show>
+
+      <Show when={skillPosition() !== null && tagFlowStep() === "skill"}>
+        <SkillMentionPopover
+          workspace={props.workspace}
+          bottom={skillPosition()!.top}
+          left={skillPosition()!.left}
+          query={skillQuery()}
+          onSelect={handleSkillSelect}
+          onClose={handlePopoverClose}
         />
       </Show>
 
