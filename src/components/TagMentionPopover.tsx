@@ -12,6 +12,7 @@ interface TagType {
 
 const TAGS: TagType[] = [
   { id: "skill", label: "skill", icon: "package", enabled: true },
+  { id: "goal", label: "goal", icon: "goal", enabled: true },
   { id: "agent", label: "agent", icon: "brain", enabled: false },
   { id: "prompt", label: "prompt", icon: "file-text", enabled: false },
 ];

@@ -93,7 +93,62 @@ body,
   -webkit-user-select: text;
 }
 
+/* Golden outline that shimmers like polished gold: the border is a
+   multi-stop metallic gradient (dark bronze → gold → near-white glint)
+   whose position sweeps back and forth, reading as light traveling
+   across the metal. Works on rounded corners via the double-background
+   trick: the first layer repaints the padding-box with the element's
+   fill (override with --gold-fill), the second paints the border-box
+   with the gold gradient. */
+.gold-outline {
+  border: 1.5px solid transparent;
+  background-image:
+    linear-gradient(var(--gold-fill, var(--surface-1)), var(--gold-fill, var(--surface-1))),
+    linear-gradient(
+      115deg,
+      #8a6d1f 0%,
+      #d4af37 14%,
+      #fff3b0 26%,
+      #fffbe6 31%,
+      #d4af37 42%,
+      #7a5c1e 56%,
+      #e6c34d 72%,
+      #fff3b0 82%,
+      #8a6d1f 100%
+    );
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  background-size: 100% 100%, 300% 300%;
+  box-shadow:
+    0 0 6px rgba(212, 175, 55, 0.35),
+    var(--shadow-sm);
+}
+
+[data-theme="light"] .gold-outline {
+  box-shadow:
+    0 0 5px rgba(184, 134, 11, 0.4),
+    var(--shadow-sm);
+}
+
 @media (prefers-reduced-motion: no-preference) {
+  .gold-outline {
+    animation: gold-sheen 2.8s ease-in-out infinite;
+  }
+
+  @keyframes gold-sheen {
+    0%,
+    100% {
+      background-position:
+        0 0,
+        0% 50%;
+    }
+    50% {
+      background-position:
+        0 0,
+        100% 50%;
+    }
+  }
+
   @keyframes rise-in {
     from {
       opacity: 0;

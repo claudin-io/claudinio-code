@@ -549,6 +549,25 @@ export const ChatPanel: Component<{
 
     const before = text.slice(0, atIdx + 1); // include the <
     const after = text.slice(caret); // after the query
+
+    // "goal" has no picker step: insert <goal></goal> and put the cursor
+    // between the tags so the user types the goal text directly.
+    if (tagType === "goal") {
+      setInput(`${before}goal></goal>${after}`);
+      setTagQuery("");
+      setTagPosition(null);
+      setTagFlowStep(null);
+      const cursorPos = atIdx + "<goal>".length;
+      setTimeout(() => {
+        const el = inputRef;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(cursorPos, cursorPos);
+        }
+      }, 0);
+      return;
+    }
+
     // Insert <tagname> (for skill it's <skill>)
     setInput(`${before}${tagType}>${after}`);
     setTagQuery("");
@@ -2101,10 +2120,10 @@ const TimelineSteps: Component<{
           <Show when={step.type === "golden" && step.golden}>
             <div class="my-1 ml-6 flex items-center gap-1.5">
               <span
-                class="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-500"
+                class="gold-outline inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] text-amber-500"
                 title={step.golden!.pending.join(", ")}
               >
-                🎯
+                <Icon name="goal" class="h-3 w-3" />
                 {step.golden!.maxCycles > 0
                   ? t("golden.loop", String(step.golden!.cycle), String(step.golden!.maxCycles), String(step.golden!.pending.length))
                   : t("golden.loop.replay", String(step.golden!.cycle), String(step.golden!.pending.length))}
