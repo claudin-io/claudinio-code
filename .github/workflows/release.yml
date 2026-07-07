@@ -84,7 +84,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          echo "CARGO_ENCODED_RUSTFLAGS=-Clink-args=/FORCE:MULTIPLE" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-Ctarget-feature=-crt-static -Clink-args=/FORCE:MULTIPLE" >> "$GITHUB_ENV"
 
       - name: Build Tauri app
         run: pnpm tauri build
