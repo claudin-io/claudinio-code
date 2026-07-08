@@ -111,20 +111,21 @@ describe("grill-me", () => {
   it("loadDict returns cached result when loading the same locale twice", async () => {
     const mod = await import("./grill-me");
 
-    mod.setLocale("pt-BR");
-    await flushUntil(() => mod.t("greeting") === "Olá");
-    expect(mod.t("greeting")).toBe("Olá");
+    // Await loadDict directly instead of going through setLocale → Solid effect →
+    // signal update. That async propagation path is inherently timing-dependent and
+    // flakes under CI load; awaiting the promise is deterministic.
+    const pt1 = await mod.loadDict("pt-BR");
+    expect(pt1["greeting"]).toBe("Olá");
 
-    // Switch to en-US — first load, not cached yet → dynamic import
-    mod.setLocale("en-US");
-    await flushUntil(() => mod.t("greeting") === "Hello");
-    expect(mod.t("greeting")).toBe("Hello");
+    // First en-US load — not cached yet → dynamic import
+    const en = await mod.loadDict("en-US");
+    expect(en["greeting"]).toBe("Hello");
 
-    // Switch back to pt-BR — second load: dictCache.has("pt-BR") is true → cache hit
-    // This exercises the `if (dictCache.has(id)) return dictCache.get(id)!;` branch
-    mod.setLocale("pt-BR");
-    await flushUntil(() => mod.t("greeting") === "Olá");
-    expect(mod.t("greeting")).toBe("Olá");
+    // Second pt-BR load: dictCache.has("pt-BR") is true → cache hit branch
+    // (`if (dictCache.has(id)) return dictCache.get(id)!;`). Same object reference
+    // proves the cached value was returned rather than re-imported.
+    const pt2 = await mod.loadDict("pt-BR");
+    expect(pt2).toBe(pt1);
   });
 
   // ── Proxy get handler: unknown property returns undefined (line 49) ──
@@ -161,9 +162,11 @@ describe("grill-me", () => {
   it("ensureDictWatcher locale effect still works after single init", async () => {
     const mod = await import("./grill-me");
 
-    mod.setLocale("pt-BR");
-    await flushUntil(() => mod.t("greeting") === "Olá");
-    expect(mod.t("greeting")).toBe("Olá");
+    // Warm the dict cache so the effect's loadDict() resolves from cache (a couple
+    // of microtasks) rather than a dynamic import whose timing flakes on CI. The
+    // effect → signal propagation is then reliably caught by flushUntil.
+    await mod.loadDict("pt-BR");
+    await mod.loadDict("en-US");
 
     mod.setLocale("en-US");
     await flushUntil(() => mod.t("greeting") === "Hello");

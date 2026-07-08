@@ -56,7 +56,8 @@ export const { locale, setLocale } = __localeProxy;
 // ── loader for locale dicts ─────────────────────────────────────────
 const dictCache = new Map<LocaleId, LocaleDict>();
 
-async function loadDict(id: LocaleId): Promise<LocaleDict> {
+/** @internal exported for testing */
+export async function loadDict(id: LocaleId): Promise<LocaleDict> {
   if (dictCache.has(id)) return dictCache.get(id)!;
   let mod: { default: LocaleDict };
   if (id === "pt-BR") {
