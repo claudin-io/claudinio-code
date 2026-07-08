@@ -432,6 +432,7 @@ export const ChatPanel: Component<{
   const [showSessions, setShowSessions] = createSignal(false);
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   const [queuedSteering, setQueuedSteering] = createSignal<string[]>([]);
+  const [retryableError, setRetryableError] = createSignal<string | null>(null);
   // Attachments to send with the next message
   const [attachments, setAttachments] = createSignal<{ name: string; path: string; mediaType: string; size: number }[]>([]);
   const [isDragging, setIsDragging] = createSignal(false);
@@ -903,6 +904,7 @@ export const ChatPanel: Component<{
       } else {
         setCurrentSteps((prev) => [...prev, { type: "text", text }]);
       }
+      setRetryableError(null);
       scrollToBottom();
     } else if (event.event === "Thinking") {
       if (!event.data) return;
@@ -1055,6 +1057,7 @@ export const ChatPanel: Component<{
       setPendingApprovals([]);
       setThinkingStart(0);
       setStatus("done");
+      setRetryableError(null);
       scrollToBottom();
     } else if (event.event === "SessionStats") {
       const data = event.data;
@@ -1069,7 +1072,8 @@ export const ChatPanel: Component<{
       if (data.maxContextTokens) setMaxContextTokens(data.maxContextTokens);
       if (data.compactThreshold) setCompactThreshold(data.compactThreshold);
     } else if (event.event === "Error") {
-      setMessages((prev) => [...prev, { role: "user", text: t("chat.status.error") + ": " + event.data }]);
+      // Don't show error in message list — we render an error bar below input
+      setRetryableError(event.data);
       setCurrentSteps([]);
       setThinkingStart(0);
       setSubagentState({});
@@ -1113,6 +1117,28 @@ export const ChatPanel: Component<{
       // Login failed — card stays visible, user can retry
     } finally {
       setAuthSigningIn(false);
+    }
+  };
+
+  const handleRetryContinue = async () => {
+    if (status() !== "error") return;
+    setRetryableError(null);
+    setCurrentSteps([]);
+    setThinkingStart(0);
+    setStatus("thinking");
+    scrollToBottom(true);
+    try {
+      const result = await sendMessage(
+        props.workspace,
+        "[system] continue from where you stopped",
+        [],
+        handleEvent,
+        mode(),
+      );
+      setActiveSessionId(result.sessionId);
+    } catch (e) {
+      setRetryableError(String(e));
+      setStatus("error");
     }
   };
 
@@ -1562,6 +1588,28 @@ export const ChatPanel: Component<{
               </div>
             )}
           </For>
+        </div>
+      </Show>
+
+      <Show when={retryableError() !== null}>
+        <div class="border-t border-danger/30 bg-danger/5 px-4 py-3">
+          <div class="flex items-center justify-between gap-4">
+            <p class="text-[13px] text-danger shrink-0">{t("chat.status.error")}: {retryableError()}</p>
+            <div class="flex gap-2 shrink-0">
+              <button
+                onClick={() => setRetryableError(null)}
+                class="rounded-md px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-surface-2"
+              >
+                {t("chat.errorBar.dismiss") || "Dismiss"}
+              </button>
+              <button
+                onClick={handleRetryContinue}
+                class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:bg-accent/80"
+              >
+                {t("chat.errorBar.continue") || "Continuar"}
+              </button>
+            </div>
+          </div>
         </div>
       </Show>
 
