@@ -84,7 +84,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          echo "RUSTFLAGS=-Ctarget-feature=-crt-static -Clink-args=/FORCE:MULTIPLE" >> "$GITHUB_ENV"
+          # ort links onnxruntime statically with the static CRT (/MT). All C/C++
+          # deps (esaxx-rs via tokenizers, etc.) must match, otherwise link.exe
+          # fails with LNK2038 RuntimeLibrary mismatch (MD vs MT). Force /MT everywhere.
+          echo "RUSTFLAGS=-Ctarget-feature=+crt-static" >> "$GITHUB_ENV"
 
       - name: Build Tauri app
         run: pnpm tauri build
