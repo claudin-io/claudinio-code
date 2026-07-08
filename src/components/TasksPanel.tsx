@@ -36,7 +36,7 @@ export const TasksPanel: Component<{
   });
 
   const cycleStatus = async (id: string) => {
-    const next: Record<string, string> = {
+    const next: Record<string, TaskItem['status']> = {
       todo: "doing",
       doing: "done",
       done: "todo",

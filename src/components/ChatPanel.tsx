@@ -16,6 +16,7 @@ import {
   readAttachment,
   setSessionMode,
   normalizeSessionMode,
+  pickFiles,
   type SessionMode,
   type ModeChangedData,
   type GoldenLoopData,
@@ -31,7 +32,6 @@ import {
   type SessionSummary,
   type SessionRecord,
   type UserAnswer,
-  type AttachmentData,
 } from "../lib/ipc";
 import { marked } from "marked";
 import hljs from "highlight.js";
@@ -1570,16 +1570,9 @@ export const ChatPanel: Component<{
           <div class="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
             <button
               onClick={async () => {
-                // Use Tauri dialog to pick files
-                const { open } = await import("@tauri-apps/plugin-dialog");
-                const selected = await open({ multiple: true });
-                if (selected) {
-                  const files = Array.isArray(selected) ? selected : [selected];
-                  for (const f of files) {
-                    if (typeof f === "string") {
-                      await addAttachment(f);
-                    }
-                  }
+                const files = await pickFiles();
+                for (const f of files) {
+                  await addAttachment(f);
                 }
               }}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}

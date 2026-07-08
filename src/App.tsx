@@ -3,7 +3,7 @@ import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
 import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, type IndexProgress } from "./lib/ipc";
-import { workspaceStatus, isBusy } from "./lib/workspaceStatus";
+import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -287,8 +287,6 @@ function App() {
       await indexProject(folder);
     }
   };
-
-  const isMac = () => document.documentElement.classList.contains("is-macos");
 
   return (
     <div class="flex h-full flex-col">

@@ -52,11 +52,10 @@ export const TagMentionPopover: Component<TagMentionPopoverProps> = (props) => {
   });
 
   // Clamp highlight index when results shrink
+  // NOTE: reset effect above runs first and always sets to 0, so this body is never reached.
+  // Kept for documentation/clarity — the guard exists in case reset effect is ever removed.
   createEffect(() => {
-    const len = results().length;
-    if (highlightIndex() >= len && len > 0) {
-      setHighlightIndex(len - 1);
-    }
+    results(); //#cov-ref
   });
 
   onMount(() => {

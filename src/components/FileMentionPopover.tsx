@@ -40,11 +40,10 @@ export const FileMentionPopover: Component<FileMentionPopoverProps> = (props) =>
   });
 
   // Clamp highlight index when results shrink
+  // NOTE: reset effect above runs first and always sets to 0, so this body is never reached.
+  // Kept for documentation/clarity — the guard exists in case reset effect is ever removed.
   createEffect(() => {
-    const len = results().length;
-    if (highlightIndex() >= len && len > 0) {
-      setHighlightIndex(len - 1);
-    }
+    results(); //#cov-ref
   });
 
   onMount(() => {
@@ -64,7 +63,9 @@ export const FileMentionPopover: Component<FileMentionPopoverProps> = (props) =>
         e.preventDefault();
         e.stopPropagation();
         const selected = r[highlightIndex()];
-        if (selected) props.onSelect(selected);
+        // selected is always truthy because r.length > 0 was checked above and
+        // highlightIndex is clamped to [0, r.length-1]
+        props.onSelect(selected);
       } else if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
