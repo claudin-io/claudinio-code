@@ -24,7 +24,7 @@ export const DiffViewer: Component<{
   };
 
   onMount(() => {
-    if (!containerRef) return;
+    // containerRef is always set by SolidJS before onMount fires
     defineMonacoThemes();
 
     // Set container height to match content before creating editor

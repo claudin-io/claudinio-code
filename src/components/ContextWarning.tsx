@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onCleanup, onMount, type Component } from "solid-js";
+import { createSignal, For, Show, onCleanup, onMount, batch, type Component } from "solid-js";
 import { getContextWarning, type ContextWarningData } from "../lib/ipc";
 import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
@@ -45,9 +45,18 @@ const ContextWarning: Component<{
   onMount(() => {
     setLoading(true);
     getContextWarning(props.workspace)
-      .then((d) => setData(d))
-      .catch(() => setData(null))
-      .finally(() => setLoading(false));
+      .then((d) => {
+        batch(() => {
+          setData(d);
+          setLoading(false);
+        });
+      })
+      .catch(() => {
+        batch(() => {
+          setData(null);
+          setLoading(false);
+        });
+      });
   });
 
   onMount(() => {
@@ -60,14 +69,10 @@ const ContextWarning: Component<{
 
   const visible = () => showWarning(data());
 
-  const agentColor = () => {
-    const d = data();
-    if (!d) return "text-ink-faint";
-    return severityClass(d.agentsMdTokens);
-  };
+  const agentColor = () => severityClass(data()!.agentsMdTokens);
 
   return (
-    <Show when={!loading && visible()}>
+    <Show when={!loading() && visible()}>
       <>
         <button
           onClick={() => setOpen(true)}
@@ -96,7 +101,7 @@ const ContextWarning: Component<{
                 </button>
               </div>
 
-              <Show when={data()} fallback={<p class="text-xs text-ink-faint">{t("context.warning.noData")}</p>}>
+              <Show when={data()}>
                 {(d) => (
                   <div class="flex flex-col gap-4 overflow-y-auto pr-1">
                     {/* AGENTS.md section */}

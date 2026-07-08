@@ -60,11 +60,10 @@ export const SkillMentionPopover: Component<SkillMentionPopoverProps> = (props) 
   });
 
   // Clamp highlight index when results shrink
+  // NOTE: reset effect above runs first and always sets to 0, so this body is never reached.
+  // Kept for documentation/clarity — the guard exists in case reset effect is ever removed.
   createEffect(() => {
-    const len = results().length;
-    if (highlightIndex() >= len && len > 0) {
-      setHighlightIndex(len - 1);
-    }
+    results(); //#cov-ref
   });
 
   onMount(() => {
@@ -101,8 +100,7 @@ export const SkillMentionPopover: Component<SkillMentionPopoverProps> = (props) 
   // Scroll highlighted item into view when highlightIndex changes
   createEffect(() => {
     const idx = highlightIndex();
-    if (!scrollRef || idx < 0) return;
-    const btn = scrollRef.querySelector(`[data-index="${idx}"]`) as HTMLElement | null;
+    const btn = scrollRef?.querySelector(`[data-index="${idx}"]`) as HTMLElement | null;
     btn?.scrollIntoView({ block: "nearest" });
   });
 

@@ -21,6 +21,12 @@ export async function pickFolder(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
+export async function pickFiles(): Promise<string[]> {
+  const selected = await open({ multiple: true });
+  if (!selected) return [];
+  return Array.isArray(selected) ? selected : [selected];
+}
+
 export interface SessionStarted {
   sessionId: string;
 }
@@ -405,7 +411,7 @@ export interface SymbolRecord {
 
 export function openWorkspace(path: string, onProgress?: (p: IndexProgress) => void): Promise<IndexStatus> {
   const channel = new Channel<IndexProgress>();
-  channel.onmessage = onProgress ?? (() => {});
+  if (onProgress) channel.onmessage = onProgress;
   return invoke<IndexStatus>("open_workspace", { path, progressChannel: channel });
 }
 

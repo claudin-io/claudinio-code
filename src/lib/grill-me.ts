@@ -36,7 +36,7 @@ function getLocaleState() {
   return localeState;
 }
 
-export const { locale, setLocale } = new Proxy(
+export const __localeProxy = new Proxy(
   {} as {
     locale: ReturnType<typeof createLocaleState>["locale"];
     setLocale: ReturnType<typeof createLocaleState>["setLocale"];
@@ -50,6 +50,8 @@ export const { locale, setLocale } = new Proxy(
     },
   },
 );
+
+export const { locale, setLocale } = __localeProxy;
 
 // ── loader for locale dicts ─────────────────────────────────────────
 const dictCache = new Map<LocaleId, LocaleDict>();
@@ -73,7 +75,8 @@ loadDict(getLocaleState().locale()).then((d) => setCurrentDict(d));
 
 // Subscribe to locale changes
 let effectStarted = false;
-function ensureDictWatcher() {
+/** @internal exported for testing */
+export function ensureDictWatcher() {
   if (effectStarted) return;
   effectStarted = true;
   createRoot(() => {
