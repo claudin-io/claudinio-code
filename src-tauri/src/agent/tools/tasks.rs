@@ -21,8 +21,39 @@ pub fn execute_set(
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
     let path = ctx.session_store_path.as_ref().ok_or("session_store_path not set")?;
-    crate::commands::tasks::append_tasks(Path::new(path), &args.tasks)?;
-    Ok(format!("Tasks updated: {} task(s) saved.", args.tasks.len()))
+    let prev = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
+    let (merged, preserved) = merge_preserving_golden(&prev, args.tasks);
+    crate::commands::tasks::append_tasks(Path::new(path), &merged)?;
+    if preserved > 0 {
+        Ok(format!(
+            "Tasks updated: {} task(s) saved. {} golden task(s) are mandatory and were \
+             preserved — golden tasks cannot be deleted, only completed.",
+            merged.len(), preserved
+        ))
+    } else {
+        Ok(format!("Tasks updated: {} task(s) saved.", merged.len()))
+    }
+}
+
+/// Merge an incoming task list with the previous snapshot, guaranteeing that
+/// no golden task is ever dropped. Any golden task present in `prev` whose id
+/// is absent from `incoming` is re-injected (preserving its prior state).
+/// Golden tasks the model *did* include pass through unchanged, so status
+/// updates (todo→doing→done) still work. Returns the merged list and the
+/// number of golden tasks that had to be re-injected.
+pub fn merge_preserving_golden(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<TaskItem>, usize) {
+    use std::collections::HashSet;
+    let incoming_ids: HashSet<&str> = incoming.iter().map(|t| t.id.as_str()).collect();
+    let missing: Vec<TaskItem> = prev
+        .iter()
+        .filter(|t| is_golden(t) && !incoming_ids.contains(t.id.as_str()))
+        .cloned()
+        .collect();
+    let preserved = missing.len();
+    // Re-injected golden tasks go first so they stay prominent in the UI.
+    let mut result = missing;
+    result.extend(incoming);
+    (result, preserved)
 }
 
 /// Create golden tasks from parsed <goal> tags.
@@ -144,6 +175,45 @@ mod golden_tests {
         assert_eq!(slugify("Code Coverage in 80%"), "code-coverage-in-80");
         assert_eq!(slugify("Hello World"), "hello-world");
         assert!(slugify("a very long string with many many characters that exceeds forty chars total").len() <= 40);
+    }
+
+    fn task(id: &str, status: &str) -> TaskItem {
+        TaskItem { id: id.into(), title: "t".into(), description: "".into(), journal: vec![], status: status.into() }
+    }
+
+    #[test]
+    fn test_merge_preserving_golden_blocks_drop() {
+        let prev = vec![task("golden-a-0", "todo"), task("normal", "doing")];
+        // Model tries to replace the list, omitting the golden task.
+        let incoming = vec![task("new-task", "todo")];
+        let (merged, preserved) = merge_preserving_golden(&prev, incoming);
+        assert_eq!(preserved, 1);
+        let golden: Vec<_> = merged.iter().filter(|t| t.id == "golden-a-0").collect();
+        assert_eq!(golden.len(), 1);
+        assert_eq!(golden[0].status, "todo");
+        assert!(merged.iter().any(|t| t.id == "new-task"));
+    }
+
+    #[test]
+    fn test_merge_preserving_golden_status_update_passes_through() {
+        let prev = vec![task("golden-a-0", "todo")];
+        // Model keeps the golden task and marks it done — allowed, no re-injection.
+        let incoming = vec![task("golden-a-0", "done")];
+        let (merged, preserved) = merge_preserving_golden(&prev, incoming);
+        assert_eq!(preserved, 0);
+        let golden: Vec<_> = merged.iter().filter(|t| t.id == "golden-a-0").collect();
+        assert_eq!(golden.len(), 1);
+        assert_eq!(golden[0].status, "done");
+    }
+
+    #[test]
+    fn test_merge_preserving_golden_no_golden() {
+        let prev = vec![task("normal-1", "todo")];
+        let incoming = vec![task("normal-2", "todo")];
+        let (merged, preserved) = merge_preserving_golden(&prev, incoming.clone());
+        assert_eq!(preserved, 0);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "normal-2");
     }
 
     #[test]
