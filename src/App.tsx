@@ -314,7 +314,7 @@ function App() {
 
       <Show when={showConfig()}>
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
-          <div class="w-[400px] rounded-lg bg-surface-1 p-5 shadow-modal">
+          <div class="w-[400px] max-h-[90vh] overflow-y-auto rounded-lg bg-surface-1 p-5 shadow-modal">
             <h2 class="mb-4 text-sm font-semibold text-ink">{t("app.config.title")}</h2>
 
             {/* Lang selector */}
