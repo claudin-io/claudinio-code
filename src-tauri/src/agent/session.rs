@@ -808,11 +808,55 @@ fn roll_cost(
     *cumul_cost_cache = Some(cumul_cost_cache.unwrap_or(0.0) + cc);
 }
 
-/// Estimate cost for provider calls when the provider does not report cost.
-fn cost_for(model: &str, input: u32, cache_read: u32, output: u32) -> f64 {
-    let p = model_pricing(model);
-    (input as f64 * p.input + cache_read as f64 * p.cache_read + output as f64 * p.output)
-        / 1_000_000.0
+/// True for errors worth retrying: network hiccups, stalled connections, and
+/// rate-limit/server errors. False for things that will fail again immediately
+/// (bad auth, malformed request) — retrying those just wastes time.
+fn is_retryable_error(msg: &str) -> bool {
+    if msg.starts_with("stream error:") || msg.starts_with("request failed:") {
+        return true;
+    }
+    if let Some(code) = msg.strip_prefix("API error: HTTP ").and_then(|s| s.parse::<u16>().ok()) {
+        return code == 429 || (500..600).contains(&code);
+    }
+    false
+}
+
+/// Wraps `provider::stream_message` with a retry loop for transient network
+/// failures (stalled streams, dropped connections, 429/5xx). A full 30-minute
+/// hang like the one that killed session 1aafbfbf was silently unrecoverable
+/// before this — a single reqwest error aborted the whole agent run.
+#[allow(clippy::too_many_arguments)]
+async fn stream_message_with_retry(
+    config: &AgentConfig,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDescription],
+    system: Option<&str>,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+    assistant_text: &mut String,
+    interrupt: &AtomicBool,
+) -> Result<provider::StreamOutput, String> {
+    const BACKOFFS_MS: [u64; 3] = [2_000, 5_000, 15_000];
+    let mut attempt = 0usize;
+    loop {
+        assistant_text.clear();
+        let result = provider::stream_message(
+            config, model, messages, tools, system, event_tx, session_id, assistant_text, interrupt,
+        )
+        .await;
+        match result {
+            Ok(out) => return Ok(out),
+            Err(e) if attempt < BACKOFFS_MS.len() && is_retryable_error(&e) => {
+                if interrupt.load(Ordering::SeqCst) {
+                    return Err(e);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(BACKOFFS_MS[attempt])).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub async fn run_workflow(
@@ -947,7 +991,7 @@ pub async fn run_workflow(
 
         let mut assistant_text = String::new();
         let resolved_model = config.model_for_mode(cur_mode.as_str());
-        let stream_output = provider::stream_message(
+        let stream_output = stream_message_with_retry(
             config,
             resolved_model,
             history,
@@ -2407,6 +2451,13 @@ mod tests {
             },
         ];
         assert_eq!(compute_tail_turns(&recs), 0, "oversized tail must be dropped");
+    }
+
+    /// Estimate cost for provider calls when the provider does not report cost.
+    fn cost_for(model: &str, input: u32, cache_read: u32, output: u32) -> f64 {
+        let p = model_pricing(model);
+        (input as f64 * p.input + cache_read as f64 * p.cache_read + output as f64 * p.output)
+            / 1_000_000.0
     }
 
     #[test]

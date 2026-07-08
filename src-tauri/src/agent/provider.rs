@@ -8,6 +8,13 @@ use tauri::ipc::Channel;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Max time to wait for the *next* SSE chunk before treating the connection
+/// as dead. Resets on every chunk received, so a long-but-healthy stream
+/// (many minutes of steady deltas) is never killed by this — only a stalled
+/// connection (e.g. the socket surviving sleep/network-change with no more
+/// bytes coming) is.
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub base_url: String,
@@ -324,7 +331,10 @@ pub async fn stream_message(
     assistant_text: &mut String,
     interrupt: &AtomicBool,
 ) -> Result<StreamOutput, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let body = RequestBody {
         model: model.to_string(),
         // Large tasks (thinking + a whole-file edit in one tool call) easily
@@ -386,7 +396,7 @@ pub async fn stream_message(
     let mut stop_reason: Option<String> = None;
     let mut usage: Option<Usage> = None;
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
         // Check interrupt before processing each chunk
         if interrupt.load(Ordering::SeqCst) {
             // Drop the stream to cancel the HTTP request eagerly
@@ -399,6 +409,12 @@ pub async fn stream_message(
                 interrupted: true,
             });
         }
+
+        let chunk_result = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(r)) => r,
+            Ok(None) => break,
+            Err(_) => return Err("stream error: no data received for 90s, connection stalled".into()),
+        };
 
         let chunk = chunk_result.map_err(|e| format!("stream error: {e}"))?;
         let chunk_str = String::from_utf8_lossy(&chunk);
