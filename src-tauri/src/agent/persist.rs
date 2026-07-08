@@ -101,6 +101,19 @@ pub enum SessionRecord {
         goals: Vec<String>,
         ts: u64,
     },
+    /// The completion judge ran on a terminal `end_turn` (no tool call) and
+    /// decided whether the turn was genuinely finished or merely announced a
+    /// next step it never took. Persisted for observability even though the UI
+    /// does not render it: it is transparent to the user but auditable in the
+    /// JSONL. `verdict` is "done" | "continue"; `nudged` is true when the loop
+    /// injected a continuation nudge as a result.
+    #[serde(rename = "continuation_judge")]
+    ContinuationJudge {
+        verdict: String,
+        nudged: bool,
+        streak: u32,
+        ts: u64,
+    },
 }
 
 /// Number of golden cycles already run in this session (the highest
@@ -452,7 +465,8 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Tasks { ts, .. }
                 | SessionRecord::Mode { ts, .. }
                 | SessionRecord::Status { ts, .. }
-                | SessionRecord::GoldenCycle { ts, .. } => {
+                | SessionRecord::GoldenCycle { ts, .. }
+                | SessionRecord::ContinuationJudge { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
             }
@@ -631,6 +645,33 @@ mod tests {
                 assert_eq!(ts, 100);
             }
             _ => panic!("expected Compacted, got {:?}", back),
+        }
+    }
+
+    #[test]
+    fn continuation_judge_record_serialization() {
+        // The judge decision is transparent to the user (UI renders nothing) but
+        // MUST be auditable in the JSONL — guard the on-disk shape.
+        let rec = SessionRecord::ContinuationJudge {
+            verdict: "continue".into(),
+            nudged: true,
+            streak: 1,
+            ts: 42,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"continuation_judge\""), "got: {json}");
+        assert!(json.contains("\"verdict\":\"continue\""), "got: {json}");
+        assert!(json.contains("\"nudged\":true"), "got: {json}");
+
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionRecord::ContinuationJudge { verdict, nudged, streak, ts } => {
+                assert_eq!(verdict, "continue");
+                assert!(nudged);
+                assert_eq!(streak, 1);
+                assert_eq!(ts, 42);
+            }
+            _ => panic!("expected ContinuationJudge, got {:?}", back),
         }
     }
 
