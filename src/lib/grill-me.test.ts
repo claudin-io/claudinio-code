@@ -43,6 +43,23 @@ vi.mock("./locales/en-US", () => ({
   },
 }));
 
+// Solid 1.9 schedules effects via MessageChannel, whose callbacks fire in the
+// Node "Check" phase — the same phase as setImmediate, and AFTER timers. So we
+// flush with setImmediate (not setTimeout/vi.waitFor, which polls in the Timer
+// phase and can fail to let the Solid effect run). Each cycle also drains
+// microtasks so the loadDict().then(setCurrentDict) handler applies. We poll
+// until the expectation holds rather than a fixed count, so it never flakes on
+// slow CI; the cap only bounds a genuine hang. grill-me's "latest locale wins"
+// guard makes this deterministic even across the shared module state vitest
+// reuses between tests in a file.
+async function flushUntil(cond: () => boolean, maxCycles = 500) {
+  for (let i = 0; i < maxCycles; i++) {
+    if (cond()) return;
+    await new Promise((r) => setImmediate(r));
+    await Promise.resolve();
+  }
+}
+
 describe("grill-me", () => {
   it("exports FLAGS with correct emoji for each locale", async () => {
     const { FLAGS } = await import("./grill-me");
@@ -94,38 +111,19 @@ describe("grill-me", () => {
   it("loadDict returns cached result when loading the same locale twice", async () => {
     const mod = await import("./grill-me");
 
-    // Solid 1.9 uses MessageChannel for scheduling. In Node.js, MessageChannel
-    // events fire in the "Check" phase (same as setImmediate), AFTER timers.
-    // The Solid effect fires → loadDict() → .then(setCurrentDict). The number of
-    // flush cycles this takes is not fixed: under CI load (parallel workers) it
-    // can take many more than a handful, so a fixed loop count flakes. Instead,
-    // poll — flush Check phase + microtasks — until the expectation holds.
-    async function settle(until?: () => boolean) {
-      for (let i = 0; i < 200; i++) {
-        if (until?.()) return;
-        await new Promise((r) => setImmediate(r));
-        await Promise.resolve();
-      }
-    }
-
-    // Flush any pending effects from the previous test first
-    // (vitest caches modules across tests)
-    await settle();
-
-    // Force to pt-BR and wait for the effect + import to settle
     mod.setLocale("pt-BR");
-    await settle(() => mod.t("greeting") === "Olá");
+    await flushUntil(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
 
     // Switch to en-US — first load, not cached yet → dynamic import
     mod.setLocale("en-US");
-    await settle(() => mod.t("greeting") === "Hello");
+    await flushUntil(() => mod.t("greeting") === "Hello");
     expect(mod.t("greeting")).toBe("Hello");
 
     // Switch back to pt-BR — second load: dictCache.has("pt-BR") is true → cache hit
     // This exercises the `if (dictCache.has(id)) return dictCache.get(id)!;` branch
     mod.setLocale("pt-BR");
-    await settle(() => mod.t("greeting") === "Olá");
+    await flushUntil(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
   });
 
@@ -163,24 +161,16 @@ describe("grill-me", () => {
   it("ensureDictWatcher locale effect still works after single init", async () => {
     const mod = await import("./grill-me");
 
-    async function settle(until?: () => boolean) {
-      for (let i = 0; i < 200; i++) {
-        if (until?.()) return;
-        await new Promise((r) => setImmediate(r));
-        await Promise.resolve();
-      }
-    }
-
     mod.setLocale("pt-BR");
-    await settle(() => mod.t("greeting") === "Olá");
+    await flushUntil(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
 
     mod.setLocale("en-US");
-    await settle(() => mod.t("greeting") === "Hello");
+    await flushUntil(() => mod.t("greeting") === "Hello");
     expect(mod.t("greeting")).toBe("Hello");
 
     mod.setLocale("pt-BR");
-    await settle(() => mod.t("greeting") === "Olá");
+    await flushUntil(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
   });
 });
