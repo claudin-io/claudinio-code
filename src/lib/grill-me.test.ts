@@ -96,10 +96,13 @@ describe("grill-me", () => {
 
     // Solid 1.9 uses MessageChannel for scheduling. In Node.js, MessageChannel
     // events fire in the "Check" phase (same as setImmediate), AFTER timers.
-    // We flush both the Check phase (Solid effect fires → loadDict() is called)
-    // and subsequent microtasks (.then(setCurrentDict) handlers).
-    async function settle() {
-      for (let i = 0; i < 5; i++) {
+    // The Solid effect fires → loadDict() → .then(setCurrentDict). The number of
+    // flush cycles this takes is not fixed: under CI load (parallel workers) it
+    // can take many more than a handful, so a fixed loop count flakes. Instead,
+    // poll — flush Check phase + microtasks — until the expectation holds.
+    async function settle(until?: () => boolean) {
+      for (let i = 0; i < 200; i++) {
+        if (until?.()) return;
         await new Promise((r) => setImmediate(r));
         await Promise.resolve();
       }
@@ -111,18 +114,18 @@ describe("grill-me", () => {
 
     // Force to pt-BR and wait for the effect + import to settle
     mod.setLocale("pt-BR");
-    await settle();
+    await settle(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
 
     // Switch to en-US — first load, not cached yet → dynamic import
     mod.setLocale("en-US");
-    await settle();
+    await settle(() => mod.t("greeting") === "Hello");
     expect(mod.t("greeting")).toBe("Hello");
 
     // Switch back to pt-BR — second load: dictCache.has("pt-BR") is true → cache hit
     // This exercises the `if (dictCache.has(id)) return dictCache.get(id)!;` branch
     mod.setLocale("pt-BR");
-    await settle();
+    await settle(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
   });
 
@@ -160,23 +163,24 @@ describe("grill-me", () => {
   it("ensureDictWatcher locale effect still works after single init", async () => {
     const mod = await import("./grill-me");
 
-    async function settle() {
-      for (let i = 0; i < 5; i++) {
+    async function settle(until?: () => boolean) {
+      for (let i = 0; i < 200; i++) {
+        if (until?.()) return;
         await new Promise((r) => setImmediate(r));
         await Promise.resolve();
       }
     }
 
     mod.setLocale("pt-BR");
-    await settle();
+    await settle(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
 
     mod.setLocale("en-US");
-    await settle();
+    await settle(() => mod.t("greeting") === "Hello");
     expect(mod.t("greeting")).toBe("Hello");
 
     mod.setLocale("pt-BR");
-    await settle();
+    await settle(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
   });
 });
