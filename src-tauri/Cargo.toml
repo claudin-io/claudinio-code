@@ -109,7 +109,12 @@ notify = "8"
 notify-debouncer-mini = "0.5"
 dirs = "6"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
-tokenizers = "0.23"
+# default drops "esaxx_fast": it pulls esaxx-rs, a C++ lib that force-builds
+# with the static CRT (/MT), which clashes on Windows with ort's prebuilt
+# onnxruntime (dynamic CRT, /MD) — no CRT flag can satisfy both. esaxx_fast only
+# speeds up Unigram *training*; inference/encoding doesn't need it. "onig" is
+# kept for the Oniguruma-backed pre-tokenizers used at encode time.
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 tiktoken-rs = "0.6"
 serde_yaml = "0.9"
 sha2 = "0.10"
