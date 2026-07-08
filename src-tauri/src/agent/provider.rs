@@ -320,6 +320,85 @@ pub struct StreamOutput {
     pub interrupted: bool,
 }
 
+/// System prompt for the completion judge. Deliberately demands a single
+/// sentinel token so the caller never has to parse natural language — this is
+/// what keeps the mechanism language-agnostic (the judged text may be in any
+/// language the UI supports, but the answer is always CONTINUE / DONE).
+const COMPLETION_JUDGE_SYSTEM: &str = "You are a strict classifier inside an agentic coding harness. \
+You are given the assistant's final message of a turn that ended WITHOUT calling any tool. \
+Decide whether the turn is genuinely complete, or whether the assistant merely announced or \
+implied an immediate next step (e.g. said it would ask the user a question, spawn subagents, \
+read a file, run a command, or make an edit) but stopped before actually doing it. \
+Answer with EXACTLY ONE WORD and nothing else: \
+CONTINUE if the assistant promised or implied a next action it did not take, \
+or if the message is clearly cut off mid-thought; \
+DONE if the message is a complete, self-contained reply that needs no further action right now. \
+The message may be in any language; your one-word answer must still be CONTINUE or DONE.";
+
+/// Non-streaming, single-shot classification call used by the workflow loop to
+/// decide whether a terminal `end_turn` is a real finish or a dangling promise.
+/// Returns the model's raw reply (expected to contain CONTINUE or DONE); the
+/// caller maps it to a verdict. Kept small (tiny max_tokens, no tools) so it is
+/// cheap enough to run on every terminal turn.
+pub async fn classify_turn_completion(
+    config: &AgentConfig,
+    model: &str,
+    assistant_text: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    let body = RequestBody {
+        model: model.to_string(),
+        // The Brain model is a thinking model: it burns output tokens on a
+        // reasoning block before the one-word verdict. Too small a cap (e.g. 8)
+        // is entirely consumed by thinking and yields an empty answer, so leave
+        // ample headroom — the answer itself is still a single token.
+        max_tokens: 1024,
+        stream: false,
+        messages: vec![Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text(format!(
+                "Assistant's final message of the turn:\n\n{assistant_text}"
+            ))],
+        }],
+        tools: None,
+        system: Some(COMPLETION_JUDGE_SYSTEM.to_string()),
+    };
+    let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("x-api-key", &config.api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("API error: HTTP {}", response.status()));
+    }
+    let json: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse judge response: {e}"))?;
+    // Anthropic-shaped response: { "content": [ { "type": "text", "text": "..." } ] }
+    let reply = json
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    Ok(reply)
+}
+
 pub async fn stream_message(
     config: &AgentConfig,
     model: &str,

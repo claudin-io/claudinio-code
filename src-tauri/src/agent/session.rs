@@ -821,6 +821,58 @@ fn is_retryable_error(msg: &str) -> bool {
     false
 }
 
+/// How a terminal `end_turn` (no tool call) should be handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnVerdict {
+    /// A complete, self-contained reply — end the run normally.
+    Done,
+    /// The model announced/implied an immediate next step (ask the user, spawn
+    /// subagents, read a file, edit code…) but ended without taking it. The run
+    /// must not go idle here — nudge the model to actually act and loop again.
+    Continue,
+}
+
+/// Map the completion-judge model's reply to a verdict. Kept separate from the
+/// HTTP call so the parsing is deterministic and unit-testable, and — crucially —
+/// language-agnostic: the judge is instructed to answer with a fixed sentinel
+/// token, never natural-language prose, so no per-language keyword list is ever
+/// needed here (new UI languages need no changes).
+///
+/// Fails safe toward `Done`: an unrecognizable reply ends the run rather than
+/// risking a spurious extra loop.
+fn parse_turn_verdict(reply: &str) -> TurnVerdict {
+    let norm = reply.trim().to_ascii_uppercase();
+    // Accept the token anywhere in the reply so a chatty model ("CONTINUE — it
+    // said it would ask a question") is still handled correctly. CONTINUE wins
+    // ties: if the judge is unsure enough to emit both, keep working.
+    if norm.contains("CONTINUE") {
+        TurnVerdict::Continue
+    } else if norm.contains("DONE") {
+        TurnVerdict::Done
+    } else {
+        TurnVerdict::Done
+    }
+}
+
+/// Ask the model itself whether a terminal turn is genuinely finished or merely
+/// announced a next step it never took (the failure that stalled session
+/// 912bb460: "Primeiro, preciso confirmar algo sobre o tempo:" with no tool
+/// call, and the twin case where it said it would spawn subagents and didn't).
+///
+/// Uses the LLM instead of hardcoded phrases so it works in any language the UI
+/// ever adds. Fails safe toward `Done` on any error — a judge outage must never
+/// wedge the loop or fabricate an infinite continuation.
+async fn judge_terminal_turn(
+    config: &AgentConfig,
+    model: &str,
+    assistant_text: &str,
+) -> TurnVerdict {
+    match crate::agent::provider::classify_turn_completion(config, model, assistant_text).await {
+        Ok(reply) => parse_turn_verdict(&reply),
+        Err(_) => TurnVerdict::Done,
+    }
+}
+
 /// Wraps `provider::stream_message` with a retry loop for transient network
 /// failures (stalled streams, dropped connections, 429/5xx). A full 30-minute
 /// hang like the one that killed session 1aafbfbf was silently unrecoverable
@@ -968,6 +1020,7 @@ pub async fn run_workflow(
     let mut last_context: u64 = estimate_tokens(history, &system, &tools);
     let mut truncation_streak: u32 = 0;
     let mut empty_streak: u32 = 0;
+    let mut unfinished_streak: u32 = 0;
 
     // Golden-goals loop state. The cycle counter resumes from the session's
     // records so a restart doesn't reset the cap mid-loop.
@@ -1220,6 +1273,49 @@ pub async fn run_workflow(
             if inject_steering(history, store, steering, event_tx) {
                 continue;
             }
+            // A terminal end_turn whose text only *announces* a next step
+            // ("Primeiro vou confirmar…:", "Vou explorar com subagentes:") but
+            // carries no tool call is a model glitch, not a finish — the agent
+            // narrated its intent and stopped instead of acting, leaving the run
+            // dangling mid-task. Ask the model itself (language-agnostic, no
+            // hardcoded phrases) whether the turn is really done; if not, nudge
+            // it to actually take the action. Bounded so a genuinely-final reply
+            // the judge misreads can't loop forever.
+            if !last_text.is_empty() && unfinished_streak < 2 {
+                // Always judge with the Brain model (planning/reasoning), never
+                // the Builder model, regardless of the session's current mode.
+                let judge_model = config.model_for_mode(SessionMode::Brain.as_str());
+                let verdict = judge_terminal_turn(config, judge_model, &last_text).await;
+                let will_nudge = verdict == TurnVerdict::Continue;
+                // Transparent to the user (no event emitted, UI renders nothing)
+                // but auditable: persist the judge's decision to the JSONL.
+                store.try_append(&SessionRecord::ContinuationJudge {
+                    verdict: match verdict {
+                        TurnVerdict::Continue => "continue".into(),
+                        TurnVerdict::Done => "done".into(),
+                    },
+                    nudged: will_nudge,
+                    streak: unfinished_streak + if will_nudge { 1 } else { 0 },
+                    ts: now_ms(),
+                });
+                if will_nudge {
+                    unfinished_streak += 1;
+                    push_user_blocks(
+                        history,
+                        store,
+                        vec![ContentBlock::text(
+                            "[system] Your previous message announced a next step \
+                             but ended without taking it — no tool call followed. \
+                             Do not stop here. Continue now and actually perform the \
+                             action you described: call the appropriate tool (e.g. \
+                             ask the user, spawn the subagents, read the file, make \
+                             the edit). If the task is genuinely complete, instead \
+                             reply with a short final summary of what was done.",
+                        )],
+                    );
+                    continue;
+                }
+            }
             // Golden verification: an end_turn with golden tasks still pending
             // is not a real finish — flip Brain↔Builder and send the model
             // back to work, bounded by the cycle and stall caps.
@@ -1331,6 +1427,10 @@ pub async fn run_workflow(
             });
             return Ok(());
         }
+
+        // The model recovered and is taking an action — reset the dangling-promise
+        // guard so the cap only counts *consecutive* announce-but-don't-act turns.
+        unfinished_streak = 0;
 
         // The model wants to use tools: the assistant message carries the
         // (optional) text plus every tool_use block; the following user message
@@ -2493,6 +2593,197 @@ mod tests {
     fn compact_threshold_is_75_percent_of_window() {
         assert_eq!(MAX_CONTEXT_TOKENS, 256_000);
         assert_eq!(COMPACT_THRESHOLD, 192_000);
+    }
+
+    // --- completion-judge verdict parsing (harness must never go idle after
+    // the model merely announces a next step without taking it) ---
+    //
+    // The decision is delegated to the Brain model at runtime (language-agnostic,
+    // no hardcoded phrase lists), so the only pure logic to unit-test here is how
+    // the judge's one-word reply maps to a verdict. The live HTTP path is covered
+    // by `judge_backend_mock` below against a stubbed /v1/messages server.
+
+    #[test]
+    fn verdict_continue_when_reply_says_continue() {
+        assert_eq!(parse_turn_verdict("CONTINUE"), TurnVerdict::Continue);
+        assert_eq!(parse_turn_verdict(" continue "), TurnVerdict::Continue);
+        // Chatty models: token embedded in prose still counts.
+        assert_eq!(
+            parse_turn_verdict("CONTINUE — it said it would ask a question"),
+            TurnVerdict::Continue
+        );
+    }
+
+    #[test]
+    fn verdict_done_when_reply_says_done() {
+        assert_eq!(parse_turn_verdict("DONE"), TurnVerdict::Done);
+        assert_eq!(parse_turn_verdict("done.\n"), TurnVerdict::Done);
+    }
+
+    #[test]
+    fn verdict_fails_safe_to_done_on_garbage() {
+        // Unrecognizable / empty replies end the run rather than risk a spurious
+        // extra loop.
+        assert_eq!(parse_turn_verdict(""), TurnVerdict::Done);
+        assert_eq!(parse_turn_verdict("¯\\_(ツ)_/¯"), TurnVerdict::Done);
+    }
+
+    #[test]
+    fn verdict_continue_wins_when_both_tokens_present() {
+        // If the judge hedges and emits both, keep working.
+        assert_eq!(
+            parse_turn_verdict("not DONE, you should CONTINUE"),
+            TurnVerdict::Continue
+        );
+    }
+}
+
+/// Backend/mock coverage for the completion judge: spin a throwaway local HTTP
+/// server that answers `/v1/messages` with a canned Anthropic-shaped body, point
+/// an AgentConfig at it, and assert the judge maps the reply to the right
+/// verdict. No external network, no mock crate — just tokio (already a dep).
+#[cfg(test)]
+mod judge_backend_tests {
+    use super::*;
+    use crate::agent::provider::{classify_turn_completion, AgentConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Start a one-shot HTTP server that replies to a single request with the
+    /// given `content` text wrapped in an Anthropic messages response. Returns
+    /// the base URL to point the client at.
+    async fn spawn_stub(content: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Serve every connection (a test may make several judge calls).
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                // Drain the request headers enough to not RST the client; we
+                // don't need the body for the stub.
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let body = serde_json::json!({
+                    "content": [ { "type": "text", "text": content } ]
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn cfg_for(base_url: String) -> AgentConfig {
+        AgentConfig {
+            base_url,
+            api_key: "test-key".into(),
+            ..AgentConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_backend_mock_continue() {
+        let base = spawn_stub("CONTINUE").await;
+        let cfg = cfg_for(base);
+        let reply = classify_turn_completion(&cfg, "claudinio", "Primeiro vou confirmar:")
+            .await
+            .unwrap();
+        assert_eq!(parse_turn_verdict(&reply), TurnVerdict::Continue);
+        assert_eq!(
+            judge_terminal_turn(&cfg, "claudinio", "Primeiro vou confirmar:").await,
+            TurnVerdict::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn judge_backend_mock_done() {
+        let base = spawn_stub("DONE").await;
+        let cfg = cfg_for(base);
+        let verdict = judge_terminal_turn(&cfg, "claudinio", "Tudo pronto, testes passaram.").await;
+        assert_eq!(verdict, TurnVerdict::Done);
+    }
+
+    #[tokio::test]
+    async fn judge_fails_safe_to_done_when_backend_unreachable() {
+        // Nothing listening here — the request errors and the judge must NOT
+        // wedge the loop: it falls back to Done.
+        let cfg = cfg_for("http://127.0.0.1:1".into());
+        let verdict = judge_terminal_turn(&cfg, "claudinio", "Vou explorar com subagentes:").await;
+        assert_eq!(verdict, TurnVerdict::Done);
+    }
+
+    /// Extract the text of the LAST assistant Turn from a session JSONL — the
+    /// dangling message the run ended on.
+    fn last_assistant_text(jsonl: &str) -> Option<String> {
+        jsonl
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("turn")
+                && v.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            .filter_map(|v| {
+                v.get("content").and_then(|c| c.as_array()).map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+            })
+            .filter(|s| !s.trim().is_empty())
+            .last()
+    }
+
+    /// End-to-end reproduction of the stall: replay the real session that
+    /// stopped (912bb460), take the exact dangling assistant message it ended
+    /// on, and ask the LIVE Brain model whether the turn was finished. It must
+    /// answer CONTINUE — proving the harness would have kept going instead of
+    /// going idle.
+    ///
+    /// Ignored by default (needs network + a key). Run with:
+    ///   CLAUDINIO_API_KEY=sk-… cargo test --lib judge_real_api_replays -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "hits the live claudin.io API; requires CLAUDINIO_API_KEY"]
+    async fn judge_real_api_replays_stalled_session() {
+        let Ok(api_key) = std::env::var("CLAUDINIO_API_KEY") else {
+            eprintln!("skipping: CLAUDINIO_API_KEY not set");
+            return;
+        };
+        let jsonl = std::fs::read_to_string(
+            "/Users/victortavernari/claudinio_code/.claudinio/sessions/912bb460-7e9b-459a-968d-eb506e5e9ec9.jsonl",
+        )
+        .expect("session jsonl readable");
+        let dangling = last_assistant_text(&jsonl).expect("a final assistant message");
+        eprintln!("--- dangling final message ---\n{dangling}\n------------------------------");
+        assert!(
+            dangling.trim_end().ends_with(':'),
+            "sanity: the replayed message is the mid-thought that stalled the run"
+        );
+        let cfg = AgentConfig {
+            base_url: "https://api.claudin.io".into(),
+            api_key,
+            ..AgentConfig::default()
+        };
+        // Judge with the Brain model, exactly as the harness does.
+        let brain = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
+        let reply = classify_turn_completion(&cfg, &brain, &dangling)
+            .await
+            .expect("live judge call");
+        eprintln!("--- live judge reply: {reply:?} ---");
+        assert_eq!(
+            parse_turn_verdict(&reply),
+            TurnVerdict::Continue,
+            "the live Brain model must recognise the dangling promise as unfinished"
+        );
     }
 }
 
