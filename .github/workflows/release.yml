@@ -84,10 +84,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          # ort links onnxruntime statically with the static CRT (/MT). All C/C++
-          # deps (esaxx-rs via tokenizers, etc.) must match, otherwise link.exe
-          # fails with LNK2038 RuntimeLibrary mismatch (MD vs MT). Force /MT everywhere.
-          echo "RUSTFLAGS=-Ctarget-feature=+crt-static" >> "$GITHUB_ENV"
+          # ort's prebuilt onnxruntime uses the dynamic CRT (/MD, msvcprt), which is
+          # also the MSVC default for Rust. Keep the whole build on /MD so nothing
+          # pulls the static C++ runtime (libcpmt) and duplicates its symbols
+          # (LNK2005/LNK1169). The other C++ CRT outlier, esaxx-rs, is removed by
+          # dropping tokenizers' esaxx_fast feature (see src-tauri/Cargo.toml).
+          echo "RUSTFLAGS=-Ctarget-feature=-crt-static" >> "$GITHUB_ENV"
 
       - name: Build Tauri app
         run: pnpm tauri build
