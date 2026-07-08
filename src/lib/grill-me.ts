@@ -70,8 +70,12 @@ async function loadDict(id: LocaleId): Promise<LocaleDict> {
 
 const [currentDict, setCurrentDict] = createRoot(() => createSignal<LocaleDict>({}));
 
-// Lazy-load the initial dict
-loadDict(getLocaleState().locale()).then((d) => setCurrentDict(d));
+// Lazy-load the initial dict. Guard against a stale load clobbering a newer
+// locale: only apply the result if the requested locale is still current.
+const initialLocale = getLocaleState().locale();
+loadDict(initialLocale).then((d) => {
+  if (getLocaleState().locale() === initialLocale) setCurrentDict(d);
+});
 
 // Subscribe to locale changes
 let effectStarted = false;
@@ -82,7 +86,12 @@ export function ensureDictWatcher() {
   createRoot(() => {
     createEffect(() => {
       const id = getLocaleState().locale();
-      loadDict(id).then((d) => setCurrentDict(d));
+      // Only the latest requested locale wins: a slower earlier load must not
+      // overwrite a newer one that already resolved (loads race, order isn't
+      // guaranteed). Without this, rapid locale switches settle on the wrong dict.
+      loadDict(id).then((d) => {
+        if (getLocaleState().locale() === id) setCurrentDict(d);
+      });
     });
   });
 }
