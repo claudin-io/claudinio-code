@@ -366,7 +366,6 @@ pub async fn stream_message(
         } else {
             format!("API error: HTTP {status}")
         };
-        let _ = event_tx.send(AgentEvent::Error(err_msg.clone()));
         return Err(err_msg);
     }
 

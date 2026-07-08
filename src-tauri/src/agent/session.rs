@@ -837,7 +837,7 @@ async fn stream_message_with_retry(
     assistant_text: &mut String,
     interrupt: &AtomicBool,
 ) -> Result<provider::StreamOutput, String> {
-    const BACKOFFS_MS: [u64; 3] = [2_000, 5_000, 15_000];
+    const BACKOFFS_MS: [u64; 8] = [2_000, 5_000, 15_000, 30_000, 60_000, 120_000, 180_000, 300_000];
     let mut attempt = 0usize;
     loop {
         assistant_text.clear();
