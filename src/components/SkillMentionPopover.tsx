@@ -3,6 +3,7 @@ import { Portal } from "solid-js/web";
 import Fuse from "fuse.js";
 import { listSkills, type SkillEntry } from "../lib/ipc";
 import { Icon } from "./Icon";
+import { t } from "../lib/grill-me";
 
 interface SkillMentionPopoverProps {
   workspace: string;
@@ -123,7 +124,7 @@ export const SkillMentionPopover: Component<SkillMentionPopoverProps> = (props) 
             <Show
               when={results().length > 0}
               fallback={
-                <div class="px-3 py-2 text-[12px] text-ink-faint">No skills found</div>
+                <div class="px-3 py-2 text-[12px] text-ink-faint">{t("mention.noSkills")}</div>
               }
             >
               <For each={results()}>
