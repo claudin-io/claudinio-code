@@ -97,6 +97,14 @@ pub async fn send_message(
     let ws = state.workspace(&workspace).await?;
     let workspace_root = Some(ws.root.to_string_lossy().to_string());
 
+    // Load workspace-level config (.claudinio.json) and merge over local config
+    let mut config = config;
+    if let Some(ref root) = workspace_root {
+        if let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root) {
+            crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
+        }
+    }
+
     // Continue the workspace's active session, or start a fresh one persisted
     // to its own JSONL file.
     let handle = {
@@ -159,6 +167,7 @@ pub async fn send_message(
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
+        plan_save_path: config.plan_save_path.clone(),
     };
 
     let residual = steering.drain();
@@ -428,6 +437,7 @@ pub struct SetConfigArgs {
     pub yolo_blacklist: Option<Vec<String>>,
     pub max_golden_cycles: Option<Option<usize>>,
     pub max_golden_stalls: Option<Option<usize>>,
+    pub plan_save_path: Option<String>,
 }
 
 #[tauri::command]
@@ -466,15 +476,34 @@ pub async fn set_config(
     if let Some(max_golden_stalls) = args.max_golden_stalls {
         cfg.max_golden_stalls = max_golden_stalls;
     }
+    if let Some(plan_save_path) = args.plan_save_path {
+        cfg.plan_save_path = if plan_save_path.is_empty() {
+            None
+        } else {
+            Some(plan_save_path)
+        };
+    }
     save_config(&cfg);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn get_config(
+    workspace: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    let cfg = state.config.lock().await;
+    let mut cfg = state.config.lock().await;
+
+    // Load workspace config and merge if a workspace is specified
+    let workspace_config = if let Some(ref ws_root) = workspace {
+        crate::agent::provider::read_workspace_config(ws_root)
+    } else {
+        None
+    };
+    if let Some(ref ws) = workspace_config {
+        crate::agent::provider::merge_workspace_config(&mut cfg, ws);
+    }
+
     Ok(serde_json::json!({
         "baseUrl": cfg.base_url,
         "brainModel": cfg.brain_model,
@@ -490,6 +519,8 @@ pub async fn get_config(
         "accountTier": cfg.account_tier,
         "maxGoldenCycles": cfg.max_golden_cycles,
         "maxGoldenStalls": cfg.max_golden_stalls,
+        "planSavePath": cfg.plan_save_path,
+        "workspaceConfig": workspace_config,
     }))
 }
 
@@ -628,6 +659,7 @@ pub async fn compact_session(
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
+        plan_save_path: config.plan_save_path.clone(),
     };
 
     let summary = session::compact_history(
@@ -723,4 +755,37 @@ pub async fn interrupt_session(
         }
         None => Err("session not running".into()),
     }
+}
+
+/// Write a value to the workspace-level `.claudinio.json` config file.
+/// Creates the file if it doesn't exist; updates only the specified key.
+#[tauri::command]
+pub async fn set_workspace_config(
+    workspace_root: String,
+    plan_save_path: Option<String>,
+) -> Result<(), String> {
+    let config_path = Path::new(&workspace_root).join(".claudinio.json");
+    let mut cfg: Value = if config_path.exists() {
+        std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if let Some(obj) = cfg.as_object_mut() {
+        match plan_save_path {
+            Some(ref path) if !path.is_empty() => {
+                obj.insert("plan_save_path".into(), Value::String(path.clone()));
+            }
+            _ => {
+                obj.insert("plan_save_path".into(), Value::Null);
+            }
+        }
+    }
+    let json = serde_json::to_string_pretty(&cfg)
+        .map_err(|e| format!("serialize .claudinio.json: {e}"))?;
+    std::fs::write(&config_path, json)
+        .map_err(|e| format!("write .claudinio.json: {e}"))?;
+    Ok(())
 }

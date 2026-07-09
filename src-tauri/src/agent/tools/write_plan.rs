@@ -32,8 +32,23 @@ fn slugify(name: &str) -> String {
     slug
 }
 
-pub fn plans_dir(workspace_root: &str) -> PathBuf {
-    PathBuf::from(workspace_root).join(".claudinio").join("plans")
+/// Resolve the directory where plans are saved.
+///
+/// * If `plan_save_path` is `Some(path)`, the plans go to
+///   `<workspace_root>/<path>` (relative) or `<path>` (absolute).
+/// * Otherwise the default is `<workspace_root>/.claudinio/plans`.
+pub fn plans_dir(workspace_root: &str, plan_save_path: Option<&str>) -> PathBuf {
+    match plan_save_path {
+        Some(path) if !path.is_empty() => {
+            let candidate = PathBuf::from(path);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                PathBuf::from(workspace_root).join(path)
+            }
+        }
+        _ => PathBuf::from(workspace_root).join(".claudinio").join("plans"),
+    }
 }
 
 pub fn execute(args: WritePlanArgs, ctx: &crate::agent::tools::ToolContext) -> Result<String, String> {
@@ -41,7 +56,7 @@ pub fn execute(args: WritePlanArgs, ctx: &crate::agent::tools::ToolContext) -> R
         .workspace_root
         .as_ref()
         .ok_or("write_plan requires an open workspace")?;
-    let dir = plans_dir(root);
+    let dir = plans_dir(root, ctx.plan_save_path.as_deref());
     std::fs::create_dir_all(&dir).map_err(|e| format!("create plans dir: {e}"))?;
 
     let date = chrono::Local::now().format("%Y-%m-%d");
@@ -64,5 +79,29 @@ mod tests {
         assert_eq!(slugify("Modo Pensador / Constructor"), "modo-pensador-constructor");
         assert_eq!(slugify("  weird__name!! "), "weird-name");
         assert_eq!(slugify("///"), "plan");
+    }
+
+    #[test]
+    fn plans_dir_default() {
+        let got = plans_dir("/home/user/project", None);
+        assert_eq!(got, PathBuf::from("/home/user/project/.claudinio/plans"));
+    }
+
+    #[test]
+    fn plans_dir_custom_relative() {
+        let got = plans_dir("/home/user/project", Some("docs/plans"));
+        assert_eq!(got, PathBuf::from("/home/user/project/docs/plans"));
+    }
+
+    #[test]
+    fn plans_dir_custom_absolute() {
+        let got = plans_dir("/home/user/project", Some("/tmp/my-plans"));
+        assert_eq!(got, PathBuf::from("/tmp/my-plans"));
+    }
+
+    #[test]
+    fn plans_dir_empty_falls_back() {
+        let got = plans_dir("/home/user/project", Some(""));
+        assert_eq!(got, PathBuf::from("/home/user/project/.claudinio/plans"));
     }
 }

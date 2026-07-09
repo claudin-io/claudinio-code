@@ -57,6 +57,8 @@ export interface AgentConfig {
   accountTier?: string | null;
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
+  planSavePath?: string | null;
+  workspaceConfig?: Record<string, unknown> | null;
 }
 
 export interface SetConfigArgs {
@@ -70,6 +72,7 @@ export interface SetConfigArgs {
   yoloBlacklist?: string[];
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
+  planSavePath?: string | null;
 }
 
 export interface ApproveArgs {
@@ -347,8 +350,12 @@ export function setConfig(args: SetConfigArgs): Promise<void> {
   return invoke<void>("set_config", { args });
 }
 
-export function getConfig(): Promise<AgentConfig> {
-  return invoke<AgentConfig>("get_config");
+export function getConfig(workspace?: string): Promise<AgentConfig> {
+  return invoke<AgentConfig>("get_config", { workspace: workspace ?? null });
+}
+
+export function setWorkspaceConfig(workspaceRoot: string, planSavePath: string | null): Promise<void> {
+  return invoke<void>("set_workspace_config", { workspaceRoot, planSavePath });
 }
 
 export function listModels(): Promise<string[]> {

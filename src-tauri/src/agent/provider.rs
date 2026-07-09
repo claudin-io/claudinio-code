@@ -3,6 +3,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
@@ -77,6 +78,10 @@ pub struct AgentConfig {
     /// stops with "golden_stalled". None falls back to the default (2).
     #[serde(default)]
     pub max_golden_stalls: Option<usize>,
+    /// Custom path for saving plans, relative to workspace root.
+    /// None = use default (.claudinio/plans).
+    #[serde(default)]
+    pub plan_save_path: Option<String>,
 }
 
 fn default_claudinio() -> String {
@@ -104,6 +109,7 @@ impl Default for AgentConfig {
             account_tier: None,
             max_golden_cycles: None,
             max_golden_stalls: None,
+            plan_save_path: None,
         }
     }
 }
@@ -162,6 +168,55 @@ pub fn save_config(config: &AgentConfig) {
         if let Ok(json) = serde_json::to_string_pretty(config) {
             let _ = std::fs::write(path, json);
         }
+    }
+}
+
+/// Read the workspace-level config from `<workspace_root>/.claudinio.json`.
+/// Returns `None` if the file doesn't exist, is unreadable, or has invalid JSON.
+pub fn read_workspace_config(workspace_root: &str) -> Option<Value> {
+    let path = Path::new(workspace_root).join(".claudinio.json");
+    let s = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+/// Merge workspace config values into an AgentConfig.
+/// Workspace values OVERRIDE the local config for these fields ONLY:
+/// plan_save_path, brain_model, builder_model, max_rounds, sub_max_rounds,
+/// yolo_mode, yolo_blacklist.
+/// Fields like api_key, base_url, account_*, max_golden_*, services_url
+/// are NEVER read from workspace config.
+pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
+    let obj = match ws.as_object() {
+        Some(o) => o,
+        None => return,
+    };
+    if let Some(v) = obj.get("plan_save_path") {
+        if v.is_null() {
+            cfg.plan_save_path = None;
+        } else if let Some(s) = v.as_str() {
+            cfg.plan_save_path = Some(s.to_string());
+        }
+    }
+    if let Some(v) = obj.get("brain_model").and_then(|v| v.as_str()) {
+        cfg.brain_model = v.to_string();
+    }
+    if let Some(v) = obj.get("builder_model").and_then(|v| v.as_str()) {
+        cfg.builder_model = v.to_string();
+    }
+    if let Some(v) = obj.get("max_rounds") {
+        cfg.max_rounds = v.as_u64().map(|n| n as usize);
+    }
+    if let Some(v) = obj.get("sub_max_rounds") {
+        cfg.sub_max_rounds = v.as_u64().map(|n| n as usize);
+    }
+    if let Some(v) = obj.get("yolo_mode").and_then(|v| v.as_bool()) {
+        cfg.yolo_mode = v;
+    }
+    if let Some(v) = obj.get("yolo_blacklist").and_then(|v| v.as_array()) {
+        cfg.yolo_blacklist = v
+            .iter()
+            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+            .collect();
     }
 }
 
@@ -409,6 +464,70 @@ pub async fn classify_turn_completion(
         .await
         .map_err(|e| format!("failed to parse judge response: {e}"))?;
     // Anthropic-shaped response: { "content": [ { "type": "text", "text": "..." } ] }
+    let reply = json
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    Ok(reply)
+}
+
+/// Single-shot, non-streaming completion: send one `system` + one `user`
+/// message and return the concatenated text of the reply. No tools, no
+/// history. Primarily an eval/test utility for grading prompts against the
+/// live model, but generic enough for any one-off classification call.
+#[allow(dead_code)]
+pub async fn one_shot(
+    config: &AgentConfig,
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    let body = RequestBody {
+        model: model.to_string(),
+        max_tokens,
+        stream: false,
+        messages: vec![Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text(user.to_string())],
+        }],
+        tools: None,
+        system: Some(system.to_string()),
+    };
+    let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("x-api-key", &config.api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return match budget_exceeded_message(&body) {
+            Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
+            None => Err(format!("API error: HTTP {status}")),
+        };
+    }
+    let json: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse response: {e}"))?;
     let reply = json
         .get("content")
         .and_then(|c| c.as_array())

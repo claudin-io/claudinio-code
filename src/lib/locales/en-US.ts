@@ -42,6 +42,13 @@ const dict: LocaleDict = {
   "app.config.yoloModeHint": "Auto-approves tool calls except those in the blacklist below.",
   "app.config.yoloBlacklist": "YOLO Blacklist (comma-separated tool names)",
   "app.config.yoloBlacklistHint": "These tools still require manual approval even with YOLO on. Ex: edit_file, bash",
+  "app.config.planSavePath": "Plan save path",
+  "app.config.planSavePathHint": "Relative to workspace root. Leave empty to use default (.claudinio/plans).",
+  "app.config.browseFolder": "Browse folder",
+  "app.config.resetToDefault": "Reset to default",
+  "app.config.default": "default",
+  "app.config.sourceWorkspace": "Workspace",
+  "app.config.sourceLocal": "Local",
 
   // ── EmptyState ────────────────────────────────────────────────────
   "empty.title": "Claudinio Code",

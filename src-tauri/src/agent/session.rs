@@ -309,7 +309,17 @@ or grep is faster and cheaper), tasks that depend on each other's results (run t
 or spawn in sequential waves), or anything needing a user decision mid-task — resolve that with ask_user \
 BEFORE spawning. \
 HOW to write good subagent goals: each goal must be fully self-contained — the subagent knows nothing \
-about this conversation. Always set expected_output to describe the report \
+about this conversation, has never seen the user's message, and cannot ask the user anything. Treat the \
+goal as a complete technical specification, not a hint. It MUST carry: (a) exact file paths and symbol \
+names to touch; (b) every concrete value the user gave — VERBATIM — including URLs, icon/asset names, \
+exact SVG or code snippets, copy text, colors, and DIMENSIONS/sizes; (c) any design decision already \
+made (e.g. 'modal is nearly fullscreen, 10% margin each side'); (d) the expected_output. \
+NEVER let a subagent invent something the user already specified: if the user gave a reference (a URL, \
+an image, an exact icon like 'lucide:notebook-pen', a mockup), you must RESOLVE it to concrete data \
+BEFORE delegating — fetch the URL (web_search/read the asset) and paste the real SVG path / value into \
+the goal, OR pass the URL and explicitly instruct the subagent to fetch it. A goal that says 'make it \
+similar to X' when the user handed you the real X is a defect — the subagent will guess and be wrong. \
+Always set expected_output to describe the report \
 you need. Modes: 'explore' = \
 read-only investigation; 'code' = may edit files and run commands (edits still require user approval). \
 Prefer 'explore' unless the agent must change something. Spawn independent agents in ONE spawn_agents \
@@ -333,18 +343,63 @@ IMPORTANT — Language policy: ALL communication must be in English. Write in En
 regardless of the language the user writes in. If the user writes in a non-English language, \
 treat it as if they asked in English — respond in English only.";
 
-/// Appended to the system prompt while the session is in Brain mode.
-const BRAIN_PROMPT: &str = "\n\n## CURRENT MODE: BRAIN (PLANNING — READ-ONLY)\n\
+/// Appended to the system prompt in BOTH modes: golden tasks are mandatory
+/// goals the session must reach before it is allowed to finish for real.
+const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS (MANDATORY GOALS)\n\
+Tasks whose id starts with 'golden-' are mandatory goals set by the user via <goal> tags:\n\
+- They are the success criteria of the session: work is only finished when every golden task \
+has status='done'.\n\
+- Only mark a golden task 'done' after you VERIFIED the goal it describes is actually met \
+(run the checks — build, tests, coverage, whatever the goal requires) — never on intention.\n\
+- If you end your turn while golden tasks are pending, the system automatically switches mode \
+(Brain to plan, Builder to execute) and sends you back to work on them, up to a cycle limit.\n\
+- Never delete golden tasks in tasks_set; keep them in the list and update their status.";
+
+/// Build the per-session system prompt. The base is byte-identical for every
+/// request in the same workspace so the provider's prefix cache stays warm;
+/// the mode block is appended last and only changes when the mode switches.
+fn system_prompt(
+    workspace_root: Option<&str>,
+    skills_section: Option<&str>,
+    plan_save_path: Option<&str>,
+    mode: SessionMode,
+) -> String {
+    let base = match workspace_root {
+        Some(root) => format!(
+            "{SYSTEM_PROMPT}\n\nProject workspace root: {root}. \
+The bash tool already runs with this directory as its working directory — run commands directly \
+(e.g. \"git status\"), use relative paths, and never cd into guessed paths. \
+File tools take absolute paths inside this root."
+        ),
+        None => SYSTEM_PROMPT.to_string(),
+    };
+    let base = match skills_section {
+        Some(s) if !s.is_empty() => format!("{base}\n{s}"),
+        _ => base,
+    };
+    // Resolve the effective plans directory for the prompt.
+    let plans_subdir = match plan_save_path {
+        Some(path) if !path.is_empty() => format!(".claudinio.json (plan_save_path=\"{path}\")"),
+        _ => ".claudinio/plans".to_string(),
+    };
+
+    match mode {
+        SessionMode::Brain => {
+            // Build a Brain prompt that references the actual plans directory
+            let brain_prompt = format!("\n\n## CURRENT MODE: BRAIN (PLANNING — READ-ONLY)\n\
 You are in Brain mode: the brains of the operation — an explorer and requirements analyst. You \
 MUST NOT implement, edit files or run state-changing commands — your editing tools are disabled \
 and bash only accepts read-only commands.\n\
 \n\
 ### Mandatory deliverables\n\
 A Brain session is NOT finished until BOTH exist, no matter who enabled this mode:\n\
-1. The Solution Design plan written via write_plan (.claudinio/plans/*.md).\n\
+1. The Solution Design plan written via write_plan ({plans_subdir}/*.md).\n\
 2. The executable task list created via tasks_set — one self-contained task per atomic step, \
-each carrying enough description (file paths, symbols, constraints, the plan file path) to be \
-handed to a Builder subagent that knows nothing about this conversation. All status='todo'.\n\
+each carrying enough description (file paths, symbols, constraints, the plan file path, plus every \
+user-supplied value VERBATIM — URLs, exact asset/icon ids, real SVG/snippets, agreed dimensions and \
+sizes) to be handed to a Builder subagent that knows nothing about this conversation and cannot ask \
+the user anything. A task that references a design decision without stating its concrete value is \
+underspecified. All status='todo'.\n\
 Never end your turn without both deliverables in place.\n\
 \n\
 ### Investigation: smart tools FIRST\n\
@@ -372,71 +427,52 @@ DECISIONS are the user's — put each one to them and wait.\n\
 4. Do NOT call write_plan until the user has confirmed the shared understanding — your last \
 interview question must be a confirmation of the agreed design.\n\
 \n\
+### UI/visual features: size & assets are MANDATORY decisions\n\
+When the request involves anything visual (a component, modal, dialog, panel, button, layout), the \
+user OWNS these decisions — you must interview them, never invent them:\n\
+• SIZE & LAYOUT: dimensions of new surfaces (a modal's width/height — fullscreen? fixed px? % of \
+viewport? margins?), placement, and responsive behavior. 'A modal' without an agreed size is an \
+incomplete spec — ask.\n\
+• ASSETS the user supplied: if they gave an icon name, a URL, an image, a mockup, or exact copy, \
+that asset is GROUND TRUTH. Do not paraphrase it to 'an icon like X'. Resolve it (fetch the URL / \
+read the image) so you have the real data, confirm you'll use exactly that, and record the reference \
+VERBATIM (the full URL, the exact icon id like 'lucide:notebook-pen', the real SVG) in the plan and \
+in the task descriptions — so the Builder and its subagents use the real thing, not a guess.\n\
+\n\
 ### Workflow\n\
 EXPLORE (subagents + semantic_search) → INTERVIEW (protocol above) → write_plan (sections: \
 Context, Solution Design, Risks, Tasks summary; call again with the full content to revise) → \
 tasks_set → hand off: if YOU entered this mode (enter_plan_mode), call exit_plan_mode and start \
 building; if the USER enabled it, do NOT try to exit — finish by saying the plan and tasks are \
-ready for them to flip the toggle to Builder.";
-
-/// Appended to the system prompt while the session is in Builder mode.
-const BUILDER_PROMPT: &str = "\n\n## CURRENT MODE: BUILDER (EXECUTION)\n\
+ready for them to flip the toggle to Builder.\"");
+            format!("{base}{GOLDEN_PROMPT}{brain_prompt}")
+        }
+        SessionMode::Builder => {
+            let builder_prompt = format!("\n\n## CURRENT MODE: BUILDER (EXECUTION)\n\
 You are in Builder mode: you execute plans. When starting work on a request:\n\
 1. Call tasks_get. If tasks exist (usually created in Brain mode), they ARE the plan — follow \
 them in order, respecting dependencies.\n\
-2. Check .claudinio/plans/ (list_dir) for the most recent plan file and read it before executing \
+2. Check {plans_subdir}/ (list_dir) for the most recent plan file and read it before executing \
 its tasks — it carries the Solution Design context the tasks refer to.\n\
 3. Delegate: implement each task through spawn_agents in 'code' mode — one subagent per task, in \
 ONE call when tasks are independent (parallel), in sequential waves when they depend on each \
 other. This keeps your own context clean. Only implement directly yourself when a task is trivial \
 (a single small edit) or needs mid-task user decisions.\n\
+   Each subagent goal is a COMPLETE technical spec: it must repeat every concrete value from the \
+plan/task VERBATIM (exact file paths & symbols, agreed sizes/dimensions, and any user-supplied asset \
+— the real URL, exact icon id, real SVG). The subagent has empty context and cannot ask the user, so \
+if a value is missing it WILL guess and be wrong. If the plan references an external asset by name/URL \
+that isn't yet concrete data, RESOLVE it first (fetch it) and paste the real data into the goal — \
+never tell a subagent to make something 'similar to' an asset the user already specified.\n\
 4. Use the available skills whenever one matches the work.\n\
 5. Keep the Task Panel live: status='doing' before starting a task, journal entries for findings, \
 status='done' when its subagent reports success and you verified the result.\n\
 6. After all tasks, verify the whole (build/tests where applicable) and report.\n\
 Investigate with the smart tools first — semantic_search for behavior questions, code_search / \
 symbol_lookup for known names, file_outline before reading — and leave grep/bash searching as \
-the last resort. Tell your subagents to do the same.\n\
-If a request turns out to be genuinely hard or ambiguous — unclear requirements, large design \
-space, conflicting constraints — call enter_plan_mode to switch yourself into Brain mode and \
-design first instead of guessing.";
-
-/// Appended to the system prompt in BOTH modes: golden tasks are mandatory
-/// goals the session must reach before it is allowed to finish for real.
-const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS (MANDATORY GOALS)\n\
-Tasks whose id starts with 'golden-' are mandatory goals set by the user via <goal> tags:\n\
-- They are the success criteria of the session: work is only finished when every golden task \
-has status='done'.\n\
-- Only mark a golden task 'done' after you VERIFIED the goal it describes is actually met \
-(run the checks — build, tests, coverage, whatever the goal requires) — never on intention.\n\
-- If you end your turn while golden tasks are pending, the system automatically switches mode \
-(Brain to plan, Builder to execute) and sends you back to work on them, up to a cycle limit.\n\
-- Never delete golden tasks in tasks_set; keep them in the list and update their status.";
-
-/// Build the per-session system prompt. The base is byte-identical for every
-/// request in the same workspace so the provider's prefix cache stays warm;
-/// the mode block is appended last and only changes when the mode switches.
-fn system_prompt(
-    workspace_root: Option<&str>,
-    skills_section: Option<&str>,
-    mode: SessionMode,
-) -> String {
-    let base = match workspace_root {
-        Some(root) => format!(
-            "{SYSTEM_PROMPT}\n\nProject workspace root: {root}. \
-The bash tool already runs with this directory as its working directory — run commands directly \
-(e.g. \"git status\"), use relative paths, and never cd into guessed paths. \
-File tools take absolute paths inside this root."
-        ),
-        None => SYSTEM_PROMPT.to_string(),
-    };
-    let base = match skills_section {
-        Some(s) if !s.is_empty() => format!("{base}\n{s}"),
-        _ => base,
-    };
-    match mode {
-        SessionMode::Brain => format!("{base}{GOLDEN_PROMPT}{BRAIN_PROMPT}"),
-        SessionMode::Builder => format!("{base}{GOLDEN_PROMPT}{BUILDER_PROMPT}"),
+the last resort. Tell your subagents to do the same.\n\"");
+            format!("{base}{GOLDEN_PROMPT}{builder_prompt}")
+        }
     }
 }
 
@@ -944,7 +980,7 @@ pub async fn run_workflow(
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let (mut cur_mode, _) = mode_ctl.get();
-    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), cur_mode);
+    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode);
     let mut tools = api_tools(cur_mode);
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
@@ -1043,7 +1079,7 @@ pub async fn run_workflow(
         let (mode_now, _) = mode_ctl.get();
         if mode_now != cur_mode {
             cur_mode = mode_now;
-            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), cur_mode);
+            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode);
             tools = api_tools(cur_mode);
         }
 
@@ -2835,5 +2871,156 @@ mod golden_goal_tests {
         let (cleaned, goals) = parse_goals("<goal>  </goal>");
         assert!(goals.is_empty());
         assert!(cleaned.is_empty());
+    }
+}
+
+/// Tests that lock in the "brain/builder must interview about size and preserve
+/// user-supplied assets, and subagent goals must be complete specs" behavior.
+///
+/// The deterministic tests assert the prompt invariants (cheap, always run).
+/// The `#[ignore]` tests replay the real session 44ec41c1 (textarea editor
+/// modal) against the LIVE Brain/Builder models to prove the hardened prompts
+/// actually make the model (a) ask about modal size and (b) carry the exact
+/// icon reference into a subagent goal instead of saying "similar to".
+///
+/// Run the live evals with:
+///   CLAUDINIO_API_KEY=sk-… cargo test --lib prompt_eval -- --ignored --nocapture
+#[cfg(test)]
+mod prompt_eval_tests {
+    use super::*;
+    use crate::agent::provider::{one_shot, AgentConfig};
+
+    const ROOT: &str = "/Users/victortavernari/claudinio_code";
+
+    /// The verbatim first user message from session 44ec41c1 — a UI feature
+    /// (button + modal) that carries a concrete icon reference (a URL naming
+    /// the exact `lucide:notebook-pen` icon).
+    const SESSION_REQUEST: &str = "Gostaria que o textarea do input tivesse um botão para editar \
+https://icones.js.org/collection/all?s=notebook&icon=lucide:notebook-pen e ao clicar nele, ele pega \
+o texto que está na text area e abre um editor de texto numa modal com multiplas linhas, e ao fechar \
+essa modal este texto volte para a text area, e assim posso enviar o texto editado.";
+
+    // ---- Deterministic prompt-invariant tests (no network) ----
+
+    #[test]
+    fn brain_prompt_mandates_size_and_verbatim_assets() {
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain);
+        // Size/dimensions must be a mandatory interview item.
+        assert!(
+            sys.contains("SIZE & LAYOUT"),
+            "Brain prompt must force interviewing about UI size/layout"
+        );
+        // User-supplied assets must be captured verbatim, not paraphrased.
+        assert!(
+            sys.contains("VERBATIM"),
+            "Brain prompt must require recording user assets verbatim"
+        );
+        assert!(
+            sys.to_lowercase().contains("ground truth"),
+            "Brain prompt must treat a user-supplied asset as ground truth"
+        );
+    }
+
+    #[test]
+    fn builder_prompt_requires_complete_subagent_spec() {
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder);
+        assert!(
+            sys.contains("COMPLETE technical spec"),
+            "Builder prompt must require complete subagent specs"
+        );
+        assert!(
+            sys.contains("VERBATIM"),
+            "Builder prompt must require repeating concrete values verbatim to subagents"
+        );
+    }
+
+    #[test]
+    fn system_prompt_warns_against_similar_to_guessing() {
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder);
+        assert!(
+            sys.contains("similar to"),
+            "subagent guidance must call out the 'similar to X' anti-pattern"
+        );
+        assert!(
+            sys.contains("RESOLVE it to concrete data"),
+            "subagent guidance must require resolving user references before delegating"
+        );
+    }
+
+    // ---- Live-API evals (ignored by default; need CLAUDINIO_API_KEY) ----
+
+    fn live_cfg() -> Option<AgentConfig> {
+        let api_key = std::env::var("CLAUDINIO_API_KEY").ok()?;
+        Some(AgentConfig {
+            base_url: "https://api.claudin.io".into(),
+            api_key,
+            ..AgentConfig::default()
+        })
+    }
+
+    /// Feed the REAL Brain system prompt + the real session request to the live
+    /// Brain model and ask it to list the clarifying questions it would ask
+    /// before writing a plan. It MUST surface (a) the modal SIZE and (b) the
+    /// exact icon asset — the two things it silently invented last time.
+    #[tokio::test]
+    #[ignore = "hits the live claudin.io API; requires CLAUDINIO_API_KEY"]
+    async fn brain_interview_covers_modal_size_and_icon_asset() {
+        let Some(cfg) = live_cfg() else {
+            eprintln!("skipping: CLAUDINIO_API_KEY not set");
+            return;
+        };
+        let system = system_prompt(Some(ROOT), None, None, SessionMode::Brain);
+        let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
+        let user = format!(
+            "{SESSION_REQUEST}\n\n---\nDo NOT call any tool and do NOT write a plan. Instead, output \
+ONLY a numbered list of the clarifying questions you must ask me before writing the plan."
+        );
+        let reply = one_shot(&cfg, &model, &system, &user, 1500)
+            .await
+            .expect("live brain call");
+        eprintln!("--- brain clarifying questions ---\n{reply}\n----------------------------------");
+        let lc = reply.to_lowercase();
+        let asks_size = ["tamanho", "size", "dimens", "largura", "altura", "width", "height", "fullscreen", "tela cheia", "viewport", "margin", "margem"]
+            .iter()
+            .any(|k| lc.contains(k));
+        let asks_asset = ["ícone", "icone", "icon", "lucide", "notebook-pen", "svg", "url"]
+            .iter()
+            .any(|k| lc.contains(k));
+        assert!(asks_size, "Brain must interview about the modal size/dimensions");
+        assert!(asks_asset, "Brain must confirm/preserve the exact icon asset the user linked");
+    }
+
+    /// Give the live Builder model a plan step that references the user's exact
+    /// icon URL and ask it for the subagent goal it would spawn. The goal MUST
+    /// carry the concrete reference (URL / exact id / fetch instruction) rather
+    /// than the "similar to lucide notebook-pen" guess that produced the wrong
+    /// icon in the original session.
+    #[tokio::test]
+    #[ignore = "hits the live claudin.io API; requires CLAUDINIO_API_KEY"]
+    async fn builder_subagent_goal_carries_user_asset() {
+        let Some(cfg) = live_cfg() else {
+            eprintln!("skipping: CLAUDINIO_API_KEY not set");
+            return;
+        };
+        let system = system_prompt(Some(ROOT), None, None, SessionMode::Builder);
+        let model = cfg.model_for_mode(SessionMode::Builder.as_str()).to_string();
+        let user = "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
+specified the EXACT icon to use with this reference: \
+https://icones.js.org/collection/all?s=notebook&icon=lucide:notebook-pen (that is the Lucide \
+'notebook-pen' icon).\n\n---\nDo NOT call any tool. Output ONLY the exact `goal` string you would \
+pass to a single 'code' subagent to implement this task.";
+        let reply = one_shot(&cfg, &model, &system, &user, 1200)
+            .await
+            .expect("live builder call");
+        eprintln!("--- builder subagent goal ---\n{reply}\n-----------------------------");
+        let lc = reply.to_lowercase();
+        let carries_ref = lc.contains("lucide:notebook-pen")
+            || lc.contains("icones.js.org")
+            || lc.contains("fetch");
+        assert!(
+            carries_ref,
+            "subagent goal must embed the exact icon reference or instruct the agent to fetch it, \
+not merely say 'similar to'"
+        );
     }
 }

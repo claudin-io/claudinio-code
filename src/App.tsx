@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, type IndexProgress } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, setWorkspaceConfig, type IndexProgress } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
@@ -65,6 +65,8 @@ function App() {
   const [configMaxGoldenStalls, setConfigMaxGoldenStalls] = createSignal<number | null>(null);
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
+  const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
+  const [workspaceConfigFields, setWorkspaceConfigFields] = createSignal<Set<string>>(new Set());
   const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
   const [accountTier, setAccountTier] = createSignal<string | null>(null);
   const [loggingIn, setLoggingIn] = createSignal(false);
@@ -136,7 +138,7 @@ function App() {
 
   const openConfig = async () => {
     try {
-      const [cfg, models] = await Promise.all([getConfig(), listModels()]);
+      const [cfg, models] = await Promise.all([getConfig(activeWorkspace() ?? undefined), listModels()]);
       if (cfg) {
         setConfigBrainModel(cfg.brainModel);
         setConfigBuilderModel(cfg.builderModel);
@@ -146,8 +148,17 @@ function App() {
         setConfigMaxGoldenStalls(cfg.maxGoldenStalls ?? null);
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
+        setConfigPlanSavePath(cfg.planSavePath ?? "");
         setAccountLogin(cfg.accountLogin ?? null);
         setAccountTier(cfg.accountTier ?? null);
+        // Build set of field names that come from workspace config
+        const wsKeys = new Set<string>();
+        if (cfg.workspaceConfig && typeof cfg.workspaceConfig === "object") {
+          for (const key of Object.keys(cfg.workspaceConfig)) {
+            wsKeys.add(key);
+          }
+        }
+        setWorkspaceConfigFields(wsKeys);
       }
       if (models && models.length > 0) {
         setAvailableModels(models);
@@ -167,11 +178,18 @@ function App() {
         maxGoldenCycles: configMaxGoldenCycles(),
         maxGoldenStalls: configMaxGoldenStalls(),
         yoloMode: configYoloMode(),
+        planSavePath: configPlanSavePath() || undefined,
         yoloBlacklist: configYoloBlacklist()
           .split(",")
           .map((s) => s.trim())
           .filter((s) => s.length > 0),
       });
+      // Also persist plan_save_path to workspace config (.claudinio.json)
+      const ws = activeWorkspace();
+      if (ws) {
+        const psp = configPlanSavePath();
+        await setWorkspaceConfig(ws, psp || null);
+      }
       setShowConfig(false);
       setConfigApiKey("");
     } catch (e) {
@@ -198,6 +216,24 @@ function App() {
     } catch {}
     setAccountLogin(null);
     setAccountTier(null);
+  };
+
+  const pickPlanPath = async () => {
+    const folder = await pickFolder();
+    if (!folder) return;
+    const ws = activeWorkspace();
+    if (!ws) {
+      setConfigPlanSavePath(folder);
+      return;
+    }
+    // Convert absolute path to relative (relative to workspace root)
+    if (folder.startsWith(ws)) {
+      let rel = folder.slice(ws.length);
+      if (rel.startsWith("/") || rel.startsWith("\\")) rel = rel.slice(1);
+      setConfigPlanSavePath(rel || ".");
+    } else {
+      setConfigPlanSavePath(folder);
+    }
   };
 
   const addOpenWorkspace = (folder: string) => {
@@ -369,12 +405,63 @@ function App() {
               />
             </Show>
 
+            <hr class="mb-4 border-border-subtle" />
+
+            {/* Plan save path — always editable */}
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.planSavePath")}</label>
+            <div class="mb-1 flex gap-1">
+              <div class="relative flex-1">
+                <input
+                  type="text"
+                  value={configPlanSavePath()}
+                  onInput={(e) => setConfigPlanSavePath(e.currentTarget.value)}
+                  placeholder=".claudinio/plans"
+                  class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 pr-8 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <Show when={configPlanSavePath()}>
+                  <button
+                    onClick={() => setConfigPlanSavePath("")}
+                    class="absolute right-2 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink"
+                    title={t("app.config.resetToDefault")}
+                  >
+                    <Icon name="x" class="h-3.5 w-3.5" />
+                  </button>
+                </Show>
+              </div>
+              <button
+                onClick={pickPlanPath}
+                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle text-ink-muted hover:bg-surface-2 hover:text-ink"
+                title={t("app.config.browseFolder")}
+              >
+                <Icon name="folder-open" class="h-4 w-4" />
+              </button>
+            </div>
+            <div class="mb-4 flex items-center gap-2">
+              <Show when={!configPlanSavePath()}>
+                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.default")}</span>
+              </Show>
+              <p class="text-[11px] text-ink-faint">{t("app.config.planSavePathHint")}</p>
+            </div>
+
             {/* Brain model selector */}
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.brainModel")}</label>
+            <div class="flex items-center gap-2 mb-1">
+              <label class="block text-xs text-ink-muted">{t("app.config.brainModel")}</label>
+              <Show when={workspaceConfigFields().has("brain_model")}>
+                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
+              </Show>
+              <Show when={!workspaceConfigFields().has("brain_model")}>
+                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
+              </Show>
+            </div>
             <select
               value={configBrainModel()}
               onChange={(e) => setConfigBrainModel(e.currentTarget.value)}
-              class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              disabled={workspaceConfigFields().has("brain_model")}
+              class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              classList={{
+                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("brain_model"),
+                "bg-surface-0": !workspaceConfigFields().has("brain_model"),
+              }}
             >
               <For each={availableModels()}>
                 {(m) => <option value={m} selected={configBrainModel() === m}>{m}</option>}
@@ -382,11 +469,24 @@ function App() {
             </select>
 
             {/* Builder model selector */}
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.builderModel")}</label>
+            <div class="flex items-center gap-2 mb-1">
+              <label class="block text-xs text-ink-muted">{t("app.config.builderModel")}</label>
+              <Show when={workspaceConfigFields().has("builder_model")}>
+                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
+              </Show>
+              <Show when={!workspaceConfigFields().has("builder_model")}>
+                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
+              </Show>
+            </div>
             <select
               value={configBuilderModel()}
               onChange={(e) => setConfigBuilderModel(e.currentTarget.value)}
-              class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              disabled={workspaceConfigFields().has("builder_model")}
+              class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              classList={{
+                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("builder_model"),
+                "bg-surface-0": !workspaceConfigFields().has("builder_model"),
+              }}
             >
               <For each={availableModels()}>
                 {(m) => <option value={m} selected={configBuilderModel() === m}>{m}</option>}
@@ -395,7 +495,15 @@ function App() {
 
             <hr class="mb-4 border-border-subtle" />
 
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.maxRounds")}</label>
+            <div class="flex items-center gap-2 mb-1">
+              <label class="block text-xs text-ink-muted">{t("app.config.maxRounds")}</label>
+              <Show when={workspaceConfigFields().has("max_rounds")}>
+                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
+              </Show>
+              <Show when={!workspaceConfigFields().has("max_rounds")}>
+                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
+              </Show>
+            </div>
             <input
               type="number"
               min="0"
@@ -405,11 +513,24 @@ function App() {
                 setConfigMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
               }}
               placeholder={t("app.config.unlimited")}
-              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              class="mb-1 w-full rounded-md border border-border-subtle p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              classList={{
+                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("max_rounds"),
+                "bg-surface-0": !workspaceConfigFields().has("max_rounds"),
+              }}
+              disabled={workspaceConfigFields().has("max_rounds")}
             />
             <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.maxRoundsHint")}</p>
 
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.subMaxRounds")}</label>
+            <div class="flex items-center gap-2 mb-1">
+              <label class="block text-xs text-ink-muted">{t("app.config.subMaxRounds")}</label>
+              <Show when={workspaceConfigFields().has("sub_max_rounds")}>
+                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
+              </Show>
+              <Show when={!workspaceConfigFields().has("sub_max_rounds")}>
+                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
+              </Show>
+            </div>
             <input
               type="number"
               min="0"
@@ -419,7 +540,12 @@ function App() {
                 setConfigSubMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
               }}
               placeholder={t("app.config.unlimited")}
-              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              class="mb-1 w-full rounded-md border border-border-subtle p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              classList={{
+                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("sub_max_rounds"),
+                "bg-surface-0": !workspaceConfigFields().has("sub_max_rounds"),
+              }}
+              disabled={workspaceConfigFields().has("sub_max_rounds")}
             />
             <p class="mb-4 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
 
@@ -459,9 +585,16 @@ function App() {
                 checked={configYoloMode()}
                 onChange={(e) => setConfigYoloMode(e.currentTarget.checked)}
                 class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+                disabled={workspaceConfigFields().has("yolo_mode")}
               />
               <span class="text-sm font-medium text-ink">{t("app.config.yoloMode")}</span>
               <span class="text-[11px] text-ink-faint">{t("app.config.yoloModeHint")}</span>
+              <Show when={workspaceConfigFields().has("yolo_mode")}>
+                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
+              </Show>
+              <Show when={!workspaceConfigFields().has("yolo_mode")}>
+                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
+              </Show>
             </label>
 
             <Show when={configYoloMode()}>
@@ -472,6 +605,10 @@ function App() {
                 placeholder="edit_file, bash"
                 rows={2}
                 class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                classList={{
+                  "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("yolo_blacklist"),
+                }}
+                disabled={workspaceConfigFields().has("yolo_blacklist")}
               />
               <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{t("app.config.yoloBlacklistHint")}</p>
             </Show>
