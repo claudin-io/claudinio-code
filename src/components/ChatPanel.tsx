@@ -469,11 +469,13 @@ export const ChatPanel: Component<{
   const [isCompacting, setIsCompacting] = createSignal(false);
   const [mode, setMode] = createSignal<SessionMode>("builder");
   const [modeOrigin, setModeOrigin] = createSignal<ModeOrigin>("human");
+  const [hasPlanBeenWritten, setHasPlanBeenWritten] = createSignal(false);
 
   // Human toggle: persists a Mode record in the session JSONL immediately so
   // the mode survives reloads; a running workflow picks it up next round.
   const switchMode = async (m: SessionMode) => {
     if (m === mode()) return;
+    setHasPlanBeenWritten(false);
     setMode(m);
     setCurrentSteps((prev) => [
       ...prev,
@@ -491,6 +493,7 @@ export const ChatPanel: Component<{
   // clicks the "Continue with Builder" button after a Brain planning session.
   const continueWithBuilder = async () => {
     try {
+      setHasPlanBeenWritten(false);
       await switchMode("builder");
       const msg = t("mode.continueMessage");
       setMessages((prev) => [
@@ -975,6 +978,7 @@ export const ChatPanel: Component<{
     } else if (event.event === "ToolResult") {
       const data = event.data as ToolResultData;
       setCurrentSteps((prev) => applyToolResultIn(prev, data));
+      if (data.toolName === "write_plan") setHasPlanBeenWritten(true);
       scrollToBottom();
     } else if (event.event === "AskUser") {
       setCurrentAskUser(event.data as AskUserData);
@@ -1506,15 +1510,13 @@ export const ChatPanel: Component<{
             )}
           </For>
 
-          <Show when={mode() === "brain" && modeOrigin() === "human" && status() === "done"}>
+          <Show when={mode() === "brain" && modeOrigin() === "human" && status() === "done" && hasPlanBeenWritten()}>
             <div class="mb-6 flex justify-center">
               <button
                 onClick={continueWithBuilder}
                 class="inline-flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-accent-ink shadow-lg shadow-accent/20 transition-all hover:bg-accent/90 hover:shadow-xl hover:shadow-accent/30 active:scale-[0.98]"
               >
-                <span class="inline-flex h-4 w-4 items-center justify-center">
-                  <span class="i-lucide:construction-worker h-4 w-4" />
-                </span>
+                <Icon name="construction-worker" class="h-4 w-4" />
                 {t("mode.continueWithBuilder")}
               </button>
             </div>
