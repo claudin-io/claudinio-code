@@ -2,6 +2,11 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import { FileMentionPopover } from "./FileMentionPopover";
 
+// Mock i18n: return the key so we can assert against a stable string
+vi.mock("../lib/grill-me", () => ({
+  t: (key: string) => key,
+}));
+
 describe("FileMentionPopover", () => {
   const fileList = [
     "src/index.ts",
@@ -58,7 +63,7 @@ describe("FileMentionPopover", () => {
       document.body,
     );
 
-    expect(document.body.textContent).toContain("No files found");
+    expect(document.body.textContent).toContain("mention.noFiles");
     expect(document.body.textContent).not.toContain("src/index.ts");
     dispose();
   });
