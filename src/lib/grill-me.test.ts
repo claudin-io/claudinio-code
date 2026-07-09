@@ -264,6 +264,10 @@ describe("grill-me coverage gaps", () => {
     // Switch to en-US — effect fires, starts uncached loadDict("en-US").
     mod.setLocale("en-US");
 
+    // Clear only the en-US entry so its mock import is genuinely pending
+    // (earlier tests may have cached it, breaking the race assumption).
+    mod.__clearDictCache("en-US");
+
     // Let Solid schedule the effect body (next Check phase tick)
     await new Promise((r) => setImmediate(r));
     await Promise.resolve();
