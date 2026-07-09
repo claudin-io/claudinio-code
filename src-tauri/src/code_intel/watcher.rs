@@ -154,7 +154,7 @@ impl FileWatcher {
                     let ext_ok = p
                         .extension()
                         .and_then(|e| e.to_str())
-                        .is_some_and(|e| matches!(e, "ts" | "tsx" | "js" | "jsx" | "rs" | "py" | "swift"));
+                        .is_some_and(|e| matches!(e, "ts" | "tsx" | "js" | "jsx" | "rs" | "py" | "swift" | "md" | "txt"));
                     if !ext_ok {
                         continue;
                     }
