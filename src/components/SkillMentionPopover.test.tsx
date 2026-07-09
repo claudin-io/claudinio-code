@@ -83,7 +83,7 @@ describe("SkillMentionPopover", () => {
     render(() => <SkillMentionPopover {...props} />, document.body);
 
     await vi.waitFor(() => {
-      expect(document.body.textContent).toContain("No skills found");
+      expect(document.body.textContent).toContain("mention.noSkills");
     });
   });
 
