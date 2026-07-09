@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, setWorkspaceConfig, type IndexProgress } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, type IndexProgress } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
@@ -71,7 +71,10 @@ function App() {
   const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
   const [accountTier, setAccountTier] = createSignal<string | null>(null);
   const [loggingIn, setLoggingIn] = createSignal(false);
-  const [showAdvancedAuth, setShowAdvancedAuth] = createSignal(false);
+  const [hasApiKey, setHasApiKey] = createSignal(false);
+  const [apiKeyValidating, setApiKeyValidating] = createSignal(false);
+  const [onboardingApiKeyError, setOnboardingApiKeyError] = createSignal<string | null>(null);
+  const [settingsApiKeyError, setSettingsApiKeyError] = createSignal<string | null>(null);
   const [showTree, setShowTree] = createSignal(false);
   const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
@@ -138,6 +141,19 @@ function App() {
     }
   });
 
+  // Load persisted auth state on startup so API-key-only users skip onboarding
+  // on app restart.
+  onMount(async () => {
+    try {
+      const cfg = await getConfig();
+      setAccountLogin(cfg.accountLogin ?? null);
+      setAccountTier(cfg.accountTier ?? null);
+      setHasApiKey(cfg.hasApiKey ?? false);
+    } catch {
+      // Config file may not exist yet — silently assume no auth.
+    }
+  });
+
   const openConfig = async () => {
     try {
       const [cfg, models] = await Promise.all([getConfig(activeWorkspace() ?? undefined), listModels()]);
@@ -171,8 +187,22 @@ function App() {
 
   const saveConfig = async () => {
     try {
+      const changedApiKey = configApiKey();
+
+      // If the user provided an API key through settings and is not already
+      // authenticated via OAuth, validate the key before saving.
+      if (changedApiKey && !accountLogin()) {
+        setSettingsApiKeyError(null);
+        try {
+          await validateApiKey(changedApiKey);
+        } catch (e) {
+          setSettingsApiKeyError(String(e));
+          return; // Keep the modal open
+        }
+      }
+
       await setConfig({
-        apiKey: configApiKey() || undefined,
+        apiKey: changedApiKey || undefined,
         brainModel: configBrainModel() || undefined,
         builderModel: configBuilderModel() || undefined,
         maxRounds: configMaxRounds(),
@@ -186,6 +216,11 @@ function App() {
           .map((s) => s.trim())
           .filter((s) => s.length > 0),
       });
+      // If the user just saved an API key and isn't authenticated via OAuth,
+      // mark them as authenticated so onboarding stays hidden.
+      if (changedApiKey && !accountLogin()) {
+        setHasApiKey(true);
+      }
       // Also persist plan_save_path to workspace config (.claudinio.json)
       const ws = activeWorkspace();
       if (ws) {
@@ -194,6 +229,7 @@ function App() {
       }
       setShowConfig(false);
       setConfigApiKey("");
+      setSettingsApiKeyError(null);
     } catch (e) {
       alert(t("app.config.saveError", String(e)));
     }
@@ -218,6 +254,7 @@ function App() {
     } catch {}
     setAccountLogin(null);
     setAccountTier(null);
+    setHasApiKey(false);
   };
 
   const pickPlanPath = async () => {
@@ -337,6 +374,21 @@ function App() {
     }
   };
 
+  const onboardApiKeySubmit = async (key: string) => {
+    setOnboardingApiKeyError(null);
+    setApiKeyValidating(true);
+    try {
+      // Save the key first so the backend uses it for validation
+      await setConfig({ apiKey: key });
+      // Validate by fetching available models
+      await validateApiKey(key);
+      setHasApiKey(true);
+    } catch (e) {
+      setOnboardingApiKeyError(String(e));
+      setApiKeyValidating(false);
+    }
+  };
+
   return (
     <div class="flex h-full flex-col">
       <header
@@ -379,43 +431,36 @@ function App() {
 
             <label class="mb-1 block text-xs text-ink-muted">{t("app.config.account")}</label>
             <Show
-              when={accountLogin()}
+              when={accountLogin() || hasApiKey()}
               fallback={
-                <button
-                  onClick={doLogin}
-                  disabled={loggingIn()}
-                  class="mb-2 w-full rounded-md bg-accent p-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
-                >
-                  {loggingIn() ? t("app.config.signingIn") : t("app.config.signIn")}
-                </button>
+                <div class="mb-2 space-y-2">
+                  <button
+                    onClick={doLogin}
+                    disabled={loggingIn()}
+                    class="w-full rounded-md bg-accent p-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                  >
+                    {loggingIn() ? t("app.config.signingIn") : t("app.config.signIn")}
+                  </button>
+                  <label class="block text-xs text-ink-muted">{t("app.config.apiKey")}</label>
+                  <input
+                    type="password"
+                    value={configApiKey()}
+                    onInput={(e) => setConfigApiKey(e.currentTarget.value)}
+                    placeholder="sk-..."
+                    class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                  />
+                  <Show when={settingsApiKeyError()}>
+                    <div class="text-sm text-red-400">{settingsApiKeyError()}</div>
+                  </Show>
+                </div>
               }
             >
               <div class="mb-2 flex items-center justify-between rounded-md border border-border-subtle bg-surface-0 p-2 text-sm">
-                <span class="truncate text-ink">
-                  {t("app.config.signedInAs", accountLogin() ?? "")}
-                  <Show when={accountTier()}> — {accountTier()}</Show>
-                </span>
+                <span class="truncate text-ink">{t("app.config.signedIn")}</span>
                 <button onClick={doLogout} class="ml-2 shrink-0 text-xs text-ink-muted hover:text-ink hover:underline">
                   {t("app.config.signOut")}
                 </button>
               </div>
-            </Show>
-
-            <button
-              onClick={() => setShowAdvancedAuth((v) => !v)}
-              class="mb-2 text-xs text-ink-muted hover:text-ink hover:underline"
-            >
-              {showAdvancedAuth() ? t("app.config.hideAdvanced") : t("app.config.showAdvanced")}
-            </button>
-            <Show when={showAdvancedAuth()}>
-              <label class="mb-1 block text-xs text-ink-muted">{t("app.config.apiKey")}</label>
-              <input
-                type="password"
-                value={configApiKey()}
-                onInput={(e) => setConfigApiKey(e.currentTarget.value)}
-                placeholder="sk-..."
-                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              />
             </Show>
 
             <hr class="mb-4 border-border-subtle" />
@@ -644,11 +689,14 @@ function App() {
         </div>
       </Show>
 
-      <Show when={accountLogin()} fallback={
+      <Show when={accountLogin() || hasApiKey()} fallback={
         <OnboardingWizard
           onSignIn={onboardingSignIn}
           signingIn={loggingIn()}
           signInError={onboardingSignInError()}
+          onApiKeySubmit={onboardApiKeySubmit}
+          apiKeyValidating={apiKeyValidating()}
+          apiKeyError={onboardingApiKeyError()}
         />
       }>
         <div class="flex min-h-0 flex-1">

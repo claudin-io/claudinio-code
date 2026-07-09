@@ -6,8 +6,13 @@ export const OnboardingWizard: Component<{
   onSignIn: () => Promise<void>;
   signingIn: boolean;
   signInError: string | null;
+  onApiKeySubmit: (key: string) => Promise<void>;
+  apiKeyValidating: boolean;
+  apiKeyError: string | null;
 }> = (props) => {
   const [step, setStep] = createSignal(0);
+  const [showApiKeyField, setShowApiKeyField] = createSignal(false);
+  const [apiKeyInput, setApiKeyInput] = createSignal("");
 
   const features = () => [
     {
@@ -31,6 +36,12 @@ export const OnboardingWizard: Component<{
       desc: t("onboarding.features.indexing.desc"),
     },
   ];
+
+  const handleApiKeyContinue = async () => {
+    const key = apiKeyInput().trim();
+    if (!key) return;
+    await props.onApiKeySubmit(key);
+  };
 
   return (
     <div class="flex h-full flex-col items-center justify-center px-6">
@@ -85,21 +96,59 @@ export const OnboardingWizard: Component<{
         <p class="mb-6 max-w-sm text-center text-sm text-ink-muted">
           {t("onboarding.signIn.subtitle")}
         </p>
-        <button
-          onClick={props.onSignIn}
-          disabled={props.signingIn}
-          class="inline-flex items-center gap-2 rounded-md bg-accent px-6 py-2.5 text-sm font-medium text-accent-ink hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Icon name="external-link" class="h-4 w-4" />
-          <span>{t("onboarding.signIn.button")}</span>
-        </button>
-        <Show when={props.signingIn}>
-          <div class="mt-4 text-sm text-ink-muted">
-            {t("onboarding.signIn.signingIn")}
+
+        <Show when={!showApiKeyField()} fallback={
+          <div class="flex w-full max-w-xs flex-col items-center gap-3">
+            <input
+              type="password"
+              value={apiKeyInput()}
+              onInput={(e) => setApiKeyInput(e.currentTarget.value)}
+              placeholder={t("onboarding.signIn.apiKeyPlaceholder")}
+              class="w-full rounded-md border border-border-subtle bg-surface-0 p-2.5 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <button
+              onClick={handleApiKeyContinue}
+              disabled={props.apiKeyValidating || !apiKeyInput().trim()}
+              class="inline-flex items-center gap-2 rounded-md bg-accent px-6 py-2.5 text-sm font-medium text-accent-ink hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Show when={props.apiKeyValidating} fallback={t("onboarding.signIn.apiKeyContinue")}>
+                <span>{t("onboarding.signIn.apiKeyValidating")}</span>
+                <Icon name="loader" class="h-4 w-4 animate-spin" />
+              </Show>
+            </button>
+            <Show when={props.apiKeyError}>
+              <div class="text-sm text-red-400">{props.apiKeyError}</div>
+            </Show>
+            <button
+              onClick={() => { setShowApiKeyField(false); setApiKeyInput(""); }}
+              class="text-xs text-ink-muted hover:text-ink hover:underline"
+            >
+              {t("onboarding.signIn.apiKeyBack")}
+            </button>
           </div>
-        </Show>
-        <Show when={props.signInError}>
-          <div class="mt-4 text-sm text-red-400">{props.signInError}</div>
+        }>
+          <button
+            onClick={props.onSignIn}
+            disabled={props.signingIn}
+            class="inline-flex items-center gap-2 rounded-md bg-accent px-6 py-2.5 text-sm font-medium text-accent-ink hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Icon name="external-link" class="h-4 w-4" />
+            <span>{t("onboarding.signIn.button")}</span>
+          </button>
+          <Show when={props.signingIn}>
+            <div class="mt-4 text-sm text-ink-muted">
+              {t("onboarding.signIn.signingIn")}
+            </div>
+          </Show>
+          <Show when={props.signInError}>
+            <div class="mt-4 text-sm text-red-400">{props.signInError}</div>
+          </Show>
+          <button
+            onClick={() => setShowApiKeyField(true)}
+            class="mt-3 text-xs text-ink-muted hover:text-ink hover:underline"
+          >
+            {t("onboarding.signIn.apiKeyLink")}
+          </button>
         </Show>
       </Show>
 

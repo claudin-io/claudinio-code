@@ -376,6 +376,11 @@ export function logoutClaudinio(): Promise<void> {
   return invoke<void>("logout_claudinio");
 }
 
+/** Validates an API key by calling the models endpoint. Returns model list on success, throws on failure. */
+export function validateApiKey(apiKey: string): Promise<string[]> {
+  return invoke<string[]>("validate_api_key", { apiKey });
+}
+
 // --- Code Intelligence ---
 
 export interface IndexStatus {

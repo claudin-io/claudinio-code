@@ -2,6 +2,7 @@ use crate::agent::app_sign;
 use crate::agent::provider::save_config;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
@@ -232,4 +233,51 @@ pub async fn logout_claudinio(state: State<'_, AppState>) -> Result<(), String> 
     cfg.account_tier = None;
     save_config(&cfg);
     Ok(())
+}
+
+/// Validates an API key by calling GET {base_url}/v1/models with it.
+/// Returns the model list on success, or a descriptive error on failure.
+/// Unlike `list_models`, this does NOT swallow errors — the caller needs
+/// to know whether the key is valid.
+#[tauri::command]
+pub async fn validate_api_key(
+    api_key: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let base_url = {
+        let cfg = state.config.lock().await;
+        cfg.base_url.trim_end_matches('/').to_string()
+    };
+
+    let url = format!("{base_url}/v1/models");
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("x-api-key", &api_key)
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Authentication failed (HTTP {status}): {body}"));
+    }
+
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Invalid API response: {e}"))?;
+
+    let models = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|id| id.as_str().map(String::from)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(models)
 }
