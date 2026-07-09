@@ -140,9 +140,11 @@ pub async fn login_with_claudinio(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<LoginResult, String> {
-    let services_url = {
-        let cfg = state.config.lock().await;
-        cfg.services_url.clone()
+    let (services_url, install_id) = {
+        let mut cfg = state.config.lock().await;
+        let install_id = crate::agent::provider::ensure_install_id(&mut cfg);
+        save_config(&cfg);
+        (cfg.services_url.clone(), install_id)
     };
 
     let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -173,7 +175,7 @@ pub async fn login_with_claudinio(
 
     let exchange_path = "/api/app/exchange";
     let exchange_url = format!("{}{}", services_url.trim_end_matches('/'), exchange_path);
-    let body = serde_json::json!({ "code": code, "verifier": verifier });
+    let body = serde_json::json!({ "code": code, "verifier": verifier, "install_id": install_id });
     let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode exchange request: {e}"))?;
     let signature_headers = app_sign::sign("POST", exchange_path, &body_bytes);
 

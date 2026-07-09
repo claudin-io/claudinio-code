@@ -1,4 +1,5 @@
 pub mod app_sign;
+pub mod install_id;
 pub mod permissions;
 pub mod persist;
 pub mod provider;

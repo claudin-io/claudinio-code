@@ -82,6 +82,15 @@ pub struct AgentConfig {
     /// None = use default (.claudinio/plans).
     #[serde(default)]
     pub plan_save_path: Option<String>,
+    /// Opaque per-device id (salted SHA-256 of the OS install GUID), sent at
+    /// login to gate the once-per-device app-install promo. Cached here so it's
+    /// stable across runs. See `agent::install_id`.
+    #[serde(default)]
+    pub install_id: Option<String>,
+    /// Random uuid used as the hash source when the OS install GUID can't be
+    /// read, so the fallback `install_id` is itself stable. Never transmitted.
+    #[serde(default)]
+    pub install_fallback_seed: Option<String>,
 }
 
 fn default_claudinio() -> String {
@@ -110,6 +119,8 @@ impl Default for AgentConfig {
             max_golden_cycles: None,
             max_golden_stalls: None,
             plan_save_path: None,
+            install_id: None,
+            install_fallback_seed: None,
         }
     }
 }
@@ -169,6 +180,20 @@ pub fn save_config(config: &AgentConfig) {
             let _ = std::fs::write(path, json);
         }
     }
+}
+
+/// Ensure `cfg.install_id` is populated (generating and caching it, plus the
+/// random fallback seed, on first call) and return it. Does NOT persist — the
+/// caller saves via `save_config` after this so the write happens once.
+pub fn ensure_install_id(cfg: &mut AgentConfig) -> String {
+    if cfg.install_fallback_seed.is_none() {
+        cfg.install_fallback_seed = Some(uuid::Uuid::new_v4().to_string());
+    }
+    if cfg.install_id.is_none() {
+        let seed = cfg.install_fallback_seed.as_deref().unwrap_or("");
+        cfg.install_id = Some(crate::agent::install_id::compute_install_id(seed));
+    }
+    cfg.install_id.clone().unwrap_or_default()
 }
 
 /// Read the workspace-level config from `<workspace_root>/.claudinio.json`.
