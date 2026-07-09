@@ -64,6 +64,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={vi.fn()}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => null}
         />
       ),
@@ -86,6 +87,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={vi.fn()}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => null}
         />
       ),
@@ -110,6 +112,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={vi.fn()}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => null}
         />
       ),
@@ -148,6 +151,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={vi.fn()}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => null}
         />
       ),
@@ -184,6 +188,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={onOpenFile}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => null}
         />
       ),
@@ -202,16 +207,17 @@ describe("FileTree", () => {
 
   // ── Double-click ───────────────────────────────────────────────
 
-  it("calls onOpenExternal on double-clicking a file", async () => {
+  it("calls onDblClickFile on double-clicking a file", async () => {
     vi.mocked(listDir).mockResolvedValueOnce([fileEntry]);
-    const onOpenExternal = vi.fn();
+    const onDblClickFile = vi.fn();
 
     const dispose = render(
       () => (
         <FileTree
           root={rootDir}
           onOpenFile={vi.fn()}
-          onOpenExternal={onOpenExternal}
+          onOpenExternal={vi.fn()}
+          onDblClickFile={onDblClickFile}
           selectedPath={() => null}
         />
       ),
@@ -223,21 +229,22 @@ describe("FileTree", () => {
     const fileButton = Array.from(buttons).find((b) => b.textContent?.includes("main.ts"))!;
     fileButton.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
-    expect(onOpenExternal).toHaveBeenCalledWith("/test/workspace/main.ts");
+    expect(onDblClickFile).toHaveBeenCalledWith("/test/workspace/main.ts");
 
     dispose();
   });
 
-  it("does not call onOpenExternal on double-clicking a directory", async () => {
+  it("does not call onDblClickFile on double-clicking a directory", async () => {
     vi.mocked(listDir).mockResolvedValueOnce([dirEntry]);
-    const onOpenExternal = vi.fn();
+    const onDblClickFile = vi.fn();
 
     const dispose = render(
       () => (
         <FileTree
           root={rootDir}
           onOpenFile={vi.fn()}
-          onOpenExternal={onOpenExternal}
+          onOpenExternal={vi.fn()}
+          onDblClickFile={onDblClickFile}
           selectedPath={() => null}
         />
       ),
@@ -249,7 +256,7 @@ describe("FileTree", () => {
     const dirButton = Array.from(buttons).find((b) => b.textContent?.includes("src"))!;
     dirButton.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
-    expect(onOpenExternal).not.toHaveBeenCalled();
+    expect(onDblClickFile).not.toHaveBeenCalled();
 
     dispose();
   });
@@ -267,6 +274,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={onOpenFile}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => null}
         />
       ),
@@ -290,17 +298,18 @@ describe("FileTree", () => {
     dispose();
   });
 
-  it("calls onOpenExternal when double-clicking a child file in an expanded directory", async () => {
+  it("calls onDblClickFile when double-clicking a child file in an expanded directory", async () => {
     vi.mocked(listDir).mockResolvedValueOnce(rootEntries);
     vi.mocked(listDir).mockResolvedValueOnce(childEntries);
-    const onOpenExternal = vi.fn();
+    const onDblClickFile = vi.fn();
 
     const dispose = render(
       () => (
         <FileTree
           root={rootDir}
           onOpenFile={vi.fn()}
-          onOpenExternal={onOpenExternal}
+          onOpenExternal={vi.fn()}
+          onDblClickFile={onDblClickFile}
           selectedPath={() => null}
         />
       ),
@@ -319,7 +328,7 @@ describe("FileTree", () => {
     const childButton = Array.from(allButtons).find((b) => b.textContent?.includes("utils.ts"))!;
     childButton.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
-    expect(onOpenExternal).toHaveBeenCalledWith("/test/workspace/src/utils.ts");
+    expect(onDblClickFile).toHaveBeenCalledWith("/test/workspace/src/utils.ts");
 
     dispose();
   });
@@ -335,6 +344,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={vi.fn()}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => "/test/workspace/main.ts"}
         />
       ),
@@ -358,6 +368,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={vi.fn()}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={() => "/test/workspace/src"}
         />
       ),
@@ -383,6 +394,7 @@ describe("FileTree", () => {
           root={rootDir}
           onOpenFile={vi.fn()}
           onOpenExternal={vi.fn()}
+          onDblClickFile={vi.fn()}
           selectedPath={selectedPath}
         />
       ),

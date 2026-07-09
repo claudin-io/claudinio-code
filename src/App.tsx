@@ -13,6 +13,7 @@ import { EmptyState } from "./components/EmptyState";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { TasksPanel } from "./components/TasksPanel";
 import { Icon } from "./components/Icon";
+import FileEditorModal from "./components/FileEditorModal";
 
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
@@ -53,6 +54,7 @@ function App() {
   const [openWorkspaces, setOpenWorkspaces] = createSignal<string[]>([]);
   const [activeWorkspace, setActiveWorkspace] = createSignal<string | null>(null);
   const [selectedFile, setSelectedFile] = createSignal<string | null>(null);
+  const [editorFilePath, setEditorFilePath] = createSignal<string | null>(null);
   const [indexStatusMap, setIndexStatusMap] = createSignal<Record<string, string>>({});
   const [progressMap, setProgressMap] = createSignal<Record<string, IndexProgress | null>>({});
   const [showConfig, setShowConfig] = createSignal(false);
@@ -850,6 +852,7 @@ function App() {
               <FileTree
                 root={activeWorkspace()!}
                 onOpenFile={setSelectedFile}
+                onDblClickFile={setEditorFilePath}
                 onOpenExternal={openExternal}
                 selectedPath={selectedFile}
               />
@@ -965,6 +968,13 @@ function App() {
           </aside>
         </Show>
       </div>
+      <Show when={editorFilePath() && activeWorkspace()}>
+        <FileEditorModal
+          filePath={editorFilePath()!}
+          rootPath={activeWorkspace()!}
+          onClose={() => setEditorFilePath(null)}
+        />
+      </Show>
       </Show>
     </div>
   );

@@ -17,6 +17,12 @@ export default defineConfig(async () => ({
   // fails to load. HMR is meaningless in tests anyway.
   plugins: [solid(isTest ? { hot: false } : {}), tailwindcss()],
 
+  optimizeDeps: {
+    // Monaco editor loads workers via `new Worker(new URL(...))` at runtime.
+    // Pre-bundling these workers breaks them, so exclude Monaco entirely.
+    exclude: ["monaco-editor"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

@@ -179,6 +179,12 @@ const dict: LocaleDict = {
   // ── Text Editor Modal ─────────────────────────────────────────────
   "editor.title": "Editor",
   "editor.open": "Open editor",
+
+  // ── File Editor Modal ─────────────────────────────────────────────
+  "fileEditor.unsavedTitle": "Unsaved changes",
+  "fileEditor.unsavedMessage": "You have unsaved changes. Are you sure you want to close?",
+  "fileEditor.save": "Save",
+  "fileEditor.title": "{0} — Editor",
   // ── Tasks Panel ──────────────────────────────────────────────
   "tasks.panel.title": "Tasks",
   "tasks.panel.noTasks": "No tasks yet — ask the agent to create some",
