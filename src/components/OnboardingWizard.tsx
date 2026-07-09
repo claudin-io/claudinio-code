@@ -9,7 +9,7 @@ export const OnboardingWizard: Component<{
 }> = (props) => {
   const [step, setStep] = createSignal(0);
 
-  const features = [
+  const features = () => [
     {
       icon: "thinking-face" as const,
       title: t("onboarding.features.agent.title"),
@@ -64,7 +64,7 @@ export const OnboardingWizard: Component<{
           {t("onboarding.features.title")}
         </h2>
         <div class="grid max-w-md grid-cols-2 gap-3">
-          <For each={features}>
+          <For each={features()}>
             {(feature) => (
               <div class="flex flex-col items-center gap-2 rounded-lg border border-border-subtle bg-surface-0 p-4 text-center">
                 <Icon name={feature.icon} class="h-8 w-8 text-accent" />
