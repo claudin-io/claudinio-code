@@ -1,6 +1,7 @@
 import { onMount, onCleanup, type Component } from "solid-js";
 import * as monaco from "monaco-editor";
 import { Icon } from "./Icon";
+import { t } from "../lib/grill-me";
 
 interface TextEditorModalProps {
   initialText: string;
@@ -49,7 +50,7 @@ const TextEditorModal: Component<TextEditorModalProps> = (props) => {
     >
       <div class="flex w-[80vw] h-[80vh] flex-col rounded-xl bg-surface-0 shadow-2xl">
         <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
-          <span class="font-semibold text-ink">Editor</span>
+          <span class="font-semibold text-ink">{t("editor.title")}</span>
           <button
             onClick={handleClose}
             class="rounded-md p-1 text-ink-faint transition-colors hover:bg-surface-2 hover:text-ink"
