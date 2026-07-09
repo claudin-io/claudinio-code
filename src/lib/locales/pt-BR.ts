@@ -66,6 +66,12 @@ const dict: LocaleDict = {
   "chat.status.awaitingInput": "Aguardando sua resposta",
   "chat.status.done": "Pronto",
   "chat.status.error": "Erro",
+  "chat.errorBar.dismiss": "Dispensar",
+  "chat.errorBar.continue": "Continuar",
+  "chat.budgetBanner.title": "Budget do plano esgotado",
+  "chat.budgetBanner.description": "Seu limite de uso foi atingido e o agente não pode continuar. Faça upgrade do plano para seguir enviando mensagens.",
+  "chat.budgetBanner.upgrade": "Fazer upgrade",
+  "chat.budgetBanner.dismiss": "Dispensar",
   "chat.status.idle": "Parado",
 
   // ── ChatPanel - Messages ──────────────────────────────────────────
