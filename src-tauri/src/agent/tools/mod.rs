@@ -416,7 +416,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             // Record the read for edit_file validation
             {
                 let mut tracker = ctx.read_tracker.lock().await;
-                tracker.record_read(&path, start_line, end_line);
+                tracker.record_read(&path, start_line, end_line, &content);
             }
             Ok(ToolOutput::Text { content })
         }
@@ -697,7 +697,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default)]
 pub struct ReadFileRecord {
     pub full_read: bool,
-    pub ranges: Vec<(usize, usize)>,
+    /// Verbatim text of each range that was read. We verify edits against the
+    /// actual text the model saw rather than line numbers, so the gate is
+    /// immune to duplicate lines and to line shifts caused by earlier edits.
+    pub chunks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -706,23 +709,35 @@ pub struct ReadTracker {
 }
 
 impl ReadTracker {
-    pub fn record_read(&mut self, path: &str, start_line: Option<usize>, end_line: Option<usize>) {
+    pub fn record_read(
+        &mut self,
+        path: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        content: &str,
+    ) {
         let entry = self.files.entry(path.to_string()).or_default();
         match (start_line, end_line) {
-            (Some(s), Some(e)) => {
-                entry.ranges.push((s, e));
+            (Some(_), Some(_)) => {
+                entry.chunks.push(content.to_string());
             }
             _ => {
                 // No range or incomplete range = full file read
                 entry.full_read = true;
-                entry.ranges.clear();
+                entry.chunks.clear();
+                entry.chunks.push(content.to_string());
             }
         }
     }
 
     /// Check whether editing `old_string` in `path` is allowed based on
-    /// previously recorded reads. Returns Ok if the file was fully read or
-    /// the old_string's first line falls within a recorded range.
+    /// previously recorded reads. Returns Ok if the file was fully read or the
+    /// exact `old_string` appears in some text the model previously read.
+    ///
+    /// Verifying by content (rather than by line number) avoids a failure mode
+    /// where a repetitive first line (e.g. `</div>`) resolves to a spurious
+    /// earlier match, making the gate impossible to satisfy no matter which
+    /// range the model reads.
     pub fn check_can_edit(&self, path: &str, old_string: &str) -> Result<(), String> {
         let entry = self.files.get(path).ok_or_else(|| {
             format!(
@@ -735,36 +750,36 @@ impl ReadTracker {
             return Ok(());
         }
 
-        // Read the file to find which line old_string starts on
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-
-        let first_line_text = old_string.lines().next().unwrap_or("");
-        if first_line_text.is_empty() {
+        if old_string.is_empty() {
             return Err("old_string cannot be empty".to_string());
         }
 
-        let line_num = content
-            .lines()
-            .position(|l| l.contains(first_line_text))
-            .map(|idx| idx + 1) // 1-based
-            .ok_or_else(|| format!("old_string not found in {path}"))?;
-
-        if entry.ranges.iter().any(|(start, end)| line_num >= *start && line_num <= *end) {
-            Ok(())
-        } else {
-            let ranges_str = entry
-                .ranges
-                .iter()
-                .map(|(s, e)| format!("{s}-{e}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(format!(
-                "read_file was called on {path}, but the old_string's first line ({line_num}) \
-                 is outside the read range(s) ({ranges_str}). \
-                 Call read_file on the relevant lines before editing."
-            ))
+        // The model may edit any text it has actually read verbatim.
+        if entry.chunks.iter().any(|c| c.contains(old_string)) {
+            return Ok(());
         }
+
+        // Not yet read. Point at where the text really is so the model can read
+        // the correct range instead of guessing (the source of the old loop).
+        let hint = match std::fs::read_to_string(path) {
+            Ok(content) => match content.find(old_string) {
+                Some(byte_idx) => {
+                    let line_num = content[..byte_idx].matches('\n').count() + 1;
+                    format!(
+                        " The text is at line {line_num}. Call read_file with start_line/end_line \
+                         covering it, then edit."
+                    )
+                }
+                None => " That exact text was not found in the current file — re-read the file \
+                         and copy old_string verbatim, including indentation."
+                    .to_string(),
+            },
+            Err(e) => format!(" (could not re-read file: {e})"),
+        };
+        Err(format!(
+            "read_file was called on {path}, but you have not read the exact text you're trying \
+             to edit.{hint}"
+        ))
     }
 }
 
@@ -930,8 +945,8 @@ mod tests {
         assert!(result.is_err(), "edit at line 10 (outside range 3-5) should be rejected");
         let err = result.unwrap_err();
         assert!(
-            err.contains("outside the read range"),
-            "error should mention outside range: {err}"
+            err.contains("you have not read the exact text") && err.contains("line 10"),
+            "error should explain the text wasn't read and point to the real line: {err}"
         );
         let _ = std::fs::remove_file(&p);
     }
