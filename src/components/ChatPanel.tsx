@@ -37,6 +37,7 @@ import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
+import TextEditorModal from "./TextEditorModal";
 import { FileMentionPopover } from "./FileMentionPopover";
 import { TagMentionPopover } from "./TagMentionPopover";
 import { SkillMentionPopover } from "./SkillMentionPopover";
@@ -435,6 +436,7 @@ export const ChatPanel: Component<{
   const [retryableError, setRetryableError] = createSignal<string | null>(null);
   // Attachments to send with the next message
   const [attachments, setAttachments] = createSignal<{ name: string; path: string; mediaType: string; size: number }[]>([]);
+  const [showEditor, setShowEditor] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
   // @-mention autocomplete state
   const [mentionQuery, setMentionQuery] = createSignal("");
@@ -1617,6 +1619,14 @@ export const ChatPanel: Component<{
         <div class="w-full">
           <div class="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
             <button
+              onClick={() => setShowEditor(true)}
+              disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
+              title="Abrir editor"
+            >
+              <Icon name="notebook-pen" class="h-4 w-4" stroke />
+            </button>
+            <button
               onClick={async () => {
                 const files = await pickFiles();
                 for (const f of files) {
@@ -1867,6 +1877,23 @@ export const ChatPanel: Component<{
             <small>{t("chat.drop.hint")}</small>
           </div>
         </div>
+      </Show>
+      <Show when={showEditor()}>
+        <TextEditorModal
+          initialText={input()}
+          onClose={(text) => {
+            setInput(text);
+            setShowEditor(false);
+            setTimeout(() => {
+              const el = inputRef;
+              if (el) {
+                el.focus();
+                const pos = text.length;
+                el.setSelectionRange(pos, pos);
+              }
+            }, 0);
+          }}
+        />
       </Show>
     </div>
   );
