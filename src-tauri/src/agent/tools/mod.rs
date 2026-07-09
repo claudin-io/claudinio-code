@@ -213,7 +213,7 @@ pub fn get_defs() -> Vec<ToolDef> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "代码功能的自然语言描述。必须使用英文——如果用户使用了其他语言，请先翻译。" },
+                    "query": { "type": "string", "description": "代码功能的自然语言描述。必须使用英文——如果用户使用了其他语言，请先翻译。 (query MUST be English)" },
                     "limit": { "type": "integer", "default": 15 }
                 },
                 "required": ["query"]
@@ -318,7 +318,7 @@ pub fn get_defs() -> Vec<ToolDef> {
                             "required": ["name", "goal", "mode"],
                             "properties": {
                                 "name": { "type": "string", "description": "向用户显示的简短标签，例如'auth-flow-investigator'" },
-                                "goal": { "type": "string", "description": "自包含的指令：任务、已知文件路径/符号、约束条件" },
+                                "goal": { "type": "string", "description": "自包含的指令：任务、已知文件路径/符号、约束条件 (write the goal in English)" },
                                 "mode": { "type": "string", "enum": ["explore", "code"], "description": "explore = 仅读工具；code = 可以编辑文件并运行bash（需要用户批准）" },
                                 "expected_output": { "type": "string", "description": "最终报告必须包含的内容" }
                             }

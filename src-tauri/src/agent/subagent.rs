@@ -285,7 +285,9 @@ pub async fn run_subagent(
         None => String::new(),
     };
     let system = format!(
-        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}",
+        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}\
+         \n\nLANGUAGE: Think, call tools, and write your final report in English ONLY -- never Chinese. \
+         The Chinese in this prompt is instruction to you, not a language to reproduce.",
         ctx.workspace_root.as_deref().unwrap_or("(none)"),
         skills_hint,
     );
