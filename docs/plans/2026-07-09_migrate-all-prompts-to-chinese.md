@@ -144,3 +144,23 @@ Every translated block has `/* Original (EN): */` comment above it with the full
 - Migrate input_schema property descriptions to Chinese: File: src-tauri/src/agent/tools/mod.rs, all input_schema description fields; DONE by tools-mod-rs-prompt-migrator
 - Update test assertions for new Chinese prompts: Files: src-tauri/src/agent/session.rs (tests), src-tauri/src/agent/skills.rs (tests); session.rs tests updated by session-rs-prompt-migrator; skills.rs tests check XML skill names — no changes needed
 - Build & verify: cargo build + cargo test pass: Build passes clean; 161/162 tests pass. 1 failing test (test_read_file_large_truncated) is PRE-EXISTING and unrelated to prompt changes (confirmed via git stash); 3 prompt_eval tests all pass: brain_prompt_mandates_size_and_verbatim_assets, builder_prompt_requires_complete_subagent_spec, system_prompt_warns_against_similar_to_guessing
+
+
+## Implementation Log — 2026-07-09 20:12
+**Summary:** Commit + push — all prompt migrations shipped
+**Changed files:** A	.claudinio.json, A	docs/plans/2026-07-09_2026-07-07-file-editor-monaco.md, A	docs/plans/2026-07-09_2026-07-09-fix-onboarding-bugs.md, A	docs/plans/2026-07-09_2026-07-09-remove-ts-diagnostics-from-file-editor.md, A	docs/plans/2026-07-09_api-key-authentication.md, A	docs/plans/2026-07-09_fix-at-mention-dropdown-gap.md, A	docs/plans/2026-07-09_migrate-all-prompts-to-chinese.md, M	src-tauri/src/agent/provider.rs, M	src-tauri/src/agent/session.rs, M	src-tauri/src/agent/subagent.rs, M	src-tauri/src/agent/tools/mod.rs, M	src/components/DiffViewer.test.tsx, M	src/components/DiffViewer.tsx, M	src/components/OnboardingWizard.test.tsx, M	src/lib/grill-me.test.ts, M	src/lib/ipc.test.ts, M	src/lib/theme.test.ts
+**Commits:** c37014d feat: migrate all AI prompts to Chinese (Sandwich Hybrid Pattern)
+**Journal:** Commit and push completed successfully. 17 files staged (4 Rust prompt files + 6 test/component files from other sessions + 6 plan files + .claudinio.json). Build verified clean beforehand, 161/162 tests pass (1 pre-existing).
+
+**Task journal:**
+- Migrate SYSTEM_PROMPT to Chinese: File: src-tauri/src/agent/session.rs, lines 257-305; DONE by session-rs-prompt-migrator
+- Migrate GOLDEN_PROMPT to Chinese: File: src-tauri/src/agent/session.rs, lines 307-314; DONE by session-rs-prompt-migrator
+- Migrate Brain & Builder mode prompts in system_prompt(): File: src-tauri/src/agent/session.rs, lines 315-430; DONE by session-rs-prompt-migrator + manual fix for Rust 2021 lexer Unicode compat
+- Migrate TOOL_PREFERENCE to Chinese: File: src-tauri/src/agent/subagent.rs, lines 36-52; DONE by subagent-rs-prompt-migrator
+- Migrate SUBAGENT_SYSTEM_PROMPT to Chinese: File: src-tauri/src/agent/subagent.rs, lines 53-60; DONE by subagent-rs-prompt-migrator
+- Migrate COMPLETION_JUDGE_SYSTEM to Chinese: File: src-tauri/src/agent/provider.rs, lines 426-439; DONE by provider-rs-prompt-migrator
+- Migrate tool descriptions in get_defs() to Chinese: File: src-tauri/src/agent/tools/mod.rs, lines 72-334; DONE by tools-mod-rs-prompt-migrator
+- Migrate standalone tool def descriptions to Chinese: File: src-tauri/src/agent/tools/mod.rs, lines 340-402; DONE by tools-mod-rs-prompt-migrator
+- Migrate input_schema property descriptions to Chinese: File: src-tauri/src/agent/tools/mod.rs, all input_schema description fields; DONE by tools-mod-rs-prompt-migrator
+- Update test assertions for new Chinese prompts: Files: src-tauri/src/agent/session.rs (tests), src-tauri/src/agent/skills.rs (tests); session.rs tests updated by session-rs-prompt-migrator; skills.rs tests check XML skill names — no changes needed
+- Build & verify: cargo build + cargo test pass: Build passes clean; 161/162 tests pass. 1 failing test (test_read_file_large_truncated) is PRE-EXISTING and unrelated to prompt changes (confirmed via git stash); 3 prompt_eval tests all pass: brain_prompt_mandates_size_and_verbatim_assets, builder_prompt_requires_complete_subagent_spec, system_prompt_warns_against_similar_to_guessing
