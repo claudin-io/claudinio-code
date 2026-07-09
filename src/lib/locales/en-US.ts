@@ -230,6 +230,27 @@ const dict: LocaleDict = {
   "settings.maxGoldenCyclesHint": "How many automatic Brain↔Builder cycles to run while golden goals (<goal> tags) are pending. Empty = 5.",
   "settings.maxGoldenStalls": "Max golden stalls",
   "settings.maxGoldenStallsHint": "Stop the golden loop after this many cycles without progress. Empty = 2.",
+
+  // ── Onboarding Wizard ────────────────────────────────────────
+  "onboarding.welcome.title": "Welcome to Claudinio Code",
+  "onboarding.welcome.subtitle": "Your AI agent for software development. Plan, code, and execute tasks with autonomous agents.",
+  "onboarding.welcome.tagline": "Maximum productivity with AI that understands your code.",
+  "onboarding.features.title": "What you can do",
+  "onboarding.features.agent.title": "Intelligent Agent",
+  "onboarding.features.agent.desc": "Chat with AI that plans, executes tools, and shows everything in real time on the timeline.",
+  "onboarding.features.approval.title": "Safe Approvals",
+  "onboarding.features.approval.desc": "Bash commands and file edits require your permission with Monaco Editor visual diff.",
+  "onboarding.features.subagents.title": "Parallel Subagents",
+  "onboarding.features.subagents.desc": "Up to 4 simultaneous agents for complex tasks, each with its own timeline.",
+  "onboarding.features.indexing.title": "Smart Indexing",
+  "onboarding.features.indexing.desc": "Semantic search with CodeBERT that understands what your code does, not just names.",
+  "onboarding.signIn.title": "Let's get started",
+  "onboarding.signIn.subtitle": "Sign in with your claudin.io account to unlock all features.",
+  "onboarding.signIn.button": "Sign in with claudin.io",
+  "onboarding.signIn.signingIn": "Waiting for browser sign-in…",
+  "onboarding.signIn.error": "Sign-in failed. Please try again.",
+  "onboarding.next": "Next",
+  "onboarding.prev": "Previous",
 };
 
 export default dict;

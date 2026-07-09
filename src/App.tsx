@@ -10,6 +10,7 @@ import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
 import { FileTree } from "./components/FileTree";
 import { ChatPanel } from "./components/ChatPanel";
 import { EmptyState } from "./components/EmptyState";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import { TasksPanel } from "./components/TasksPanel";
 import { Icon } from "./components/Icon";
 
@@ -74,6 +75,7 @@ function App() {
   const [showTree, setShowTree] = createSignal(false);
   const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
+  const [onboardingSignInError, setOnboardingSignInError] = createSignal<string | null>(null);
 
   // Convenience views scoped to the currently visible workspace.
   const progress = () => {
@@ -321,6 +323,17 @@ function App() {
       activateWorkspace(folder);
     } else {
       await indexProject(folder);
+    }
+  };
+
+  const onboardingSignIn = async () => {
+    setOnboardingSignInError(null);
+    try {
+      const result = await loginWithClaudinio();
+      setAccountLogin(result.login);
+      setAccountTier(result.tier ?? null);
+    } catch (e) {
+      setOnboardingSignInError(t("onboarding.signIn.error") + ": " + String(e));
     }
   };
 
@@ -631,7 +644,14 @@ function App() {
         </div>
       </Show>
 
-      <div class="flex min-h-0 flex-1">
+      <Show when={accountLogin()} fallback={
+        <OnboardingWizard
+          onSignIn={onboardingSignIn}
+          signingIn={loggingIn()}
+          signInError={onboardingSignInError()}
+        />
+      }>
+        <div class="flex min-h-0 flex-1">
         <aside class="flex w-60 shrink-0 flex-col border-r border-border-subtle bg-surface-1">
           <Show
             when={showTree() && activeWorkspace()}
@@ -897,6 +917,7 @@ function App() {
           </aside>
         </Show>
       </div>
+      </Show>
     </div>
   );
 }
