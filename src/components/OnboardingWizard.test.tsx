@@ -14,7 +14,7 @@ describe("OnboardingWizard", () => {
   it("renders step 0 (welcome) by default", () => {
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} />
+        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
@@ -27,7 +27,7 @@ describe("OnboardingWizard", () => {
   it("next button advances to step 1 (features)", () => {
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} />
+        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
@@ -44,7 +44,7 @@ describe("OnboardingWizard", () => {
   it("next button advances to step 2 (sign in)", () => {
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} />
+        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
@@ -62,7 +62,7 @@ describe("OnboardingWizard", () => {
   it("previous button goes back from step 2 to step 1", () => {
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} />
+        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
@@ -84,7 +84,7 @@ describe("OnboardingWizard", () => {
   it("dots reflect current step", () => {
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} />
+        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError={null} onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
@@ -102,7 +102,7 @@ describe("OnboardingWizard", () => {
     const onSignIn = vi.fn();
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={onSignIn} signingIn={false} signInError={null} />
+        <OnboardingWizard onSignIn={onSignIn} signingIn={false} signInError={null} onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
@@ -124,7 +124,7 @@ describe("OnboardingWizard", () => {
   it("sign-in button is disabled while signingIn", () => {
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={vi.fn()} signingIn={true} signInError={null} />
+        <OnboardingWizard onSignIn={vi.fn()} signingIn={true} signInError={null} onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
@@ -145,7 +145,7 @@ describe("OnboardingWizard", () => {
   it("shows error message when signInError is provided", () => {
     const dispose = render(
       () => (
-        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError="error message" />
+        <OnboardingWizard onSignIn={vi.fn()} signingIn={false} signInError="error message" onApiKeySubmit={vi.fn()} apiKeyValidating={false} apiKeyError={null} />
       ),
       document.body,
     );
