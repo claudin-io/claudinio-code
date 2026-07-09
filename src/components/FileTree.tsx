@@ -5,6 +5,7 @@ const TreeNode: Component<{
   entry: DirEntry;
   depth: number;
   onOpenFile: (path: string) => void;
+  onDblClickFile: (path: string) => void;
   onOpenExternal: (path: string) => void;
   selectedPath: () => string | null;
 }> = (props) => {
@@ -20,7 +21,7 @@ const TreeNode: Component<{
   };
 
   const handleDblClick = () => {
-    if (!props.entry.isDir) props.onOpenExternal(props.entry.path);
+    if (!props.entry.isDir) props.onDblClickFile(props.entry.path);
   };
 
   return (
@@ -44,6 +45,7 @@ const TreeNode: Component<{
               entry={child}
               depth={props.depth + 1}
               onOpenFile={props.onOpenFile}
+              onDblClickFile={props.onDblClickFile}
               onOpenExternal={props.onOpenExternal}
               selectedPath={props.selectedPath}
             />
@@ -57,6 +59,7 @@ const TreeNode: Component<{
 export const FileTree: Component<{
   root: string;
   onOpenFile: (path: string) => void;
+  onDblClickFile: (path: string) => void;
   onOpenExternal: (path: string) => void;
   selectedPath: () => string | null;
 }> = (props) => {
@@ -73,6 +76,7 @@ export const FileTree: Component<{
             entry={entry}
             depth={0}
             onOpenFile={props.onOpenFile}
+            onDblClickFile={props.onDblClickFile}
             onOpenExternal={props.onOpenExternal}
             selectedPath={props.selectedPath}
           />
