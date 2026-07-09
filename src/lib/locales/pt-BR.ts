@@ -170,6 +170,14 @@ const dict: LocaleDict = {
   // ── ChatPanel - Drop overlay ──────────────────────────────────────
   "chat.drop.title": "Solte o arquivo para anexar",
   "chat.drop.hint": "Imagens, PDFs, documentos, código e mais",
+
+  // ── Mention popovers ──────────────────────────────────────────────
+  "mention.noFiles": "Nenhum arquivo encontrado",
+  "mention.noSkills": "Nenhuma skill encontrada",
+
+  // ── Text Editor Modal ─────────────────────────────────────────────
+  "editor.title": "Editor",
+  "editor.open": "Abrir editor",
   // ── Tasks Panel ──────────────────────────────────────────────
   "tasks.panel.title": "Tarefas",
   "tasks.panel.noTasks": "Nenhuma tarefa ainda — peça ao agente para criar",
@@ -209,6 +217,8 @@ const dict: LocaleDict = {
   "mode.changed.brain.agent": "O agente entrou no modo Brain",
   "mode.changed.builder.agent": "O agente voltou ao modo Builder",
   "mode.changed.reason": "Motivo: {0}",
+  "mode.continueWithBuilder": "Continuar com Builder",
+  "mode.continueMessage": "Executar o plano",
   "golden.loop": "Golden loop: ciclo {0} de {1} — {2} goal(s) pendente(s)",
   "golden.loop.replay": "Golden loop: ciclo {0} — {1} goal(s) pendente(s)",
   "golden.task.badge": "Golden — meta obrigatória",
