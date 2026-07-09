@@ -42,6 +42,13 @@ export interface AttachmentData {
   size: number;
 }
 
+export interface WriteClipboardBlobResult {
+  path: string;
+  name: string;
+  mediaType: string;
+  size: number;
+}
+
 export interface AgentConfig {
   baseUrl: string;
   brainModel: string;
@@ -233,6 +240,10 @@ export function getSessionMode(workspace: string): Promise<{ mode: SessionMode; 
 
 export function readAttachment(path: string): Promise<AttachmentData> {
   return invoke<AttachmentData>("read_attachment", { path });
+}
+
+export function writeClipboardBlob(data: string, name: string, mediaType: string): Promise<WriteClipboardBlobResult> {
+  return invoke<WriteClipboardBlobResult>("write_clipboard_blob", { data, name, mediaType });
 }
 
 export interface SessionSummary {

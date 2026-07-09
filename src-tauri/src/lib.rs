@@ -32,6 +32,7 @@ pub fn run() {
             commands::auth::login_with_claudinio,
             commands::auth::logout_claudinio,
             commands::auth::validate_api_key,
+            commands::clipboard::write_clipboard_blob,
             commands::code_intel::open_workspace,
             commands::code_intel::close_workspace,
             commands::code_intel::search_symbols,

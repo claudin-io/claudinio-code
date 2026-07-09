@@ -15,6 +15,7 @@ import {
   loginWithClaudinio,
   openExternalUrl,
   readAttachment,
+  writeClipboardBlob,
   setSessionMode,
   normalizeSessionMode,
   pickFiles,
@@ -48,6 +49,7 @@ import ContextWarning from "./ContextWarning";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
 import { setWorkspaceStatus } from "../lib/workspaceStatus";
+import { ToastPill } from "./ToastPill";
 
 marked.use({
   renderer: {
@@ -441,6 +443,9 @@ export const ChatPanel: Component<{
   const isBudgetError = () => retryableError()?.startsWith("BUDGET_EXCEEDED::") ?? false;
   // Attachments to send with the next message
   const [attachments, setAttachments] = createSignal<{ name: string; path: string; mediaType: string; size: number }[]>([]);
+  const [toastMessage, setToastMessage] = createSignal<string | null>(null);
+  const showToast = (msg: string) => setToastMessage(msg);
+  const dismissToast = () => setToastMessage(null);
   const [showEditor, setShowEditor] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
   // @-mention autocomplete state
@@ -543,6 +548,70 @@ export const ChatPanel: Component<{
 
   const removeAttachment = (index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handlePaste = async (e: ClipboardEvent) => {
+    // Only handle pastes when the textarea is enabled
+    if (isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input") return;
+
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    let handled = false;
+
+    // Phase 1: Check for image blobs in clipboard items
+    // (e.g. screenshots, copied images from browser)
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const blob = item.getAsFile();
+        if (!blob) continue;
+
+        const base64Data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result as string;
+            const comma = result.indexOf(",");
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+          };
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(blob);
+        });
+
+        const ext = item.type.split("/")[1] || "png";
+        const name = `clipboard-${Date.now()}.${ext}`;
+        try {
+          const result = await writeClipboardBlob(base64Data, name, item.type);
+          await addAttachment(result.path);
+          handled = true;
+        } catch {
+          // Silently ignore if write fails
+        }
+        break; // One image at a time
+      }
+    }
+
+    // Phase 2: Check for file objects with path (copied from OS file manager)
+    if (!handled && e.clipboardData.files.length > 0) {
+      for (let i = 0; i < e.clipboardData.files.length; i++) {
+        const file = e.clipboardData.files[i];
+        const filePath = (file as any).path as string | undefined;
+        if (filePath) {
+          try {
+            await addAttachment(filePath);
+            handled = true;
+          } catch {
+            // Silently ignore
+          }
+        }
+      }
+    }
+
+    // Phase 3: If we attached something via paste, prevent default text paste and show toast
+    if (handled) {
+      e.preventDefault();
+      showToast(t("chat.toast.fileAttached"));
+    }
   };
 
   const handleMentionSelect = (path: string) => {
@@ -1843,6 +1912,7 @@ export const ChatPanel: Component<{
                   if (tagFlowStep() !== "skill") setTagFlowStep(null);
                 }
               }}
+              onPaste={handlePaste}
               onKeyDown={handleKeyDown}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
               placeholder={
@@ -1962,6 +2032,7 @@ export const ChatPanel: Component<{
           }}
         />
       </Show>
+      <ToastPill message={toastMessage()} onDismiss={dismissToast} />
     </div>
   );
 };
