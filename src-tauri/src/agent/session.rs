@@ -322,8 +322,9 @@ UI Mandate: Task Panel (右侧) 是你唯一的计划/进度UI。绝不在文本
 # 5. GIT & ACTIONS
 - 除非用户明确指示，执行外部/破坏性操作（push, branch, PR）前必须调用 `ask_user`。
 
-# 6. LANGUAGE POLICY
-- STRICTLY ENGLISH ONLY FOR ALL OUTPUTS: 无论用户使用何种语言，你的所有输出必须严格使用英语。"#;
+# LANGUAGE POLICY
+- User-facing replies: write in the language of the user's latest message. If it is unclear or mixed, default to English.
+- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English -- never Chinese. The Chinese above is instruction to you; never mirror it into your thinking or tool calls."#;
 
 /// Appended to the system prompt in BOTH modes: golden tasks are mandatory
 /// goals the session must reach before it is allowed to finish for real.
@@ -426,7 +427,9 @@ File tools take absolute paths inside this root.\n*/\n\
                 "上下文、解决方案设计、风险、任务摘要; 再次调用以修改完整内容) -> ",
                 "`tasks_set` -> 交接: 如果你自己进入了此模式 (通过 `enter_plan_mode`), 调用 `exit_plan_mode` 并开始",
                 "构建; 如果用户启用了它, 不要试图退出 - 最后说计划和任务已准备就绪, 等待他们切换开关到 Builder 模式。\n",
-                "\nSTRICTLY ENGLISH ONLY FOR ALL OUTPUTS: 无论用户使用何种语言, 你的所有输出必须严格使用英语。\n"
+                "\n# LANGUAGE POLICY\n",
+                "- User-facing replies: write in the language of the user's latest message. If unclear or mixed, default to English.\n",
+                "- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English -- never Chinese. The Chinese above is instruction to you; never mirror it into your thinking or tool calls.\n"
             );
             let brain_prompt = brain_text.replace("{plans_subdir}", &plans_subdir);
             format!("{base}{GOLDEN_PROMPT}{brain_prompt}")
@@ -476,7 +479,9 @@ File tools take absolute paths inside this root.\n*/\n\
                 "因此 journal 应侧重于 '为什么' 和你学到了什么 - 而不是文件列表。这为计划提供未来参考的数据。\n",
                 "先使用智能工具进行调查 - `semantic_search` 用于行为问题, `code_search`/`symbol_lookup` 用于已知名称, ",
                 "先 `file_outline` 再读取文件 - 而 `grep`/bash 搜索作为最后手段。指示你的子智能体也这样做。\n",
-                "\nSTRICTLY ENGLISH ONLY FOR ALL OUTPUTS: 无论用户使用何种语言, 你的所有输出必须严格使用英语。\n"
+                "\n# LANGUAGE POLICY\n",
+                "- User-facing replies: write in the language of the user's latest message. If unclear or mixed, default to English.\n",
+                "- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English -- never Chinese. The Chinese above is instruction to you; never mirror it into your thinking or tool calls.\n"
             );
             let builder_prompt = builder_text.replace("{plans_subdir}", &plans_subdir);
             format!("{base}{GOLDEN_PROMPT}{builder_prompt}")
