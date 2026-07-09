@@ -170,6 +170,14 @@ const dict: LocaleDict = {
   // ── ChatPanel - Drop overlay ──────────────────────────────────────
   "chat.drop.title": "Drop file to attach",
   "chat.drop.hint": "Images, PDFs, docs, code and more",
+
+  // ── Mention popovers ──────────────────────────────────────────────
+  "mention.noFiles": "No files found",
+  "mention.noSkills": "No skills found",
+
+  // ── Text Editor Modal ─────────────────────────────────────────────
+  "editor.title": "Editor",
+  "editor.open": "Open editor",
   // ── Tasks Panel ──────────────────────────────────────────────
   "tasks.panel.title": "Tasks",
   "tasks.panel.noTasks": "No tasks yet — ask the agent to create some",
