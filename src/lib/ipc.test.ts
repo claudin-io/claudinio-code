@@ -597,7 +597,7 @@ describe("getConfig", () => {
     mockInvokeFor(fake);
     const { getConfig } = await import("./ipc");
     const result = await getConfig();
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith("get_config");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("get_config", { workspace: null });
     expect(result).toEqual(fake);
   });
 });
@@ -1108,6 +1108,15 @@ describe("pickFolder", () => {
     const { pickFolder } = await import("./ipc");
     const result = await pickFolder();
     expect(result).toBeNull();
+  });
+
+  it("passes defaultPath to open when provided", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValue("/workspace/sub");
+    const { pickFolder } = await import("./ipc");
+    const result = await pickFolder("/workspace");
+    expect(vi.mocked(open)).toHaveBeenCalledWith({ directory: true, multiple: false, defaultPath: "/workspace" });
+    expect(result).toBe("/workspace/sub");
   });
 });
 

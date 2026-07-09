@@ -16,8 +16,8 @@ export function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
 }
 
-export async function pickFolder(): Promise<string | null> {
-  const selected = await open({ directory: true, multiple: false });
+export async function pickFolder(defaultPath?: string): Promise<string | null> {
+  const selected = await open({ directory: true, multiple: false, ...(defaultPath !== undefined ? { defaultPath } : {}) });
   return typeof selected === "string" ? selected : null;
 }
 
