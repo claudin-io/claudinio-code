@@ -42,6 +42,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 // ── @tauri-apps/plugin-opener ──────────────────────────────────────
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
+  openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ── solid-js/web (Portal) ──────────────────────────────────────────

@@ -13,6 +13,7 @@ import {
   getSessionStats,
   getConfig,
   loginWithClaudinio,
+  openExternalUrl,
   readAttachment,
   setSessionMode,
   normalizeSessionMode,
@@ -434,6 +435,8 @@ export const ChatPanel: Component<{
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   const [queuedSteering, setQueuedSteering] = createSignal<string[]>([]);
   const [retryableError, setRetryableError] = createSignal<string | null>(null);
+  // Budget do plano estourado: mostra banner de upgrade em vez do retry bar.
+  const isBudgetError = () => retryableError()?.startsWith("BUDGET_EXCEEDED::") ?? false;
   // Attachments to send with the next message
   const [attachments, setAttachments] = createSignal<{ name: string; path: string; mediaType: string; size: number }[]>([]);
   const [showEditor, setShowEditor] = createSignal(false);
@@ -1593,7 +1596,37 @@ export const ChatPanel: Component<{
         </div>
       </Show>
 
-      <Show when={retryableError() !== null}>
+      <Show when={retryableError() !== null && isBudgetError()}>
+        <div class="border-t border-accent/40 bg-accent/10 px-4 py-3.5">
+          <div class="flex items-start justify-between gap-4">
+            <div class="flex items-start gap-3 min-w-0">
+              <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent/20 text-accent">
+                <Icon name="external-link" class="h-4 w-4" />
+              </div>
+              <div class="min-w-0">
+                <p class="text-[13px] font-semibold text-ink">{t("chat.budgetBanner.title")}</p>
+                <p class="text-[12px] text-ink-muted mt-0.5">{t("chat.budgetBanner.description")}</p>
+              </div>
+            </div>
+            <div class="flex gap-2 shrink-0">
+              <button
+                onClick={() => setRetryableError(null)}
+                class="rounded-md px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-surface-2"
+              >
+                {t("chat.budgetBanner.dismiss")}
+              </button>
+              <button
+                onClick={() => openExternalUrl("https://claudin.io/dashboard#billing")}
+                class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-accent-ink hover:bg-accent/80"
+              >
+                {t("chat.budgetBanner.upgrade")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={retryableError() !== null && !isBudgetError()}>
         <div class="border-t border-danger/30 bg-danger/5 px-4 py-3">
           <div class="flex items-center justify-between gap-4">
             <p class="text-[13px] text-danger shrink-0">{t("chat.status.error")}: {retryableError()}</p>
@@ -1602,13 +1635,13 @@ export const ChatPanel: Component<{
                 onClick={() => setRetryableError(null)}
                 class="rounded-md px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-surface-2"
               >
-                {t("chat.errorBar.dismiss") || "Dismiss"}
+                {t("chat.errorBar.dismiss")}
               </button>
               <button
                 onClick={handleRetryContinue}
                 class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:bg-accent/80"
               >
-                {t("chat.errorBar.continue") || "Continuar"}
+                {t("chat.errorBar.continue")}
               </button>
             </div>
           </div>

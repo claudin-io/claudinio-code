@@ -812,6 +812,11 @@ fn roll_cost(
 /// rate-limit/server errors. False for things that will fail again immediately
 /// (bad auth, malformed request) — retrying those just wastes time.
 fn is_retryable_error(msg: &str) -> bool {
+    // Budget esgotado do plano: retentar é inútil (o servidor recusará de novo
+    // até o usuário fazer upgrade). O frontend mostra um banner de upgrade.
+    if msg.starts_with(crate::agent::provider::BUDGET_EXCEEDED_MARKER) {
+        return false;
+    }
     if msg.starts_with("stream error:") || msg.starts_with("request failed:") {
         return true;
     }
@@ -2229,6 +2234,17 @@ mod tests {
         SessionStore {
             path: std::env::temp_dir().join(format!("claudinio_test_{}.jsonl", now_ms())),
         }
+    }
+
+    #[test]
+    fn budget_exceeded_is_not_retryable() {
+        let msg = format!(
+            "{}Claudinio: Budget exceeded for window '1h'.",
+            crate::agent::provider::BUDGET_EXCEEDED_MARKER
+        );
+        assert!(!is_retryable_error(&msg));
+        // sanity: transient 500 stays retryable
+        assert!(is_retryable_error("API error: HTTP 500"));
     }
 
     #[test]

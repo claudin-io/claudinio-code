@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 
 export interface DirEntry {
   name: string;
@@ -596,4 +596,9 @@ export function lspHover(workspace: string, args: LspPositionArgs): Promise<Hove
 
 export function openExternal(path: string): void {
   openPath(path).catch(() => {});
+}
+
+/** Abre uma URL no navegador padrão (best-effort). */
+export function openExternalUrl(url: string): void {
+  openUrl(url).catch(() => {});
 }

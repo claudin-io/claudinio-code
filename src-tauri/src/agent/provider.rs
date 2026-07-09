@@ -8,6 +8,25 @@ use tauri::ipc::Channel;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Prefixo-sentinela para erros de budget esgotado. O frontend detecta isso
+/// para trocar o error bar de retry por um banner de upgrade, e o retry loop
+/// (session.rs `is_retryable_error`) o trata como não-retentável.
+pub const BUDGET_EXCEEDED_MARKER: &str = "BUDGET_EXCEEDED::";
+
+/// Extrai `error.message` de um corpo de erro estilo Anthropic/LiteLLM; se
+/// contiver "budget" (case-insensitive), é um estouro de budget do plano.
+/// A API retorna HTTP 500 com corpo
+/// `{"error":{"message":"Claudinio: Budget exceeded for window '1h'. ..."}}`.
+fn budget_exceeded_message(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let msg = v.get("error")?.get("message")?.as_str()?;
+    if msg.to_lowercase().contains("budget") {
+        Some(msg.to_string())
+    } else {
+        None
+    }
+}
+
 /// Max time to wait for the *next* SSE chunk before treating the connection
 /// as dead. Resets on every chunk received, so a long-but-healthy stream
 /// (many minutes of steady deltas) is never killed by this — only a stalled
@@ -378,7 +397,12 @@ pub async fn classify_turn_completion(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("API error: HTTP {}", response.status()));
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return match budget_exceeded_message(&body) {
+            Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
+            None => Err(format!("API error: HTTP {status}")),
+        };
     }
     let json: Value = response
         .json()
@@ -440,8 +464,11 @@ pub async fn stream_message(
 
     let status = response.status();
     if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
         let err_msg = if status.as_u16() == 401 {
             "Unauthorized — check your API key".into()
+        } else if let Some(m) = budget_exceeded_message(&body) {
+            format!("{BUDGET_EXCEEDED_MARKER}{m}")
         } else {
             format!("API error: HTTP {status}")
         };
@@ -770,6 +797,22 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tauri::ipc::InvokeResponseBody;
+
+    #[test]
+    fn test_budget_exceeded_message_detects_real_body() {
+        let body = r#"{"error":{"message":"Claudinio: Budget exceeded for window '1h'. Please check your dashboard for details.","type":"None","param":"None","code":"500"}}"#;
+        assert_eq!(
+            budget_exceeded_message(body).as_deref(),
+            Some("Claudinio: Budget exceeded for window '1h'. Please check your dashboard for details.")
+        );
+    }
+
+    #[test]
+    fn test_budget_exceeded_message_ignores_non_budget_errors() {
+        let body = r#"{"error":{"message":"Internal Server Error","code":"500"}}"#;
+        assert_eq!(budget_exceeded_message(body), None);
+        assert_eq!(budget_exceeded_message("not json"), None);
+    }
 
     #[test]
     fn test_usage_merged_across_message_start_and_delta_anthropic_style() {

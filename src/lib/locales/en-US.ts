@@ -67,6 +67,12 @@ const dict: LocaleDict = {
   "chat.status.done": "Done",
   "chat.status.error": "Error",
   "chat.status.idle": "Idle",
+  "chat.errorBar.dismiss": "Dismiss",
+  "chat.errorBar.continue": "Continue",
+  "chat.budgetBanner.title": "Plan budget reached",
+  "chat.budgetBanner.description": "You've hit your usage limit, so the agent can't continue. Upgrade your plan to keep going.",
+  "chat.budgetBanner.upgrade": "Upgrade plan",
+  "chat.budgetBanner.dismiss": "Dismiss",
 
   // ── ChatPanel - Messages ──────────────────────────────────────────
   "chat.message.you": "You",
