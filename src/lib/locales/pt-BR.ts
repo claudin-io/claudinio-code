@@ -131,6 +131,7 @@ const dict: LocaleDict = {
   "chat.input.askCode": "Escreva algo… | @arquivo | <tag> | <skill>",
   "chat.input.dropToAttach": "Solte o arquivo para anexar",
   "chat.input.dropHint": "Imagens, PDFs, documentos, código e mais",
+  "chat.toast.fileAttached": "Arquivo anexado",
 
   // ── ChatPanel - Approval ──────────────────────────────────────────
   "chat.approval.proposedEdit": "Edição proposta",
