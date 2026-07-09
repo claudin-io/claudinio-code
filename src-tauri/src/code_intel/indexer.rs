@@ -99,6 +99,61 @@ pub fn index_file(
     Ok(parse_result)
 }
 
+pub fn index_doc_file(
+    db: &IndexDb,
+    path: &str,
+    content: &str,
+    mut embedder: Option<&mut CodeEmbedder>,
+) -> Result<usize, String> {
+    let lang = parser::detect_doc_language(path).unwrap_or("markdown");
+    let hash = compute_hash(content);
+    let modified = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let size = content.len() as i64;
+
+    let file_id = db.upsert_file(path, lang, &hash, modified, size)?;
+    let doc_symbols = parser::parse_doc_file(path, content);
+
+    db.delete_symbols_for_file(file_id)?;
+
+    let mut symbol_ids: Vec<(String, i64)> = Vec::new();
+    for sym in &doc_symbols {
+        let id = db.insert_symbol(
+            file_id,
+            &sym.name,
+            &sym.kind,
+            None,
+            sym.start_line,
+            sym.start_col,
+            sym.end_line,
+            sym.end_col,
+            sym.doc_comment.as_deref(),
+        )?;
+        symbol_ids.push((sym.name.clone(), id));
+    }
+
+    if let Some(ref mut emb) = embedder {
+        let texts: Vec<String> = doc_symbols
+            .iter()
+            .map(|sym| {
+                build_embedding_text(
+                    &sym.kind,
+                    &sym.name,
+                    sym.parent_context.as_deref(),
+                    None, // no doc_comment — the body is the content
+                    sym.body_text.as_deref(),
+                )
+            })
+            .collect();
+
+        encode_and_store_batched(db, emb, &symbol_ids, &texts);
+    }
+
+    Ok(doc_symbols.len())
+}
+
 /// Encode+store embeddings in bounded-size chunks so memory stays flat
 /// regardless of how many symbols a single file produces (e.g. a minified
 /// bundle can yield thousands of "symbols" in one shot).
@@ -206,9 +261,59 @@ pub fn scan_workspace(
         }
     }
 
+    // ── Second pass: documentation files (.md, .mdx, .txt) ──────────────
+    let doc_walker = ignore::WalkBuilder::new(root)
+        .git_ignore(true)
+        .git_global(true)
+        .hidden(true)
+        .build();
+
+    let doc_paths: Vec<String> = doc_walker
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter(|e| {
+            let p = e.path().to_string_lossy();
+            p.ends_with(".md") || p.ends_with(".mdx") || p.ends_with(".txt")
+        })
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+
+    let doc_total = doc_paths.len() as i64;
+
+    // Update total for progress display: code files + doc files
+    let grand_total = total + doc_total;
+    let grand_progress = IndexProgress {
+        status: "indexing".into(),
+        files_indexed: total_files,
+        symbols_indexed: total_symbols,
+        total_files: grand_total,
+        workspace: root.to_string(),
+    };
+    if let Some(handle) = app_handle.as_ref() {
+        let _ = handle.emit("index-progress", grand_progress);
+    }
+
+    for path_str in &doc_paths {
+        let content = match std::fs::read_to_string(path_str) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        match index_doc_file(db, path_str, &content, embedder.as_deref_mut()) {
+            Ok(num_symbols) => {
+                total_files += 1;
+                total_symbols += num_symbols as i64;
+            }
+            Err(_) => {
+                total_files += 1;
+            }
+        }
+    }
+
     // Drop rows for files no longer in the scan set (deleted files, or junk
     // like node_modules/dist indexed before ignore rules existed).
-    let keep: std::collections::HashSet<String> = all_paths.iter().cloned().collect();
+    let mut keep: std::collections::HashSet<String> = all_paths.iter().cloned().collect();
+    keep.extend(doc_paths);
     match db.prune_files_not_in(&keep) {
         Ok(pruned) if pruned > 0 => eprintln!("[indexer] pruned {pruned} stale files from index"),
         Ok(_) => {}
@@ -219,7 +324,7 @@ pub fn scan_workspace(
         status: "done".into(),
         files_indexed: total_files,
         symbols_indexed: total_symbols,
-        total_files: total,
+        total_files: grand_total,
         workspace: root.to_string(),
     };
     if let Some(handle) = app_handle {
@@ -251,16 +356,24 @@ pub fn generate_all_embeddings(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let parse_result = parser::parse_file(&file.path, &content);
-        if parse_result.error.is_some() {
-            continue;
-        }
 
         // Delete old embeddings for this file so stale symbols don't linger
         let _ = db.delete_embeddings_for_file(file.id);
 
-        let texts: Vec<String> = parse_result
-            .symbols
+        // For doc files, use parse_doc_file; for code files, use tree-sitter parser
+        let symbols: Vec<parser::ParsedSymbol> = if file.language.as_deref() == Some("markdown")
+            || file.language.as_deref() == Some("text")
+        {
+            parser::parse_doc_file(&file.path, &content)
+        } else {
+            let parse_result = parser::parse_file(&file.path, &content);
+            if parse_result.error.is_some() {
+                continue;
+            }
+            parse_result.symbols
+        };
+
+        let texts: Vec<String> = symbols
             .iter()
             .map(|sym| {
                 build_embedding_text(
@@ -277,8 +390,7 @@ pub fn generate_all_embeddings(
             let db_symbols = db.symbols_in_file(&file.path)?;
             // Encode in small batches, locking per batch, so the watcher and
             // semantic_search never wait long and memory stays bounded.
-            for (chunk_syms, chunk_texts) in parse_result
-                .symbols
+            for (chunk_syms, chunk_texts) in symbols
                 .chunks(EMBED_BATCH_SIZE)
                 .zip(texts.chunks(EMBED_BATCH_SIZE))
             {
@@ -353,6 +465,17 @@ pub fn reindex_file(db: &IndexDb, path: &str, embedder: Option<&mut CodeEmbedder
         if file.hash.as_deref() == Some(&new_hash) {
             return Ok(None);
         }
+    }
+
+    // Doc files use the doc-specific indexer instead of tree-sitter parsing
+    if path.ends_with(".md") || path.ends_with(".mdx") || path.ends_with(".txt") {
+        let _ = index_doc_file(db, path, &content, embedder);
+        return Ok(Some(ParseResult {
+            language: "markdown".into(),
+            symbols: vec![],
+            calls: vec![],
+            error: None,
+        }));
     }
 
     let result = index_file(db, path, &content, embedder).ok();

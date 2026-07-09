@@ -192,8 +192,8 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "semantic_search".into(),
-            description: "Semantic (concept-based) code search using CodeBERT embeddings. \
-Finds code by meaning and behavior, not keywords — e.g. 'message queue system' finds \
+            description: "Semantic (concept-based) code & documentation search using CodeBERT embeddings. \
+Finds code and documentation by meaning and behavior, not keywords — e.g. 'message queue system' finds \
 SteeringCtl.drain/push/queue even without identifier match. Prefer this when you can \
 describe the functionality but don't know the exact symbol name. The embedding model \
 is ENGLISH-ONLY: always translate the user's phrasing to English before querying — \

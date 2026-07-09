@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::path::Path;
 
+use regex::Regex;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedSymbol {
@@ -217,6 +219,122 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
 
         _ => None,
     }
+}
+
+/// Detect the language for documentation/text files.
+pub fn detect_doc_language(path: &str) -> Option<&'static str> {
+    let p = std::path::Path::new(path);
+    let ext = match p.extension() {
+        Some(e) => e.to_str()?,
+        None => return None,
+    };
+    match ext {
+        "md" | "mdx" => Some("markdown"),
+        "txt" => Some("text"),
+        _ => None,
+    }
+}
+
+/// Parse a documentation file (markdown or text) into chunked sections.
+/// Produces one `ParsedSymbol` per heading section (levels 2–6).
+/// Falls back to a single symbol using the file stem if no headings are found.
+pub fn parse_doc_file(path: &str, content: &str) -> Vec<ParsedSymbol> {
+    const MAX_BODY: usize = 800;
+
+    // Find all heading lines (levels 2–6: ## through ######)
+    let re = Regex::new(r"^(#{2,6})\s+(.+)$").unwrap();
+
+    let headings: Vec<(usize, String)> = content
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            re.captures(line).map(|cap| {
+                let heading_text = cap.get(2).unwrap().as_str().trim().to_string();
+                (i, heading_text) // 0-based line index
+            })
+        })
+        .collect();
+
+    // No headings → single symbol with file stem as name
+    if headings.is_empty() {
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document")
+            .to_string();
+
+        let body: String = content
+            .chars()
+            .take(MAX_BODY)
+            .collect();
+
+        let total_lines = content.lines().count() as i64;
+
+        return vec![ParsedSymbol {
+            name: stem,
+            kind: "doc_section".into(),
+            parent_context: Some(path.to_string()),
+            signature: None,
+            doc_comment: None,
+            body_text: if body.is_empty() { None } else { Some(body) },
+            start_line: 1,
+            start_col: 1,
+            end_line: if total_lines < 1 { 1 } else { total_lines },
+            end_col: 1,
+        }];
+    }
+
+    let mut symbols: Vec<ParsedSymbol> = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    for (idx, &(heading_line, ref heading_name)) in headings.iter().enumerate() {
+        // Determine where this section ends: either the next heading or EOF
+        let next_heading_line = headings.get(idx + 1).map(|&(l, _)| l).unwrap_or(total_lines);
+
+        // Body is everything between heading line (exclusive) and next heading line (exclusive)
+        let body_start = heading_line + 1;
+        let body_end = next_heading_line;
+
+        let body_text = if body_start < body_end {
+            let raw_body = lines[body_start..body_end].join("\n");
+            let trimmed: &str = raw_body.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                let truncated: String = trimmed
+                    .char_indices()
+                    .nth(MAX_BODY)
+                    .map(|(i, _)| trimmed[..i].to_string())
+                    .unwrap_or_else(|| trimmed.to_string());
+                Some(truncated)
+            }
+        } else {
+            None
+        };
+
+        // end_line is the last line of the section body (1-based)
+        let end_line = if body_end > heading_line + 1 {
+            body_end as i64 // heading_line is 0-based, body_end is the exclusive end index
+        } else {
+            (heading_line + 1) as i64
+        };
+
+        symbols.push(ParsedSymbol {
+            name: heading_name.clone(),
+            kind: "doc_section".into(),
+            parent_context: Some(path.to_string()),
+            signature: None,
+            doc_comment: None,
+            body_text,
+            start_line: (heading_line + 1) as i64, // 1-based
+            start_col: 1,
+            end_line,
+            end_col: 1,
+        });
+    }
+
+    symbols
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,5 +1123,132 @@ fn find_containing_function_name(
             }
         }
         current = current.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_doc_language_markdown() {
+        assert_eq!(detect_doc_language("README.md"), Some("markdown"));
+        assert_eq!(detect_doc_language("docs/guide.mdx"), Some("markdown"));
+        assert_eq!(detect_doc_language("ARCHITECTURE.md"), Some("markdown"));
+    }
+
+    #[test]
+    fn detect_doc_language_text() {
+        assert_eq!(detect_doc_language("notes.txt"), Some("text"));
+        assert_eq!(detect_doc_language("docs/CHANGELOG.txt"), Some("text"));
+    }
+
+    #[test]
+    fn detect_doc_language_unknown() {
+        assert_eq!(detect_doc_language("main.rs"), None);
+        assert_eq!(detect_doc_language("index.js"), None);
+        assert_eq!(detect_doc_language("Makefile"), None);
+    }
+
+    #[test]
+    fn parse_doc_file_with_headings() {
+        let content = "\
+# Title
+Some intro text that should not be a symbol.
+
+## Installation
+Run `npm install`.
+
+## Usage
+Call the function with options.
+
+### Advanced
+Deep details here.
+";
+        let symbols = parse_doc_file("test.md", content);
+        assert_eq!(symbols.len(), 3, "should create 3 symbols for ##, ##, and ###");
+
+        // First heading: Installation
+        assert_eq!(symbols[0].name, "Installation");
+        assert_eq!(symbols[0].kind, "doc_section");
+        assert!(symbols[0].body_text.as_ref().unwrap().contains("npm install"));
+        assert_eq!(symbols[0].start_line, 4);
+        assert_eq!(symbols[0].parent_context.as_deref(), Some("test.md"));
+
+        // Second heading: Usage
+        assert_eq!(symbols[1].name, "Usage");
+        assert!(symbols[1].body_text.as_ref().unwrap().contains("Call the function"));
+
+        // Third heading: Advanced
+        assert_eq!(symbols[2].name, "Advanced");
+        assert!(symbols[2].body_text.as_ref().unwrap().contains("Deep details"));
+    }
+
+    #[test]
+    fn parse_doc_file_no_headings() {
+        let content = "Just a plain text file with no markdown headings.\nSecond line.";
+        let symbols = parse_doc_file("README.txt", content);
+        assert_eq!(symbols.len(), 1, "should create 1 symbol when no headings found");
+        assert_eq!(symbols[0].name, "README");
+        assert_eq!(symbols[0].kind, "doc_section");
+        assert!(symbols[0].body_text.as_ref().unwrap().contains("plain text"));
+        assert_eq!(symbols[0].start_line, 1);
+        assert_eq!(symbols[0].parent_context.as_deref(), Some("README.txt"));
+    }
+
+    #[test]
+    fn parse_doc_file_truncates_long_body() {
+        let long_chunk = "x".repeat(500);
+        let medium_chunk = "y".repeat(500);
+        let content = format!(
+            "\
+## Section One
+{}
+
+## Section Two
+{}",
+            long_chunk, medium_chunk
+        );
+        let symbols = parse_doc_file("doc.md", &content);
+        // Each body should be truncated to MAX_BODY (800)
+        for sym in &symbols {
+            if let Some(ref body) = sym.body_text {
+                assert!(body.len() <= 800, "body too long: {}", body.len());
+            }
+        }
+        // But we should still have 2 distinct symbols
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].name, "Section One");
+        assert_eq!(symbols[1].name, "Section Two");
+    }
+
+    #[test]
+    fn parse_doc_file_skips_h1_headings() {
+        let content = "\
+# This is an H1 and should be skipped
+Some intro.
+
+## Actual section
+Content here.
+";
+        let symbols = parse_doc_file("test.md", content);
+        assert_eq!(symbols.len(), 1, "H1 headings should not create symbols");
+        assert_eq!(symbols[0].name, "Actual section");
+    }
+
+    #[test]
+    fn parse_doc_file_empty_body_after_heading() {
+        let content = "\
+## Empty Section
+
+## Next Section
+Has content.
+";
+        let symbols = parse_doc_file("test.md", content);
+        assert_eq!(symbols.len(), 2);
+        // Empty section should have no body
+        assert!(symbols[0].body_text.is_none() || symbols[0].body_text.as_ref().unwrap().is_empty());
+        // Next section should have content
+        assert!(symbols[1].body_text.is_some() && !symbols[1].body_text.as_ref().unwrap().is_empty());
     }
 }
