@@ -298,7 +298,11 @@ function App() {
     setWsProgress(folder, null);
     try {
       const s = await openWorkspace(folder, (p) => setWsProgress(folder, p));
-      setWsIndexStatus(folder, t("app.index.filesCount", s.filesCount, s.symbolsCount));
+      if (s.watcherWarning) {
+        setWsIndexStatus(folder, `${t('app.index.filesCount', s.filesCount, s.symbolsCount)} — ⚠️ ${s.watcherWarning}`);
+      } else {
+        setWsIndexStatus(folder, t('app.index.filesCount', s.filesCount, s.symbolsCount));
+      }
       // Load the flat file list for @-mention autocomplete
       await loadFileIndex(folder);
       // Only clear scan progress — the embedding phase keeps reporting after

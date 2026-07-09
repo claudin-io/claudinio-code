@@ -38,6 +38,7 @@ const dict: LocaleDict = {
   "app.index.filesCount": "{0} files, {1} symbols",
   "app.index.indexingStatus": "indexing…",
   "app.index.embeddingStatus": "Generating embeddings",
+  "app.index.watcherWarning": "Live file watching unavailable — filesystem changes will not be re-indexed automatically.",
   "app.config.saveError": "Error saving config: {0}",
   "app.config.yoloMode": "⚡ YOLO Mode (auto-approve all)",
   "app.config.yoloModeHint": "Auto-approves tool calls except those in the blacklist below.",

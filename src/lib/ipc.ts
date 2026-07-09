@@ -398,6 +398,7 @@ export interface IndexStatus {
   status: string;
   filesCount: number;
   symbolsCount: number;
+  watcherWarning?: string;
 }
 
 export interface IndexProgress {

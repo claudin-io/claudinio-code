@@ -29,6 +29,7 @@ pub struct WorkspaceState {
     /// so a shared manager would answer workspace B from workspace A's root.
     pub lsp_manager: Arc<Mutex<LspManager>>,
     pub _watcher: Mutex<Option<crate::code_intel::watcher::FileWatcher>>,
+    pub watcher_warning: Mutex<Option<String>>,
     pub active_session: Mutex<Option<SessionHandle>>,
 }
 
