@@ -219,7 +219,7 @@ function App() {
   };
 
   const pickPlanPath = async () => {
-    const folder = await pickFolder();
+    const folder = await pickFolder(activeWorkspace() ?? undefined);
     if (!folder) return;
     const ws = activeWorkspace();
     if (!ws) {
@@ -433,7 +433,7 @@ function App() {
                 class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle text-ink-muted hover:bg-surface-2 hover:text-ink"
                 title={t("app.config.browseFolder")}
               >
-                <Icon name="folder-open" class="h-4 w-4" />
+                <Icon name="folder" class="h-4 w-4" />
               </button>
             </div>
             <div class="mb-4 flex items-center gap-2">
