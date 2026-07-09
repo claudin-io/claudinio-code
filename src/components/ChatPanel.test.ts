@@ -1,4 +1,12 @@
 import { describe, it, expect } from "vitest";
+import {
+  applySubagentDone,
+  syncSubagentTimelineItems,
+  mapSubagentDoneStatus,
+  markThinkingEnded,
+  type SubagentNode,
+  type TimelineNode,
+} from "../lib/subagentTimeline";
 
 // ── Pure functions extracted from ChatPanel for testing ────────────
 
@@ -203,6 +211,127 @@ describe("SubagentTimelineState", () => {
     // When goal is empty, the UI should NOT show it (Show when={sa.goal} in SolidJS
     // evaluates falsy for empty string)
     expect(!!sa.goal).toBe(false);
+  });
+});
+
+// ── subagent timeline transition tests (the real regression) ───────
+//
+// Regression: when a subagent finished (SubagentDone), the authoritative
+// subagent-state map was updated but the inline timeline snapshot was NOT,
+// so the main timeline row stayed stuck on "running" forever even though the
+// subagent had reported and the parent turn had already continued.
+
+function runningSubagent(id: string): SubagentNode {
+  return {
+    id,
+    status: "running",
+    rounds: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    steps: [
+      { type: "thinking", thinking: { text: "waiting…", startedAt: 100 } },
+      { type: "text", text: "did a thing" } as TimelineNode,
+    ],
+  };
+}
+
+describe("mapSubagentDoneStatus", () => {
+  it("maps known terminal statuses", () => {
+    expect(mapSubagentDoneStatus("completed")).toBe("completed");
+    expect(mapSubagentDoneStatus("failed")).toBe("failed");
+    expect(mapSubagentDoneStatus("interrupted")).toBe("interrupted");
+    expect(mapSubagentDoneStatus("max_rounds")).toBe("max_rounds");
+  });
+
+  it("treats unknown/empty status as completed so it never stays running", () => {
+    expect(mapSubagentDoneStatus("")).toBe("completed");
+    expect(mapSubagentDoneStatus("weird")).toBe("completed");
+    // The key invariant: a done subagent is never left as "running".
+    expect(mapSubagentDoneStatus("running")).toBe("completed");
+  });
+});
+
+describe("markThinkingEnded", () => {
+  it("closes open thinking spinners without touching finished ones", () => {
+    const steps: TimelineNode[] = [
+      { type: "thinking", thinking: { text: "a", startedAt: 1 } },
+      { type: "thinking", thinking: { text: "b", startedAt: 2, endedAt: 5 } },
+      { type: "text" },
+    ];
+    const out = markThinkingEnded(steps, 999);
+    expect(out[0].thinking!.endedAt).toBe(999);
+    expect(out[1].thinking!.endedAt).toBe(5); // untouched
+    expect(out[2]).toEqual({ type: "text" });
+  });
+});
+
+describe("applySubagentDone", () => {
+  it("moves the subagent to its terminal status with final stats", () => {
+    const subagents = { "sid:0": runningSubagent("sid:0") };
+    const next = applySubagentDone(
+      subagents,
+      { subagentId: "sid:0", status: "completed", rounds: 4, inputTokens: 1200, outputTokens: 340, report: "done" },
+      777,
+    );
+    const sa = next["sid:0"];
+    expect(sa.status).toBe("completed");
+    expect(sa.rounds).toBe(4);
+    expect(sa.inputTokens).toBe(1200);
+    expect(sa.outputTokens).toBe(340);
+    expect(sa.report).toBe("done");
+    // Open thinking spinner is closed out.
+    expect(sa.steps[0].thinking!.endedAt).toBe(777);
+  });
+
+  it("does not mutate the input map", () => {
+    const subagents = { "sid:0": runningSubagent("sid:0") };
+    applySubagentDone(subagents, { subagentId: "sid:0", status: "completed", rounds: 1, inputTokens: 0, outputTokens: 0 }, 1);
+    expect(subagents["sid:0"].status).toBe("running");
+  });
+
+  it("is a no-op for an unknown subagent id", () => {
+    const subagents = { "sid:0": runningSubagent("sid:0") };
+    const next = applySubagentDone(subagents, { subagentId: "sid:missing", status: "completed", rounds: 1, inputTokens: 0, outputTokens: 0 }, 1);
+    expect(next).toBe(subagents);
+  });
+});
+
+describe("syncSubagentTimelineItems (the fix)", () => {
+  it("updates the inline timeline snapshot so it stops showing running", () => {
+    const running = runningSubagent("sid:0");
+    // The main timeline holds a snapshot of the subagent while it runs.
+    const timeline: TimelineNode[] = [
+      { type: "text", text: "before" } as TimelineNode,
+      { type: "subagent", subagent: running },
+      { type: "text", text: "after" } as TimelineNode,
+    ];
+
+    // Subagent finishes: authoritative map is updated…
+    const doneMap = applySubagentDone(
+      { "sid:0": running },
+      { subagentId: "sid:0", status: "completed", rounds: 3, inputTokens: 500, outputTokens: 200, report: "ok" },
+      50,
+    );
+    // …and the timeline snapshot is synced from it.
+    const synced = syncSubagentTimelineItems(timeline, doneMap);
+
+    const item = synced.find((s) => s.type === "subagent")!;
+    expect(item.subagent!.status).toBe("completed"); // was "running" — the bug
+    expect(item.subagent!.rounds).toBe(3);
+    expect(item.subagent!.report).toBe("ok");
+    // Surrounding items are preserved and order is stable.
+    expect(synced[0].text).toBe("before");
+    expect(synced[2].text).toBe("after");
+  });
+
+  it("leaves non-subagent items and unknown subagents untouched", () => {
+    const timeline: TimelineNode[] = [
+      { type: "subagent", subagent: runningSubagent("other") },
+      { type: "thinking", thinking: { text: "x", startedAt: 1 } },
+    ];
+    const synced = syncSubagentTimelineItems(timeline, {});
+    expect(synced[0].subagent!.status).toBe("running"); // no state for it → unchanged
+    expect(synced[1]).toEqual(timeline[1]);
   });
 });
 
