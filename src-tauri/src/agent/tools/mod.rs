@@ -1,11 +1,14 @@
 pub(crate) mod bash;
 mod edit_file;
+pub mod finalize_plan;
 mod grep;
 mod list_dir;
 mod read_file;
 pub mod tasks;
 mod web_search;
-mod write_plan;
+pub(crate) mod write_plan;
+
+pub use finalize_plan::git_head;
 
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
@@ -38,6 +41,10 @@ pub struct ToolContext {
     /// Custom plan save path (relative to workspace_root).
     /// None = use default (.claudinio/plans).
     pub plan_save_path: Option<String>,
+    /// The git commit HEAD pointed at when this run started, used by
+    /// finalize_plan to compute the changed files / commits since work began.
+    /// None when not a git repo (or git unavailable).
+    pub base_commit: Option<String>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -344,6 +351,29 @@ complete updated text to revise. Structure: Context, Solution Design, Risks, Tas
     }
 }
 
+/// Definition of the finalize_plan tool. Only offered in Builder mode — it
+/// appends an Implementation Log (changed files, commits, journal) to the plan
+/// `.md`, feeding the plan with data for future reference once a build is done.
+pub fn finalize_plan_def() -> ToolDef {
+    ToolDef {
+        name: "finalize_plan".into(),
+        description: "Append an Implementation Log to the plan file once its implementation is \
+DONE and verified. Records the CHANGED FILES and COMMITS automatically (read from git), so your \
+`journal` should focus on findings, decisions, and gotchas — not a file list. Call this as the \
+LAST step of a Builder run, after all tasks are done. Defaults to the most recent plan in the \
+plans directory.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "journal": { "type": "string", "description": "Findings, decisions, and gotchas from the implementation (the 'why' and what was learned)." },
+                "plan_file": { "type": "string", "description": "Optional plan file to target (basename like '2026-07-09_x.md' or a path). Defaults to the most recently modified plan." },
+                "summary": { "type": "string", "description": "Optional one-line summary of the implementation." }
+            },
+            "required": ["journal"]
+        }),
+    }
+}
+
 /// Definition of the enter_plan_mode tool. Only offered in Builder mode.
 pub fn enter_plan_mode_def() -> ToolDef {
     ToolDef {
@@ -513,6 +543,11 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "write_plan" => {
             let a: write_plan::WritePlanArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             let content = write_plan::execute(a, ctx)?;
+            Ok(ToolOutput::Text { content })
+        }
+        "finalize_plan" => {
+            let a: finalize_plan::FinalizePlanArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let content = finalize_plan::execute(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
         "web_search" => {
@@ -750,6 +785,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         }
     }
 
@@ -992,6 +1028,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -1011,6 +1048,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -1030,6 +1068,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -1047,6 +1086,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -1067,6 +1107,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -1087,6 +1128,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -1106,6 +1148,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -1128,6 +1171,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));

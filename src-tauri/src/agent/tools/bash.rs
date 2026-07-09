@@ -278,6 +278,7 @@ mod tests {
                 interrupt: None,
                 agent_config: None,
                 plan_save_path: None,
+            base_commit: None,
             },
         ))
     }
@@ -303,6 +304,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -340,6 +342,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -376,6 +379,7 @@ mod tests {
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
+            base_commit: None,
         };
         let result = rt.block_on(execute(
             BashArgs {
