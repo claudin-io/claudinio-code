@@ -12,10 +12,10 @@ const PATHS: Record<string, string[]> = {
     "M12 8h6v2h-6z",
   ],
   "chevron-left": [
-    "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
+    "m14 7l-5 5l5 5V7z",
   ],
   "chevron-right": [
-    "M16 13v-2h-2v2h2Zm-2-2V9h-2v2h2Zm0 4v-2h-2v2h2Zm-2-6V7h-2v2h2Zm0 8v-2h-2v2h2ZM10 7V5H8v2h2Zm0 12v-2H8v2h2Z",
+    "m10 17l5-5l-5-5v10z",
   ],
   "chevron-down": [
     "M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z",
