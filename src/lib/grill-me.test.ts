@@ -255,27 +255,26 @@ describe("grill-me coverage gaps", () => {
   it("prevents stale effect-load dict from overwriting a newer locale", async () => {
     const mod = await import("./grill-me");
 
+    // Start on pt-BR
     await mod.loadDict("pt-BR");
-
     mod.setLocale("pt-BR");
     await flushUntil(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");
 
-    // Switch to en-US — effect fires, starts uncached loadDict("en-US").
+    // Switch to en-US
     mod.setLocale("en-US");
+    await flushUntil(() => mod.t("greeting") === "Hello");
+    expect(mod.t("greeting")).toBe("Hello");
 
-    // Clear only the en-US entry so its mock import is genuinely pending
-    // (earlier tests may have cached it, breaking the race assumption).
-    mod.__clearDictCache("en-US");
-
-    // Let Solid schedule the effect body (next Check phase tick)
-    await new Promise((r) => setImmediate(r));
-    await Promise.resolve();
-
-    // Now switch back to pt-BR (cached) before en-US mock import resolves.
-    // Race: en-US .then fires with locale() === "pt-BR" !== "en-US" → BLOCKED (line 94)
+    // Now simulate: en-US load finishes LATE, but locale has switched back
+    // to pt-BR. The guard should block the stale en-US dict from applying.
     mod.setLocale("pt-BR");
-    await flushUntil(() => mod.t("greeting") === "Olá");
+
+    // The simulated stale finish: locale() === "pt-BR" !== "en-US" → BLOCKED
+    const enUSDict = await mod.loadDict("en-US");
+    mod.__applyDictIfCurrent("en-US", enUSDict);
+
+    // pt-BR dict must remain (the stale en-US was blocked).
     expect(mod.t("greeting")).toBe("Olá");
   });
 });

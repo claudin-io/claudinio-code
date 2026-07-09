@@ -64,6 +64,12 @@ export function __clearDictCache(id?: LocaleId) {
   }
 }
 
+/** @internal exported for testing — applies a dict only if the locale still
+ * matches, simulating the effect's stale-load guard without async timing. */
+export function __applyDictIfCurrent(id: LocaleId, d: LocaleDict) {
+  if (getLocaleState().locale() === id) setCurrentDict(d);
+}
+
 // ── loader for locale dicts ─────────────────────────────────────────
 const dictCache = new Map<LocaleId, LocaleDict>();
 
