@@ -2036,9 +2036,9 @@ const ContextFooter: Component<{
     hasBreakdown()
       ? t(
           "chat.context.costBreakdown",
-          props.costInput!.toFixed(2),
-          props.costOutput!.toFixed(2),
-          props.costCacheRead!.toFixed(2),
+          props.costInput!.toFixed(4),
+          props.costOutput!.toFixed(4),
+          props.costCacheRead!.toFixed(4),
         )
       : t("chat.context.sessionCost");
   const pct = () => Math.min((props.contextTokens / props.maxTokens) * 100, 100);
@@ -2079,7 +2079,7 @@ const ContextFooter: Component<{
 
       <Show when={props.estimatedCost !== undefined}>
         <span class="font-mono text-[11px] text-ink-faint" title={costTitle()}>
-          ~${props.estimatedCost!.toFixed(2)}
+          ${props.estimatedCost!.toFixed(4)}
         </span>
       </Show>
 
