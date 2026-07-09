@@ -18,6 +18,8 @@ pub struct IndexStatus {
     pub status: String,
     pub files_count: i64,
     pub symbols_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watcher_warning: Option<String>,
 }
 
 fn resolve_model_dir(app_handle: &tauri::AppHandle) -> Option<std::path::PathBuf> {
@@ -59,10 +61,12 @@ pub async fn open_workspace(
     // not restart indexing/watcher/LSP under a possibly-running agent.
     if let Ok(ws) = state.workspace(&path).await {
         let (files_count, symbols_count) = ws.index_db.index_stats().unwrap_or((0, 0));
+        let warning = ws.watcher_warning.lock().await.clone();
         return Ok(IndexStatus {
             status: "ok".into(),
             files_count,
             symbols_count,
+            watcher_warning: warning,
         });
     }
 
@@ -198,7 +202,21 @@ pub async fn open_workspace(
         });
     }
 
-    let watcher = FileWatcher::start(&path, &db_path, app_handle.clone())?;
+    let (watcher, watcher_warning): (Option<FileWatcher>, Option<String>) =
+        match FileWatcher::start(&path, &db_path, app_handle.clone()) {
+            Ok(w) => (Some(w), None),
+            Err(e) => {
+                eprintln!("[open_workspace] file watcher failed (workspace still usable): {e}");
+                let _ = app_handle.emit("index-progress", indexer::IndexProgress {
+                    status: "watcher_warning".into(),
+                    files_indexed: files_count,
+                    symbols_indexed: symbols_count,
+                    total_files: files_count,
+                    workspace: path.clone(),
+                });
+                (None, Some(format!("Live file watching unavailable: {e}")))
+            }
+        };
 
     let root = std::path::PathBuf::from(&path);
     let lsp_manager = Arc::new(tokio::sync::Mutex::new(crate::lsp::manager::LspManager::new()));
@@ -214,7 +232,8 @@ pub async fn open_workspace(
             crate::agent::skills::SkillManager::new(Some(root.clone())),
         )),
         lsp_manager,
-        _watcher: tokio::sync::Mutex::new(Some(watcher)),
+        _watcher: tokio::sync::Mutex::new(watcher),
+        watcher_warning: tokio::sync::Mutex::new(watcher_warning),
         active_session: tokio::sync::Mutex::new(None),
     });
 
@@ -227,6 +246,7 @@ pub async fn open_workspace(
         status: "ok".into(),
         files_count,
         symbols_count,
+        watcher_warning: None,
     })
 }
 
