@@ -25,6 +25,16 @@ static LOGIN_PATH: OnceLock<String> = OnceLock::new();
 /// - **Windows**: returns the current process PATH directly (no login-shell concept).
 ///
 /// The result is cached in a `OnceLock` after the first call.
+///
+/// Public so other tools that shell out to binaries installed under the user's
+/// login PATH (e.g. the `grep` tool, which invokes `rg`) can share the exact
+/// same resolved PATH — a GUI app launched from Finder inherits only a minimal
+/// PATH (`/usr/bin:/bin:…`) that excludes homebrew/cargo/nvm, so a bare
+/// `Command::new("rg")` fails with "No such file or directory".
+pub fn login_path() -> &'static str {
+    LOGIN_PATH.get_or_init(resolve_login_path)
+}
+
 fn resolve_login_path() -> String {
     // Windows: no login-shell concept, just use current PATH
     if cfg!(target_os = "windows") {
@@ -115,7 +125,7 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
     // Resolve and inject the login PATH (cached in OnceLock after first call).
     // This avoids the LLM needing to prepend `export PATH=...` to every command,
     // which on macOS triggers repeated TCC permission prompts.
-    let login_path = LOGIN_PATH.get_or_init(resolve_login_path);
+    let login_path = login_path();
 
     let mut child = Command::new(shell)
         .arg(shell_flag)
@@ -267,6 +277,7 @@ mod tests {
                 )),
                 interrupt: None,
                 agent_config: None,
+                plan_save_path: None,
             },
         ))
     }
@@ -291,6 +302,7 @@ mod tests {
             )),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -327,6 +339,7 @@ mod tests {
             )),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -362,6 +375,7 @@ mod tests {
             )),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let result = rt.block_on(execute(
             BashArgs {

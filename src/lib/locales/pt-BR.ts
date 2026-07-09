@@ -42,6 +42,13 @@ const dict: LocaleDict = {
   "app.config.yoloModeHint": "Auto-aprova chamadas de ferramentas exceto as na blacklist abaixo.",
   "app.config.yoloBlacklist": "YOLO Blacklist (nomes separados por vírgula)",
   "app.config.yoloBlacklistHint": "Essas ferramentas ainda exigem aprovação manual mesmo com YOLO ativo. Ex: edit_file, bash",
+  "app.config.planSavePath": "Caminho para salvar planos",
+  "app.config.planSavePathHint": "Relativo à raiz do workspace. Deixe vazio para usar o padrão (.claudinio/plans).",
+  "app.config.browseFolder": "Procurar pasta",
+  "app.config.resetToDefault": "Voltar ao padrão",
+  "app.config.default": "padrão",
+  "app.config.sourceWorkspace": "Workspace",
+  "app.config.sourceLocal": "Local",
 
   // ── EmptyState ────────────────────────────────────────────────────
   "empty.title": "Claudinio Code",
@@ -109,7 +116,7 @@ const dict: LocaleDict = {
   "chat.subagent.interrupted": "Interrompido",
   "chat.subagent.maxRounds": "Limite de rounds",
   "chat.subagent.rounds": "rounds",
-  "chat.subagent.title": "Subagent: {0}",
+  "chat.subagent.title": "Subagente: {0}",
   "chat.subagent.goal": "Objetivo",
   "chat.subagent.report": "Relatório",
 

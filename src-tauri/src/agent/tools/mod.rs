@@ -1,4 +1,4 @@
-mod bash;
+pub(crate) mod bash;
 mod edit_file;
 mod grep;
 mod list_dir;
@@ -35,6 +35,9 @@ pub struct ToolContext {
     /// Loaded AgentConfig — used by tools that call claudin.io services
     /// (currently just web_search). None when unavailable (e.g. some tests).
     pub agent_config: Option<crate::agent::provider::AgentConfig>,
+    /// Custom plan save path (relative to workspace_root).
+    /// None = use default (.claudinio/plans).
+    pub plan_save_path: Option<String>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -746,6 +749,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         }
     }
 
@@ -987,6 +991,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -1005,6 +1010,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -1023,6 +1029,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -1039,6 +1046,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -1058,6 +1066,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -1077,6 +1086,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -1095,6 +1105,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -1116,6 +1127,7 @@ mod tests {
             read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
             interrupt: None,
             agent_config: None,
+            plan_save_path: None,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
