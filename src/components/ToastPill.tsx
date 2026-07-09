@@ -1,4 +1,4 @@
-import { onMount, onCleanup } from "solid-js";
+import { createEffect, onCleanup } from "solid-js";
 
 interface ToastPillProps {
   message: string | null;
@@ -8,28 +8,18 @@ interface ToastPillProps {
 export function ToastPill(props: ToastPillProps) {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-  const scheduleDismiss = () => {
+  createEffect(() => {
     clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => {
-      props.onDismiss();
-    }, 2000);
-  };
-
-  onMount(() => {
     if (props.message) {
-      scheduleDismiss();
+      timeoutId = setTimeout(() => {
+        props.onDismiss();
+      }, 2000);
     }
   });
 
   onCleanup(() => {
     clearTimeout(timeoutId);
   });
-
-  // Re-schedule when message changes
-  // Using a createEffect would be better, but we keep it simple
-  // The parent controls message changes, and this component tracks via mount/cleanup
-  // Actually, since we don't have createEffect imported, we handle via the parent
-  // The parent ChatPanel re-mounts this on message change via key or conditional
 
   return (
     <div
