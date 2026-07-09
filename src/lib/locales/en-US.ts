@@ -217,6 +217,8 @@ const dict: LocaleDict = {
   "mode.changed.brain.agent": "The agent entered Brain mode",
   "mode.changed.builder.agent": "The agent returned to Builder mode",
   "mode.changed.reason": "Reason: {0}",
+  "mode.continueWithBuilder": "Continue with Builder",
+  "mode.continueMessage": "Execute the plan",
   "golden.loop": "Golden loop: cycle {0} of {1} — {2} goal(s) pending",
   "golden.loop.replay": "Golden loop: cycle {0} — {1} goal(s) pending",
   "golden.task.badge": "Golden — mandatory goal",

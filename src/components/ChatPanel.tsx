@@ -18,6 +18,7 @@ import {
   setSessionMode,
   normalizeSessionMode,
   pickFiles,
+  type ModeOrigin,
   type SessionMode,
   type ModeChangedData,
   type GoldenLoopData,
@@ -34,6 +35,7 @@ import {
   type SessionRecord,
   type UserAnswer,
 } from "../lib/ipc";
+import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
@@ -466,6 +468,7 @@ export const ChatPanel: Component<{
   const [compactThreshold, setCompactThreshold] = createSignal(192_000);
   const [isCompacting, setIsCompacting] = createSignal(false);
   const [mode, setMode] = createSignal<SessionMode>("builder");
+  const [modeOrigin, setModeOrigin] = createSignal<ModeOrigin>("human");
 
   // Human toggle: persists a Mode record in the session JSONL immediately so
   // the mode survives reloads; a running workflow picks it up next round.
@@ -481,6 +484,34 @@ export const ChatPanel: Component<{
       setActiveSessionId(result.sessionId);
     } catch {
       // backend unavailable — sendMessage will sync the mode on next send
+    }
+  };
+
+  // Auto-switch to Builder mode and send "Execute the plan" when the user
+  // clicks the "Continue with Builder" button after a Brain planning session.
+  const continueWithBuilder = async () => {
+    try {
+      await switchMode("builder");
+      const msg = t("mode.continueMessage");
+      setMessages((prev) => [
+        ...prev,
+        { role: "user" as const, text: msg },
+      ]);
+      setCurrentSteps([]);
+      setThinkingStart(0);
+      setStatus("thinking");
+      scrollToBottom(true);
+      const result = await sendMessage(
+        props.workspace,
+        msg,
+        [],
+        handleEvent,
+        "builder",
+      );
+      setActiveSessionId(result.sessionId);
+    } catch (e) {
+      setRetryableError(String(e));
+      setStatus("error");
     }
   };
 
@@ -952,6 +983,7 @@ export const ChatPanel: Component<{
     } else if (event.event === "ModeChanged") {
       const data = event.data as ModeChangedData;
       setMode(data.mode);
+      setModeOrigin(data.origin);
       setCurrentSteps((prev) => [
         ...prev,
         { type: "mode" as const, modeChange: data } as TimelineItem,
@@ -996,25 +1028,11 @@ export const ChatPanel: Component<{
       scrollToBottom();
     } else if (event.event === "SubagentDone") {
       const d = event.data as SubagentDoneData;
-      setSubagentState((prev) => {
-        const sa = prev[d.subagentId];
-        if (!sa) return prev;
-        const status = d.status === "completed" ? "completed" as const
-          : d.status === "failed" ? "failed" as const
-          : d.status === "interrupted" ? "interrupted" as const
-          : d.status === "max_rounds" ? "max_rounds" as const
-          : "completed" as const;
-        const finalSteps = sa.steps.map((s) => {
-          if (s.type === "thinking") {
-            return { ...s, thinking: { ...s.thinking!, endedAt: Date.now() } };
-          }
-          return s;
-        });
-        return {
-          ...prev,
-          [d.subagentId]: { ...sa, status, rounds: d.rounds, inputTokens: d.inputTokens, outputTokens: d.outputTokens, report: d.report, steps: finalSteps },
-        };
-      });
+      const next = applySubagentDone(subagentState(), d, Date.now());
+      setSubagentState(next);
+      // Sync the inline timeline snapshot so the main timeline reflects the
+      // subagent's terminal status instead of staying stuck on "running".
+      setCurrentSteps((prev) => syncSubagentTimelineItems(prev, next));
       scrollToBottom();
     } else if (event.event === "Subagent") {
       const d = event.data;
@@ -1488,6 +1506,20 @@ export const ChatPanel: Component<{
             )}
           </For>
 
+          <Show when={mode() === "brain" && modeOrigin() === "human" && status() === "done"}>
+            <div class="mb-6 flex justify-center">
+              <button
+                onClick={continueWithBuilder}
+                class="inline-flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-accent-ink shadow-lg shadow-accent/20 transition-all hover:bg-accent/90 hover:shadow-xl hover:shadow-accent/30 active:scale-[0.98]"
+              >
+                <span class="inline-flex h-4 w-4 items-center justify-center">
+                  <span class="i-lucide:construction-worker h-4 w-4" />
+                </span>
+                {t("mode.continueWithBuilder")}
+              </button>
+            </div>
+          </Show>
+
           <Show when={status() === "thinking" || status() === "done" || status() === "awaiting_input"}>
             <div class="mb-6">
               <div class="trajectory-rail flex flex-col gap-0.5">
@@ -1655,7 +1687,7 @@ export const ChatPanel: Component<{
               onClick={() => setShowEditor(true)}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
               class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
-              title="Abrir editor"
+              title={t("editor.open")}
             >
               <Icon name="notebook-pen" class="h-4 w-4" stroke />
             </button>
