@@ -1,29 +1,29 @@
 import { describe, it, expect, vi } from "vitest";
 
+// Factory so we can recreate the mock in different scopes
+function createLocalStorageMock() {
+  const store: Record<string, string> = {};
+  return {
+    getItem: (key: string) => store[key] ?? null,
+    setItem: (key: string, value: string) => {
+      store[key] = value;
+    },
+    removeItem: (key: string) => {
+      delete store[key];
+    },
+    clear: () => {
+      Object.keys(store).forEach((k) => delete store[k]);
+    },
+    get length() {
+      return Object.keys(store).length;
+    },
+    key: (i: number) => Object.keys(store)[i] ?? null,
+  };
+}
+
 // jsdom doesn't provide a functional localStorage — stub it so the
 // module can be imported without throwing.
-vi.stubGlobal(
-  "localStorage",
-  (() => {
-    const store: Record<string, string> = {};
-    return {
-      getItem: (key: string) => store[key] ?? null,
-      setItem: (key: string, value: string) => {
-        store[key] = value;
-      },
-      removeItem: (key: string) => {
-        delete store[key];
-      },
-      clear: () => {
-        Object.keys(store).forEach((k) => delete store[k]);
-      },
-      get length() {
-        return Object.keys(store).length;
-      },
-      key: (i: number) => Object.keys(store)[i] ?? null,
-    };
-  })(),
-);
+vi.stubGlobal("localStorage", createLocalStorageMock());
 
 // Mock locale dynamic imports with data that includes function-form entries
 // to exercise the branch in t() where typeof val === "function".
@@ -172,6 +172,104 @@ describe("grill-me", () => {
     await flushUntil(() => mod.t("greeting") === "Hello");
     expect(mod.t("greeting")).toBe("Hello");
 
+    mod.setLocale("pt-BR");
+    await flushUntil(() => mod.t("greeting") === "Olá");
+    expect(mod.t("greeting")).toBe("Olá");
+  });
+});
+
+// ── Coverage gaps: SSR guard, stale-load guards ──────────────────────
+//
+// These tests cover the remaining branches that the default jsdom / stubbed
+// localStorage environment never exercises:
+//
+//   Line 13  — typeof localStorage !== "undefined" (false)  in createLocaleState
+//   Line 21  — typeof localStorage !== "undefined" (false)  in setLocale
+//   Line 78  — locale() === initialLocale       (false)  in init .then handler
+//   Line 94  — locale() === id                  (false)  in effect .then handler
+//
+describe("grill-me coverage gaps", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    // Restore a working localStorage mock (do NOT use unstubAllGlobals — that
+    // restores jsdom's broken localStorage, which would fail on next import).
+    vi.stubGlobal("localStorage", createLocalStorageMock());
+  });
+
+  // ── SSR guard: no localStorage available (lines 13, 21) ──────────
+  it("works without localStorage (SSR) — createLocaleState guard", async () => {
+    vi.stubGlobal("localStorage", undefined);
+
+    // Use vi.importActual so the top-level code runs fresh with localStorage=undefined
+    const mod = await vi.importActual<typeof import("./grill-me")>("./grill-me");
+
+    // Default locale should still be pt-BR (stored ?? "pt-BR" → stored is null)
+    expect(mod.locale()).toBe("pt-BR");
+
+    // setLocale must not throw even though localStorage is undefined (line 21 guard)
+    expect(() => mod.setLocale("en-US")).not.toThrow();
+    expect(mod.locale()).toBe("en-US");
+
+    expect(() => mod.setLocale("pt-BR")).not.toThrow();
+    expect(mod.locale()).toBe("pt-BR");
+  });
+
+  // ── stored ?? "pt-BR" default when localStorage is present but empty ──
+  it("defaults to pt-BR when localStorage has no stored locale", async () => {
+    // localStorage mock has no "claudinio_locale" key → stored is null → "pt-BR"
+    const mod = await import("./grill-me");
+    expect(mod.locale()).toBe("pt-BR");
+  });
+
+  // ── initial-load stale guard (line 78) ──────────────────────────────
+  //
+  // Module init: loadDict(initialLocale).then((d) => {
+  //   if (getLocaleState().locale() === initialLocale) setCurrentDict(d);
+  // });
+  // If locale is changed BEFORE the .then fires, the guard prevents applying
+  // a stale dict.
+  it("prevents stale initial-load dict from overwriting a newer locale", async () => {
+    const mod = await import("./grill-me");
+
+    // Module init: initialLocale = "pt-BR", loadDict("pt-BR") is pending.
+    // Change locale before .then fires so guard evaluates to false.
+    mod.setLocale("en-US");
+
+    // Flush so the init .then fires with locale() === "en-US" !== "pt-BR"
+    // → setCurrentDict is NOT called with pt-BR dict (line 78 false branch).
+    await flushUntil(() => mod.t("greeting") === "Hello");
+
+    // en-US dict came from effect (init load was blocked)
+    expect(mod.t("greeting")).toBe("Hello");
+  });
+
+  // ── effect-load stale guard (line 94) ────────────────────────────────
+  //
+  // createEffect watches locale(). When it fires:
+  //   loadDict(id).then((d) => {
+  //     if (getLocaleState().locale() === id) setCurrentDict(d);
+  //   });
+  it("prevents stale effect-load dict from overwriting a newer locale", async () => {
+    const mod = await import("./grill-me");
+
+    await mod.loadDict("pt-BR");
+
+    mod.setLocale("pt-BR");
+    await flushUntil(() => mod.t("greeting") === "Olá");
+    expect(mod.t("greeting")).toBe("Olá");
+
+    // Switch to en-US — effect fires, starts uncached loadDict("en-US").
+    mod.setLocale("en-US");
+
+    // Let Solid schedule the effect body (next Check phase tick)
+    await new Promise((r) => setImmediate(r));
+    await Promise.resolve();
+
+    // Now switch back to pt-BR (cached) before en-US mock import resolves.
+    // Race: en-US .then fires with locale() === "pt-BR" !== "en-US" → BLOCKED (line 94)
     mod.setLocale("pt-BR");
     await flushUntil(() => mod.t("greeting") === "Olá");
     expect(mod.t("greeting")).toBe("Olá");

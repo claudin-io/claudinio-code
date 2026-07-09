@@ -207,10 +207,71 @@ describe("openExternal", () => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// openExternalUrl — uses openUrl from @tauri-apps/plugin-opener
+// ─────────────────────────────────────────────────────────────
+
+describe("openExternalUrl", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("delegates to openUrl with the given url", async () => {
+    const { openExternalUrl } = await import("./ipc");
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const mockedOpenUrl = vi.mocked(openUrl);
+
+    openExternalUrl("https://example.com");
+
+    expect(mockedOpenUrl).toHaveBeenCalledTimes(1);
+    expect(mockedOpenUrl).toHaveBeenCalledWith("https://example.com");
+  });
+
+  it("does not throw when openUrl rejects", async () => {
+    const { openExternalUrl } = await import("./ipc");
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    vi.mocked(openUrl).mockRejectedValueOnce(new Error("network error"));
+
+    expect(() => openExternalUrl("https://bad.example")).not.toThrow();
+  });
+
+  it("does not throw when openUrl resolves successfully", async () => {
+    const { openExternalUrl } = await import("./ipc");
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    vi.mocked(openUrl).mockResolvedValueOnce(undefined);
+
+    expect(() => openExternalUrl("https://good.example")).not.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
 // normalizeSessionMode — edge cases beyond ipc-normalize.test.ts
 // ─────────────────────────────────────────────────────────────
 
 describe("normalizeSessionMode edge cases", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns 'brain' for string 'brain'", async () => {
+    const { normalizeSessionMode } = await import("./ipc");
+    expect(normalizeSessionMode("brain")).toBe("brain");
+  });
+
+  it("returns 'brain' for string 'pensador'", async () => {
+    const { normalizeSessionMode } = await import("./ipc");
+    expect(normalizeSessionMode("pensador")).toBe("brain");
+  });
+
+  it("returns 'builder' for string 'builder'", async () => {
+    const { normalizeSessionMode } = await import("./ipc");
+    expect(normalizeSessionMode("builder")).toBe("builder");
+  });
+
+  it("returns 'builder' for string 'constructor'", async () => {
+    const { normalizeSessionMode } = await import("./ipc");
+    expect(normalizeSessionMode("constructor")).toBe("builder");
+  });
+
   it("returns 'builder' for number 0", async () => {
     const { normalizeSessionMode } = await import("./ipc");
     expect(normalizeSessionMode(0)).toBe("builder");
@@ -599,6 +660,61 @@ describe("getConfig", () => {
     const result = await getConfig();
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("get_config", { workspace: null });
     expect(result).toEqual(fake);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// validateApiKey
+// ─────────────────────────────────────────────────────────────
+
+describe("validateApiKey", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with validate_api_key and apiKey, returns model list", async () => {
+    const fake = ["gpt-4", "gpt-3.5"];
+    mockInvokeFor(fake);
+    const { validateApiKey } = await import("./ipc");
+    const result = await validateApiKey("sk-abc123");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("validate_api_key", { apiKey: "sk-abc123" });
+    expect(result).toEqual(fake);
+  });
+
+  it("throws when invoke rejects", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("invalid key"));
+    const { validateApiKey } = await import("./ipc");
+    await expect(validateApiKey("sk-bad")).rejects.toThrow("invalid key");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// setWorkspaceConfig
+// ─────────────────────────────────────────────────────────────
+
+describe("setWorkspaceConfig", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with set_workspace_config, workspaceRoot and planSavePath", async () => {
+    mockInvokeFor(undefined);
+    const { setWorkspaceConfig } = await import("./ipc");
+    await setWorkspaceConfig("/path/to/workspace", "/path/to/plans");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("set_workspace_config", {
+      workspaceRoot: "/path/to/workspace",
+      planSavePath: "/path/to/plans",
+    });
+  });
+
+  it("calls invoke with null planSavePath", async () => {
+    mockInvokeFor(undefined);
+    const { setWorkspaceConfig } = await import("./ipc");
+    await setWorkspaceConfig("/workspace", null);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("set_workspace_config", {
+      workspaceRoot: "/workspace",
+      planSavePath: null,
+    });
   });
 });
 

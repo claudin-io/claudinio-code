@@ -33,7 +33,8 @@ pub struct SubagentResult {
     pub out_tok: u32,
 }
 
-const TOOL_PREFERENCE: &str = "\
+/*
+Original (EN):
 The workspace has a pre-indexed symbol database (FTS5). Before brute-forcing with grep or read_file, \
 use these tools in this order of preference: \
   \u{2022} code_search  \u{2014} find any symbol/definition by name (faster than grep) \
@@ -48,14 +49,38 @@ but don't know symbol names. \
 Accuracy hierarchy: LSP tools (precise) \u{2192} semantic_search (conceptual) \u{2192} \
 code_search (keyword) \u{2192} grep/bash (fallback). \
 Use grep only when the index doesn't cover what you need. \
-Example: to understand an unfamiliar file, call file_outline first, not read_file.";
+Example: to understand an unfamiliar file, call file_outline first, not read_file.
+*/
+const TOOL_PREFERENCE: &str = "\
+工作区有一个预索引的符号数据库（FTS5）。在粗暴地使用 grep 或 read_file 之前，\
+请按以下偏好顺序使用这些工具：\
+  \u{2022} code_search  \u{2014} 按名称查找任意符号/定义（比 grep 更快）\
+  \u{2022} file_outline \u{2014} 列出文件中的所有符号（阅读前预览结构）\
+  \u{2022} go_to_definition / find_references \u{2014} 精确定位符号关系\
+   \u{2022} symbol_lookup \u{2014} 在整个工作区中精确查找符号名称\
+   \u{2022} semantic_search \u{2014} 使用 LateOn 代码和文档嵌入按概念/语义搜索。\
+用自然语言描述代码的功能：\
+'message queue system' 无需标识符匹配即可找到 SteeringCtl.queue/drain/push。\
+当你能描述行为但不知道符号名称时，在 grep 之前使用此工具。\
+准确性层次：LSP 工具（精确）\u{2192} semantic_search（概念）\u{2192} \
+code_search（关键字）\u{2192} grep/bash（回退）。\
+仅当索引无法覆盖所需内容时才使用 grep。\
+示例：要了解不熟悉的文件，先调用 file_outline，而不是 read_file。";
 
-pub const SUBAGENT_SYSTEM_PROMPT: &str = "\
+/*
+Original (EN):
 You are a subagent of Claudinio, an AI coding agent, running inside a larger task. \
 You were spawned with a specific goal, given in the first user message. \
 You cannot interact with the user: never ask questions, never wait for input — if information \
 is missing, state your assumption and proceed, or report what is missing. \
-Work autonomously and efficiently: use the fewest tool calls that accomplish the goal. \
+Work autonomously and efficiently: use the fewest tool calls that accomplish the goal.
+*/
+pub const SUBAGENT_SYSTEM_PROMPT: &str = "\
+You are a subagent of Claudinio, an AI coding agent, running inside a larger task. \
+你被生成了一个特定目标，该目标在第一条用户消息中给出。\
+你不能与用户交互：永远不要提问，永远不要等待输入——如果信息缺失，\
+陈述你的假设并继续执行，或报告缺失的内容。\
+自主高效地工作：使用最少的工具调用来达成目标。\
 ";
 
 pub fn subagent_defs(mode: SubagentMode) -> Vec<ToolDef> {

@@ -50,9 +50,7 @@ export const DiffViewer: Component<{
 
   createEffect(() => {
     const currentTheme = theme();
-    if (editor) {
-      monaco.editor.setTheme(currentTheme === "dark" ? "claudinio-dark" : "claudinio-light");
-    }
+    monaco.editor.setTheme(currentTheme === "dark" ? "claudinio-dark" : "claudinio-light");
   });
 
   onCleanup(() => {
