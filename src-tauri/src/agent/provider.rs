@@ -423,15 +423,24 @@ pub struct StreamOutput {
 /// sentinel token so the caller never has to parse natural language — this is
 /// what keeps the mechanism language-agnostic (the judged text may be in any
 /// language the UI supports, but the answer is always CONTINUE / DONE).
+/* Original (EN):
+   "You are a strict classifier inside an agentic coding harness. \
+    You are given the assistant's final message of a turn that ended WITHOUT calling any tool. \
+    Decide whether the turn is genuinely complete, or whether the assistant merely announced or \
+    implied an immediate next step (e.g. said it would ask the user a question, spawn subagents, \
+    read a file, run a command, or make an edit) but stopped before actually doing it. \
+    Answer with EXACTLY ONE WORD and nothing else: \
+    CONTINUE if the assistant promised or implied a next action it did not take, \
+    or if the message is clearly cut off mid-thought; \
+    DONE if the message is a complete, self-contained reply that needs no further action right now. \
+    The message may be in any language; your one-word answer must still be CONTINUE or DONE." */
 const COMPLETION_JUDGE_SYSTEM: &str = "You are a strict classifier inside an agentic coding harness. \
-You are given the assistant's final message of a turn that ended WITHOUT calling any tool. \
-Decide whether the turn is genuinely complete, or whether the assistant merely announced or \
-implied an immediate next step (e.g. said it would ask the user a question, spawn subagents, \
-read a file, run a command, or make an edit) but stopped before actually doing it. \
-Answer with EXACTLY ONE WORD and nothing else: \
-CONTINUE if the assistant promised or implied a next action it did not take, \
-or if the message is clearly cut off mid-thought; \
-DONE if the message is a complete, self-contained reply that needs no further action right now. \
+你收到的是助手在某轮对话中未调用任何工具而结束的最终消息。 \
+判断该轮对话是否真正完成，还是助手仅仅宣布或暗示了下一步动作（例如说会向用户提问、生成子代理、\
+读取文件、运行命令或进行编辑），但实际上并未执行。 \
+只回答一个词，别无其他：\
+如果助手承诺或暗示了它未执行的下一步动作，或消息明显在思考中途被截断，则回答 CONTINUE；\
+如果消息是一个完整、自包含的回复，当前无需进一步操作，则回答 DONE。\
 The message may be in any language; your one-word answer must still be CONTINUE or DONE.";
 
 /// Non-streaming, single-shot classification call used by the workflow loop to

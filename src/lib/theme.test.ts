@@ -69,6 +69,13 @@ describe("theme", () => {
     expect(theme()).toBe("dark");
   });
 
+  it("returns 'dark' when window is undefined (SSR — skips browser code)", async () => {
+    vi.stubGlobal("window", undefined);
+    vi.stubGlobal("matchMedia", undefined);
+    const { theme } = await import("./theme");
+    expect(theme()).toBe("dark");
+  });
+
   it("update function reacts to change event — toggles between dark/light", async () => {
     let storedHandler: (() => void) | null = null;
     let matchesValue = false;
