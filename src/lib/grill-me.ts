@@ -53,6 +53,17 @@ export const __localeProxy = new Proxy(
 
 export const { locale, setLocale } = __localeProxy;
 
+/** @internal exported for testing — clears a specific locale from the dict
+ * cache so its next load is genuinely pending (useful for race-condition tests
+ * where earlier tests may have cached the locale). Pass no id to clear all. */
+export function __clearDictCache(id?: LocaleId) {
+  if (id) {
+    dictCache.delete(id);
+  } else {
+    dictCache.clear();
+  }
+}
+
 // ── loader for locale dicts ─────────────────────────────────────────
 const dictCache = new Map<LocaleId, LocaleDict>();
 
