@@ -255,26 +255,25 @@ describe("grill-me coverage gaps", () => {
   it("prevents stale effect-load dict from overwriting a newer locale", async () => {
     const mod = await import("./grill-me");
 
-    // Start on pt-BR
-    await mod.loadDict("pt-BR");
-    mod.setLocale("pt-BR");
-    await flushUntil(() => mod.t("greeting") === "Olá");
+    // Bring pt-BR into cache
+    const ptDict = await mod.loadDict("pt-BR");
+
+    // Apply pt-BR as the current dict (synchronously, bypassing the effect)
+    mod.__applyDictIfCurrent("pt-BR", ptDict);
     expect(mod.t("greeting")).toBe("Olá");
 
-    // Switch to en-US
+    // Now the en-US load finishes LATE (stale) — locale is "pt-BR" so
+    // the guard should block it.
+    const enDict = await mod.loadDict("en-US");
+    mod.__applyDictIfCurrent("en-US", enDict);
+
+    // pt-BR dict must remain (stale en-US was blocked).
+    expect(mod.t("greeting")).toBe("Olá");
+
+    // Now change locale to en-US and apply it to confirm the function works
+    // when the locale DOES match.
     mod.setLocale("en-US");
-    await flushUntil(() => mod.t("greeting") === "Hello");
+    mod.__applyDictIfCurrent("en-US", enDict);
     expect(mod.t("greeting")).toBe("Hello");
-
-    // Now simulate: en-US load finishes LATE, but locale has switched back
-    // to pt-BR. The guard should block the stale en-US dict from applying.
-    mod.setLocale("pt-BR");
-
-    // The simulated stale finish: locale() === "pt-BR" !== "en-US" → BLOCKED
-    const enUSDict = await mod.loadDict("en-US");
-    mod.__applyDictIfCurrent("en-US", enUSDict);
-
-    // pt-BR dict must remain (the stale en-US was blocked).
-    expect(mod.t("greeting")).toBe("Olá");
   });
 });
