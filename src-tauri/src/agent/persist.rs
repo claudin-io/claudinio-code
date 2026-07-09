@@ -114,6 +114,22 @@ pub enum SessionRecord {
         streak: u32,
         ts: u64,
     },
+    /// The git HEAD at the moment this session's work began. Written once per
+    /// session (guarded), so finalize_plan can compute the changed files and
+    /// commits since planning started, even across resumed runs.
+    #[serde(rename = "base_commit")]
+    BaseCommit { sha: String, ts: u64 },
+    /// A plan's Implementation Log was appended: the run finished with the
+    /// changed files / commit(s) recorded back into the plan `.md`. `plan_file`
+    /// is the absolute path; `commits` are short "<sha> <subject>" lines and
+    /// `files_changed` are "<status>\t<path>" lines from the diff.
+    #[serde(rename = "plan_finalized")]
+    PlanFinalized {
+        plan_file: String,
+        commits: Vec<String>,
+        files_changed: Vec<String>,
+        ts: u64,
+    },
 }
 
 /// Number of golden cycles already run in this session (the highest
@@ -127,6 +143,23 @@ pub fn golden_cycle_count(records: &[SessionRecord]) -> u32 {
         })
         .max()
         .unwrap_or(0)
+}
+
+/// The earliest recorded base commit for the session (the git HEAD when work
+/// first began), or None if no `BaseCommit` record exists yet.
+pub fn earliest_base_commit(records: &[SessionRecord]) -> Option<String> {
+    records.iter().find_map(|r| match r {
+        SessionRecord::BaseCommit { sha, .. } => Some(sha.clone()),
+        _ => None,
+    })
+}
+
+/// Whether the session already has a `BaseCommit` record (used to write it
+/// only once, anchoring the diff window to the true start of the plan's work).
+pub fn has_base_commit(records: &[SessionRecord]) -> bool {
+    records
+        .iter()
+        .any(|r| matches!(r, SessionRecord::BaseCommit { .. }))
 }
 
 pub fn now_ms() -> u64 {
@@ -466,7 +499,9 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Mode { ts, .. }
                 | SessionRecord::Status { ts, .. }
                 | SessionRecord::GoldenCycle { ts, .. }
-                | SessionRecord::ContinuationJudge { ts, .. } => {
+                | SessionRecord::ContinuationJudge { ts, .. }
+                | SessionRecord::BaseCommit { ts, .. }
+                | SessionRecord::PlanFinalized { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
             }

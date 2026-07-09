@@ -468,6 +468,10 @@ never tell a subagent to make something 'similar to' an asset the user already s
 5. Keep the Task Panel live: status='doing' before starting a task, journal entries for findings, \
 status='done' when its subagent reports success and you verified the result.\n\
 6. After all tasks, verify the whole (build/tests where applicable) and report.\n\
+7. As your LAST step, once every task is done and verified, call finalize_plan with a journal of \
+findings (key decisions, gotchas, what was learned). It auto-records the changed files and \
+commit(s) into the plan file, so the journal should focus on the 'why' and what you learned — not \
+a file list. This feeds the plan with data for future reference.\n\
 Investigate with the smart tools first — semantic_search for behavior questions, code_search / \
 symbol_lookup for known names, file_outline before reading — and leave grep/bash searching as \
 the last resort. Tell your subagents to do the same.\n\"");
@@ -632,6 +636,7 @@ fn api_tools(mode: SessionMode) -> Vec<ToolDescription> {
     match mode {
         SessionMode::Builder => {
             defs.push(tools::enter_plan_mode_def());
+            defs.push(tools::finalize_plan_def());
         }
         SessionMode::Brain => {
             defs.retain(|t| t.name != "edit_file");
@@ -1071,6 +1076,27 @@ pub async fn run_workflow(
     let mut golden_last_pending: Vec<String> = Vec::new();
     let mut golden_stalls: usize = 0;
 
+    // Plan-finalization state. `plan_finalized` flips when the agent calls the
+    // finalize_plan tool this run; `finalize_nudged` bounds the enforcement to a
+    // single reminder before the harness falls back to auto-appending the log.
+    let mut plan_finalized = false;
+    let mut finalize_nudged = false;
+
+    // Anchor the diff window at the true start of the plan's work: record the
+    // git HEAD once per session (guarded), so finalize_plan can report every
+    // changed file / commit since planning began, even across resumed runs.
+    if let Some(sha) = ctx.base_commit.as_deref() {
+        let already = crate::agent::persist::has_base_commit(
+            &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+        );
+        if !already {
+            store.try_append(&SessionRecord::BaseCommit {
+                sha: sha.to_string(),
+                ts: now_ms(),
+            });
+        }
+    }
+
     let max_rounds = config.max_rounds.unwrap_or(usize::MAX);
     for _ in 0..max_rounds {
         // The mode can change mid-run (human toggle, or the agent's own
@@ -1439,6 +1465,56 @@ pub async fn run_workflow(
                     golden_pending.join(", "),
                 );
             }
+
+            // Feed the plan its Implementation Log when a goal-driven build
+            // truly finishes: golden tasks existed and are all done (so this is
+            // an honest end_turn, not a cap give-up), a plan file exists, and
+            // finalize_plan wasn't called yet. One reminder, then the harness
+            // auto-appends the log so the plan is ALWAYS fed. Fail-open: this
+            // never blocks the finish.
+            if !plan_finalized && stop_reason == "end_turn" {
+                let tasks = ctx
+                    .session_store_path
+                    .as_deref()
+                    .and_then(|p| {
+                        crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok()
+                    })
+                    .unwrap_or_default();
+                let had_golden = tasks
+                    .iter()
+                    .any(crate::agent::tools::tasks::is_golden);
+                let plan_exists =
+                    crate::agent::tools::finalize_plan::latest_plan_file(ctx).is_some();
+                if had_golden && plan_exists {
+                    if !finalize_nudged {
+                        finalize_nudged = true;
+                        push_user_blocks(
+                            history,
+                            store,
+                            vec![ContentBlock::text(
+                                "[system] All goals are met. Before finishing, call \
+                                 finalize_plan with a journal of your findings — it records the \
+                                 changed files and commits into the plan for future reference. \
+                                 This is the required last step."
+                                    .to_string(),
+                            )],
+                        );
+                        continue;
+                    }
+                    // The model still skipped it — record the log ourselves.
+                    if let Some(outcome) =
+                        crate::agent::tools::finalize_plan::auto_finalize(ctx)
+                    {
+                        let _ = event_tx.send(AgentEvent::TextStep {
+                            text: format!(
+                                "📝 Implementation Log recorded to {}",
+                                outcome.plan_file
+                            ),
+                        });
+                    }
+                }
+            }
+
             // If the model didn't produce a final text response, provide a
             // generic closing so the user doesn't see a blank answer.
             if last_text.is_empty() {
@@ -1612,6 +1688,15 @@ pub async fn run_workflow(
                 )
                 .await
             };
+            // Note a successful finalize_plan so the golden-completion gate
+            // knows the plan was fed and skips the reminder / fallback.
+            if tool_name == "finalize_plan" {
+                if let ContentBlock::ToolResult { content, .. } = &block {
+                    if !content.starts_with("Error") {
+                        plan_finalized = true;
+                    }
+                }
+            }
             tool_result_blocks.push(block);
         }
 

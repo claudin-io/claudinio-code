@@ -158,6 +158,13 @@ pub async fn send_message(
         .as_ref()
         .map(|p| format!("{p}/.claudinio_index.db"));
 
+    // Capture the git HEAD at run start so finalize_plan can compute the
+    // changed files / commits since this plan's work began. Best-effort:
+    // None when the workspace is not a git repo (or git is unavailable).
+    let base_commit: Option<String> = workspace_root
+        .as_ref()
+        .and_then(|root| crate::agent::tools::git_head(root));
+
     let ctx = ToolContext {
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
@@ -168,6 +175,7 @@ pub async fn send_message(
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),
+        base_commit,
     };
 
     let residual = steering.drain();
@@ -660,6 +668,7 @@ pub async fn compact_session(
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),
+        base_commit: None,
     };
 
     let summary = session::compact_history(
