@@ -532,6 +532,10 @@ const DECLARATION_KINDS: &[&str] = &[
     "namespace_declaration",
     "local_function_statement",
     "indexer_declaration",
+    // CSS (rule_set's "name" is its selector list; see extract_declaration_name)
+    "rule_set",
+    "media_statement",
+    "keyframes_statement",
     // Swift
     "protocol_declaration",
     "extension_declaration",
@@ -772,6 +776,35 @@ fn extract_declaration_name(
     if let Some(alias) = node.child_by_field_name("alias") {
         let name = alias.utf8_text(content.as_bytes()).ok()?;
         return Some(name.to_string());
+    }
+
+    // CSS: no name fields in the grammar — the identity of a rule is its
+    // selector list, of a keyframes block its name, of a media rule its query.
+    if kind == "rule_set" || kind == "keyframes_statement" || kind == "media_statement" {
+        let wanted_child = match kind {
+            "rule_set" => Some("selectors"),
+            "keyframes_statement" => Some("keyframes_name"),
+            _ => None,
+        };
+        if let Some(wanted) = wanted_child {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == wanted {
+                    let name = get_node_text(content, &child, 80);
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+        // media_statement (or fallback): first line of the node up to the block.
+        let text = get_node_text(content, node, 120);
+        let head = text.split('{').next().unwrap_or("").trim();
+        if !head.is_empty() {
+            return Some(head.to_string());
+        }
+        return None;
     }
 
     // For struct_specifier / class_specifier (C/C++), name is in the "name" child

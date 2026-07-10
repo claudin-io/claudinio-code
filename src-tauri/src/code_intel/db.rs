@@ -61,7 +61,7 @@ pub struct SemanticSearchResult {
 
 /// Bump when the index format changes (schema, embedding layout, ignore
 /// rules). A mismatched on-disk index is deleted and rebuilt from scratch.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Minimum final score (cosine similarity + lexical boost, clamped to
 /// [0, 1]) for a semantic search hit to be returned at all. Calibrated
@@ -73,6 +73,9 @@ const MIN_SEMANTIC_SCORE: f32 = 0.35;
 /// consistently out-score code symbols on NL queries; this penalty keeps them
 /// in the results without letting them crowd out the code the agent needs.
 const DOC_SECTION_PENALTY: f32 = 0.12;
+
+/// Applied to results living in test files (see `is_test_file`).
+const TEST_FILE_PENALTY: f32 = 0.10;
 
 /// Max results kept per source file before `limit` is applied, so a single
 /// large file (many symbols) can't dominate the whole ranking.
@@ -105,13 +108,20 @@ fn basename_variants(file_path: &str) -> (String, String) {
 
 /// Highest lexical boost across all query tokens for a given symbol name /
 /// file path. Layers don't stack — only the best-matching layer counts.
+/// A basename match outranks a symbol-name match: a query naming a file is a
+/// strong navigation signal, but short symbol names collide with ordinary
+/// query words ("task", "list") and shouldn't dominate the semantic score.
 fn lexical_boost(tokens: &[String], name: &str, file_path: &str) -> f32 {
     let name_lower = name.to_lowercase();
     let (base, stem) = basename_variants(file_path);
     let mut boost = 0.0f32;
     for token in tokens {
-        if token == &name_lower || token == &base || token == &stem {
+        if token == &base || token == &stem {
             return 0.25;
+        }
+        if token == &name_lower {
+            boost = boost.max(0.15);
+            continue;
         }
         if name_lower.contains(token.as_str())
             || token.contains(name_lower.as_str())
@@ -124,6 +134,29 @@ fn lexical_boost(tokens: &[String], name: &str, file_path: &str) -> f32 {
         }
     }
     boost
+}
+
+/// Test files answer "how is this used in tests", not "where does this live" —
+/// they mirror the vocabulary of the code under test and crowd it out.
+fn is_test_file(file_path: &str) -> bool {
+    let lower = file_path.to_lowercase();
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+    base.contains(".test.")
+        || base.contains(".spec.")
+        || base.ends_with("_test.rs")
+        || base.ends_with("_tests.rs")
+        || lower.contains("/tests/")
+        || lower.contains("/__tests__/")
+}
+
+/// Inline test symbols (Rust `mod tests`, `fn test_*`) live inside production
+/// files, so `is_test_file` misses them — catch them by naming convention.
+fn is_test_symbol(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with("test_")
+        || lower.ends_with("_test")
+        || lower.ends_with("_tests")
+        || lower == "tests"
 }
 
 impl IndexDb {
@@ -587,7 +620,10 @@ impl IndexDb {
             let cosine = dot.max(0.0).min(1.0);
             let file_path = sym.file_path.unwrap_or_default();
             let boost = lexical_boost(&tokens, &sym.name, &file_path);
-            let penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
+            let mut penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
+            if is_test_file(&file_path) || is_test_symbol(&sym.name) {
+                penalty += TEST_FILE_PENALTY;
+            }
             let score = (cosine + boost - penalty).clamp(0.0, 1.0);
             if score < MIN_SEMANTIC_SCORE {
                 continue;
@@ -661,18 +697,45 @@ mod tests {
     #[test]
     fn lexical_boost_layers_dont_stack() {
         let tokens = tokenize_query("Icon.tsx component");
-        // Exact symbol/basename match wins the +0.25 layer even though a
-        // substring match would also apply.
+        // Exact basename match wins the +0.25 layer even though a substring
+        // match would also apply.
         let boost = lexical_boost(&tokens, "Icon", "src/ui/Icon.tsx");
         assert_eq!(boost, 0.25);
 
+        // Exact symbol-name match (no basename match) -> the middle +0.15
+        // layer: short names collide with ordinary query words too easily
+        // to outrank everything.
+        let boost = lexical_boost(&tokens, "icon", "src/ui/other.tsx");
+        assert_eq!(boost, 0.15);
+
         // Only a substring relationship -> the lower +0.10 layer.
-        let boost = lexical_boost(&tokens, "IconButton", "src/ui/other.tsx");
+        let boost = lexical_boost(&tokens, "IconButton", "src/ui/misc.tsx");
         assert_eq!(boost, 0.10);
 
         // No relationship at all.
         let boost = lexical_boost(&tokens, "unrelatedThing", "src/ui/misc.rs");
         assert_eq!(boost, 0.0);
+    }
+
+    #[test]
+    fn test_files_are_detected_across_conventions() {
+        assert!(is_test_file("src/components/TasksPanel.test.tsx"));
+        assert!(is_test_file("src/lib/ipc.spec.ts"));
+        assert!(is_test_file("src-tauri/src/agent/persist_test.rs"));
+        assert!(is_test_file("src-tauri/tests/integration.rs"));
+        assert!(is_test_file("src/__tests__/App.tsx"));
+        assert!(!is_test_file("src/components/TasksPanel.tsx"));
+        assert!(!is_test_file("src-tauri/src/agent/tests_helper_naming.rs"));
+    }
+
+    #[test]
+    fn inline_test_symbols_are_detected() {
+        assert!(is_test_symbol("test_golden_pending_ids"));
+        assert!(is_test_symbol("golden_tests"));
+        assert!(is_test_symbol("tests"));
+        assert!(is_test_symbol("roundtrip_test"));
+        assert!(!is_test_symbol("TasksPanel"));
+        assert!(!is_test_symbol("attestation"));
     }
 
     #[test]

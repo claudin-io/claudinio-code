@@ -22,7 +22,9 @@
     {"query": "permissions approval for tool execution", "expected": ["permissions.rs"]},
     {"query": "sqlite database schema for symbol index", "expected": ["db.rs"]},
     {"query": "sidebar panel showing file count symbol count embedding statistics", "expected": ["App.tsx", "ipc.ts", "code_intel.rs"]},
-    {"query": "chat input send button disabled while agent is streaming", "expected": ["ChatPanel.tsx"]}
+    {"query": "chat input send button disabled while agent is streaming", "expected": ["ChatPanel.tsx"]},
+    {"query": "Task Panel right bar card component with task list display", "expected": ["TasksPanel.tsx"]},
+    {"query": "CSS scrollbar styling custom theme", "expected": ["App.css", "index.css"]}
   ],
   "negative": [
     {"query": "kubernetes deployment yaml configuration"},
