@@ -106,7 +106,7 @@ interface TimelineItem {
   phase?: Phase;
   phaseResult?: { phase: Phase; text: string };
   text?: string;
-  steering?: { text: string };
+  steering?: { text: string; attachments?: Array<{ name: string; mediaType: string; size: number }> };
   subagent?: SubagentTimelineState;
   compaction?: {
     kind: "start" | "done" | "fail";
@@ -114,6 +114,11 @@ interface TimelineItem {
   };
   modeChange?: ModeChangedData;
   golden?: GoldenLoopData;
+}
+
+interface QueuedSteeringEntry {
+  text: string;
+  attachments: Array<{ name: string; mediaType: string; size: number }>;
 }
 
 function modeChangeLabel(mc: ModeChangedData): string {
@@ -381,7 +386,7 @@ function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
     } else if (kind === "steering") {
       steps.push({
         type: "steering",
-        steering: { text: String(rec.text ?? "") },
+        steering: { text: String(rec.text ?? ""), attachments: rec.attachments as Array<{ name: string; mediaType: string; size: number }> | undefined },
       });
     } else if (kind === "mode") {
       steps.push({
@@ -437,7 +442,7 @@ export const ChatPanel: Component<{
   const [sessions, setSessions] = createSignal<SessionSummary[]>([]);
   const [showSessions, setShowSessions] = createSignal(false);
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
-  const [queuedSteering, setQueuedSteering] = createSignal<string[]>([]);
+  const [queuedSteering, setQueuedSteering] = createSignal<QueuedSteeringEntry[]>([]);
   const [retryableError, setRetryableError] = createSignal<string | null>(null);
   // Budget do plano estourado: mostra banner de upgrade em vez do retry bar.
   const isBudgetError = () => retryableError()?.startsWith("BUDGET_EXCEEDED::") ?? false;
@@ -1071,10 +1076,10 @@ export const ChatPanel: Component<{
       ]);
       scrollToBottom();
     } else if (event.event === "SteeringInjected") {
-      setQueuedSteering((prev) => prev.filter((s) => s !== event.data.text));
+      setQueuedSteering((prev) => prev.filter((s) => s.text !== event.data.text));
       setCurrentSteps((prev) => [
         ...prev,
-        { type: "steering" as const, steering: { text: event.data.text } } as TimelineItem,
+        { type: "steering" as const, steering: { text: event.data.text, attachments: event.data.attachments } } as TimelineItem,
       ]);
       scrollToBottom();
     } else if (event.event === "SubagentStarted") {
@@ -1245,14 +1250,26 @@ export const ChatPanel: Component<{
     // If the agent is currently thinking, queue the message as steering
     if (status() === "thinking") {
       const sid = activeSessionId();
+      const atts = attachments();
       if (sid) {
         try {
-          await queueSteering(sid, text);
+          await queueSteering(sid, text, atts.map((a) => ({ path: a.path })));
         } catch {
           // best-effort
         }
       }
-      setQueuedSteering((prev) => [...prev, text]);
+      setQueuedSteering((prev) => [
+        ...prev,
+        {
+          text,
+          attachments: atts.map((a) => ({
+            name: a.name,
+            mediaType: a.mediaType,
+            size: a.size,
+          })),
+        },
+      ]);
+      setAttachments([]);
       setInput("");
       return;
     }
@@ -1661,10 +1678,30 @@ export const ChatPanel: Component<{
         <div class="flex flex-wrap gap-1.5 border-t border-border-subtle px-6 py-1.5">
           <For each={queuedSteering()}>
             {(s) => (
-              <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
-                <span class="h-1.5 w-1.5 rounded-full bg-accent" />
-                {s.length > 40 ? `${s.slice(0, 40)}…` : s}
-              </span>
+              <>
+                <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+                  <span class="h-1.5 w-1.5 rounded-full bg-accent" />
+                  {s.text.length > 40 ? `${s.text.slice(0, 40)}…` : s.text}
+                </span>
+                <For each={s.attachments}>
+                  {(att) => (
+                    <span class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-1 px-2 py-0.5 text-[11px] text-ink-muted">
+                      <Icon
+                        name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                        class="h-3 w-3 shrink-0"
+                      />
+                      <span class="max-w-[120px] truncate">{att.name}</span>
+                      <span class="font-mono text-[10px] text-ink-faint">
+                        {att.size > 1024 * 1024
+                          ? `${(att.size / (1024 * 1024)).toFixed(1)} MB`
+                          : att.size > 1024
+                            ? `${(att.size / 1024).toFixed(0)} KB`
+                            : `${att.size} B`}
+                      </span>
+                    </span>
+                  )}
+                </For>
+              </>
             )}
           </For>
         </div>
@@ -2299,14 +2336,38 @@ const TimelineSteps: Component<{
             />
           </Show>
           <Show when={step.type === "steering" && step.steering}>
-            <div class="my-1 ml-6 flex items-center gap-1.5">
-              <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
-                <span class="h-1.5 w-1.5 rounded-full bg-accent" />
-                {step.steering!.text.length > 50
-                  ? `${step.steering!.text.slice(0, 50)}…`
-                  : step.steering!.text}
-              </span>
-              <span class="text-[10px] text-ink-faint">{t("chat.timeline.steering")}</span>
+            <div class="my-1 ml-6 flex flex-col gap-1">
+              <div class="flex items-center gap-1.5">
+                <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+                  <span class="h-1.5 w-1.5 rounded-full bg-accent" />
+                  {step.steering!.text.length > 50
+                    ? `${step.steering!.text.slice(0, 50)}…`
+                    : step.steering!.text}
+                </span>
+                <span class="text-[10px] text-ink-faint">{t("chat.timeline.steering")}</span>
+              </div>
+              <Show when={step.steering!.attachments && step.steering!.attachments!.length > 0}>
+                <div class="ml-6 flex flex-wrap gap-1">
+                  <For each={step.steering!.attachments!}>
+                    {(att) => (
+                      <span class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-1 px-2 py-0.5 text-[10px] text-ink-muted">
+                        <Icon
+                          name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                          class="h-3 w-3 shrink-0"
+                        />
+                        <span class="max-w-[120px] truncate">{att.name}</span>
+                        <span class="font-mono text-[10px] text-ink-faint">
+                          {att.size > 1024 * 1024
+                            ? `${(att.size / (1024 * 1024)).toFixed(1)} MB`
+                            : att.size > 1024
+                              ? `${(att.size / 1024).toFixed(0)} KB`
+                              : `${att.size} B`}
+                        </span>
+                      </span>
+                    )}
+                  </For>
+                </div>
+              </Show>
             </div>
           </Show>
           <Show when={step.type === "subagent" && step.subagent}>

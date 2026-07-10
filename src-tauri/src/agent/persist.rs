@@ -15,6 +15,13 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentMeta {
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
+}
+
 /// One line of a session JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -47,7 +54,7 @@ pub enum SessionRecord {
     /// A run failed.
     Error { message: String, ts: u64 },
     /// A steering message injected mid-run.
-    Steering { text: String, ts: u64 },
+    Steering { text: String, #[serde(skip_serializing_if = "Option::is_none")] attachments: Option<Vec<AttachmentMeta>>, ts: u64 },
     /// Context was compacted: earlier turns replaced by a summary.
     /// The frontend renders this as a collapsible archive block.
     /// `tail_turns` Turn records immediately BEFORE this marker stay live
@@ -296,17 +303,31 @@ fn fold_into_history<'a>(
             SessionRecord::Turn { message, .. } => {
                 out.push(message.clone());
             }
-            SessionRecord::Steering { text, .. } => {
-                let block = crate::agent::provider::ContentBlock::text(text);
+            SessionRecord::Steering { text, attachments, .. } => {
+                let mut blocks = vec![crate::agent::provider::ContentBlock::text(text)];
+                if let Some(atts) = attachments {
+                    for att in atts {
+                        let size_str = if att.size > 1024 * 1024 {
+                            format!("{:.1} MB", att.size as f64 / (1024.0 * 1024.0))
+                        } else if att.size > 1024 {
+                            format!("{:.1} KB", att.size as f64 / 1024.0)
+                        } else {
+                            format!("{} B", att.size)
+                        };
+                        blocks.push(crate::agent::provider::ContentBlock::text(
+                            format!("[Anexo do steering: `{}` ({}) — tipo: {}]", att.name, size_str, att.media_type)
+                        ));
+                    }
+                }
                 if let Some(last) = out.last_mut() {
                     if last.role == "user" {
-                        last.content.push(block);
+                        last.content.extend(blocks);
                         continue;
                     }
                 }
                 out.push(Message {
                     role: "user".into(),
-                    content: vec![block],
+                    content: blocks,
                 });
             }
             _ => {}
@@ -600,11 +621,17 @@ mod tests {
             // Steering after assistant -> new user turn
             SessionRecord::Steering {
                 text: "steer1".into(),
+                attachments: None,
                 ts: 3,
             },
-            // Steering again -> merge into the new user turn
+            // Steering with attachments
             SessionRecord::Steering {
                 text: "steer2".into(),
+                attachments: Some(vec![AttachmentMeta {
+                    name: "photo.png".into(),
+                    media_type: "image/png".into(),
+                    size: 1024,
+                }]),
                 ts: 4,
             },
         ];
@@ -613,7 +640,8 @@ mod tests {
         assert_eq!(history[0].role, "user");
         assert_eq!(history[1].role, "assistant");
         assert_eq!(history[2].role, "user");
-        assert_eq!(history[2].content.len(), 2);
+        // steer1 text block + steer2 text block + attachment reference block
+        assert_eq!(history[2].content.len(), 3);
         assert_eq!(
             history[2].content[0].get_text().unwrap(),
             "steer1"
@@ -637,6 +665,7 @@ mod tests {
             // Steering should merge into the existing user turn
             SessionRecord::Steering {
                 text: "steer".into(),
+                attachments: None,
                 ts: 2,
             },
         ];

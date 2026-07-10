@@ -143,7 +143,7 @@ export type AgentEvent =
   | { event: "ToolResult"; data: ToolResultData }
   | { event: "AskUser"; data: AskUserData }
   | { event: "Done"; data: DoneData }
-  | { event: "SteeringInjected"; data: { text: string } }
+  | { event: "SteeringInjected"; data: { text: string; attachments?: Array<{ name: string; mediaType: string; size: number }> } }
   | { event: "Error"; data: string }
   | { event: "SubagentStarted"; data: SubagentStartedData }
   | { event: "SubagentDone"; data: SubagentDoneData }
@@ -293,8 +293,8 @@ export function submitAnswers(
   return invoke<void>("submit_answers", { args: { sessionId, toolId, answers } });
 }
 
-export function queueSteering(sessionId: string, text: string): Promise<void> {
-  return invoke<void>("queue_steering", { sessionId, text });
+export function queueSteering(sessionId: string, text: string, attachments?: AttachmentInput[]): Promise<void> {
+  return invoke<void>("queue_steering", { sessionId, text, attachments: attachments ?? null });
 }
 
 export function interruptSession(sessionId: string): Promise<void> {
