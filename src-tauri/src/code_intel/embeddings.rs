@@ -293,6 +293,107 @@ pub fn build_embedding_text(
     parts.join(" | ")
 }
 
+/// Lines of overlap between consecutive chunks so a match spanning a chunk
+/// boundary still lands in at least one chunk.
+const CHUNK_OVERLAP_LINES: usize = 2;
+
+/// One embeddable slice of a symbol. Large symbol bodies (big components,
+/// long functions) are split into several chunks so content deep inside them
+/// is searchable — a single mean-pooled vector of the first MAX_BODY_CHARS
+/// can't represent a 300-line component.
+#[derive(Debug, Clone)]
+pub struct EmbedChunk {
+    pub chunk_index: i64,
+    /// Absolute 1-based file lines covered by this chunk's body slice.
+    pub start_line: i64,
+    pub end_line: i64,
+    pub text: String,
+}
+
+/// Split a symbol into embedding chunks. Line-based and language-agnostic:
+/// works identically for any tree-sitter grammar (and doc sections), since it
+/// only sees the extracted body text. Every chunk repeats the symbol header
+/// (kind/name/context/doc) so it stays anchored to its symbol.
+pub fn build_embedding_chunks(
+    kind: &str,
+    name: &str,
+    parent_context: Option<&str>,
+    doc: Option<&str>,
+    body: Option<&str>,
+    symbol_start_line: i64,
+    symbol_end_line: i64,
+) -> Vec<EmbedChunk> {
+    let mut header_parts = vec![format!("{kind}: {name}")];
+    if let Some(ctx) = parent_context {
+        let trimmed = ctx.trim();
+        if !trimmed.is_empty() {
+            header_parts.push(format!("context: {trimmed}"));
+        }
+    }
+    if let Some(d) = doc {
+        let trimmed = d.trim();
+        if !trimmed.is_empty() {
+            header_parts.push(trimmed.to_string());
+        }
+    }
+    let header = header_parts.join(" | ");
+
+    let body = body.map(str::trim_end).unwrap_or("");
+    if body.trim().is_empty() {
+        return vec![EmbedChunk {
+            chunk_index: 0,
+            start_line: symbol_start_line,
+            end_line: symbol_end_line,
+            text: header,
+        }];
+    }
+
+    let lines: Vec<&str> = body.lines().collect();
+    // The body is the tail of the symbol's line range (for code it's the whole
+    // range; for doc sections it starts after the heading), so anchor absolute
+    // line numbers from the end. This holds for every language uniformly.
+    let body_first_line = (symbol_end_line - lines.len() as i64 + 1).max(symbol_start_line);
+
+    let mut chunks: Vec<EmbedChunk> = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let mut chars = 0usize;
+        let mut j = i;
+        while j < lines.len() {
+            let line_len = lines[j].chars().count() + 1;
+            if chars + line_len > MAX_BODY_CHARS && j > i {
+                break;
+            }
+            chars += line_len;
+            j += 1;
+        }
+        let slice = lines[i..j].join("\n");
+        let slice = slice.trim();
+        if !slice.is_empty() {
+            chunks.push(EmbedChunk {
+                chunk_index: chunks.len() as i64,
+                start_line: body_first_line + i as i64,
+                end_line: body_first_line + j as i64 - 1,
+                text: format!("{header} | {slice}"),
+            });
+        }
+        if j >= lines.len() {
+            break;
+        }
+        i = j.saturating_sub(CHUNK_OVERLAP_LINES).max(i + 1);
+    }
+
+    if chunks.is_empty() {
+        chunks.push(EmbedChunk {
+            chunk_index: 0,
+            start_line: symbol_start_line,
+            end_line: symbol_end_line,
+            text: header,
+        });
+    }
+    chunks
+}
+
 pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
     if cache_dir.join(ACTIVE_MODEL.model_filename).exists() {
         return Ok(());
@@ -371,5 +472,57 @@ mod tests {
         }
         // Distinct texts must not collapse to the same vector.
         assert!(vecs[0].iter().zip(&vecs[1]).any(|(a, b)| (a - b).abs() > 1e-3));
+    }
+
+    #[test]
+    fn small_body_yields_single_chunk_with_symbol_lines() {
+        let chunks = build_embedding_chunks("function", "foo", None, None, Some("let x = 1;"), 10, 10);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!((chunks[0].start_line, chunks[0].end_line), (10, 10));
+        assert!(chunks[0].text.contains("function: foo"));
+        assert!(chunks[0].text.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn no_body_yields_header_only_chunk() {
+        let chunks = build_embedding_chunks("struct", "Config", Some("mod db"), None, None, 5, 8);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 8));
+        assert_eq!(chunks[0].text, "struct: Config | context: mod db");
+    }
+
+    #[test]
+    fn large_body_splits_into_overlapping_chunks_with_absolute_lines() {
+        // 100 lines of ~40 chars -> several chunks under MAX_BODY_CHARS (800).
+        let body: Vec<String> = (0..100).map(|i| format!("line {i} {}", "x".repeat(32))).collect();
+        let body = body.join("\n");
+        // Symbol spans lines 50..149 and body covers the whole range.
+        let chunks = build_embedding_chunks("function", "big", None, None, Some(&body), 50, 149);
+        assert!(chunks.len() > 2, "expected multiple chunks, got {}", chunks.len());
+        assert_eq!(chunks[0].start_line, 50);
+        assert_eq!(chunks.last().unwrap().end_line, 149);
+        for (i, c) in chunks.iter().enumerate() {
+            assert_eq!(c.chunk_index, i as i64);
+            assert!(c.text.starts_with("function: big | "));
+            assert!(c.start_line >= 50 && c.end_line <= 149 && c.start_line <= c.end_line);
+        }
+        // Consecutive chunks overlap by CHUNK_OVERLAP_LINES.
+        for w in chunks.windows(2) {
+            assert_eq!(w[1].start_line, w[0].end_line + 1 - CHUNK_OVERLAP_LINES as i64);
+        }
+        // Deep content (line 90) is present in some chunk even though it is
+        // far beyond the first MAX_BODY_CHARS of the body.
+        assert!(chunks.iter().any(|c| c.text.contains("line 90")));
+    }
+
+    #[test]
+    fn doc_section_body_anchors_lines_from_symbol_end() {
+        // Doc sections: body starts after the heading line, so absolute lines
+        // are anchored from end_line (body = last N lines of the range).
+        let body = "para one\npara two\npara three";
+        let chunks = build_embedding_chunks("doc_section", "Intro", None, None, Some(body), 4, 7);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 7));
     }
 }

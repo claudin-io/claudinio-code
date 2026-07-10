@@ -61,7 +61,7 @@ pub struct SemanticSearchResult {
 
 /// Bump when the index format changes (schema, embedding layout, ignore
 /// rules). A mismatched on-disk index is deleted and rebuilt from scratch.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Minimum final score (cosine similarity + lexical boost, clamped to
 /// [0, 1]) for a semantic search hit to be returned at all. Calibrated
@@ -72,7 +72,7 @@ const MIN_SEMANTIC_SCORE: f32 = 0.35;
 /// Doc sections (markdown headings) embed dense natural language, so they
 /// consistently out-score code symbols on NL queries; this penalty keeps them
 /// in the results without letting them crowd out the code the agent needs.
-const DOC_SECTION_PENALTY: f32 = 0.08;
+const DOC_SECTION_PENALTY: f32 = 0.12;
 
 /// Max results kept per source file before `limit` is applied, so a single
 /// large file (many symbols) can't dominate the whole ranking.
@@ -205,8 +205,12 @@ impl IndexDb {
             CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_symbol_id);
 
             CREATE TABLE IF NOT EXISTS symbol_embeddings (
-                symbol_id INTEGER PRIMARY KEY,
+                symbol_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL DEFAULT 0,
+                start_line INTEGER NOT NULL DEFAULT 0,
+                end_line INTEGER NOT NULL DEFAULT 0,
                 embedding BLOB NOT NULL,
+                PRIMARY KEY(symbol_id, chunk_index),
                 FOREIGN KEY(symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
             );
             ",
@@ -484,15 +488,23 @@ impl IndexDb {
         Ok(results)
     }
 
-    pub fn upsert_embedding(&self, symbol_id: i64, embedding: &[f32]) -> Result<(), String> {
+    pub fn upsert_embedding(
+        &self,
+        symbol_id: i64,
+        chunk_index: i64,
+        start_line: i64,
+        end_line: i64,
+        embedding: &[f32],
+    ) -> Result<(), String> {
         let bytes: Vec<u8> = embedding
             .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO symbol_embeddings (symbol_id, embedding) VALUES (?1, ?2)",
-            params![symbol_id, bytes],
+            "INSERT OR REPLACE INTO symbol_embeddings (symbol_id, chunk_index, start_line, end_line, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![symbol_id, chunk_index, start_line, end_line, bytes],
         )
         .map_err(|e| format!("upsert embedding: {e}"))?;
         Ok(())
@@ -508,13 +520,15 @@ impl IndexDb {
         Ok(())
     }
 
-    pub fn load_all_embeddings(&self) -> Result<Vec<(SymbolRecord, Vec<f32>)>, String> {
+    /// One embedded chunk of a symbol, as stored. `chunk_start_line`/`chunk_end_line`
+    /// are 0 for whole-symbol embeddings (headers, small bodies).
+    pub fn load_all_embeddings(&self) -> Result<Vec<(SymbolRecord, i64, i64, Vec<f32>)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT s.id, s.file_id, s.name, s.kind, s.signature,
                         s.start_line, s.start_col, s.end_line, s.end_col, f.path,
-                        e.embedding
+                        e.start_line, e.end_line, e.embedding
                  FROM symbols s
                  JOIN files f ON f.id = s.file_id
                  JOIN symbol_embeddings e ON e.symbol_id = s.id",
@@ -522,7 +536,7 @@ impl IndexDb {
             .map_err(|e| format!("prepare: {e}"))?;
         let results = stmt
             .query_map([], |row| {
-                let blob: Vec<u8> = row.get(10)?;
+                let blob: Vec<u8> = row.get(12)?;
                 // Blob length defines the dimension — self-describing across model swaps.
                 let embedding: Vec<f32> = blob
                     .chunks_exact(4)
@@ -541,6 +555,8 @@ impl IndexDb {
                         end_col: row.get(8)?,
                         file_path: row.get(9)?,
                     },
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
                     embedding,
                 ))
             })
@@ -558,30 +574,52 @@ impl IndexDb {
     ) -> Result<Vec<SemanticSearchResult>, String> {
         let tokens = tokenize_query(query_text);
         let all = self.load_all_embeddings()?;
-        let mut scored: Vec<SemanticSearchResult> = all
-            .into_iter()
-            .filter(|(_, emb)| emb.len() == query_vec.len())
-            .map(|(sym, emb)| {
-                let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
-                let cosine = dot.max(0.0).min(1.0);
-                let file_path = sym.file_path.unwrap_or_default();
-                let boost = lexical_boost(&tokens, &sym.name, &file_path);
-                let penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
-                let score = (cosine + boost - penalty).clamp(0.0, 1.0);
-                SemanticSearchResult {
-                    symbol_id: sym.id,
-                    name: sym.name,
-                    kind: sym.kind,
-                    file_path,
-                    start_line: sym.start_line,
-                    end_line: sym.end_line,
-                    signature: sym.signature,
-                    score,
-                    snippet: None,
+        // Score every chunk, then keep only the best chunk per symbol so a
+        // long function split into many chunks still yields one result —
+        // pointed at the chunk's line range, not the whole symbol.
+        let mut best_per_symbol: std::collections::HashMap<i64, SemanticSearchResult> =
+            std::collections::HashMap::new();
+        for (sym, chunk_start, chunk_end, emb) in all {
+            if emb.len() != query_vec.len() {
+                continue;
+            }
+            let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
+            let cosine = dot.max(0.0).min(1.0);
+            let file_path = sym.file_path.unwrap_or_default();
+            let boost = lexical_boost(&tokens, &sym.name, &file_path);
+            let penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
+            let score = (cosine + boost - penalty).clamp(0.0, 1.0);
+            if score < MIN_SEMANTIC_SCORE {
+                continue;
+            }
+            let (start_line, end_line) = if chunk_start > 0 {
+                (chunk_start, chunk_end)
+            } else {
+                (sym.start_line, sym.end_line)
+            };
+            let candidate = SemanticSearchResult {
+                symbol_id: sym.id,
+                name: sym.name,
+                kind: sym.kind,
+                file_path,
+                start_line,
+                end_line,
+                signature: sym.signature,
+                score,
+                snippet: None,
+            };
+            match best_per_symbol.entry(sym.id) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    if candidate.score > e.get().score {
+                        e.insert(candidate);
+                    }
                 }
-            })
-            .filter(|r| r.score >= MIN_SEMANTIC_SCORE)
-            .collect();
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(candidate);
+                }
+            }
+        }
+        let mut scored: Vec<SemanticSearchResult> = best_per_symbol.into_values().collect();
         scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         // Dedupe by file (keep highest-scoring first) before applying limit,
@@ -657,7 +695,7 @@ mod tests {
             let sym_id = db
                 .insert_symbol(file_id, &format!("sym{i}"), "function", None, i, 0, i, 0, None)
                 .expect("insert symbol");
-            db.upsert_embedding(sym_id, &unit_vec(4, 0)).expect("upsert embedding");
+            db.upsert_embedding(sym_id, 0, 0, 0, &unit_vec(4, 0)).expect("upsert embedding");
         }
 
         // One symbol in a different file with a low-similarity embedding
@@ -668,7 +706,7 @@ mod tests {
         let low_sym_id = db
             .insert_symbol(other_file_id, "lowMatch", "function", None, 0, 0, 0, 0, None)
             .expect("insert symbol");
-        db.upsert_embedding(low_sym_id, &unit_vec(4, 3)).expect("upsert embedding");
+        db.upsert_embedding(low_sym_id, 0, 0, 0, &unit_vec(4, 3)).expect("upsert embedding");
 
         let query_vec = unit_vec(4, 0);
         let results = db
@@ -690,7 +728,7 @@ mod tests {
             .insert_symbol(file_id, "unrelated", "function", None, 0, 0, 0, 0, None)
             .expect("insert symbol");
         // Orthogonal embedding -> cosine ~0, no lexical overlap -> no boost.
-        db.upsert_embedding(sym_id, &unit_vec(4, 1)).expect("upsert embedding");
+        db.upsert_embedding(sym_id, 0, 0, 0, &unit_vec(4, 1)).expect("upsert embedding");
 
         let query_vec = unit_vec(4, 0);
         let results = db
