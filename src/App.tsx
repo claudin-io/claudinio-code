@@ -515,7 +515,7 @@ function App() {
                   type="text"
                   value={configOverrideBaseUrl()}
                   onInput={(e) => setConfigOverrideBaseUrl(e.currentTarget.value)}
-                  placeholder="https://api.anthropic.com"
+                  placeholder="https://api.claudin.io"
                   class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                 />
                 <p class="mt-1 mb-3 text-[11px] text-ink-faint">{t("app.config.overrideBaseUrlHint")}</p>
@@ -602,7 +602,7 @@ function App() {
                 type="text"
                 value={configBrainModel()}
                 onInput={(e) => setConfigBrainModel(e.currentTarget.value)}
-                placeholder="claude-sonnet-4-20250514"
+                placeholder="claudius"
                 class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
               />
             </Show>
@@ -640,7 +640,7 @@ function App() {
                 type="text"
                 value={configBuilderModel()}
                 onInput={(e) => setConfigBuilderModel(e.currentTarget.value)}
-                placeholder="claude-sonnet-4-20250514"
+                placeholder="claudinio"
                 class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
               />
             </Show>
