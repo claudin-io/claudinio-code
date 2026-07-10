@@ -149,7 +149,7 @@ export const TasksPanel: Component<{
               }}
               onMouseEnter={cancelClose}
               onMouseLeave={scheduleClose}
-              class="w-64 rounded-lg bg-surface-1 p-3"
+              class="w-64 rounded-lg bg-surface-1 p-3 max-h-[50vh] overflow-y-auto"
               classList={{
                 "gold-outline": isGolden(task),
                 "border border-border-subtle shadow-modal": !isGolden(task),
