@@ -145,3 +145,23 @@ The project has 7 source files without dedicated test coverage. The current cove
 - Run full test suite with coverage and verify results: 23 test files, 383 tests, all passing. Coverage report generated. Key files at 100%: subagentTimeline.ts, ToastPill.tsx, workspaceStatus.ts, theme.ts, fileIndex.ts, monacoThemes.ts, Icon.tsx, EmptyState.tsx, ContextWarning.tsx, FileMentionPopover.tsx, en-US.ts, pt-BR.ts, locales (all). Files with tested pure functions: App.tsx (5 fns exported+tested), FileEditorModal.tsx (3 fns exported+tested).
 - check if the code coverage is 100%, if not, wrote more tests: Plan written: docs/plans/2026-07-10_untested-pure-functions-coverage.md. 7 untested source files identified. Scope agreed with user: 100% of testable pure functions from App.tsx (5), FileEditorModal.tsx (3), subagentTimeline.ts (4), plus ToastPill render test and locale key parity test.
 - check if the code coverage is 100%, if not, wrote more tests: All 9 tasks executed. 23 test files, 383 tests passing, all passing. Coverage configured and working. All testable pure functions (agreed scope) now have 100% test coverage.
+
+
+## Implementation Log — 2026-07-10 22:52
+**Summary:** Add coverage config, export + test pure functions from App.tsx and FileEditorModal.tsx, create tests for subagentTimeline.ts/ToastPill/locales — committed and pushed
+**Changed files:** A	docs/plans/2026-07-10_untested-pure-functions-coverage.md, A	src/App.test.ts, M	src/App.tsx, A	src/components/FileEditorModal.test.ts, M	src/components/FileEditorModal.tsx, A	src/components/ToastPill.test.tsx, A	src/lib/locales.test.ts, A	src/lib/subagentTimeline.test.ts, M	vite.config.ts
+**Commits:** beda217 feat: add coverage config + tests for pure functions across App, FileEditorModal, subagentTimeline, ToastPill, and locales
+**Journal:** Commit beda217 pushed to origin/main. All 9 tasks executed: coverage configured, 5 new test files created (68 new tests), 383 tests passing total. Files at 100% coverage: subagentTimeline.ts, ToastPill.tsx, workspaceStatus.ts, theme.ts, fileIndex.ts, monacoThemes.ts, Icon.tsx, EmptyState.tsx, ContextWarning.tsx, FileMentionPopover.tsx, en-US.ts, pt-BR.ts. Pure functions in App.tsx (5) and FileEditorModal.tsx (3) exported and fully tested.
+
+**Task journal:**
+- Configure vitest coverage in vite.config.ts: Added coverage block with v8 provider, text+html reporters, include/exclude patterns
+- Export pure functions from App.tsx: All 5 functions now exported with `export` keyword - lines 21, 30, 34, 43, 47
+- Create App.test.ts with tests for pure functions: 11 tests created covering all 5 functions: loadRecent (3), saveRecent (1), loadOpenWorkspaces (3), saveOpenWorkspaces (1), addRecent (3). All pass.
+- Export pure functions from FileEditorModal.tsx: All 3 functions now exported - lines 14, 34, 38
+- Create FileEditorModal.test.ts with tests for pure functions: 23 tests created: 15 detectLanguage (13 mapped + 2 fallbacks), 4 getBasename, 4 getRelativePath. All pass.
+- Create subagentTimeline.test.ts with comprehensive tests: 24 tests created covering all 4 functions: 6 mapSubagentDoneStatus, 6 markThinkingEnded, 6 applySubagentDone, 5 syncSubagentTimelineItems. All pass.
+- Create ToastPill.test.tsx with basic render tests: 5 tests created: renders with message (text check), renders null (empty string), opacity-100 class, opacity-0 class, onDismiss called after 2000ms. All pass.
+- Create locales.test.ts for key parity between en-US and pt-BR: 5 tests created: key count parity, all en-US keys in pt-BR, all pt-BR keys in en-US, all en-US values valid, all pt-BR values valid. All pass.
+- Run full test suite with coverage and verify results: 23 test files, 383 tests, all passing. Coverage report generated. Key files at 100%: subagentTimeline.ts, ToastPill.tsx, workspaceStatus.ts, theme.ts, fileIndex.ts, monacoThemes.ts, Icon.tsx, EmptyState.tsx, ContextWarning.tsx, FileMentionPopover.tsx, en-US.ts, pt-BR.ts, locales (all). Files with tested pure functions: App.tsx (5 fns exported+tested), FileEditorModal.tsx (3 fns exported+tested).
+- check if the code coverage is 100%, if not, wrote more tests: Plan written: docs/plans/2026-07-10_untested-pure-functions-coverage.md. 7 untested source files identified. Scope agreed with user: 100% of testable pure functions from App.tsx (5), FileEditorModal.tsx (3), subagentTimeline.ts (4), plus ToastPill render test and locale key parity test.
+- check if the code coverage is 100%, if not, wrote more tests: All 9 tasks executed. 23 test files, 383 tests passing, all passing. Coverage configured and working. All testable pure functions (agreed scope) now have 100% test coverage.

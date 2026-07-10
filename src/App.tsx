@@ -1,4 +1,4 @@
-import { createSignal, For, Match, Show, Switch, onMount } from "solid-js";
+import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffect } from "solid-js";
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
@@ -407,6 +407,30 @@ function App() {
     }
   };
 
+  // Global listener for Easter egg "iddqd" — captura teclas mesmo sem foco
+  createEffect(() => {
+    if (!showConfig()) {
+      setEasterEggActive(false);
+      setKeystrokeBuf("");
+      return;
+    }
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
+      if (easterEggActive()) return;
+      const next = keystrokeBuf() + e.key.toLowerCase();
+      if ("iddqd".startsWith(next)) {
+        setKeystrokeBuf(next);
+        if (next === "iddqd") setEasterEggActive(true);
+      } else if ("iddqd".startsWith(e.key.toLowerCase())) {
+        setKeystrokeBuf(e.key.toLowerCase());
+      } else {
+        setKeystrokeBuf("");
+      }
+    };
+    document.addEventListener("keydown", handler);
+    onCleanup(() => document.removeEventListener("keydown", handler));
+  });
+
   return (
     <div class="flex h-full flex-col">
       <header
@@ -434,20 +458,6 @@ function App() {
       <Show when={showConfig()}>
         <div
           class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]"
-          onKeyDown={(e) => {
-            // Only track keystrokes when NOT focused on an input/select/textarea
-            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-            if (easterEggActive()) return;
-            const next = keystrokeBuf() + e.key.toLowerCase();
-            if ("iddqd".startsWith(next)) {
-              setKeystrokeBuf(next);
-              if (next === "iddqd") setEasterEggActive(true);
-            } else if ("iddqd".startsWith(e.key.toLowerCase())) {
-              setKeystrokeBuf(e.key.toLowerCase());
-            } else {
-              setKeystrokeBuf("");
-            }
-          }}
         >
           <div class="w-[400px] max-h-[90vh] overflow-y-auto rounded-lg bg-surface-1 p-5 shadow-modal">
             <h2 class="mb-4 text-sm font-semibold text-ink">{t("app.config.title")}</h2>
