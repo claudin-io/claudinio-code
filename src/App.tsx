@@ -579,20 +579,33 @@ function App() {
                 <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
               </Show>
             </div>
-            <select
-              value={configBrainModel()}
-              onChange={(e) => setConfigBrainModel(e.currentTarget.value)}
-              disabled={workspaceConfigFields().has("brain_model")}
-              class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              classList={{
-                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("brain_model"),
-                "bg-surface-0": !workspaceConfigFields().has("brain_model"),
-              }}
+            <Show
+              when={easterEggActive()}
+              fallback={
+                <select
+                  value={configBrainModel()}
+                  onChange={(e) => setConfigBrainModel(e.currentTarget.value)}
+                  disabled={workspaceConfigFields().has("brain_model")}
+                  class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                  classList={{
+                    "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("brain_model"),
+                    "bg-surface-0": !workspaceConfigFields().has("brain_model"),
+                  }}
+                >
+                  <For each={availableModels()}>
+                    {(m) => <option value={m} selected={configBrainModel() === m}>{m}</option>}
+                  </For>
+                </select>
+              }
             >
-              <For each={availableModels()}>
-                {(m) => <option value={m} selected={configBrainModel() === m}>{m}</option>}
-              </For>
-            </select>
+              <input
+                type="text"
+                value={configBrainModel()}
+                onInput={(e) => setConfigBrainModel(e.currentTarget.value)}
+                placeholder="claude-sonnet-4-20250514"
+                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </Show>
 
             {/* Builder model selector */}
             <div class="flex items-center gap-2 mb-1">
@@ -604,20 +617,33 @@ function App() {
                 <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
               </Show>
             </div>
-            <select
-              value={configBuilderModel()}
-              onChange={(e) => setConfigBuilderModel(e.currentTarget.value)}
-              disabled={workspaceConfigFields().has("builder_model")}
-              class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              classList={{
-                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("builder_model"),
-                "bg-surface-0": !workspaceConfigFields().has("builder_model"),
-              }}
+            <Show
+              when={easterEggActive()}
+              fallback={
+                <select
+                  value={configBuilderModel()}
+                  onChange={(e) => setConfigBuilderModel(e.currentTarget.value)}
+                  disabled={workspaceConfigFields().has("builder_model")}
+                  class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                  classList={{
+                    "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("builder_model"),
+                    "bg-surface-0": !workspaceConfigFields().has("builder_model"),
+                  }}
+                >
+                  <For each={availableModels()}>
+                    {(m) => <option value={m} selected={configBuilderModel() === m}>{m}</option>}
+                  </For>
+                </select>
+              }
             >
-              <For each={availableModels()}>
-                {(m) => <option value={m} selected={configBuilderModel() === m}>{m}</option>}
-              </For>
-            </select>
+              <input
+                type="text"
+                value={configBuilderModel()}
+                onInput={(e) => setConfigBuilderModel(e.currentTarget.value)}
+                placeholder="claude-sonnet-4-20250514"
+                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </Show>
 
             <hr class="mb-4 border-border-subtle" />
 
