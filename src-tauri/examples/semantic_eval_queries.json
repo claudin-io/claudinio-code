@@ -20,7 +20,9 @@
     {"query": "API HTTP request to LLM provider with retry logic", "expected": ["client.rs", "provider.rs"]},
     {"query": "file tree browser panel component", "expected": ["FileTree.tsx"]},
     {"query": "permissions approval for tool execution", "expected": ["permissions.rs"]},
-    {"query": "sqlite database schema for symbol index", "expected": ["db.rs"]}
+    {"query": "sqlite database schema for symbol index", "expected": ["db.rs"]},
+    {"query": "sidebar panel showing file count symbol count embedding statistics", "expected": ["App.tsx", "ipc.ts", "code_intel.rs"]},
+    {"query": "chat input send button disabled while agent is streaming", "expected": ["ChatPanel.tsx"]}
   ],
   "negative": [
     {"query": "kubernetes deployment yaml configuration"},

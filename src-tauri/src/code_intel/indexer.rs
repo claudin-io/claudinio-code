@@ -1,5 +1,7 @@
 use crate::code_intel::db::IndexDb;
-use crate::code_intel::embeddings::{build_embedding_text, CodeEmbedder, SharedEmbedder};
+use crate::code_intel::embeddings::{
+    build_embedding_chunks, build_embedding_text, CodeEmbedder, EmbedChunk, SharedEmbedder,
+};
 use crate::code_intel::parser::{self, ParseResult};
 use std::time::SystemTime;
 use xxhash_rust::xxh3::xxh3_64;
@@ -112,26 +114,45 @@ pub fn index_file(
     db.update_fts_for_file(file_id)?;
 
     if let Some(ref mut emb) = embedder {
-        let mut filtered_ids: Vec<(String, i64)> = Vec::new();
-        let mut filtered_texts: Vec<String> = Vec::new();
-        for (sym, (name, id)) in parse_result.symbols.iter().zip(symbol_ids.iter()) {
-            let text = build_embedding_text(
-                &sym.kind,
-                &sym.name,
-                sym.parent_context.as_deref(),
-                sym.doc_comment.as_deref(),
-                sym.body_text.as_deref(),
-            );
-            if should_embed_symbol(&sym.kind, &sym.name, &text) {
-                filtered_ids.push((name.clone(), *id));
-                filtered_texts.push(text);
-            }
-        }
-
-        encode_and_store_batched(db, emb, &filtered_ids, &filtered_texts);
+        let chunks = collect_embedding_chunks(&parse_result.symbols, &symbol_ids);
+        encode_and_store_batched(db, emb, &chunks);
     }
 
     Ok(parse_result)
+}
+
+/// Gate symbols through `should_embed_symbol`, then split survivors into
+/// line-based chunks paired with their DB symbol id. Language-agnostic: it
+/// only looks at the extracted body text, never at syntax.
+fn collect_embedding_chunks(
+    symbols: &[parser::ParsedSymbol],
+    symbol_ids: &[(String, i64)],
+) -> Vec<(i64, EmbedChunk)> {
+    let mut out: Vec<(i64, EmbedChunk)> = Vec::new();
+    for (sym, (_, id)) in symbols.iter().zip(symbol_ids.iter()) {
+        let gate_text = build_embedding_text(
+            &sym.kind,
+            &sym.name,
+            sym.parent_context.as_deref(),
+            sym.doc_comment.as_deref(),
+            sym.body_text.as_deref(),
+        );
+        if !should_embed_symbol(&sym.kind, &sym.name, &gate_text) {
+            continue;
+        }
+        for chunk in build_embedding_chunks(
+            &sym.kind,
+            &sym.name,
+            sym.parent_context.as_deref(),
+            sym.doc_comment.as_deref(),
+            sym.body_text.as_deref(),
+            sym.start_line,
+            sym.end_line,
+        ) {
+            out.push((*id, chunk));
+        }
+    }
+    out
 }
 
 pub fn index_doc_file(
@@ -170,23 +191,10 @@ pub fn index_doc_file(
     }
 
     if let Some(ref mut emb) = embedder {
-        let mut filtered_ids: Vec<(String, i64)> = Vec::new();
-        let mut filtered_texts: Vec<String> = Vec::new();
-        for (sym, (name, id)) in doc_symbols.iter().zip(symbol_ids.iter()) {
-            let text = build_embedding_text(
-                &sym.kind,
-                &sym.name,
-                sym.parent_context.as_deref(),
-                None, // no doc_comment — the body is the content
-                sym.body_text.as_deref(),
-            );
-            if should_embed_symbol(&sym.kind, &sym.name, &text) {
-                filtered_ids.push((name.clone(), *id));
-                filtered_texts.push(text);
-            }
-        }
-
-        encode_and_store_batched(db, emb, &filtered_ids, &filtered_texts);
+        // Doc symbols carry no doc_comment (the body is the content), so the
+        // shared chunk collector works for them unchanged.
+        let chunks = collect_embedding_chunks(&doc_symbols, &symbol_ids);
+        encode_and_store_batched(db, emb, &chunks);
     }
 
     Ok(doc_symbols.len())
@@ -197,17 +205,12 @@ pub fn index_doc_file(
 /// bundle can yield thousands of "symbols" in one shot).
 const EMBED_BATCH_SIZE: usize = 16;
 
-fn encode_and_store_batched(
-    db: &IndexDb,
-    emb: &mut CodeEmbedder,
-    symbol_ids: &[(String, i64)],
-    texts: &[String],
-) {
-    for (chunk_ids, chunk_texts) in symbol_ids.chunks(EMBED_BATCH_SIZE).zip(texts.chunks(EMBED_BATCH_SIZE)) {
-        let str_refs: Vec<&str> = chunk_texts.iter().map(|s| s.as_str()).collect();
+fn encode_and_store_batched(db: &IndexDb, emb: &mut CodeEmbedder, chunks: &[(i64, EmbedChunk)]) {
+    for batch in chunks.chunks(EMBED_BATCH_SIZE) {
+        let str_refs: Vec<&str> = batch.iter().map(|(_, c)| c.text.as_str()).collect();
         if let Ok(vectors) = emb.encode(&str_refs) {
-            for ((_, sid), vec) in chunk_ids.iter().zip(vectors.iter()) {
-                let _ = db.upsert_embedding(*sid, vec);
+            for ((sid, chunk), vec) in batch.iter().zip(vectors.iter()) {
+                let _ = db.upsert_embedding(*sid, chunk.chunk_index, chunk.start_line, chunk.end_line, vec);
             }
         }
     }
@@ -412,23 +415,33 @@ pub fn generate_all_embeddings(
         };
 
         // Skip low-signal symbols (imports, tiny property signatures, generic
-        // names) before encoding; keep symbol/text pairs aligned by filtering
-        // both together rather than by position.
-        let filtered: Vec<(&parser::ParsedSymbol, String)> = symbols
+        // names), then split survivors into line-based chunks. Chunks stay
+        // paired with their parsed symbol so the DB-row lookup below matches
+        // by identity, not position.
+        let filtered: Vec<(&parser::ParsedSymbol, EmbedChunk)> = symbols
             .iter()
-            .filter_map(|sym| {
-                let text = build_embedding_text(
+            .filter(|sym| {
+                let gate_text = build_embedding_text(
                     &sym.kind,
                     &sym.name,
                     sym.parent_context.as_deref(),
                     sym.doc_comment.as_deref(),
                     sym.body_text.as_deref(),
                 );
-                if should_embed_symbol(&sym.kind, &sym.name, &text) {
-                    Some((sym, text))
-                } else {
-                    None
-                }
+                should_embed_symbol(&sym.kind, &sym.name, &gate_text)
+            })
+            .flat_map(|sym| {
+                build_embedding_chunks(
+                    &sym.kind,
+                    &sym.name,
+                    sym.parent_context.as_deref(),
+                    sym.doc_comment.as_deref(),
+                    sym.body_text.as_deref(),
+                    sym.start_line,
+                    sym.end_line,
+                )
+                .into_iter()
+                .map(move |c| (sym, c))
             })
             .collect();
 
@@ -437,7 +450,7 @@ pub fn generate_all_embeddings(
             // Encode in small batches, locking per batch, so the watcher and
             // semantic_search never wait long and memory stays bounded.
             for chunk in filtered.chunks(EMBED_BATCH_SIZE) {
-                let str_refs: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
+                let str_refs: Vec<&str> = chunk.iter().map(|(_, c)| c.text.as_str()).collect();
                 let vectors = {
                     let mut emb = match embedder.lock() {
                         Ok(g) => g,
@@ -447,7 +460,7 @@ pub fn generate_all_embeddings(
                 };
                 match vectors {
                     Ok(vectors) => {
-                        for ((sym, _), vec) in chunk.iter().zip(vectors.iter()) {
+                        for ((sym, c), vec) in chunk.iter().zip(vectors.iter()) {
                             // Match parsed symbols to DB rows by identity, not position.
                             let row = db_symbols.iter().find(|r| {
                                 r.name == sym.name
@@ -455,7 +468,10 @@ pub fn generate_all_embeddings(
                                     && r.start_line == sym.start_line
                             });
                             if let Some(row) = row {
-                                if db.upsert_embedding(row.id, vec).is_ok() {
+                                if db
+                                    .upsert_embedding(row.id, c.chunk_index, c.start_line, c.end_line, vec)
+                                    .is_ok()
+                                {
                                     total_embeddings += 1;
                                 }
                             }
