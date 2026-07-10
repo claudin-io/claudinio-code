@@ -1,0 +1,30 @@
+{
+  "_comment": "Queries reais extraídas de .claudinio/sessions. expected = basenames de arquivos que deveriam aparecer no top-3 (derivado do arquivo editado na sessão / alvo óbvio). negative = queries que devem retornar vazio com threshold.",
+  "positive": [
+    {"query": "SVG icon paths and icon component system in Icon.tsx", "expected": ["Icon.tsx"]},
+    {"query": "semantic_search tool implementation invoke handler", "expected": ["mod.rs", "db.rs", "code_intel.rs"]},
+    {"query": "Monaco editor component", "expected": ["TextEditorModal.tsx", "monacoThemes.ts", "DiffViewer.tsx", "FileEditorModal.tsx"]},
+    {"query": "chat input textarea placeholder hint message", "expected": ["ChatPanel.tsx"]},
+    {"query": "projects sidebar close button X remove project from list", "expected": ["App.tsx", "Sidebar.tsx"]},
+    {"query": "chat message component with text selection disabled", "expected": ["ChatPanel.tsx", "App.css"]},
+    {"query": "paste clipboard event handler keydown listener", "expected": ["ChatPanel.tsx"]},
+    {"query": "embedding documents or code for semantic search indexing", "expected": ["embeddings.rs", "indexer.rs"]},
+    {"query": "semantic search code intelligence indexing pipeline", "expected": ["indexer.rs", "code_intel.rs", "mod.rs"]},
+    {"query": "toast notification auto-dismiss timeout system", "expected": ["ChatPanel.tsx"]},
+    {"query": "bash tool PATH export construction environment variable setup", "expected": ["bash.rs"]},
+    {"query": "system prompt assembly and skill injection", "expected": ["skills.rs", "session.rs"]},
+    {"query": "stream processing of AI assistant response parsing tool calls", "expected": ["client.rs", "session.rs"]},
+    {"query": "input queue system for chat messages", "expected": ["ChatPanel.tsx", "session.rs"]},
+    {"query": "drag and drop file upload paperclip attach button", "expected": ["ChatPanel.tsx"]},
+    {"query": "@ mention autocomplete dropdown popup positioning", "expected": ["TagMentionPopover.tsx", "ChatPanel.tsx"]},
+    {"query": "API HTTP request to LLM provider with retry logic", "expected": ["client.rs", "provider.rs"]},
+    {"query": "file tree browser panel component", "expected": ["FileTree.tsx"]},
+    {"query": "permissions approval for tool execution", "expected": ["permissions.rs"]},
+    {"query": "sqlite database schema for symbol index", "expected": ["db.rs"]}
+  ],
+  "negative": [
+    {"query": "kubernetes deployment yaml configuration"},
+    {"query": "django rest framework serializer validation"},
+    {"query": "android jetpack compose navigation graph"}
+  ]
+}

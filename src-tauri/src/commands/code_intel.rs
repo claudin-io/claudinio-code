@@ -23,22 +23,22 @@ pub struct IndexStatus {
 }
 
 fn resolve_model_dir(app_handle: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let subdir = format!("models/{}", embeddings::model_cache_dirname());
+    let model_file = embeddings::model_filename();
     if let Ok(r) = app_handle.path().resource_dir() {
-        let p = r.join("models/LateOn-Code-edge");
-        if p.join("model_int8.onnx").exists() {
+        let p = r.join(&subdir);
+        if p.join(model_file).exists() {
             return Some(p);
         }
     }
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = Path::new(&manifest).join("models/LateOn-Code-edge");
-        if p.join("model_int8.onnx").exists() {
+        let p = Path::new(&manifest).join(&subdir);
+        if p.join(model_file).exists() {
             return Some(p);
         }
     }
-    let cache = dirs::config_dir()
-        .unwrap_or_else(|| Path::new(".").to_path_buf())
-        .join("claudinio-code/models/LateOn-Code-edge");
-    if cache.join("model_int8.onnx").exists() {
+    let cache = cache_model_dir();
+    if cache.join(model_file).exists() {
         return Some(cache);
     }
     None
@@ -47,7 +47,8 @@ fn resolve_model_dir(app_handle: &tauri::AppHandle) -> Option<std::path::PathBuf
 fn cache_model_dir() -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| Path::new(".").to_path_buf())
-        .join("claudinio-code/models/LateOn-Code-edge")
+        .join("claudinio-code/models")
+        .join(embeddings::model_cache_dirname())
 }
 
 #[tauri::command]
@@ -114,7 +115,7 @@ pub async fn open_workspace(
     });
 
     // Phase 2: Reuse existing embedding model if already loaded — it is the
-    // same `LateOn-Code-edge` model for every workspace. On the very first
+    // same embedding model for every workspace. On the very first
     // call, spawn the load in parallel with the scan (same as before).
     let model_handle = {
         let guard = state.embedding_model.lock().await;

@@ -2,12 +2,75 @@ use ort::{session::Session, value::Tensor};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-const MODEL_REPO: &str = "lightonai/LateOn-Code-edge";
-const MODEL_FILES: &[(&str, &str)] = &[
-    ("model_int8.onnx", "model_int8.onnx"),
-    ("tokenizer.json", "tokenizer.json"),
-    ("config.json", "config.json"),
-];
+/// Config for a single-vector bi-encoder embedding model. Swapping candidates
+/// is changing `ACTIVE_MODEL` below to point at a different const — everything
+/// else (download, load, encode) reads from this struct.
+struct ModelConfig {
+    /// HF repo id, e.g. "Xenova/bge-small-en-v1.5".
+    repo: &'static str,
+    /// (remote path relative to `resolve/main/`, local filename in cache_dir).
+    /// Quantized ONNX exports from Xenova live under an `onnx/` subfolder in
+    /// the repo, but we flatten them into cache_dir for simplicity.
+    files: &'static [(&'static str, &'static str)],
+    /// Local filename (from `files`) of the ONNX model, used to check
+    /// presence and to load the session.
+    model_filename: &'static str,
+    /// Local filename (from `files`) of the tokenizer.
+    tokenizer_filename: &'static str,
+    /// Prefix prepended to queries only (not documents) before encoding.
+    /// bge-family models are trained with an instruction prefix for queries;
+    /// MiniLM has none.
+    query_prefix: &'static str,
+    /// Short name used to namespace the on-disk cache dir per model, so
+    /// switching ACTIVE_MODEL doesn't silently reuse a stale cache.
+    cache_dirname: &'static str,
+}
+
+#[allow(dead_code)]
+const BGE_SMALL: ModelConfig = ModelConfig {
+    repo: "Xenova/bge-small-en-v1.5",
+    files: &[
+        ("onnx/model_quantized.onnx", "model_quantized.onnx"),
+        ("tokenizer.json", "tokenizer.json"),
+        ("config.json", "config.json"),
+    ],
+    model_filename: "model_quantized.onnx",
+    tokenizer_filename: "tokenizer.json",
+    query_prefix: "Represent this sentence for searching relevant passages: ",
+    cache_dirname: "bge-small-en-v1.5",
+};
+
+const MINILM_L6: ModelConfig = ModelConfig {
+    repo: "Xenova/all-MiniLM-L6-v2",
+    files: &[
+        ("onnx/model_quantized.onnx", "model_quantized.onnx"),
+        ("tokenizer.json", "tokenizer.json"),
+        ("config.json", "config.json"),
+    ],
+    model_filename: "model_quantized.onnx",
+    tokenizer_filename: "tokenizer.json",
+    query_prefix: "",
+    cache_dirname: "all-MiniLM-L6-v2",
+};
+
+/// Single-vector bi-encoder in active use. Change this to `BGE_SMALL` to try
+/// the other candidate — nothing else in this file needs to change. MiniLM won
+/// the calibration eval (see examples/semantic_eval.rs): better top-3 rank,
+/// wider score spread, less noise on off-topic queries, faster indexing.
+const ACTIVE_MODEL: ModelConfig = MINILM_L6;
+
+/// Cache-dir name derived from the active model config, so callers can
+/// namespace the on-disk cache per model (e.g. `models/{this}`).
+pub fn model_cache_dirname() -> &'static str {
+    ACTIVE_MODEL.cache_dirname
+}
+
+/// Local filename of the active model's ONNX file, so callers can check for
+/// its presence without re-hardcoding the name.
+pub fn model_filename() -> &'static str {
+    ACTIVE_MODEL.model_filename
+}
+
 // Bounded low: attention memory grows with seq^2, and embedding texts are
 // already capped to ~800 chars of body (see MAX_BODY_CHARS below), so a much
 // larger window only inflates padding and peak memory without adding signal.
@@ -17,12 +80,15 @@ pub struct CodeEmbedder {
     session: Session,
     tokenizer: Tokenizer,
     output_name: String,
+    /// Whether the loaded model's inputs include `token_type_ids`, detected
+    /// at load time from `session.inputs()` rather than assumed.
+    wants_token_type_ids: bool,
 }
 
 impl CodeEmbedder {
     pub fn load(model_dir: &Path) -> Result<Self, String> {
-        let model_path = model_dir.join("model_int8.onnx");
-        let tokenizer_path = model_dir.join("tokenizer.json");
+        let model_path = model_dir.join(ACTIVE_MODEL.model_filename);
+        let tokenizer_path = model_dir.join(ACTIVE_MODEL.tokenizer_filename);
 
         if !model_path.exists() {
             return Err(format!(
@@ -57,7 +123,15 @@ impl CodeEmbedder {
             .map(|o| o.name().to_string())
             .ok_or("model has no outputs")?;
 
-        Ok(CodeEmbedder { session, tokenizer, output_name })
+        // Some BERT-family ONNX exports require a token_type_ids input in
+        // addition to input_ids/attention_mask; others don't. Detect it from
+        // the model itself rather than assuming either way.
+        let wants_token_type_ids = session
+            .inputs()
+            .iter()
+            .any(|i| i.name() == "token_type_ids");
+
+        Ok(CodeEmbedder { session, tokenizer, output_name, wants_token_type_ids })
     }
 
     pub fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
@@ -108,6 +182,14 @@ impl CodeEmbedder {
         inputs_map.insert("input_ids".to_string(), ids_tensor.into());
         inputs_map.insert("attention_mask".to_string(), mask_tensor.into());
 
+        if self.wants_token_type_ids {
+            let token_type_ids = vec![0i64; batch_size * padded_len];
+            let type_tensor =
+                Tensor::from_array((vec![batch_size as i64, padded_len as i64], token_type_ids))
+                    .map_err(|e| format!("token_type_ids tensor: {e}"))?;
+            inputs_map.insert("token_type_ids".to_string(), type_tensor.into());
+        }
+
         let ort_outs = self
             .session
             .run(inputs_map)
@@ -130,8 +212,8 @@ impl CodeEmbedder {
             ));
         }
 
-        // LateOn is a late-interaction (ColBERT-style) model; mean-pooling its token
-        // embeddings into one vector is a deliberate v1 simplification.
+        // Bi-encoder: mean-pool token embeddings into a single vector per
+        // text, then L2-normalize so cosine similarity is a plain dot product.
         let mut results = Vec::with_capacity(batch_size);
         for b in 0..batch_size {
             let mut sum = vec![0f32; hidden];
@@ -161,7 +243,14 @@ impl CodeEmbedder {
     }
 
     pub fn encode_query(&mut self, text: &str) -> Result<Vec<f32>, String> {
-        let mut vecs = self.encode(&[text])?;
+        let prefixed;
+        let query = if ACTIVE_MODEL.query_prefix.is_empty() {
+            text
+        } else {
+            prefixed = format!("{}{}", ACTIVE_MODEL.query_prefix, text);
+            &prefixed
+        };
+        let mut vecs = self.encode(&[query])?;
         vecs.pop().ok_or("empty encode result".into())
     }
 }
@@ -205,18 +294,18 @@ pub fn build_embedding_text(
 }
 
 pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
-    if cache_dir.join("model_int8.onnx").exists() {
+    if cache_dir.join(ACTIVE_MODEL.model_filename).exists() {
         return Ok(());
     }
 
     std::fs::create_dir_all(cache_dir)
         .map_err(|e| format!("create model dir: {e}"))?;
 
-    let base_url = format!("https://huggingface.co/{MODEL_REPO}/resolve/main");
+    let base_url = format!("https://huggingface.co/{}/resolve/main", ACTIVE_MODEL.repo);
 
-    for (filename, _) in MODEL_FILES {
-        let url = format!("{base_url}/{filename}");
-        let dest = cache_dir.join(filename);
+    for (remote_path, local_filename) in ACTIVE_MODEL.files {
+        let url = format!("{base_url}/{remote_path}");
+        let dest = cache_dir.join(local_filename);
         if dest.exists() {
             continue;
         }
@@ -226,19 +315,19 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("download {filename}: {e}"))?;
+            .map_err(|e| format!("download {local_filename}: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("download {filename} failed: HTTP {status}"));
+            return Err(format!("download {local_filename} failed: HTTP {status}"));
         }
 
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| format!("read {filename}: {e}"))?;
+            .map_err(|e| format!("read {local_filename}: {e}"))?;
 
-        std::fs::write(&dest, &bytes).map_err(|e| format!("write {filename}: {e}"))?;
+        std::fs::write(&dest, &bytes).map_err(|e| format!("write {local_filename}: {e}"))?;
     }
 
     Ok(())
@@ -257,8 +346,8 @@ mod tests {
 
     #[test]
     fn encode_produces_normalized_model_dim_vectors() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("models/LateOn-Code-edge");
-        if !dir.join("model_int8.onnx").exists() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("models/{}", model_cache_dirname()));
+        if !dir.join(ACTIVE_MODEL.model_filename).exists() {
             eprintln!("model not present, skipping");
             return;
         }
