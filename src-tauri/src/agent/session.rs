@@ -220,10 +220,16 @@ impl ModeCtl {
     }
 }
 
+/// A single steering message: text + pre-processed attachment data.
+pub struct SteeringEntry {
+    pub text: String,
+    pub attachments: Vec<(ContentBlock, crate::agent::persist::AttachmentMeta)>,
+}
+
 /// Steering: a queue of mid-run user messages and an interrupt flag.
 /// Thread-safe; the Mutex is never held across await.
 pub struct SteeringCtl {
-    pub queue: StdMutex<Vec<String>>,
+    pub queue: StdMutex<Vec<SteeringEntry>>,
     pub interrupt: Arc<AtomicBool>,
 }
 
@@ -235,14 +241,14 @@ impl SteeringCtl {
         }
     }
 
-    pub fn drain(&self) -> Vec<String> {
+    pub fn drain(&self) -> Vec<SteeringEntry> {
         let mut q = self.queue.lock().unwrap();
         std::mem::take(&mut *q)
     }
 
-    pub fn push(&self, text: String) {
+    pub fn push(&self, entry: SteeringEntry) {
         let mut q = self.queue.lock().unwrap();
-        q.push(text);
+        q.push(entry);
     }
 
     pub fn clear(&self) {
@@ -482,6 +488,8 @@ pub enum AgentEvent {
     #[serde(rename = "SteeringInjected")]
     SteeringInjected {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<crate::agent::persist::AttachmentMeta>>,
     },
     #[serde(rename = "Error")]
     Error(String),
@@ -640,18 +648,27 @@ fn inject_steering(
     steering: &SteeringCtl,
     event_tx: &Channel<AgentEvent>,
 ) -> bool {
-    let messages = steering.drain();
-    if messages.is_empty() {
+    let entries = steering.drain();
+    if entries.is_empty() {
         return false;
     }
-    for text in &messages {
+    for entry in &entries {
+        // Build content blocks: text first, then attachments
+        let mut blocks = vec![ContentBlock::text(&entry.text)];
+        let mut attachment_metas: Vec<crate::agent::persist::AttachmentMeta> = Vec::new();
+        for (block, meta) in &entry.attachments {
+            blocks.push(block.clone());
+            attachment_metas.push(meta.clone());
+        }
         store.try_append(&SessionRecord::Steering {
-            text: text.clone(),
+            text: entry.text.clone(),
+            attachments: Some(attachment_metas.clone()),
             ts: now_ms(),
         });
-        push_user_blocks(history, store, vec![ContentBlock::text(text)]);
+        push_user_blocks(history, store, blocks);
         let _ = event_tx.send(AgentEvent::SteeringInjected {
-            text: text.clone(),
+            text: entry.text.clone(),
+            attachments: Some(attachment_metas),
         });
     }
     true
@@ -2492,10 +2509,33 @@ mod tests {
 
     #[test]
     fn agent_event_round_trip_steering_injected() {
-        let ev = AgentEvent::SteeringInjected { text: "steer".into() };
+        let ev = AgentEvent::SteeringInjected { text: "steer".into(), attachments: None };
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
-        assert!(matches!(back, AgentEvent::SteeringInjected { text } if text == "steer"));
+        assert!(matches!(back, AgentEvent::SteeringInjected { text, .. } if text == "steer"));
+
+        // Round-trip with attachments
+        let ev2 = AgentEvent::SteeringInjected {
+            text: "steer2".into(),
+            attachments: Some(vec![crate::agent::persist::AttachmentMeta {
+                name: "photo.png".into(),
+                media_type: "image/png".into(),
+                size: 1024,
+            }]),
+        };
+        let json2 = serde_json::to_value(&ev2).unwrap();
+        let back2: AgentEvent = serde_json::from_value(json2).unwrap();
+        match back2 {
+            AgentEvent::SteeringInjected { text, attachments } => {
+                assert_eq!(text, "steer2");
+                let atts = attachments.unwrap();
+                assert_eq!(atts.len(), 1);
+                assert_eq!(atts[0].name, "photo.png");
+                assert_eq!(atts[0].media_type, "image/png");
+                assert_eq!(atts[0].size, 1024);
+            }
+            _ => panic!("expected SteeringInjected"),
+        }
     }
 
     #[test]

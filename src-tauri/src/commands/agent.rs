@@ -1,8 +1,8 @@
 use crate::agent::persist::{
-    self, load_records, now_ms, SessionRecord, SessionStore, SessionSummary,
+    self, load_records, now_ms, AttachmentMeta, SessionRecord, SessionStore, SessionSummary,
 };
 use crate::agent::provider::{save_config, ContentBlock};
-use crate::agent::session::{self, AgentEvent};
+use crate::agent::session::{self, AgentEvent, SteeringEntry};
 use crate::agent::tools::{ReadTracker, ToolContext};
 use crate::commands::tasks as tasks_cmd;
 use crate::state::{AppState, SessionHandle};
@@ -61,6 +61,101 @@ fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String
         Ok(_) if out.len() < bytes.len() => (out, out_type.to_string()),
         _ => (bytes.to_vec(), media_type.to_string()),
     }
+}
+
+/// Process attachment inputs into content blocks and their lightweight metadata.
+/// Used by both `send_message` and `queue_steering`.
+///
+/// Returns a vector of (ContentBlock, AttachmentMeta) pairs so the caller can
+/// forward the content blocks to the workflow and persist the metadata for
+/// UI display (timeline pills).
+pub fn process_attachments(
+    atts: &[AttachmentInput],
+) -> Vec<(ContentBlock, AttachmentMeta)> {
+    let mut results = Vec::new();
+    for att in atts {
+        let file_path = Path::new(&att.path);
+        if !file_path.exists() {
+            continue;
+        }
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let file_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
+
+        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp");
+        let is_text = matches!(
+            ext.as_str(),
+            "txt" | "md" | "csv" | "json" | "yaml" | "yml" | "toml"
+                | "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "swift"
+                | "go" | "rb" | "html" | "htm" | "css" | "sh" | "bash"
+                | "sql" | "xml" | "log"
+        );
+
+        let media_type = if is_image {
+            match ext.as_str() {
+                "png" => "image/png".to_string(),
+                "jpg" | "jpeg" => "image/jpeg".to_string(),
+                "gif" => "image/gif".to_string(),
+                "webp" => "image/webp".to_string(),
+                "bmp" => "image/bmp".to_string(),
+                _ => "image/png".to_string(),
+            }
+        } else if is_text {
+            "text/plain".to_string()
+        } else {
+            format!("application/{}", ext)
+        };
+        let meta = AttachmentMeta {
+            name: file_name.clone(),
+            media_type,
+            size: file_size,
+        };
+
+        if is_image {
+            let bytes = match std::fs::read(file_path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let media_type = match ext.as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "bmp" => "image/bmp",
+                _ => "image/png",
+            };
+            let (compressed_bytes, final_media_type) = compress_image(&bytes, &media_type, &ext);
+            let data = base64::engine::general_purpose::STANDARD.encode(&compressed_bytes);
+            results.push((ContentBlock::image(&final_media_type, &data), meta));
+        } else if is_text {
+            let text = match std::fs::read_to_string(file_path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let block_text = format!("[Arquivo anexado: `{file_name}`]\n```\n{text}\n```");
+            results.push((ContentBlock::text(block_text), meta));
+        } else {
+            let size_str = if file_size > 1024 * 1024 {
+                format!("{:.1} MB", file_size as f64 / (1024.0 * 1024.0))
+            } else if file_size > 1024 {
+                format!("{:.1} KB", file_size as f64 / 1024.0)
+            } else {
+                format!("{file_size} B")
+            };
+            let block_text =
+                format!("[Arquivo anexado: `{file_name}` ({size_str}) — tipo: {ext}]");
+            results.push((ContentBlock::text(block_text), meta));
+        }
+    }
+    results
 }
 
 #[derive(Serialize)]
@@ -184,12 +279,20 @@ pub async fn send_message(
     } else {
         let mut prefix = String::new();
         for r in &residual {
-            prefix.push_str(r);
+            prefix.push_str(&r.text);
             prefix.push('\n');
         }
         prefix.push_str(&message);
         prefix
     };
+
+    // Collect attachment blocks from any residual steering entries
+    let mut attachment_blocks: Vec<ContentBlock> = Vec::new();
+    for entry in &residual {
+        for (block, _) in &entry.attachments {
+            attachment_blocks.push(block.clone());
+        }
+    }
 
     // Golden goals: extract <goal>...</goal> tags, strip them from the text
     // sent to the model, and materialize each goal as golden tasks the
@@ -218,73 +321,9 @@ pub async fn send_message(
     // Process attachments into content blocks to prepend to the user message
     let mut attachment_blocks: Vec<ContentBlock> = Vec::new();
     if let Some(atts) = attachments {
-        for att in atts {
-            let file_path = Path::new(&att.path);
-            if !file_path.exists() {
-                continue;
-            }
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
-                .unwrap_or_default();
-            let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp");
-            let is_text = matches!(
-                ext.as_str(),
-                "txt" | "md" | "csv" | "json" | "yaml" | "yml" | "toml"
-                    | "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "swift"
-                    | "go" | "rb" | "html" | "htm" | "css" | "sh" | "bash"
-                    | "sql" | "xml" | "log"
-            );
-
-            if is_image {
-                // Read image file and create an Image content block
-                let bytes = match std::fs::read(file_path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let media_type = match ext.as_str() {
-                    "png" => "image/png",
-                    "jpg" | "jpeg" => "image/jpeg",
-                    "gif" => "image/gif",
-                    "webp" => "image/webp",
-                    "bmp" => "image/bmp",
-                    _ => "image/png",
-                };
-                // Compress large images to reduce token consumption
-                let (compressed_bytes, final_media_type) = compress_image(&bytes, &media_type, &ext);
-                let data = base64::engine::general_purpose::STANDARD.encode(&compressed_bytes);
-                attachment_blocks.push(ContentBlock::image(&final_media_type, &data));
-            } else if is_text {
-                // Read text file contents
-                let text = match std::fs::read_to_string(file_path) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                let file_name = file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file");
-                let block_text = format!("[Arquivo anexado: `{file_name}`]\n```\n{text}\n```");
-                attachment_blocks.push(ContentBlock::text(block_text));
-            } else {
-                // For PDFs, audio, video, and other binary files: read name only
-                let file_name = file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file");
-                let file_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
-                let size_str = if file_size > 1024 * 1024 {
-                    format!("{:.1} MB", file_size as f64 / (1024.0 * 1024.0))
-                } else if file_size > 1024 {
-                    format!("{:.1} KB", file_size as f64 / 1024.0)
-                } else {
-                    format!("{file_size} B")
-                };
-                let block_text =
-                    format!("[Arquivo anexado: `{file_name}` ({size_str}) — tipo: {ext}]");
-                attachment_blocks.push(ContentBlock::text(block_text));
-            }
+        let processed = process_attachments(&atts);
+        for (block, _) in &processed {
+            attachment_blocks.push(block.clone());
         }
     }
 
@@ -610,6 +649,7 @@ pub async fn list_models(
 pub async fn queue_steering(
     session_id: String,
     text: String,
+    attachments: Option<Vec<AttachmentInput>>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let ctl = {
@@ -618,7 +658,15 @@ pub async fn queue_steering(
     };
     match ctl {
         Some(ctl) => {
-            ctl.push(text);
+            let processed = if let Some(ref atts) = attachments {
+                process_attachments(atts)
+            } else {
+                Vec::new()
+            };
+            ctl.push(SteeringEntry {
+                text,
+                attachments: processed,
+            });
             Ok(())
         }
         None => Err("session not running".into()),

@@ -592,6 +592,18 @@ describe("queueSteering", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("queue_steering", {
       sessionId: "s1",
       text: "steer text",
+      attachments: null,
+    });
+  });
+
+  it("calls invoke with queue_steering and attachments", async () => {
+    mockInvokeFor(undefined);
+    const { queueSteering } = await import("./ipc");
+    await queueSteering("s1", "steer text", [{ path: "/tmp/photo.png" }]);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("queue_steering", {
+      sessionId: "s1",
+      text: "steer text",
+      attachments: [{ path: "/tmp/photo.png" }],
     });
   });
 });
