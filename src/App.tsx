@@ -81,6 +81,11 @@ function App() {
   const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
   const [onboardingSignInError, setOnboardingSignInError] = createSignal<string | null>(null);
+  // Easter egg "iddqd" — override de URL e API Key para LLM
+  const [easterEggActive, setEasterEggActive] = createSignal(false);
+  const [keystrokeBuf, setKeystrokeBuf] = createSignal("");
+  const [configOverrideBaseUrl, setConfigOverrideBaseUrl] = createSignal("");
+  const [configOverrideApiKey, setConfigOverrideApiKey] = createSignal("");
 
   // Convenience views scoped to the currently visible workspace.
   const progress = () => {
@@ -169,6 +174,8 @@ function App() {
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
         setConfigPlanSavePath(cfg.planSavePath ?? "");
+        setConfigOverrideBaseUrl(cfg.overrideBaseUrl ?? "");
+        setConfigOverrideApiKey(cfg.overrideApiKey ?? "");
         setAccountLogin(cfg.accountLogin ?? null);
         setAccountTier(cfg.accountTier ?? null);
         // Build set of field names that come from workspace config
@@ -184,6 +191,9 @@ function App() {
         setAvailableModels(models);
       }
     } catch {}
+    // Reset Easter egg — precisa digitar "iddqd" novamente a cada abertura
+    setEasterEggActive(false);
+    setKeystrokeBuf("");
     setShowConfig(true);
   };
 
@@ -217,6 +227,8 @@ function App() {
           .split(",")
           .map((s) => s.trim())
           .filter((s) => s.length > 0),
+        overrideBaseUrl: configOverrideBaseUrl() || undefined,
+        overrideApiKey: configOverrideApiKey() || undefined,
       });
       // If the user just saved an API key and isn't authenticated via OAuth,
       // mark them as authenticated so onboarding stays hidden.
@@ -420,7 +432,23 @@ function App() {
       </header>
 
       <Show when={showConfig()}>
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+        <div
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]"
+          onKeyDown={(e) => {
+            // Only track keystrokes when NOT focused on an input/select/textarea
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
+            if (easterEggActive()) return;
+            const next = keystrokeBuf() + e.key.toLowerCase();
+            if ("iddqd".startsWith(next)) {
+              setKeystrokeBuf(next);
+              if (next === "iddqd") setEasterEggActive(true);
+            } else if ("iddqd".startsWith(e.key.toLowerCase())) {
+              setKeystrokeBuf(e.key.toLowerCase());
+            } else {
+              setKeystrokeBuf("");
+            }
+          }}
+        >
           <div class="w-[400px] max-h-[90vh] overflow-y-auto rounded-lg bg-surface-1 p-5 shadow-modal">
             <h2 class="mb-4 text-sm font-semibold text-ink">{t("app.config.title")}</h2>
 
@@ -466,6 +494,30 @@ function App() {
                 <button onClick={doLogout} class="ml-2 shrink-0 text-xs text-ink-muted hover:text-ink hover:underline">
                   {t("app.config.signOut")}
                 </button>
+              </div>
+            </Show>
+
+            {/* Easter egg "iddqd" — override fields for LLM */}
+            <Show when={easterEggActive()}>
+              <div class="mb-4">
+                <label class="mb-1 block text-xs text-ink-muted">{t("app.config.overrideBaseUrl")}</label>
+                <input
+                  type="text"
+                  value={configOverrideBaseUrl()}
+                  onInput={(e) => setConfigOverrideBaseUrl(e.currentTarget.value)}
+                  placeholder="https://api.anthropic.com"
+                  class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p class="mt-1 mb-3 text-[11px] text-ink-faint">{t("app.config.overrideBaseUrlHint")}</p>
+                <label class="mb-1 block text-xs text-ink-muted">{t("app.config.overrideApiKey")}</label>
+                <input
+                  type="password"
+                  value={configOverrideApiKey()}
+                  onInput={(e) => setConfigOverrideApiKey(e.currentTarget.value)}
+                  placeholder="sk-ant-..."
+                  class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p class="mt-1 text-[11px] text-ink-faint">{t("app.config.overrideApiKeyHint")}</p>
               </div>
             </Show>
 
