@@ -61,7 +61,70 @@ pub struct SemanticSearchResult {
 
 /// Bump when the index format changes (schema, embedding layout, ignore
 /// rules). A mismatched on-disk index is deleted and rebuilt from scratch.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Minimum final score (cosine similarity + lexical boost, clamped to
+/// [0, 1]) for a semantic search hit to be returned at all. Calibrated
+/// empirically against bge-small/MiniLM-class 384-dim embeddings — tune if
+/// the embedding model changes and score distributions shift.
+const MIN_SEMANTIC_SCORE: f32 = 0.35;
+
+/// Doc sections (markdown headings) embed dense natural language, so they
+/// consistently out-score code symbols on NL queries; this penalty keeps them
+/// in the results without letting them crowd out the code the agent needs.
+const DOC_SECTION_PENALTY: f32 = 0.08;
+
+/// Max results kept per source file before `limit` is applied, so a single
+/// large file (many symbols) can't dominate the whole ranking.
+const MAX_RESULTS_PER_FILE: usize = 3;
+
+const STOPWORDS: &[&str] = &["the", "and", "for", "with"];
+
+/// Lowercase, alphanumeric tokens of at least 3 chars, minus trivial stopwords.
+fn tokenize_query(query_text: &str) -> Vec<String> {
+    query_text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .filter(|t| t.len() >= 3 && !STOPWORDS.contains(&t.as_str()))
+        .collect()
+}
+
+/// Returns the file's basename, with and without its extension.
+fn basename_variants(file_path: &str) -> (String, String) {
+    let base = Path::new(file_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let stem = Path::new(file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| base.clone());
+    (base, stem)
+}
+
+/// Highest lexical boost across all query tokens for a given symbol name /
+/// file path. Layers don't stack — only the best-matching layer counts.
+fn lexical_boost(tokens: &[String], name: &str, file_path: &str) -> f32 {
+    let name_lower = name.to_lowercase();
+    let (base, stem) = basename_variants(file_path);
+    let mut boost = 0.0f32;
+    for token in tokens {
+        if token == &name_lower || token == &base || token == &stem {
+            return 0.25;
+        }
+        if name_lower.contains(token.as_str())
+            || token.contains(name_lower.as_str())
+            || base.contains(token.as_str())
+            || token.contains(base.as_str())
+            || stem.contains(token.as_str())
+            || token.contains(stem.as_str())
+        {
+            boost = boost.max(0.10);
+        }
+    }
+    boost
+}
 
 impl IndexDb {
     pub fn open(db_path: &Path) -> Result<Self, String> {
@@ -487,33 +550,51 @@ impl IndexDb {
         Ok(results)
     }
 
-    pub fn search_by_embedding(&self, query_vec: &[f32], limit: usize) -> Result<Vec<SemanticSearchResult>, String> {
+    pub fn search_by_embedding(
+        &self,
+        query_text: &str,
+        query_vec: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SemanticSearchResult>, String> {
+        let tokens = tokenize_query(query_text);
         let all = self.load_all_embeddings()?;
-        let mut scored: Vec<(f32, SemanticSearchResult)> = all
+        let mut scored: Vec<SemanticSearchResult> = all
             .into_iter()
             .filter(|(_, emb)| emb.len() == query_vec.len())
             .map(|(sym, emb)| {
                 let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
-                let score = dot.max(0.0).min(1.0);
-                (
+                let cosine = dot.max(0.0).min(1.0);
+                let file_path = sym.file_path.unwrap_or_default();
+                let boost = lexical_boost(&tokens, &sym.name, &file_path);
+                let penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
+                let score = (cosine + boost - penalty).clamp(0.0, 1.0);
+                SemanticSearchResult {
+                    symbol_id: sym.id,
+                    name: sym.name,
+                    kind: sym.kind,
+                    file_path,
+                    start_line: sym.start_line,
+                    end_line: sym.end_line,
+                    signature: sym.signature,
                     score,
-                    SemanticSearchResult {
-                        symbol_id: sym.id,
-                        name: sym.name,
-                        kind: sym.kind,
-                        file_path: sym.file_path.unwrap_or_default(),
-                        start_line: sym.start_line,
-                        end_line: sym.end_line,
-                        signature: sym.signature,
-                        score,
-                        snippet: None,
-                    },
-                )
+                    snippet: None,
+                }
             })
+            .filter(|r| r.score >= MIN_SEMANTIC_SCORE)
             .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Dedupe by file (keep highest-scoring first) before applying limit,
+        // so one large file can't occupy the whole ranking.
+        let mut per_file_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        scored.retain(|r| {
+            let count = per_file_count.entry(r.file_path.clone()).or_insert(0);
+            *count += 1;
+            *count <= MAX_RESULTS_PER_FILE
+        });
+
         scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, r)| r).collect())
+        Ok(scored)
     }
 
     #[allow(dead_code)]
@@ -526,5 +607,95 @@ impl IndexDb {
             .query_row("SELECT count(*) FROM symbols", [], |row| row.get(0))
             .unwrap_or(0);
         Ok((files, symbols))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_vec(dims: usize, hot: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; dims];
+        v[hot] = 1.0;
+        v
+    }
+
+    #[test]
+    fn lexical_boost_layers_dont_stack() {
+        let tokens = tokenize_query("Icon.tsx component");
+        // Exact symbol/basename match wins the +0.25 layer even though a
+        // substring match would also apply.
+        let boost = lexical_boost(&tokens, "Icon", "src/ui/Icon.tsx");
+        assert_eq!(boost, 0.25);
+
+        // Only a substring relationship -> the lower +0.10 layer.
+        let boost = lexical_boost(&tokens, "IconButton", "src/ui/other.tsx");
+        assert_eq!(boost, 0.10);
+
+        // No relationship at all.
+        let boost = lexical_boost(&tokens, "unrelatedThing", "src/ui/misc.rs");
+        assert_eq!(boost, 0.0);
+    }
+
+    #[test]
+    fn tokenize_query_drops_short_tokens_and_stopwords() {
+        let tokens = tokenize_query("the Icon.tsx and for a with X");
+        assert_eq!(tokens, vec!["icon".to_string(), "tsx".to_string()]);
+    }
+
+    #[test]
+    fn search_by_embedding_dedupes_per_file_and_applies_threshold() {
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db
+            .upsert_file("src/big_file.ts", "typescript", "hash1", 0, 0)
+            .expect("upsert file");
+
+        // Five symbols in the same file, all with a near-perfect embedding
+        // match, so dedupe (max 3 per file) — not the score — is what
+        // trims them.
+        for i in 0..5 {
+            let sym_id = db
+                .insert_symbol(file_id, &format!("sym{i}"), "function", None, i, 0, i, 0, None)
+                .expect("insert symbol");
+            db.upsert_embedding(sym_id, &unit_vec(4, 0)).expect("upsert embedding");
+        }
+
+        // One symbol in a different file with a low-similarity embedding
+        // that should be dropped by MIN_SEMANTIC_SCORE.
+        let other_file_id = db
+            .upsert_file("src/other.ts", "typescript", "hash2", 0, 0)
+            .expect("upsert file");
+        let low_sym_id = db
+            .insert_symbol(other_file_id, "lowMatch", "function", None, 0, 0, 0, 0, None)
+            .expect("insert symbol");
+        db.upsert_embedding(low_sym_id, &unit_vec(4, 3)).expect("upsert embedding");
+
+        let query_vec = unit_vec(4, 0);
+        let results = db
+            .search_by_embedding("sym", &query_vec, 10)
+            .expect("search_by_embedding");
+
+        assert_eq!(results.len(), 3, "dedupe should cap results per file at 3");
+        assert!(results.iter().all(|r| r.file_path == "src/big_file.ts"));
+        assert!(results.iter().all(|r| r.score >= MIN_SEMANTIC_SCORE));
+    }
+
+    #[test]
+    fn search_by_embedding_can_return_empty() {
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db
+            .upsert_file("src/only.ts", "typescript", "hash", 0, 0)
+            .expect("upsert file");
+        let sym_id = db
+            .insert_symbol(file_id, "unrelated", "function", None, 0, 0, 0, 0, None)
+            .expect("insert symbol");
+        // Orthogonal embedding -> cosine ~0, no lexical overlap -> no boost.
+        db.upsert_embedding(sym_id, &unit_vec(4, 1)).expect("upsert embedding");
+
+        let query_vec = unit_vec(4, 0);
+        let results = db
+            .search_by_embedding("totally different query", &query_vec, 10)
+            .expect("search_by_embedding");
+        assert!(results.is_empty());
     }
 }

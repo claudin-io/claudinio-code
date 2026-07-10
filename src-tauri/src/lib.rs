@@ -1,5 +1,5 @@
 mod agent;
-mod code_intel;
+pub mod code_intel;
 mod commands;
 mod lsp;
 mod state;

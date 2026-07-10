@@ -23,6 +23,39 @@ pub fn compute_hash(content: &str) -> String {
     format!("{:x}", xxh3_64(content.as_bytes()))
 }
 
+/// Symbol kinds excluded from the embedding index: they carry no retrieval
+/// signal and crowd out real results. `import` is our own synthesized kind
+/// (see parser::IMPORT_KINDS); the others are TS/JS, C/C++/C#, and Kotlin/
+/// Scala property node kinds from parser::DECLARATION_KINDS.
+const NON_RETRIEVABLE_KINDS: &[&str] = &[
+    "import",
+    "property_signature",
+    "field_declaration",
+    "property_declaration",
+];
+
+/// Generic names that carry no retrieval signal on their own — only worth
+/// embedding if accompanied by substantial doc/body text.
+const GENERIC_NAMES: &[&str] = &[
+    "props", "children", "id", "key", "value", "classname", "class_name",
+    "name", "type", "data", "item", "items", "index", "i", "x", "y", "_",
+];
+
+/// Symbols excluded from the embedding index: they carry no retrieval signal
+/// and crowd out real results (imports, tiny property signatures, generic names).
+fn should_embed_symbol(kind: &str, name: &str, embedding_text: &str) -> bool {
+    if NON_RETRIEVABLE_KINDS.contains(&kind) {
+        return false;
+    }
+    if embedding_text.len() < 40 {
+        return false;
+    }
+    if GENERIC_NAMES.contains(&name.to_lowercase().as_str()) && embedding_text.len() < 120 {
+        return false;
+    }
+    true
+}
+
 pub fn index_file(
     db: &IndexDb,
     path: &str,
@@ -79,21 +112,23 @@ pub fn index_file(
     db.update_fts_for_file(file_id)?;
 
     if let Some(ref mut emb) = embedder {
-        let texts: Vec<String> = parse_result
-            .symbols
-            .iter()
-            .map(|sym| {
-                build_embedding_text(
-                    &sym.kind,
-                    &sym.name,
-                    sym.parent_context.as_deref(),
-                    sym.doc_comment.as_deref(),
-                    sym.body_text.as_deref(),
-                )
-            })
-            .collect();
+        let mut filtered_ids: Vec<(String, i64)> = Vec::new();
+        let mut filtered_texts: Vec<String> = Vec::new();
+        for (sym, (name, id)) in parse_result.symbols.iter().zip(symbol_ids.iter()) {
+            let text = build_embedding_text(
+                &sym.kind,
+                &sym.name,
+                sym.parent_context.as_deref(),
+                sym.doc_comment.as_deref(),
+                sym.body_text.as_deref(),
+            );
+            if should_embed_symbol(&sym.kind, &sym.name, &text) {
+                filtered_ids.push((name.clone(), *id));
+                filtered_texts.push(text);
+            }
+        }
 
-        encode_and_store_batched(db, emb, &symbol_ids, &texts);
+        encode_and_store_batched(db, emb, &filtered_ids, &filtered_texts);
     }
 
     Ok(parse_result)
@@ -135,20 +170,23 @@ pub fn index_doc_file(
     }
 
     if let Some(ref mut emb) = embedder {
-        let texts: Vec<String> = doc_symbols
-            .iter()
-            .map(|sym| {
-                build_embedding_text(
-                    &sym.kind,
-                    &sym.name,
-                    sym.parent_context.as_deref(),
-                    None, // no doc_comment — the body is the content
-                    sym.body_text.as_deref(),
-                )
-            })
-            .collect();
+        let mut filtered_ids: Vec<(String, i64)> = Vec::new();
+        let mut filtered_texts: Vec<String> = Vec::new();
+        for (sym, (name, id)) in doc_symbols.iter().zip(symbol_ids.iter()) {
+            let text = build_embedding_text(
+                &sym.kind,
+                &sym.name,
+                sym.parent_context.as_deref(),
+                None, // no doc_comment — the body is the content
+                sym.body_text.as_deref(),
+            );
+            if should_embed_symbol(&sym.kind, &sym.name, &text) {
+                filtered_ids.push((name.clone(), *id));
+                filtered_texts.push(text);
+            }
+        }
 
-        encode_and_store_batched(db, emb, &symbol_ids, &texts);
+        encode_and_store_batched(db, emb, &filtered_ids, &filtered_texts);
     }
 
     Ok(doc_symbols.len())
@@ -373,28 +411,33 @@ pub fn generate_all_embeddings(
             parse_result.symbols
         };
 
-        let texts: Vec<String> = symbols
+        // Skip low-signal symbols (imports, tiny property signatures, generic
+        // names) before encoding; keep symbol/text pairs aligned by filtering
+        // both together rather than by position.
+        let filtered: Vec<(&parser::ParsedSymbol, String)> = symbols
             .iter()
-            .map(|sym| {
-                build_embedding_text(
+            .filter_map(|sym| {
+                let text = build_embedding_text(
                     &sym.kind,
                     &sym.name,
                     sym.parent_context.as_deref(),
                     sym.doc_comment.as_deref(),
                     sym.body_text.as_deref(),
-                )
+                );
+                if should_embed_symbol(&sym.kind, &sym.name, &text) {
+                    Some((sym, text))
+                } else {
+                    None
+                }
             })
             .collect();
 
-        if !texts.is_empty() {
+        if !filtered.is_empty() {
             let db_symbols = db.symbols_in_file(&file.path)?;
             // Encode in small batches, locking per batch, so the watcher and
             // semantic_search never wait long and memory stays bounded.
-            for (chunk_syms, chunk_texts) in symbols
-                .chunks(EMBED_BATCH_SIZE)
-                .zip(texts.chunks(EMBED_BATCH_SIZE))
-            {
-                let str_refs: Vec<&str> = chunk_texts.iter().map(|s| s.as_str()).collect();
+            for chunk in filtered.chunks(EMBED_BATCH_SIZE) {
+                let str_refs: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
                 let vectors = {
                     let mut emb = match embedder.lock() {
                         Ok(g) => g,
@@ -404,7 +447,7 @@ pub fn generate_all_embeddings(
                 };
                 match vectors {
                     Ok(vectors) => {
-                        for (sym, vec) in chunk_syms.iter().zip(vectors.iter()) {
+                        for ((sym, _), vec) in chunk.iter().zip(vectors.iter()) {
                             // Match parsed symbols to DB rows by identity, not position.
                             let row = db_symbols.iter().find(|r| {
                                 r.name == sym.name
@@ -480,4 +523,45 @@ pub fn reindex_file(db: &IndexDb, path: &str, embedder: Option<&mut CodeEmbedder
 
     let result = index_file(db, path, &content, embedder).ok();
     Ok(result)
+}
+
+#[cfg(test)]
+mod should_embed_symbol_tests {
+    use super::should_embed_symbol;
+
+    #[test]
+    fn excludes_non_retrievable_kinds() {
+        let long_text = "a".repeat(200);
+        assert!(!should_embed_symbol("import", "SomeModule", &long_text));
+        assert!(!should_embed_symbol("property_signature", "onClick", &long_text));
+        assert!(!should_embed_symbol("field_declaration", "counter", &long_text));
+        assert!(!should_embed_symbol("property_declaration", "counter", &long_text));
+    }
+
+    #[test]
+    fn excludes_short_embedding_text() {
+        assert!(!should_embed_symbol("function_item", "compute_hash", "short text"));
+        assert!(should_embed_symbol(
+            "function_item",
+            "compute_hash",
+            "function_item compute_hash: computes a hash of the given content for caching"
+        ));
+    }
+
+    #[test]
+    fn excludes_generic_names_without_substantial_text() {
+        let short_text = "property_signature props: react component props";
+        assert!(short_text.len() >= 40 && short_text.len() < 120);
+        assert!(!should_embed_symbol("variable_declaration", "props", short_text));
+        assert!(!should_embed_symbol("variable_declaration", "ID", short_text)); // case-insensitive
+
+        let long_text = "a".repeat(150);
+        assert!(should_embed_symbol("variable_declaration", "props", &long_text));
+    }
+
+    #[test]
+    fn keeps_meaningful_symbols() {
+        let text = "function_item authenticate_user: verifies credentials and issues a session token";
+        assert!(should_embed_symbol("function_item", "authenticate_user", text));
+    }
 }

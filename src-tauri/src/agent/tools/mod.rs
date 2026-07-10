@@ -483,17 +483,44 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(15);
             let db = open_db(&ctx.db_path)?;
-            let model = ctx.embedding_model.lock().await.clone().ok_or(
-                "semantic search not available — the embedding model is still loading or failed to load (check app logs)",
-            )?;
-            let query = query.to_string();
+
+            // Bounded wait: the embedding model may still be loading at startup.
+            // Poll for up to ~5s before giving up and falling back to lexical search.
+            let mut model = ctx.embedding_model.lock().await.clone();
+            if model.is_none() {
+                const MAX_WAIT_MS: u64 = 5000;
+                const POLL_INTERVAL_MS: u64 = 500;
+                let mut waited_ms = 0u64;
+                while model.is_none() && waited_ms < MAX_WAIT_MS {
+                    tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+                    waited_ms += POLL_INTERVAL_MS;
+                    model = ctx.embedding_model.lock().await.clone();
+                }
+            }
+
+            let model = match model {
+                Some(model) => model,
+                None => {
+                    // Embedding model still unavailable after the bounded wait —
+                    // degrade gracefully to lexical symbol search instead of failing outright.
+                    let results = db.search_symbols(query, limit)?;
+                    let envelope = serde_json::json!({
+                        "fallback": "lexical",
+                        "note": "embedding model unavailable; results from lexical symbol search",
+                        "results": results,
+                    });
+                    return Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&envelope).unwrap_or_default() });
+                }
+            };
+
+            let query_owned = query.to_string();
             let query_vec = tokio::task::spawn_blocking(move || {
                 let mut model = model.lock().map_err(|e| format!("embedder lock: {e}"))?;
-                model.encode_query(&query)
+                model.encode_query(&query_owned)
             })
             .await
             .map_err(|e| format!("encode task panicked: {e}"))??;
-            let mut results = db.search_by_embedding(&query_vec, limit as usize)?;
+            let mut results = db.search_by_embedding(query, &query_vec, limit as usize)?;
             attach_snippets(&mut results);
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }

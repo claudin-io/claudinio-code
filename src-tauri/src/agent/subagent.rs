@@ -40,7 +40,7 @@ use these tools in this order of preference: \
   \u{2022} file_outline \u{2014} list all symbols in a file (preview structure before reading) \
   \u{2022} go_to_definition / find_references \u{2014} navigate symbol relationships precisely \
    \u{2022} symbol_lookup \u{2014} exact symbol name lookup across workspace \
-   \u{2022} semantic_search \u{2014} search by concept/meaning using LateOn code & doc embeddings. \
+   \u{2022} semantic_search \u{2014} search by concept/meaning using code & doc embeddings. \
 Describe what the code does in natural language: \
 'message queue system' finds SteeringCtl.queue/drain/push without \
 identifier match. Use this BEFORE grep when you can describe behavior \
