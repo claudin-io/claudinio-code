@@ -11,7 +11,7 @@ interface FileEditorModalProps {
   onClose: () => void;
 }
 
-function detectLanguage(filePath: string): string {
+export function detectLanguage(filePath: string): string {
   const ext = filePath.match(/\.([^.]+)$/)?.[1]?.toLowerCase();
   const map: Record<string, string> = {
     ts: "typescript",
@@ -31,11 +31,11 @@ function detectLanguage(filePath: string): string {
   return ext && ext in map ? map[ext] : "plaintext";
 }
 
-function getBasename(path: string): string {
+export function getBasename(path: string): string {
   return path.replace(/\\/g, "/").split("/").pop() ?? path;
 }
 
-function getRelativePath(filePath: string, rootPath: string): string {
+export function getRelativePath(filePath: string, rootPath: string): string {
   const normFile = filePath.replace(/\\/g, "/");
   const normRoot = rootPath.replace(/\\/g, "/").replace(/\/$/, "");
   if (normFile.startsWith(normRoot + "/")) {

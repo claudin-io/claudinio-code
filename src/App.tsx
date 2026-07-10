@@ -18,7 +18,7 @@ import FileEditorModal from "./components/FileEditorModal";
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
 
-function loadRecent(): string[] {
+export function loadRecent(): string[] {
   try {
     const raw = localStorage.getItem(RECENT_KEY);
     return raw ? JSON.parse(raw) : [];
@@ -27,11 +27,11 @@ function loadRecent(): string[] {
   }
 }
 
-function saveRecent(projects: string[]) {
+export function saveRecent(projects: string[]) {
   localStorage.setItem(RECENT_KEY, JSON.stringify(projects));
 }
 
-function loadOpenWorkspaces(): string[] {
+export function loadOpenWorkspaces(): string[] {
   try {
     const raw = localStorage.getItem(OPEN_KEY);
     return raw ? JSON.parse(raw) : [];
@@ -40,11 +40,11 @@ function loadOpenWorkspaces(): string[] {
   }
 }
 
-function saveOpenWorkspaces(workspaces: string[]) {
+export function saveOpenWorkspaces(workspaces: string[]) {
   localStorage.setItem(OPEN_KEY, JSON.stringify(workspaces));
 }
 
-function addRecent(projects: () => string[], setter: (v: string[]) => void, path: string) {
+export function addRecent(projects: () => string[], setter: (v: string[]) => void, path: string) {
   const updated = [path, ...projects().filter((p) => p !== path)].slice(0, 10);
   setter(updated);
   saveRecent(updated);

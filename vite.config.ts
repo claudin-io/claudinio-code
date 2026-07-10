@@ -54,5 +54,17 @@ export default defineConfig(async () => ({
     globals: true,
     include: ["src/**/*.test.{ts,tsx}"],
     setupFiles: ["src/test-setup.ts"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "html"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.test.*",
+        "src/vite-env.d.ts",
+        "src/test-setup.ts",
+        "src/index.tsx",
+        "src/assets/**",
+      ],
+    },
   },
 }));
