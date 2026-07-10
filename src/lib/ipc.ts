@@ -242,6 +242,10 @@ export function getSessionMode(workspace: string): Promise<{ mode: SessionMode; 
   return invoke<{ mode: SessionMode; origin: ModeOrigin }>("get_session_mode", { workspace });
 }
 
+export function checkPlanExists(workspace: string): Promise<boolean> {
+  return invoke<boolean>("check_plan_exists", { workspace });
+}
+
 export function readAttachment(path: string): Promise<AttachmentData> {
   return invoke<AttachmentData>("read_attachment", { path });
 }

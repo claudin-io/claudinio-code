@@ -17,6 +17,7 @@ import {
   readAttachment,
   writeClipboardBlob,
   setSessionMode,
+  checkPlanExists,
   normalizeSessionMode,
   pickFiles,
   type ModeOrigin,
@@ -494,6 +495,13 @@ export const ChatPanel: Component<{
     try {
       const result = await setSessionMode(props.workspace, m);
       setActiveSessionId(result.sessionId);
+
+      // If switching to brain mode and a plan already exists on disk,
+      // show the "Continue with Builder" button immediately
+      if (m === "brain") {
+        const planExists = await checkPlanExists(props.workspace);
+        if (planExists) setHasPlanBeenWritten(true);
+      }
     } catch {
       // backend unavailable — sendMessage will sync the mode on next send
     }
