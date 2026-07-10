@@ -51,6 +51,10 @@ const dict: LocaleDict = {
   "app.config.default": "padrão",
   "app.config.sourceWorkspace": "Workspace",
   "app.config.sourceLocal": "Local",
+  "app.config.overrideBaseUrl": "URL Anthropic (Override)",
+  "app.config.overrideBaseUrlHint": "Substitui o endpoint da API apenas para chamadas ao LLM. Deixe vazio para usar o padrão.",
+  "app.config.overrideApiKey": "Chave API (Override)",
+  "app.config.overrideApiKeyHint": "Substitui a chave API apenas para chamadas ao LLM. Deixe vazio para usar a chave do sign-in.",
 
   // ── EmptyState ────────────────────────────────────────────────────
   "empty.title": "Claudinio Code",

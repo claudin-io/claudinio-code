@@ -446,6 +446,8 @@ pub struct SetConfigArgs {
     pub max_golden_cycles: Option<Option<usize>>,
     pub max_golden_stalls: Option<Option<usize>>,
     pub plan_save_path: Option<String>,
+    pub override_base_url: Option<String>,
+    pub override_api_key: Option<String>,
 }
 
 #[tauri::command]
@@ -491,6 +493,12 @@ pub async fn set_config(
             Some(plan_save_path)
         };
     }
+    if let Some(url) = args.override_base_url {
+        cfg.override_base_url = if url.is_empty() { None } else { Some(url) };
+    }
+    if let Some(key) = args.override_api_key {
+        cfg.override_api_key = if key.is_empty() { None } else { Some(key) };
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -528,6 +536,8 @@ pub async fn get_config(
         "maxGoldenCycles": cfg.max_golden_cycles,
         "maxGoldenStalls": cfg.max_golden_stalls,
         "planSavePath": cfg.plan_save_path,
+        "overrideBaseUrl": cfg.override_base_url,
+        "overrideApiKey": cfg.override_api_key,
         "workspaceConfig": workspace_config,
     }))
 }

@@ -65,6 +65,8 @@ export interface AgentConfig {
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
   planSavePath?: string | null;
+  overrideBaseUrl?: string | null;
+  overrideApiKey?: string | null;
   workspaceConfig?: Record<string, unknown> | null;
 }
 
@@ -80,6 +82,8 @@ export interface SetConfigArgs {
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
   planSavePath?: string | null;
+  overrideBaseUrl?: string;
+  overrideApiKey?: string;
 }
 
 export interface ApproveArgs {

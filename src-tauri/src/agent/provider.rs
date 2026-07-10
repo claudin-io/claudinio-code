@@ -91,6 +91,17 @@ pub struct AgentConfig {
     /// read, so the fallback `install_id` is itself stable. Never transmitted.
     #[serde(default)]
     pub install_fallback_seed: Option<String>,
+    /// Override base URL for LLM inference calls only (stream_message,
+    /// classify_turn_completion, one_shot). When set, `/v1/messages` is sent
+    /// here instead of `base_url`. Does NOT affect login, websearch, or
+    /// list_models.
+    #[serde(default)]
+    pub override_base_url: Option<String>,
+    /// Override API key for LLM inference calls only. When set, used instead
+    /// of `api_key` for `/v1/messages` requests. Does NOT affect login,
+    /// websearch, or list_models.
+    #[serde(default)]
+    pub override_api_key: Option<String>,
 }
 
 fn default_claudinio() -> String {
@@ -121,6 +132,8 @@ impl Default for AgentConfig {
             plan_save_path: None,
             install_id: None,
             install_fallback_seed: None,
+            override_base_url: None,
+            override_api_key: None,
         }
     }
 }
@@ -466,11 +479,13 @@ pub async fn classify_turn_completion(
         tools: None,
         system: Some(COMPLETION_JUDGE_SYSTEM.to_string()),
     };
-    let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
+    let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
+    let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
+    let url = format!("{}/v1/messages", effective_base_url.trim_end_matches('/'));
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("x-api-key", &config.api_key)
+        .header("x-api-key", effective_api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
         .send()
@@ -531,11 +546,13 @@ pub async fn one_shot(
         tools: None,
         system: Some(system.to_string()),
     };
-    let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
+    let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
+    let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
+    let url = format!("{}/v1/messages", effective_base_url.trim_end_matches('/'));
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("x-api-key", &config.api_key)
+        .header("x-api-key", effective_api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
         .send()
@@ -594,12 +611,14 @@ pub async fn stream_message(
         system: system.map(|s| s.to_string()),
     };
 
-    let url = format!("{}/v1/messages", config.base_url.trim_end_matches('/'));
+    let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
+    let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
+    let url = format!("{}/v1/messages", effective_base_url.trim_end_matches('/'));
 
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("x-api-key", &config.api_key)
+        .header("x-api-key", effective_api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
         .send()
