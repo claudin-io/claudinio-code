@@ -804,6 +804,54 @@ pub async fn get_session_mode(
     }
 }
 
+/// Check whether a plan file (.md) exists on disk for this workspace.
+/// Used by the frontend to decide whether to show the "Continue with Builder" button
+/// when the user manually switches to Brain mode.
+#[tauri::command]
+pub async fn check_plan_exists(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let ws = state.workspace(&workspace).await?;
+    let workspace_root = ws.root.to_string_lossy().to_string();
+
+    // Resolve plan_save_path respecting workspace-level override
+    let cfg = state.config.lock().await;
+    let global_plan_save_path = cfg.plan_save_path.clone();
+    drop(cfg);
+
+    let ws_config = crate::agent::provider::read_workspace_config(&workspace_root);
+    let effective_plan_save_path = ws_config
+        .as_ref()
+        .and_then(|w| w.get("plan_save_path"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(global_plan_save_path);
+
+    let dir = crate::agent::tools::write_plan::plans_dir(
+        &workspace_root,
+        effective_plan_save_path.as_deref(),
+    );
+
+    if !dir.exists() {
+        return Ok(false);
+    }
+
+    let has_md = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    == Some("md")
+            })
+        })
+        .unwrap_or(false);
+
+    Ok(has_md)
+}
+
 /// Set the interrupt flag on a running session's steering controller.
 #[tauri::command]
 pub async fn interrupt_session(
