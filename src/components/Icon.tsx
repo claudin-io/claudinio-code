@@ -44,6 +44,17 @@ const PATHS: Record<string, string[]> = {
   brain: [
     "M9 4h6v2H9zM7 6h2v2H7zm8 0h2v2h-2zm4-2h2v2h-2zm2-2h2v2h-2zM0 10h3v2H0zm21 0h3v2h-3zM3 4h2v2H3zM1 2h2v2H1zm6 12h2v2H7zm8 0h2v2h-2zM5 8h2v6H5zm12 0h2v6h-2zm-8 8h6v2H9zm0 4h6v2H9zm0-2h2v2H9zm4 0h2v2h-2zM11 0h2v3h-2z",
   ],
+  "book-open": [
+    "M4 4h8v16H4z",
+    "M12 4h8v16h-8z",
+    "M11 4h2v16h-2z",
+    "M6 8h5v1H6z",
+    "M6 11h5v1H6z",
+    "M6 14h5v1H6z",
+    "M13 8h5v1h-5z",
+    "M13 11h5v1h-5z",
+    "M13 14h5v1h-5z",
+  ],
   loader: [
     "M13 22h-2v-6h2v6Zm-6-3H5v-2h2v2Zm12 0h-2v-2h2v2ZM9 17H7v-2h2v2Zm8 0h-2v-2h2v2Zm-9-4H2v-2h6v2Zm14 0h-6v-2h6v2ZM9 9H7V7h2v2Zm8 0h-2V7h2v2Zm-4-1h-2V2h2v6ZM7 7H5V5h2v2Zm12 0h-2V5h2v2Z",
   ],
@@ -154,6 +165,46 @@ const PATHS: Record<string, string[]> = {
     // bi:file-earmark-diff
     "M8 5a.5.5 0 0 1 .5.5V7H10a.5.5 0 0 1 0 1H8.5v1.5a.5.5 0 0 1-1 0V8H6a.5.5 0 0 1 0-1h1.5V5.5A.5.5 0 0 1 8 5m-2.5 6.5A.5.5 0 0 1 6 11h4a.5.5 0 0 1 0 1H6a.5.5 0 0 1-.5-.5",
     "M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2M9.5 3A1.5 1.5 0 0 0 11 4.5h2V14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5.5z",
+  ],
+  // Theme toggle icons
+  monitor: [
+    // monitor — pixel-art computer screen with stand
+    "M2 2h20v2h-20z",
+    "M2 4h2v14h-2z",
+    "M20 4h2v14h-2z",
+    "M2 18h20v2h-20z",
+    "M10 20h4v2h-4z",
+    "M7 22h10v2H7z",
+  ],
+  moon: [
+    // crescent moon — right-side illuminated crescent as horizontal pixel blocks
+    "M17 3h4v2h-4z",
+    "M15 5h6v2h-6z",
+    "M14 7h7v2h-7z",
+    "M13 9h8v2h-8z",
+    "M13 11h8v2h-8z",
+    "M13 13h8v2h-8z",
+    "M13 15h8v2h-8z",
+    "M14 17h7v2h-7z",
+    "M15 19h6v2h-6z",
+    "M17 21h4v2h-4z",
+  ],
+  sun: [
+    // Sun — blocky circle with 8 pixel rays
+    // Center circle (pixelated)
+    "M9 8h6v2H9z",
+    "M8 10h8v4H8z",
+    "M9 14h6v2H9z",
+    // Orthogonal rays (N, S, W, E)
+    "M11 5h2v3h-2z",
+    "M11 16h2v3h-2z",
+    "M5 11h3v2H5z",
+    "M16 11h3v2h-3z",
+    // Diagonal corner rays (NW, NE, SW, SE)
+    "M7 7h2v2H7z",
+    "M15 7h2v2h-2z",
+    "M7 15h2v2H7z",
+    "M15 15h2v2h-2z",
   ],
   // streamline-ultimate:archive-locker-bold by Streamline (24×24)
   "archive-drawer": [

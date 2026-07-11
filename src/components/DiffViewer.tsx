@@ -33,7 +33,7 @@ export const DiffViewer: Component<{
     }
 
     editor = monaco.editor.createDiffEditor(containerRef, {
-      theme: theme() === "dark" ? "claudinio-dark" : "claudinio-light",
+      theme: theme() === "dark" ? "claudinio-dark" : theme() === "sepia" ? "claudinio-sepia" : "claudinio-light",
       fontSize: 13,
       fontFamily: "'JetBrains Mono', monospace",
       readOnly: true,
@@ -50,7 +50,7 @@ export const DiffViewer: Component<{
 
   createEffect(() => {
     const currentTheme = theme();
-    monaco.editor.setTheme(currentTheme === "dark" ? "claudinio-dark" : "claudinio-light");
+    monaco.editor.setTheme(currentTheme === "dark" ? "claudinio-dark" : currentTheme === "sepia" ? "claudinio-sepia" : "claudinio-light");
   });
 
   onCleanup(() => {

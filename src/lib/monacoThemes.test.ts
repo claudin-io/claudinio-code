@@ -16,18 +16,22 @@ describe("defineMonacoThemes", () => {
     vi.clearAllMocks();
   });
 
-  it("defines both claudinio-dark and claudinio-light themes", async () => {
+  it("defines all three theme variants (dark, light, sepia)", async () => {
     const { defineMonacoThemes } = await import("./monacoThemes");
 
     defineMonacoThemes();
 
-    expect(mockDefineTheme).toHaveBeenCalledTimes(2);
+    expect(mockDefineTheme).toHaveBeenCalledTimes(3);
     expect(mockDefineTheme).toHaveBeenCalledWith(
       "claudinio-dark",
       expect.objectContaining({ base: "vs-dark" }),
     );
     expect(mockDefineTheme).toHaveBeenCalledWith(
       "claudinio-light",
+      expect.objectContaining({ base: "vs" }),
+    );
+    expect(mockDefineTheme).toHaveBeenCalledWith(
+      "claudinio-sepia",
       expect.objectContaining({ base: "vs" }),
     );
   });
@@ -38,6 +42,6 @@ describe("defineMonacoThemes", () => {
     defineMonacoThemes();
     defineMonacoThemes();
 
-    expect(mockDefineTheme).toHaveBeenCalledTimes(2);
+    expect(mockDefineTheme).toHaveBeenCalledTimes(3);
   });
 });

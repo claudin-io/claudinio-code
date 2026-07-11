@@ -3,9 +3,18 @@
   <head>
     <script>
       (function () {
-        var theme = window.matchMedia("(prefers-color-scheme: light)").matches
-          ? "light"
-          : "dark";
+        var theme;
+        try {
+          var stored = localStorage.getItem("claudinio_theme");
+          if (stored === "dark" || stored === "light" || stored === "sepia") {
+            theme = stored;
+          }
+        } catch (_) {}
+        if (!theme) {
+          theme = window.matchMedia("(prefers-color-scheme: light)").matches
+            ? "light"
+            : "dark";
+        }
         document.documentElement.dataset.theme = theme;
         if (navigator.userAgent.includes("Mac OS X")) {
           document.documentElement.classList.add("is-macos");

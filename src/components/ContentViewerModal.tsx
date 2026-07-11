@@ -6,6 +6,7 @@ import { t } from "../lib/grill-me";
 import { readFile, openExternal } from "../lib/ipc";
 import { defineMonacoThemes } from "../lib/monacoThemes";
 import { detectLanguage } from "./FileEditorModal";
+import { theme } from "../lib/theme";
 
 type ContentType = "text" | "image" | "video" | "audio";
 
@@ -65,14 +66,16 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
     if (props.contentType !== "text" || loading() || error() || !content() || !editorContainer) return;
 
     defineMonacoThemes();
-    const isDark = document.documentElement.classList.contains("dark");
+    const currentTheme = theme();
+    const monacoTheme =
+      currentTheme === "sepia" ? "claudinio-sepia" : currentTheme === "dark" ? "claudinio-dark" : "claudinio-light";
 
     const lang = detectLanguage(props.filePath);
 
     editor = monaco.editor.create(editorContainer, {
       value: content(),
       language: lang,
-      theme: isDark ? "claudinio-dark" : "claudinio-light",
+      theme: monacoTheme,
       readOnly: true,
       wordWrap: "on",
       minimap: { enabled: false },
