@@ -442,6 +442,12 @@ pub enum AgentEvent {
     TextStep {
         text: String,
     },
+    /// Live, accumulated snapshot of the assistant text currently streaming.
+    /// Superseded by the next `TextStep`/`Done` for the same block; never persisted.
+    #[serde(rename = "TextDelta")]
+    TextDelta {
+        text: String,
+    },
     #[serde(rename = "Thinking")]
     Thinking(String),
     #[serde(rename = "ToolCall")]
@@ -905,6 +911,7 @@ async fn stream_message_with_retry(
         assistant_text.clear();
         let result = provider::stream_message(
             config, model, messages, tools, system, event_tx, session_id, assistant_text, interrupt,
+            true,
         )
         .await;
         match result {
@@ -2375,6 +2382,15 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         assert!(matches!(back, AgentEvent::TextStep { text } if text == "hello"));
+    }
+
+    #[test]
+    fn agent_event_round_trip_text_delta() {
+        let ev = AgentEvent::TextDelta { text: "partial".into() };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "TextDelta");
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::TextDelta { text } if text == "partial"));
     }
 
     #[test]

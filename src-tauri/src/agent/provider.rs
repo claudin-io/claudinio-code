@@ -584,6 +584,28 @@ pub async fn one_shot(
     Ok(reply)
 }
 
+/// Minimum interval between live `TextDelta` snapshots sent to the frontend,
+/// so a fast model doesn't flood the IPC channel with one event per token.
+const TEXT_DELTA_THROTTLE: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// Sends an `AgentEvent::TextDelta` snapshot of `assistant_text` if enabled,
+/// the text grew since the last send, and the throttle interval has elapsed.
+fn maybe_emit_text_delta(
+    emit: bool,
+    event_tx: &Channel<AgentEvent>,
+    assistant_text: &str,
+    last_sent_len: &mut usize,
+    last_flush: &mut std::time::Instant,
+) {
+    if !emit || assistant_text.len() == *last_sent_len || last_flush.elapsed() < TEXT_DELTA_THROTTLE
+    {
+        return;
+    }
+    let _ = event_tx.send(AgentEvent::TextDelta { text: assistant_text.to_string() });
+    *last_sent_len = assistant_text.len();
+    *last_flush = std::time::Instant::now();
+}
+
 pub async fn stream_message(
     config: &AgentConfig,
     model: &str,
@@ -594,6 +616,7 @@ pub async fn stream_message(
     session_id: &str,
     assistant_text: &mut String,
     interrupt: &AtomicBool,
+    emit_text_deltas: bool,
 ) -> Result<StreamOutput, String> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -664,6 +687,9 @@ pub async fn stream_message(
     let mut stop_reason: Option<String> = None;
     let mut usage: Option<Usage> = None;
 
+    let mut last_sent_len: usize = 0;
+    let mut last_flush = std::time::Instant::now() - TEXT_DELTA_THROTTLE;
+
     loop {
         // Check interrupt before processing each chunk
         if interrupt.load(Ordering::SeqCst) {
@@ -720,6 +746,13 @@ pub async fn stream_message(
                         &mut stop_reason,
                         &mut usage,
                     )?;
+                    maybe_emit_text_delta(
+                        emit_text_deltas,
+                        event_tx,
+                        assistant_text,
+                        &mut last_sent_len,
+                        &mut last_flush,
+                    );
                     current_event.clear();
                     current_data.clear();
                 }
@@ -751,6 +784,13 @@ pub async fn stream_message(
             &mut stop_reason,
             &mut usage,
         )?;
+    }
+
+    // Unconditional catch-up flush: TextStep/Done follow immediately after and
+    // carry the authoritative text, so this just lets the live preview close
+    // the gap before it's replaced, ignoring the throttle interval.
+    if emit_text_deltas && assistant_text.len() != last_sent_len {
+        let _ = event_tx.send(AgentEvent::TextDelta { text: assistant_text.clone() });
     }
 
     if !buf.is_empty() {

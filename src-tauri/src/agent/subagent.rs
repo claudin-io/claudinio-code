@@ -293,6 +293,7 @@ pub async fn run_subagent(
             session_id,
             &mut assistant_text,
             interrupt,
+            false,
         )
         .await
         {

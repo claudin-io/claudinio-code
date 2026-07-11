@@ -41,6 +41,7 @@ import {
   type UserAnswer,
 } from "../lib/ipc";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
+import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
@@ -452,6 +453,14 @@ export const ChatPanel: Component<{
   const [pendingApprovals, setPendingApprovals] = createSignal<(ToolCallData & { subagentName?: string })[]>([]);
   const [currentAskUser, setCurrentAskUser] = createSignal<AskUserData | null>(null);
   const [currentSteps, setCurrentSteps] = createSignal<TimelineItem[]>([]);
+  // Live typewriter preview: `liveText` is the latest TextDelta/Done snapshot,
+  // smoothed word-by-word by `smoothLiveText`. `pendingDone` holds the Done
+  // payload while the preview finishes draining, so promotion into
+  // `messages` doesn't happen until the typewriter has caught up.
+  const [liveText, setLiveText] = createSignal("");
+  const [liveFinished, setLiveFinished] = createSignal(false);
+  const [pendingDone, setPendingDone] = createSignal<{ data: DoneData; final: TimelineItem[] } | null>(null);
+  const smoothLiveText = createSmoothText(liveText, liveFinished);
   const [subagentState, setSubagentState] = createSignal<Record<string, SubagentTimelineState>>({});
   const [openSubagentId, setOpenSubagentId] = createSignal<string | null>(null);
   const [thinkingStart, setThinkingStart] = createSignal(0);
@@ -533,6 +542,7 @@ export const ChatPanel: Component<{
       setHasPlanBeenWritten(false);
       await switchMode("builder");
       const msg = t("mode.continueMessage");
+      flushPendingDone();
       setMessages((prev) => [
         ...prev,
         { role: "user" as const, text: msg },
@@ -1030,7 +1040,14 @@ export const ChatPanel: Component<{
   };
 
   const handleEvent = (event: AgentEvent) => {
-    if (event.event === "TextStep") {
+    if (event.event === "TextDelta") {
+      const text = event.data.text;
+      // Compaction markers only ever arrive as a complete TextStep; this is
+      // defensive in case a marker is ever mid-flight in a delta snapshot.
+      if (text.startsWith("__compact")) return;
+      setLiveText(text);
+      setRetryableError(null);
+    } else if (event.event === "TextStep") {
       // Check for compaction markers
       const text = event.data.text;
       if (text.startsWith("__compact_start__:")) {
@@ -1044,6 +1061,7 @@ export const ChatPanel: Component<{
         setCurrentSteps((prev) => [...prev, { type: "compaction", compaction: { kind: "fail", args } }]);
       } else {
         setCurrentSteps((prev) => [...prev, { type: "text", text }]);
+        setLiveText("");
       }
       setRetryableError(null);
       scrollToBottom();
@@ -1173,14 +1191,14 @@ export const ChatPanel: Component<{
         }
         return s;
       });
-      // Stats are NOT recomputed here: the last SessionStats event from the
-      // backend already carries the authoritative numbers.
-      const promoted = promoteSubstantialText(final, data.textOutput);
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant" as const, text: promoted.text, steps: promoted.steps, done: data },
-      ]);
-      setCurrentSteps([]);
+      // Unlock input right away, but defer promoting into `messages` until
+      // the typewriter preview has caught up to the authoritative text —
+      // see the drain effect below. `liveText`/`liveFinished` keep the
+      // live row in TimelineSteps visible (status()==="done" still renders
+      // it) while the last words finish typing.
+      setLiveText(data.textOutput);
+      setLiveFinished(true);
+      setPendingDone({ data, final });
       setQueuedSteering([]);
       setSubagentState({});
       setPendingApprovals([]);
@@ -1207,8 +1225,53 @@ export const ChatPanel: Component<{
       setThinkingStart(0);
       setSubagentState({});
       setStatus("error");
+      setLiveText("");
+      setLiveFinished(false);
+      setPendingDone(null);
+      smoothLiveText.reset();
     }
   };
+
+  // Promotes a deferred Done payload into `messages` immediately, flushing
+  // the typewriter to its full text first. Used both by the drain effect
+  // (normal case: preview caught up) and by any action that starts a new
+  // run before the previous one finished typing (interrupt, retry, new
+  // message) so the reply isn't lost.
+  const flushPendingDone = () => {
+    const pending = pendingDone();
+    if (!pending) return;
+    const { data, final } = pending;
+    const promoted = promoteSubstantialText(final, data.textOutput);
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant" as const, text: promoted.text, steps: promoted.steps, done: data },
+    ]);
+    setCurrentSteps([]);
+    setLiveText("");
+    setLiveFinished(false);
+    setPendingDone(null);
+    smoothLiveText.reset();
+  };
+
+  createEffect(() => {
+    // Read both signals unconditionally so this effect stays subscribed to
+    // isDrained() even while pendingDone() is null (Solid only tracks
+    // signals actually read on a given run — `&&` short-circuiting would
+    // silently drop the isDrained() subscription until the next Done).
+    const pending = pendingDone();
+    const drained = smoothLiveText.isDrained();
+    if (pending && drained) flushPendingDone();
+  });
+
+  let lastLiveScroll = 0;
+  createEffect(() => {
+    smoothLiveText.displayed();
+    const now = Date.now();
+    if (now - lastLiveScroll >= 150) {
+      lastLiveScroll = now;
+      scrollToBottom();
+    }
+  });
 
   const handleAuthSignIn = async () => {
     setAuthSigningIn(true);
@@ -1220,6 +1283,7 @@ export const ChatPanel: Component<{
         setPendingMessage(null);
         // Don't call send() — the original message is already in the messages array.
         // Call sendMessage() directly via IPC so we don't duplicate the message bubble.
+        flushPendingDone();
         setCurrentSteps([]);
         setThinkingStart(0);
         setStatus("thinking");
@@ -1251,6 +1315,7 @@ export const ChatPanel: Component<{
 
   const handleRetryContinue = async () => {
     if (status() !== "error") return;
+    flushPendingDone();
     setRetryableError(null);
     setCurrentSteps([]);
     setThinkingStart(0);
@@ -1352,6 +1417,11 @@ export const ChatPanel: Component<{
       return;
     }
 
+    // A reply may still be mid-typewriter-drain (status is already "done"
+    // but pendingDone hasn't been promoted yet) — flush it now so the text
+    // isn't lost or double-rendered once the new run's events start.
+    flushPendingDone();
+
     setMessages((prev) => [
       ...prev,
       {
@@ -1429,6 +1499,7 @@ export const ChatPanel: Component<{
 
   const startNewSession = async () => {
     if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
+    flushPendingDone();
     try {
       await newSession(props.workspace);
     } catch {
@@ -1457,6 +1528,7 @@ export const ChatPanel: Component<{
 
   const reopenSession = async (id: string) => {
     if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
+    flushPendingDone();
     try {
       const records = await loadSession(props.workspace, id);
       setMessages(recordsToMessages(records));
@@ -1712,6 +1784,14 @@ export const ChatPanel: Component<{
                   isLive={status() === "thinking"}
                   onViewDetails={(id) => setOpenSubagentId(id)}
                 />
+                <Show when={smoothLiveText.displayed()}>
+                  <div class="my-1 ml-6">
+                    <div
+                      class="prose-content text-[13px] leading-[1.6] text-ink"
+                      innerHTML={marked.parse(balanceMarkdown(smoothLiveText.displayed()), { async: false }) as string}
+                    />
+                  </div>
+                </Show>
               </div>
             </div>
           </Show>
