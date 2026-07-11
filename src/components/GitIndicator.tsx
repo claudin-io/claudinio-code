@@ -1,0 +1,97 @@
+import { createSignal, createMemo, onCleanup, type Component } from "solid-js";
+import { gitStatus, gitBranch, type GitStatus } from "../lib/ipc";
+import { Icon } from "./Icon";
+import { t } from "../lib/grill-me";
+
+export const GitIndicator: Component<{
+  workspace: string;
+  onShowChanges: () => void;
+}> = (props) => {
+  const [status, setStatus] = createSignal<GitStatus | null>(null);
+  const [branch, setBranch] = createSignal<string>("");
+  const [loading, setLoading] = createSignal(true);
+
+  const refreshStatus = async () => {
+    try {
+      const s = await gitStatus(props.workspace);
+      console.log("[GitIndicator] status:", s);
+      setStatus(s);
+    } catch (e) {
+      console.warn("[GitIndicator] gitStatus failed:", e);
+      setStatus(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshBranch = async () => {
+    try {
+      const b = await gitBranch(props.workspace);
+      console.log("[GitIndicator] branch:", b);
+      setBranch(b);
+    } catch (e) {
+      setBranch("");
+    }
+  };
+
+  // Poll changes every 5s
+  const intervalId = setInterval(refreshStatus, 5000);
+  // Poll branch every 30s
+  const branchIntervalId = setInterval(refreshBranch, 30000);
+
+  refreshStatus();
+  refreshBranch();
+
+  onCleanup(() => {
+    clearInterval(intervalId);
+    clearInterval(branchIntervalId);
+  });
+
+  const s = status;
+  const loading_ = loading;
+  const branch_ = branch;
+
+  const hasChanges = createMemo(() => {
+    const v = s();
+    return v !== null && v.hasChanges && v.files.length > 0;
+  });
+
+  const fileCount = createMemo(() => s()?.files.length ?? 0);
+  const additions = createMemo(() => s()?.totalAdditions ?? 0);
+  const deletions = createMemo(() => s()?.totalDeletions ?? 0);
+
+  const label = createMemo(() => {
+    if (loading_()) return "…";
+    if (hasChanges()) {
+      return t("git.changes", String(fileCount()), String(additions()), String(deletions()));
+    }
+    return t("git.noChanges");
+  });
+
+  const tooltip = createMemo(() => {
+    const b = branch_();
+    const fc = fileCount();
+    if (b) {
+      return `${b} · ${fc > 0 ? t("git.filesChanged", String(fc)) : t("git.noChanges")}`;
+    }
+    return label();
+  });
+
+  const btnClass = createMemo(() => {
+    const base = "flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-surface-2";
+    if (loading_()) return `${base} text-ink-faint opacity-30`;
+    if (hasChanges()) return `${base} text-ink-muted`;
+    return `${base} text-ink-faint opacity-50`;
+  });
+
+  return (
+    <button
+      onClick={props.onShowChanges}
+      title={tooltip()}
+      class={btnClass()}
+    >
+      <Icon name="git-branch" class="h-3.5 w-3.5" />
+      <span>{label()}</span>
+    </button>
+  );
+};

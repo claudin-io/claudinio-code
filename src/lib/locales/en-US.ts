@@ -76,6 +76,20 @@ const dict: LocaleDict = {
   "chat.header.turns": "s",
   "chat.header.turn": "",
 
+  // ── ChatPanel - Git ──────────────────────────────────────────────
+  "git.changes": "{0} changes (+{1} −{2})",
+  "git.noChanges": "0 changes",
+  "git.modalTitle": "Changes",
+  "git.refresh": "Refresh",
+  "git.commitPush": "Commit & Push",
+  "git.modified": "Modified",
+  "git.added": "Added",
+  "git.deleted": "Deleted",
+  "git.untracked": "Untracked",
+  "git.branch": "Branch: {0}",
+  "git.filesChanged": "{0} files changed",
+  "git.autoCommitMessage": "Please commit and push all changes",
+
   // ── ChatPanel - Status ────────────────────────────────────────────
   "chat.status.thinking": "Working",
   "chat.status.awaitingApproval": "Awaiting approval",
