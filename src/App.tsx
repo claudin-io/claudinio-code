@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, type IndexProgress } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, type IndexProgress, type IndexStatus } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/theme";
 import "./lib/grill-me";
@@ -55,7 +55,7 @@ function App() {
   const [activeWorkspace, setActiveWorkspace] = createSignal<string | null>(null);
   const [selectedFile, setSelectedFile] = createSignal<string | null>(null);
   const [editorFilePath, setEditorFilePath] = createSignal<string | null>(null);
-  const [indexStatusMap, setIndexStatusMap] = createSignal<Record<string, string>>({});
+  const [indexStatusMap, setIndexStatusMap] = createSignal<Record<string, IndexStatus | string | null>>({});
   const [progressMap, setProgressMap] = createSignal<Record<string, IndexProgress | null>>({});
   const [showConfig, setShowConfig] = createSignal(false);
   const [configApiKey, setConfigApiKey] = createSignal("");
@@ -92,9 +92,11 @@ function App() {
     const ws = activeWorkspace();
     return ws ? progressMap()[ws] ?? null : null;
   };
-  const indexStatus = () => {
+  const indexStatus = (): IndexStatus | string | null => {
     const ws = activeWorkspace();
-    return ws ? indexStatusMap()[ws] ?? "" : "";
+    if (!ws) return null;
+    const v = indexStatusMap()[ws];
+    return v ?? null;
   };
   const taskCount = () => {
     const ws = activeWorkspace();
@@ -102,7 +104,7 @@ function App() {
   };
   const setWsProgress = (ws: string, p: IndexProgress | null) =>
     setProgressMap((m) => ({ ...m, [ws]: p }));
-  const setWsIndexStatus = (ws: string, s: string) =>
+  const setWsIndexStatus = (ws: string, s: IndexStatus | string | null) =>
     setIndexStatusMap((m) => ({ ...m, [ws]: s }));
 
   // Listen for global index-progress events (model loading, embedding
@@ -123,12 +125,16 @@ function App() {
           delay,
         );
       if (st === "embeddings_done") {
-        setIndexStatusMap((m) => ({
-          ...m,
-          [ws]: m[ws]
-            ? `${m[ws]} · ${event.payload.symbolsIndexed} embeddings`
-            : `${event.payload.symbolsIndexed} embeddings`,
-        }));
+        setIndexStatusMap((m) => {
+          const existing = m[ws];
+          if (typeof existing === "object" && existing !== null && "embeddingsCount" in existing) {
+            return {
+              ...m,
+              [ws]: { ...existing, embeddingsCount: event.payload.symbolsIndexed },
+            };
+          }
+          return m;
+        });
         clearIf(1500);
       } else if (st === "embeddings_error" || st === "embedding_model_error") {
         clearIf(4000);
@@ -310,11 +316,7 @@ function App() {
     setWsProgress(folder, null);
     try {
       const s = await openWorkspace(folder, (p) => setWsProgress(folder, p));
-      if (s.watcherWarning) {
-        setWsIndexStatus(folder, `${t('app.index.filesCount', s.filesCount, s.symbolsCount)} — ⚠️ ${s.watcherWarning}`);
-      } else {
-        setWsIndexStatus(folder, t('app.index.filesCount', s.filesCount, s.symbolsCount));
-      }
+      setWsIndexStatus(folder, s);
       // Load the flat file list for @-mention autocomplete
       await loadFileIndex(folder);
       // Only clear scan progress — the embedding phase keeps reporting after
@@ -459,7 +461,7 @@ function App() {
         <div
           class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]"
         >
-          <div class="w-[400px] max-h-[90vh] overflow-y-auto rounded-lg bg-surface-1 p-5 shadow-modal">
+          <div class="w-[680px] max-h-[90vh] overflow-y-auto rounded-lg bg-surface-1 p-5 shadow-modal">
             <h2 class="mb-4 text-sm font-semibold text-ink">{t("app.config.title")}</h2>
 
             {/* Lang selector */}
@@ -569,7 +571,9 @@ function App() {
               <p class="text-[11px] text-ink-faint">{t("app.config.planSavePathHint")}</p>
             </div>
 
+            <div class="grid grid-cols-2 gap-x-4 mb-4">
             {/* Brain model selector */}
+            <div>
             <div class="flex items-center gap-2 mb-1">
               <label class="block text-xs text-ink-muted">{t("app.config.brainModel")}</label>
               <Show when={workspaceConfigFields().has("brain_model")}>
@@ -586,7 +590,7 @@ function App() {
                   value={configBrainModel()}
                   onChange={(e) => setConfigBrainModel(e.currentTarget.value)}
                   disabled={workspaceConfigFields().has("brain_model")}
-                  class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                  class="w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                   classList={{
                     "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("brain_model"),
                     "bg-surface-0": !workspaceConfigFields().has("brain_model"),
@@ -603,11 +607,13 @@ function App() {
                 value={configBrainModel()}
                 onInput={(e) => setConfigBrainModel(e.currentTarget.value)}
                 placeholder="claudius"
-                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
               />
             </Show>
+            </div>
 
             {/* Builder model selector */}
+            <div>
             <div class="flex items-center gap-2 mb-1">
               <label class="block text-xs text-ink-muted">{t("app.config.builderModel")}</label>
               <Show when={workspaceConfigFields().has("builder_model")}>
@@ -624,7 +630,7 @@ function App() {
                   value={configBuilderModel()}
                   onChange={(e) => setConfigBuilderModel(e.currentTarget.value)}
                   disabled={workspaceConfigFields().has("builder_model")}
-                  class="mb-4 w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                  class="w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                   classList={{
                     "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("builder_model"),
                     "bg-surface-0": !workspaceConfigFields().has("builder_model"),
@@ -641,12 +647,16 @@ function App() {
                 value={configBuilderModel()}
                 onInput={(e) => setConfigBuilderModel(e.currentTarget.value)}
                 placeholder="claudinio"
-                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
               />
             </Show>
+            </div>
+            </div>
 
             <hr class="mb-4 border-border-subtle" />
 
+            <div class="grid grid-cols-2 gap-x-4 gap-y-2 mb-4">
+            <div>
             <div class="flex items-center gap-2 mb-1">
               <label class="block text-xs text-ink-muted">{t("app.config.maxRounds")}</label>
               <Show when={workspaceConfigFields().has("max_rounds")}>
@@ -672,8 +682,10 @@ function App() {
               }}
               disabled={workspaceConfigFields().has("max_rounds")}
             />
-            <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.maxRoundsHint")}</p>
+            <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.maxRoundsHint")}</p>
+            </div>
 
+            <div>
             <div class="flex items-center gap-2 mb-1">
               <label class="block text-xs text-ink-muted">{t("app.config.subMaxRounds")}</label>
               <Show when={workspaceConfigFields().has("sub_max_rounds")}>
@@ -699,8 +711,10 @@ function App() {
               }}
               disabled={workspaceConfigFields().has("sub_max_rounds")}
             />
-            <p class="mb-4 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
+            <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
+            </div>
 
+            <div>
             <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenCycles")}</label>
             <input
               type="number"
@@ -713,8 +727,10 @@ function App() {
               placeholder="5"
               class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
-            <p class="mb-3 text-[11px] text-ink-faint">{t("settings.maxGoldenCyclesHint")}</p>
+            <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenCyclesHint")}</p>
+            </div>
 
+            <div>
             <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenStalls")}</label>
             <input
               type="number"
@@ -727,7 +743,9 @@ function App() {
               placeholder="2"
               class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
-            <p class="mb-4 text-[11px] text-ink-faint">{t("settings.maxGoldenStallsHint")}</p>
+            <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenStallsHint")}</p>
+            </div>
+            </div>
 
             <hr class="mb-4 border-border-subtle" />
 
@@ -955,9 +973,34 @@ function App() {
             <div class="border-t border-border-subtle px-3 py-2">
               <Show when={progress() !== null}
                 fallback={
-                  <div class="font-mono text-[10px] text-ink-faint">
-                    {indexStatus()}
-                  </div>
+                  <Show when={typeof indexStatus() === "string"}
+                    fallback={
+                      <div class="flex flex-col gap-0.5">
+                        <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
+                          <Icon name="file" class="w-3 h-3" />
+                          <span>{t("app.index.filesLabel", (indexStatus() as IndexStatus).filesCount)}</span>
+                        </div>
+                        <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
+                          <Icon name="layers" class="w-3 h-3" />
+                          <span>{t("app.index.symbolsLabel", (indexStatus() as IndexStatus).symbolsCount)}</span>
+                        </div>
+                        <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
+                          <Icon name="brain" class="w-3 h-3" />
+                          <span>{t("app.index.embeddingsLabel", (indexStatus() as IndexStatus).embeddingsCount)}</span>
+                        </div>
+                        <Show when={(indexStatus() as IndexStatus).watcherWarning}>
+                          <div class="flex items-center gap-1 font-mono text-[10px] text-yellow-400">
+                            <Icon name="alert-triangle" class="w-3 h-3" />
+                            <span>{(indexStatus() as IndexStatus).watcherWarning}</span>
+                          </div>
+                        </Show>
+                      </div>
+                    }
+                  >
+                    <div class="font-mono text-[10px] text-ink-faint">
+                      {indexStatus() as string}
+                    </div>
+                  </Show>
                 }
               >
                 <Switch>
