@@ -461,6 +461,19 @@ export const ChatPanel: Component<{
   const [liveFinished, setLiveFinished] = createSignal(false);
   const [pendingDone, setPendingDone] = createSignal<{ data: DoneData; final: TimelineItem[] } | null>(null);
   const smoothLiveText = createSmoothText(liveText, liveFinished);
+  // Same typewriter treatment for the live "Thoughts" block. No defer-until-
+  // drained logic is needed here (unlike Done/pendingDone above): once a
+  // thinking step stops being the timeline's last item, ThinkingRow just
+  // stops showing its body — there's nothing "promoted" that could be cut
+  // off mid-word, and the raw `props.thinking.text` is always fully
+  // accumulated regardless of how far the typewriter got.
+  const [liveThinkingText, setLiveThinkingText] = createSignal("");
+  const liveThinkingActive = () => {
+    const steps = currentSteps();
+    const last = steps[steps.length - 1];
+    return status() === "thinking" && last?.type === "thinking";
+  };
+  const smoothThinking = createSmoothText(liveThinkingText, () => !liveThinkingActive());
   const [subagentState, setSubagentState] = createSignal<Record<string, SubagentTimelineState>>({});
   const [openSubagentId, setOpenSubagentId] = createSignal<string | null>(null);
   const [thinkingStart, setThinkingStart] = createSignal(0);
@@ -1083,6 +1096,7 @@ export const ChatPanel: Component<{
           { type: "thinking" as const, thinking: { text: event.data, startedAt: now } } as TimelineItem,
         ];
       });
+      setLiveThinkingText(event.data);
       scrollToBottom();
     } else if (event.event === "ToolCall") {
       const data = event.data as ToolCallData;
@@ -1229,6 +1243,8 @@ export const ChatPanel: Component<{
       setLiveFinished(false);
       setPendingDone(null);
       smoothLiveText.reset();
+      setLiveThinkingText("");
+      smoothThinking.reset();
     }
   };
 
@@ -1251,6 +1267,8 @@ export const ChatPanel: Component<{
     setLiveFinished(false);
     setPendingDone(null);
     smoothLiveText.reset();
+    setLiveThinkingText("");
+    smoothThinking.reset();
   };
 
   createEffect(() => {
@@ -1266,6 +1284,7 @@ export const ChatPanel: Component<{
   let lastLiveScroll = 0;
   createEffect(() => {
     smoothLiveText.displayed();
+    smoothThinking.displayed();
     const now = Date.now();
     if (now - lastLiveScroll >= 150) {
       lastLiveScroll = now;
@@ -1783,6 +1802,7 @@ export const ChatPanel: Component<{
                   onToggle={(i) => setLiveExpandedStep(liveExpandedStep() === i ? null : i)}
                   isLive={status() === "thinking"}
                   onViewDetails={(id) => setOpenSubagentId(id)}
+                  liveThinkingDisplay={smoothThinking.displayed}
                 />
                 <Show when={smoothLiveText.displayed()}>
                   <div class="my-1 ml-6">
@@ -2501,6 +2521,9 @@ const TimelineSteps: Component<{
   onToggle: (index: number) => void;
   isLive: boolean;
   onViewDetails?: (id: string) => void;
+  /// Smoothed live text for the currently-streaming "Thoughts" block, main
+  /// agent run only (not passed by the subagent-detail-panel call sites).
+  liveThinkingDisplay?: () => string;
 }> = (props) => {
   return (
     <For each={props.steps}>
@@ -2525,6 +2548,7 @@ const TimelineSteps: Component<{
               isLast={i() === props.steps.length - 1}
               isExpanded={props.expandedStep === i()}
               onToggle={() => props.onToggle(i())}
+              liveText={i() === props.steps.length - 1 ? props.liveThinkingDisplay : undefined}
             />
           </Show>
           <Show when={step.type === "tool" && step.tool}>
@@ -2851,6 +2875,11 @@ const ThinkingRow: Component<{
   isLast: boolean;
   isExpanded: boolean;
   onToggle: () => void;
+  /// Smoothed live text, only used while this row is the live/last step.
+  /// Undefined for subagent panels (no smoothing there) or once a newer
+  /// step has been pushed after this one — falls back to the always-fully-
+  /// accumulated `thinking.text`.
+  liveText?: () => string;
 }> = (props) => {
   const duration = () => {
     if (props.thinking.endedAt) {
@@ -2860,6 +2889,8 @@ const ThinkingRow: Component<{
   };
 
   const showText = () => (props.isLive && props.isLast) || props.isExpanded;
+  const bodyText = () =>
+    props.liveText && props.isLive && props.isLast ? props.liveText() : props.thinking.text;
 
   return (
     <div>
@@ -2876,7 +2907,7 @@ const ThinkingRow: Component<{
       <Show when={showText()}>
         <div class="ml-6 rounded-md bg-surface-1 p-2">
           <p class="whitespace-pre-wrap break-words text-[12px] leading-[1.6] text-ink-muted">
-            {props.thinking.text}
+            {bodyText()}
             <Show when={props.isLive && props.isLast}>
               <span class="stream-cursor" />
             </Show>
