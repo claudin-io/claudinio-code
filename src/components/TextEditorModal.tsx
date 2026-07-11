@@ -74,7 +74,7 @@ const TextEditorModal: Component<TextEditorModalProps> = (props) => {
                 title={isEnhancing() ? t("enhance.enhancing") : t("enhance.button")}
               >
                 <Show when={!isEnhancing()} fallback={<Icon name="loader" class="h-4 w-4 animate-spin" />}>
-                  <Icon name="magic-rabbit" class="h-4 w-4" />
+                  <Icon name="magic-button-outline" class="h-4 w-4" />
                 </Show>
               </button>
             </Show>

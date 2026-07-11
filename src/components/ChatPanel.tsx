@@ -469,7 +469,7 @@ export const ChatPanel: Component<{
   const showToast = (msg: string) => setToastMessage(msg);
   const dismissToast = () => setToastMessage(null);
   const [showEditor, setShowEditor] = createSignal(false);
-  const [isEnhancing, setIsEnhancing] = createSignal(false);
+  const [, setIsEnhancing] = createSignal(false);
   const [showGitModal, setShowGitModal] = createSignal(false);
   const [showCommitPushModal, setShowCommitPushModal] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
@@ -1885,26 +1885,6 @@ export const ChatPanel: Component<{
       <div class="border-t border-border-subtle px-6 py-3">
         <div class="w-full">
           <div class="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
-            <button
-              onClick={async () => {
-                const text = input();
-                if (!text.trim() || isEnhancing()) return;
-                try {
-                  const enhanced = await enhanceHandler(text);
-                  setInput(enhanced);
-                  setShowEditor(true);
-                } catch {
-                  // error is shown via toast in enhanceHandler
-                }
-              }}
-              disabled={isEnhancing() || isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input" || !input().trim()}
-              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
-              title={isEnhancing() ? t("enhance.enhancing") : t("enhance.button")}
-            >
-              <Show when={!isEnhancing()} fallback={<Icon name="loader" class="h-4 w-4 animate-spin" />}>
-                <Icon name="magic-rabbit" class="h-4 w-4" />
-              </Show>
-            </button>
             <button
               onClick={() => setShowEditor(true)}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
