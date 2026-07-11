@@ -260,6 +260,8 @@ pub async fn send_message(
         .as_ref()
         .and_then(|root| crate::agent::tools::git_head(root));
 
+    let mcp = ws.ensure_mcp_connected(&config).await;
+
     let ctx = ToolContext {
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
@@ -272,6 +274,7 @@ pub async fn send_message(
         plan_save_path: config.plan_save_path.clone(),
         base_commit,
         auto_approve_git: false,
+        mcp: Some(mcp),
     };
 
     let residual = steering.drain();
@@ -488,6 +491,7 @@ pub struct SetConfigArgs {
     pub plan_save_path: Option<String>,
     pub override_base_url: Option<String>,
     pub override_api_key: Option<String>,
+    pub mcp: Option<std::collections::HashMap<String, crate::agent::provider::McpServerEntry>>,
 }
 
 #[tauri::command]
@@ -539,6 +543,9 @@ pub async fn set_config(
     if let Some(key) = args.override_api_key {
         cfg.override_api_key = if key.is_empty() { None } else { Some(key) };
     }
+    if let Some(mcp) = args.mcp {
+        cfg.mcp = mcp;
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -578,6 +585,7 @@ pub async fn get_config(
         "planSavePath": cfg.plan_save_path,
         "overrideBaseUrl": cfg.override_base_url,
         "overrideApiKey": cfg.override_api_key,
+        "mcp": cfg.mcp,
         "workspaceConfig": workspace_config,
     }))
 }
@@ -729,6 +737,8 @@ pub async fn compact_session(
         plan_save_path: config.plan_save_path.clone(),
         base_commit: None,
         auto_approve_git: false,
+        // Compaction only summarizes history; it never dispatches tool calls.
+        mcp: None,
     };
 
     let summary = session::compact_history(
@@ -998,6 +1008,8 @@ pub async fn commit_and_push(
         .as_ref()
         .and_then(|root| crate::agent::tools::git_head(root));
 
+    let mcp = ws.ensure_mcp_connected(&config).await;
+
     let ctx = ToolContext {
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
@@ -1010,6 +1022,7 @@ pub async fn commit_and_push(
         plan_save_path: config.plan_save_path.clone(),
         base_commit,
         auto_approve_git: true,
+        mcp: Some(mcp),
     };
 
     // Register the steering controller so interrupt_session can find it

@@ -58,22 +58,27 @@ is missing, state your assumption and proceed, or report what is missing. \
 Work autonomously and efficiently: use the fewest tool calls that accomplish the goal.\
 ";
 
-pub fn subagent_defs(mode: SubagentMode) -> Vec<ToolDef> {
+pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef]) -> Vec<ToolDef> {
     let mut tools: Vec<ToolDef> = tools::get_defs()
         .into_iter()
         .filter(|t| t.name != "spawn_agents" && t.name != "ask_user")
         .collect();
     match mode {
+        // Explore subagents are read-only by design (no edit_file/bash);
+        // MCP tools have unknown, potentially non-read-only side effects, so
+        // they're excluded here for the same reason.
         SubagentMode::Explore => {
             tools.retain(|t| t.name != "edit_file" && t.name != "bash");
         }
-        SubagentMode::Code => {}
+        SubagentMode::Code => {
+            tools.extend(mcp_defs.iter().cloned());
+        }
     }
     tools
 }
 
-fn api_tools(mode: SubagentMode) -> Vec<ToolDescription> {
-    subagent_defs(mode)
+fn api_tools(mode: SubagentMode, mcp_defs: &[ToolDef]) -> Vec<ToolDescription> {
+    subagent_defs(mode, mcp_defs)
         .iter()
         .map(|t| ToolDescription {
             name: t.name.clone(),
@@ -250,7 +255,8 @@ pub async fn run_subagent(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
 ) -> SubagentResult {
-    let tools = api_tools(spec.mode);
+    let mcp_defs = ctx.mcp.as_ref().map(|m| m.cached_defs()).unwrap_or_default();
+    let tools = api_tools(spec.mode, &mcp_defs);
     let skill_mgr = crate::agent::skills::SkillManager::new(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
     );
@@ -495,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_explore_excludes_spawn_and_ask() {
-        let defs = subagent_defs(SubagentMode::Explore);
+        let defs = subagent_defs(SubagentMode::Explore, &[]);
         for d in &defs {
             assert_ne!(d.name, "spawn_agents", "explore should not include spawn_agents");
             assert_ne!(d.name, "ask_user", "explore should not include ask_user");
@@ -504,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_explore_excludes_edit_and_bash() {
-        let defs = subagent_defs(SubagentMode::Explore);
+        let defs = subagent_defs(SubagentMode::Explore, &[]);
         for d in &defs {
             assert_ne!(d.name, "edit_file", "explore should not include edit_file");
             assert_ne!(d.name, "bash", "explore should not include bash");
@@ -513,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_code_excludes_spawn_and_ask() {
-        let defs = subagent_defs(SubagentMode::Code);
+        let defs = subagent_defs(SubagentMode::Code, &[]);
         for d in &defs {
             assert_ne!(d.name, "spawn_agents", "code should not include spawn_agents");
             assert_ne!(d.name, "ask_user", "code should not include ask_user");
@@ -522,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_code_includes_edit_and_bash() {
-        let defs = subagent_defs(SubagentMode::Code);
+        let defs = subagent_defs(SubagentMode::Code, &[]);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"edit_file"), "code should include edit_file");
         assert!(names.contains(&"bash"), "code should include bash");

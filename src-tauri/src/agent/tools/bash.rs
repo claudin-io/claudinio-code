@@ -280,7 +280,7 @@ mod tests {
                 plan_save_path: None,
                 base_commit: None,
                 auto_approve_git: false,
-            },
+                mcp: None,            },
         ))
     }
 
@@ -307,7 +307,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let out = rt.block_on(execute(
             BashArgs {
                 command: "cat".to_string(),
@@ -346,7 +346,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let out = rt.block_on(execute(
             BashArgs {
                 command: "pwd".to_string(),
@@ -384,7 +384,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let result = rt.block_on(execute(
             BashArgs {
                 command: "sleep 60".to_string(),
