@@ -881,9 +881,8 @@ pub async fn interrupt_session(
 #[tauri::command]
 pub async fn commit_and_push(
     workspace: String,
-    staged_only: Option<bool>,
-    event_channel: tauri::ipc::Channel<AgentEvent>,
-    state: tauri::State<'_, AppState>,
+    event_channel: Channel<AgentEvent>,
+    state: State<'_, AppState>,
 ) -> Result<SessionStarted, String> {
     let config = {
         let cfg = state.config.lock().await;
@@ -941,27 +940,13 @@ pub async fn commit_and_push(
         map.insert(id.clone(), steering.clone());
     }
 
-    let staged_only = staged_only.unwrap_or(false);
-
-    let message = if staged_only {
-        concat!(
-            "Please commit the currently staged changes and push. Do NOT run `git add`. ",
-            "First run `git log --oneline -20` to understand the commit message pattern. ",
-            "Then commit with an appropriate message. When pushing, if the push fails with ",
-            "'non-fast-forward', run `git pull --rebase` and then `git push` again. ",
-            "If conflicts arise, resolve them following standard git practices."
-        ).to_string()
-    } else {
-        concat!(
-            "Please commit and push all changes. First run `git log --oneline -20` ",
-            "to understand the commit message pattern used in this project. Then stage ",
-            "the changes with `git add`, commit with an appropriate message following ",
-            "the project's convention, and push to the remote. ",
-            "If the push fails with 'non-fast-forward', run `git pull --rebase` and ",
-            "then `git push` again. If conflicts arise, resolve them following standard ",
-            "git practices."
-        ).to_string()
-    };
+    let message = concat!(
+        "Please commit and push all changes. First run `git log --oneline -20` ",
+        "to understand the commit message pattern used in this project. Then stage ",
+        "the changes with `git add`, commit with an appropriate message following ",
+        "the project's convention, and push to the remote."
+    )
+    .to_string();
 
     let mode_ctl = state.mode_for(&id, &store.path).await;
 
