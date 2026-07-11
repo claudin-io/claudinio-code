@@ -118,3 +118,20 @@ Currently the code indexing SQLite database (`.claudinio_index.db`) is stored at
 - Update vite.config.ts watcher pattern: Pattern updated: "**/.claudinio/index.db*" — covers .db, .db-wal, .db-shm
 - Clean up .gitignore: Line removed. .claudinio/ entry alone covers index.db and models/.
 - Compile, test, and verify no stale path references: cargo check: ✅ passed; cargo test: 187/191 passed, 3 ignored (API-dependent), 1 pre-existing failure (test_read_file_large_truncated — unmodified file, fails on original code too); Old path grep: zero occurrences of .claudinio_index.db or claudinio-code/models in src-tauri/src/; dirs::config_dir remains clean (only in agent/provider.rs and persist.rs, unrelated); Stale .claudinio_index.db* files on disk are harmless, left in .gitignore's old entry for reference
+
+
+## Implementation Log — 2026-07-11 12:57
+**Summary:** Move index DB and model cache into .claudinio/ directory
+**Changed files:** M	.gitignore, A	docs/plans/2026-07-11_move-storage-to-claudinio-dir.md, M	src-tauri/src/commands/agent.rs, M	src-tauri/src/commands/code_intel.rs, M	vite.config.ts
+**Commits:** c996ac2 feat: move index db and model cache under .claudinio/ directory
+**Journal:** Moved the SQLite index database from `.claudinio_index.db` (root) to `.claudinio/index.db` (inside the dedicated claudinio data directory), and the model cache from `~/.config/claudinio-code/models` to `.claudinio/models/` under the workspace root.
+
+Key findings:
+- The index db path was hardcoded in 3 places in `agent.rs` and 1 in `code_intel.rs` — a straightforward string replacement.
+- The model cache (`cache_model_dir()`) previously used `dirs::config_dir()` which scattered state across the user's home directory. Moving it to `.claudinio/models/` keeps all claudinio data self-contained in the workspace.
+- `resolve_model_dir()` needed the workspace root passed through to `cache_model_dir()` since it no longer uses a global config dir.
+- The `.gitignore` entry for `.claudinio_index.db*` was removed since `.claudinio/` is already gitignored (the `.claudinio/` entry covers everything inside it).
+- Vite's watch ignored pattern was updated to match the new path.
+
+**Task journal:**
+- Commit and push all changes: Commit c996ac2 pushed to origin/main: feat: move index db and model cache under .claudinio/ directory

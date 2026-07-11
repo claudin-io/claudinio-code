@@ -136,6 +136,7 @@ export interface GoldenLoopData {
 
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
+  | { event: "TextDelta"; data: { text: string } }
   | { event: "ModeChanged"; data: ModeChangedData }
   | { event: "GoldenLoop"; data: GoldenLoopData }
   | { event: "Thinking"; data: string }
