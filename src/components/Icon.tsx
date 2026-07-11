@@ -85,6 +85,10 @@ const PATHS: Record<string, string[]> = {
   layers: [
     "M4 2h16v2H4zm0 18h16v2H4zM2 4h2v16H2zm18 0h2v16h-2zm-9 5h2V7h-2zm0 8h2v-6h-2z",
   ],
+  "magic-rabbit": [
+    "M30.475 12.19h-1.52v3.05h-1.53v-1.52h-1.52v-1.53h3.05v-1.52h-3.05V9.14h-1.52v6.1h-1.53v1.52H9.145v-1.52h-1.53v-6.1H6.1v1.53H3.045v1.52H6.1v1.53H4.575v1.52h-1.53v-3.05h-1.52v4.57h1.52v1.53H6.1v10.66h1.52v1.53h1.53V32h13.71v-1.52h1.53v-1.53h1.52V18.29h3.05v-1.53h1.52Zm-6.09 9.15H7.615v-1.53h16.77Zm-1.53-13.72h1.53v1.52h-1.53Zm0-6.09h1.53v3.04h-1.53Zm-1.52 3.04h1.52v3.05h-1.52ZM19.805 0h3.05v1.53h-3.05Z",
+    "M19.805 10.67h1.53v1.52h-1.53Zm-1.52-9.14h1.52v3.04h-1.52Zm-1.52 3.04h1.52V6.1h-1.52Zm-1.53 10.67h1.53v-1.52h1.52v-1.53h-4.57v1.53h1.52zm0-9.14h1.53v1.52h-1.53Zm-1.52-1.53h1.52V6.1h-1.52Zm-1.53-3.04h1.53v3.04h-1.53Zm-1.52 9.14h1.52v1.52h-1.52ZM9.145 0h3.04v1.53h-3.04Zm0 4.57h1.52v3.05h-1.52Zm-1.53 3.05h1.53v1.52h-1.53Zm0-6.09h1.53v3.04h-1.53Z",
+  ],
   "external-link": [
     "M11 5H5v2h6V5ZM5 7H3v12h2V7Zm12 12H5v2h12v-2Zm2-6h-2v6h2v-6Zm-8 0H9v2h2v-2Zm2-2h-2v2h2v-2Zm2-2h-2v2h2V9Zm2-2h-2v2h2V7Zm2-2h-2v2h2V5Zm2-2h-2v8h2V3Z",
     "M21 3h-8v2h8V3Z",
@@ -161,6 +165,7 @@ export type IconName = keyof typeof PATHS;
 const VIEWBOX: Partial<Record<IconName, string>> = {
   "thinking-face": "0 0 16 16",
   "construction-worker": "0 0 32 32",
+  "magic-rabbit": "0 0 32 32",
   goal: "0 0 16 16",
   "git-commit": "0 0 16 16",
   diff: "0 0 16 16",

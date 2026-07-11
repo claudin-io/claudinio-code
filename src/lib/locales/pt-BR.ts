@@ -211,6 +211,11 @@ const dict: LocaleDict = {
   "editor.title": "Editor",
   "editor.open": "Abrir editor",
 
+  // ── Prompt Enhancement ──────────────────────────────────────
+  "enhance.button": "Melhorar prompt",
+  "enhance.enhancing": "Melhorando...",
+  "enhance.error": "Falha ao melhorar: {0}",
+
   // ── File Editor Modal ─────────────────────────────────────────────
   "fileEditor.unsavedTitle": "Alterações não guardadas",
   "fileEditor.unsavedMessage": "Tem alterações não guardadas. Tem a certeza que deseja fechar?",

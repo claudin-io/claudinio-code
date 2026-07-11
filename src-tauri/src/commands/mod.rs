@@ -1,8 +1,9 @@
 pub mod agent;
-pub mod clipboard;
 pub mod auth;
+pub mod clipboard;
 pub mod code_intel;
 pub mod context;
+pub mod enhance;
 pub mod fs;
 pub mod git;
 pub mod lsp;
