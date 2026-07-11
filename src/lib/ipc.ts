@@ -262,6 +262,15 @@ export function sendMessage(
   });
 }
 
+export function commitAndPush(
+  workspace: string,
+  onEvent: (event: AgentEvent) => void,
+): Promise<{ sessionId: string }> {
+  const channel = new Channel<AgentEvent>();
+  channel.onmessage = onEvent;
+  return invoke<{ sessionId: string }>("commit_and_push", { workspace, eventChannel: channel });
+}
+
 export function setSessionMode(workspace: string, mode: SessionMode): Promise<SessionStarted> {
   return invoke<SessionStarted>("set_session_mode", { workspace, mode });
 }

@@ -330,6 +330,7 @@ mod tests {
             agent_config: None,
             plan_save_path: plan_save_path.map(|s| s.to_string()),
             base_commit: None,
+            auto_approve_git: false,
         }
     }
 

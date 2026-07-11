@@ -58,12 +58,26 @@ const BASH_BLACKLIST: &[&str] = &[
     "cp /",
 ];
 
-pub fn bash_permission(command: &str) -> PermissionLevel {
+pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel {
     let trimmed = command.trim();
 
     for pattern in BASH_BLACKLIST {
         if trimmed.contains(pattern) {
             return PermissionLevel::Denied;
+        }
+    }
+
+    // When auto_approve_git is set, auto-approve git add / git commit / git push.
+    if auto_approve_git {
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("git add ")
+            || lower == "git add"
+            || lower.starts_with("git commit ")
+            || lower == "git commit"
+            || lower.starts_with("git push ")
+            || lower == "git push"
+        {
+            return PermissionLevel::Auto;
         }
     }
 
@@ -82,67 +96,67 @@ mod tests {
 
     #[test]
     fn bash_allowlist_ls() {
-        assert!(matches!(bash_permission("ls"), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("ls -la"), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("ls", false), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("ls -la", false), PermissionLevel::Auto));
     }
 
     #[test]
     fn bash_allowlist_git_status() {
-        assert!(matches!(bash_permission("git status"), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("git status --short"), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("git status", false), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("git status --short", false), PermissionLevel::Auto));
     }
 
     #[test]
     fn bash_allowlist_git_diff() {
-        assert!(matches!(bash_permission("git diff"), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("git diff --cached"), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("git diff", false), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("git diff --cached", false), PermissionLevel::Auto));
     }
 
     #[test]
     fn bash_allowlist_pnpm_dev() {
-        assert!(matches!(bash_permission("pnpm dev"), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("pnpm run dev"), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("pnpm dev", false), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("pnpm run dev", false), PermissionLevel::Auto));
     }
 
     #[test]
     fn bash_allowlist_pnpm_run() {
-        assert!(matches!(bash_permission("pnpm run build"), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("pnpm run build", false), PermissionLevel::Auto));
     }
 
     #[test]
     fn bash_allowlist_cargo_build() {
-        assert!(matches!(bash_permission("cargo build"), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("cargo build --release"), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("cargo build", false), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("cargo build --release", false), PermissionLevel::Auto));
     }
 
     #[test]
     fn bash_blacklist_rm_rf_root() {
-        assert!(matches!(bash_permission("rm -rf /"), PermissionLevel::Denied));
-        assert!(matches!(bash_permission("rm -rf /*"), PermissionLevel::Denied));
+        assert!(matches!(bash_permission("rm -rf /", false), PermissionLevel::Denied));
+        assert!(matches!(bash_permission("rm -rf /*", false), PermissionLevel::Denied));
     }
 
     #[test]
     fn bash_blacklist_sudo_rm() {
-        assert!(matches!(bash_permission("sudo rm -rf /tmp"), PermissionLevel::Denied));
+        assert!(matches!(bash_permission("sudo rm -rf /tmp", false), PermissionLevel::Denied));
     }
 
     #[test]
     fn bash_blacklist_chmod_777() {
-        assert!(matches!(bash_permission("chmod 777 /etc"), PermissionLevel::Denied));
+        assert!(matches!(bash_permission("chmod 777 /etc", false), PermissionLevel::Denied));
     }
 
     #[test]
     fn bash_neutral_requires_approval() {
         assert!(matches!(
-            bash_permission("git push origin main"),
+            bash_permission("git push origin main", false),
             PermissionLevel::RequiresApproval
         ));
         assert!(matches!(
-            bash_permission("npm install"),
+            bash_permission("npm install", false),
             PermissionLevel::RequiresApproval
         ));
         assert!(matches!(
-            bash_permission("pnpm add some-package"),
+            bash_permission("pnpm add some-package", false),
             PermissionLevel::RequiresApproval
         ));
     }
@@ -150,15 +164,126 @@ mod tests {
     #[test]
     fn bash_neutral_git_commit() {
         assert!(matches!(
-            bash_permission("git commit -m 'fix'"),
+            bash_permission("git commit -m 'fix'", false),
             PermissionLevel::RequiresApproval
         ));
     }
 
     #[test]
     fn bash_whitespace_trimmed_before_check() {
-        assert!(matches!(bash_permission("  ls  "), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("  rm -rf /  "), PermissionLevel::Denied));
+        assert!(matches!(bash_permission("  ls  ", false), PermissionLevel::Auto));
+        assert!(matches!(bash_permission("  rm -rf /  ", false), PermissionLevel::Denied));
+    }
+
+    // ── auto_approve_git tests ──
+
+    #[test]
+    fn auto_approve_git_add_no_flag() {
+        // Without the flag, git add requires approval.
+        assert!(matches!(
+            bash_permission("git add .", false),
+            PermissionLevel::RequiresApproval
+        ));
+    }
+
+    #[test]
+    fn auto_approve_git_add_with_flag() {
+        assert!(matches!(
+            bash_permission("git add .", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git add src/main.rs", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git add", true),
+            PermissionLevel::Auto
+        ));
+    }
+
+    #[test]
+    fn auto_approve_git_commit_with_flag() {
+        assert!(matches!(
+            bash_permission("git commit -m 'fix'", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git commit --amend", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git commit", true),
+            PermissionLevel::Auto
+        ));
+    }
+
+    #[test]
+    fn auto_approve_git_push_with_flag() {
+        assert!(matches!(
+            bash_permission("git push origin main", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git push --force-with-lease", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git push", true),
+            PermissionLevel::Auto
+        ));
+    }
+
+    #[test]
+    fn auto_approve_git_other_commands_unaffected() {
+        // git status/diff are already allowlisted; flag doesn't change deny-list.
+        assert!(matches!(
+            bash_permission("rm -rf /", true),
+            PermissionLevel::Denied
+        ));
+        // Non-git commands still need approval.
+        assert!(matches!(
+            bash_permission("npm install", true),
+            PermissionLevel::RequiresApproval
+        ));
+        // git log is already allowlisted.
+        assert!(matches!(
+            bash_permission("git log", true),
+            PermissionLevel::Auto
+        ));
+    }
+
+    #[test]
+    fn auto_approve_git_case_insensitive() {
+        // The flag checks lowercase; uppercase input should still match.
+        assert!(matches!(
+            bash_permission("GIT ADD .", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("GIT COMMIT -m 'x'", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("GIT PUSH", true),
+            PermissionLevel::Auto
+        ));
+    }
+
+    #[test]
+    fn auto_approve_git_whitespace_handling() {
+        assert!(matches!(
+            bash_permission("  git add .  ", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("  git commit -m 'x'  ", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("  git push  ", true),
+            PermissionLevel::Auto
+        ));
     }
 
     #[test]

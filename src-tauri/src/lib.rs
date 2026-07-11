@@ -47,6 +47,7 @@ pub fn run() {
             commands::agent::queue_steering,
             commands::agent::interrupt_session,
             commands::agent::compact_session,
+            commands::agent::commit_and_push,
             commands::agent::set_session_mode,
             commands::agent::get_session_mode,
             commands::agent::check_plan_exists,

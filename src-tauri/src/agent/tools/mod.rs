@@ -45,6 +45,11 @@ pub struct ToolContext {
     /// finalize_plan to compute the changed files / commits since work began.
     /// None when not a git repo (or git unavailable).
     pub base_commit: Option<String>,
+    /// When true, git add / git commit / git push commands are auto-approved
+    /// by the bash permission system (bypassing the RequiresApproval gate).
+    /// Default false for normal chat sessions; set true for dedicated
+    /// commit-and-push workflows.
+    pub auto_approve_git: bool,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -802,6 +807,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         }
     }
 
@@ -1045,6 +1051,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
@@ -1065,6 +1072,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
@@ -1085,6 +1093,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
@@ -1103,6 +1112,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
@@ -1124,6 +1134,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -1145,6 +1156,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
@@ -1165,6 +1177,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
@@ -1188,6 +1201,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));

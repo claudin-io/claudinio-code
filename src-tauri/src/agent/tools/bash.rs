@@ -278,7 +278,8 @@ mod tests {
                 interrupt: None,
                 agent_config: None,
                 plan_save_path: None,
-            base_commit: None,
+                base_commit: None,
+                auto_approve_git: false,
             },
         ))
     }
@@ -305,6 +306,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -343,6 +345,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let out = rt.block_on(execute(
             BashArgs {
@@ -380,6 +383,7 @@ mod tests {
             agent_config: None,
             plan_save_path: None,
             base_commit: None,
+            auto_approve_git: false,
         };
         let result = rt.block_on(execute(
             BashArgs {

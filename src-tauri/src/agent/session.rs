@@ -1623,7 +1623,8 @@ pub async fn run_workflow(
                 && tool_name == "bash"
                 && !matches!(
                     permissions::bash_permission(
-                        tool_input.get("command").and_then(|v| v.as_str()).unwrap_or("")
+                        tool_input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                        false
                     ),
                     PermissionLevel::Auto
                 )
@@ -1782,7 +1783,7 @@ pub(crate) async fn run_tool(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            match permissions::bash_permission(command) {
+            match permissions::bash_permission(command, ctx.auto_approve_git) {
                 PermissionLevel::Denied => PermissionLevel::Denied,
                 _ => PermissionLevel::Auto,
             }
@@ -1874,7 +1875,7 @@ pub(crate) async fn run_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            match permissions::bash_permission(command) {
+            match permissions::bash_permission(command, ctx.auto_approve_git) {
                 permissions::PermissionLevel::Denied => {
                     let msg = format!("Command blocked by security policy: {command}");
                     let _ = event_tx.send(AgentEvent::ToolCall {
