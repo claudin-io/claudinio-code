@@ -1633,10 +1633,19 @@ export const ChatPanel: Component<{
     try {
       const records = await loadSession(props.workspace, id);
       setMessages(recordsToMessages(records));
-      statsFromRecords(records);
+      try {
+        statsFromRecords(records);
+      } catch (e) {
+        console.error("statsFromRecords failed", e);
+      }
       // The JSONL is the source of truth for the mode too: restore the last one.
       const lastMode = [...records].reverse().find((r) => r.kind === "mode");
-      setMode(lastMode ? normalizeSessionMode(lastMode.mode) : "builder");
+      try {
+        setMode(lastMode ? normalizeSessionMode(lastMode.mode) : "builder");
+      } catch (e) {
+        console.error("setMode failed", e);
+        setMode("builder");
+      }
       setActiveSessionId(id);
       setCurrentSteps([]);
       setThinkingStart(0);
@@ -1644,7 +1653,9 @@ export const ChatPanel: Component<{
       setShowSessions(false);
       scrollToBottom(true);
     } catch (e) {
+      console.error("reopenSession failed", e);
       setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToReopen", String(e)) }]);
+      setShowSessions(false);
     }
   };
 
@@ -1862,7 +1873,7 @@ export const ChatPanel: Component<{
                           {(att) => (
                             <span class="inline-flex items-center gap-1 rounded-md border border-accent/20 bg-accent/[0.06] px-1.5 py-0.5 text-[11px] text-ink-muted">
                               <Icon
-                                name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                                name={(att.mediaType ?? "").startsWith("image/") ? "image" : "file-text"}
                                 class="h-3 w-3 shrink-0"
                               />
                               <span class="max-w-[140px] truncate">{att.name}</span>
@@ -2028,7 +2039,7 @@ export const ChatPanel: Component<{
                   {(att) => (
                     <span class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-1 px-2 py-0.5 text-[11px] text-ink-muted">
                       <Icon
-                        name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                        name={(att.mediaType ?? "").startsWith("image/") ? "image" : "file-text"}
                         class="h-3 w-3 shrink-0"
                       />
                       <span class="max-w-[120px] truncate">{att.name}</span>
@@ -2054,7 +2065,7 @@ export const ChatPanel: Component<{
             {(att, i) => (
               <div class="group flex items-center gap-1.5 rounded-md border border-border-subtle bg-surface-1 px-2 py-1 text-xs text-ink-muted hover:border-accent/40">
                 <Icon
-                  name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                  name={(att.mediaType ?? "").startsWith("image/") ? "image" : "file-text"}
                   class="h-3.5 w-3.5 shrink-0"
                 />
                 <span class="max-w-[180px] truncate">{att.name}</span>
@@ -2731,7 +2742,7 @@ const TimelineSteps: Component<{
                     {(att) => (
                       <span class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-1 px-2 py-0.5 text-[10px] text-ink-muted">
                         <Icon
-                          name={att.mediaType.startsWith("image/") ? "image" : "file-text"}
+                          name={(att.mediaType ?? "").startsWith("image/") ? "image" : "file-text"}
                           class="h-3 w-3 shrink-0"
                         />
                         <span class="max-w-[120px] truncate">{att.name}</span>
