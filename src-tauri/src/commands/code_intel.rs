@@ -187,24 +187,29 @@ pub async fn open_workspace(
             indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle), &ws_path)
         });
         let emit_handle = app_handle.clone();
+        let db3 = Arc::clone(&db);
         let ws_path = path.clone();
         tokio::spawn(async move {
             let result = join.await;
-            let (status, files, symbols) = match result {
-                Ok(Ok((processed, total))) => ("embeddings_done", processed, total),
+            let (status, files) = match result {
+                Ok(Ok((processed, _total))) => ("embeddings_done", processed),
                 Ok(Err(e)) => {
                     eprintln!("[open_workspace] embedding generation failed: {e}");
-                    ("embeddings_error", 0, 0)
+                    ("embeddings_error", 0)
                 }
                 Err(e) => {
                     eprintln!("[open_workspace] embedding task panicked: {e}");
-                    ("embeddings_error", 0, 0)
+                    ("embeddings_error", 0)
                 }
             };
+            // Query real embeddings count from the DB — generate_all_embeddings
+            // only returns newly generated embeddings (0 on re-open since all
+            // files are already embedded), but we need the total count for the UI.
+            let real_embeddings = db3.index_stats().unwrap_or((0, 0, 0)).2;
             let _ = emit_handle.emit("index-progress", indexer::IndexProgress {
                 status: status.into(),
                 files_indexed: files,
-                symbols_indexed: symbols,
+                symbols_indexed: real_embeddings,
                 total_files: files,
                 workspace: ws_path,
             });
