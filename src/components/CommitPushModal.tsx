@@ -15,7 +15,6 @@ const CommitPushModal: Component<{
   workspace: string;
   open: boolean;
   onClose: () => void;
-  stagedOnly?: boolean;
 }> = (props) => {
   let sessionId: string | null = null;
   const [status, setStatus] = createSignal<"running" | "completed" | "failed" | "interrupted">("running");
@@ -99,7 +98,7 @@ const CommitPushModal: Component<{
   onMount(async () => {
     if (!props.open) return;
     try {
-      const result = await commitAndPush(props.workspace, handleEvent, props.stagedOnly ?? false);
+      const result = await commitAndPush(props.workspace, handleEvent);
       sessionId = result.sessionId;
     } catch (e) {
       setStatus("failed");
@@ -155,9 +154,6 @@ const CommitPushModal: Component<{
             <div class="flex items-center gap-2">
               <Icon name="git-commit" class="h-4 w-4 text-ink-muted" stroke />
               <span class="font-semibold text-[14px] text-ink">{t("commitPush.modalTitle")}</span>
-              <Show when={props.stagedOnly}>
-                <span class="rounded px-1.5 py-0.5 text-[10px] font-medium bg-accent/15 text-accent">Staged Only</span>
-              </Show>
               <span class={`rounded px-1.5 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
                 {statusLabel()}
               </span>

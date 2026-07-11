@@ -535,7 +535,6 @@ export const ChatPanel: Component<{
   const [, setIsEnhancing] = createSignal(false);
   const [showGitModal, setShowGitModal] = createSignal(false);
   const [showCommitPushModal, setShowCommitPushModal] = createSignal(false);
-  const [commitStagedOnly, setCommitStagedOnly] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
   // @-mention autocomplete state
   const [mentionQuery, setMentionQuery] = createSignal("");
@@ -2336,9 +2335,8 @@ export const ChatPanel: Component<{
           workspace={props.workspace}
           open={showGitModal()}
           onClose={() => setShowGitModal(false)}
-          onCommitPush={(stagedOnly: boolean) => {
+          onCommitPush={() => {
             setShowGitModal(false);
-            setCommitStagedOnly(stagedOnly);
             setShowCommitPushModal(true);
           }}
         />
@@ -2348,7 +2346,6 @@ export const ChatPanel: Component<{
           workspace={props.workspace}
           open={showCommitPushModal()}
           onClose={() => setShowCommitPushModal(false)}
-          stagedOnly={commitStagedOnly()}
         />
       </Show>
       <Show when={viewerFile()}>
