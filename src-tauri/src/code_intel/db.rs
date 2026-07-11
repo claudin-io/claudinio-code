@@ -672,7 +672,7 @@ impl IndexDb {
     }
 
     #[allow(dead_code)]
-    pub fn index_stats(&self) -> Result<(i64, i64), String> {
+    pub fn index_stats(&self) -> Result<(i64, i64, i64), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let files: i64 = conn
             .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
@@ -680,7 +680,10 @@ impl IndexDb {
         let symbols: i64 = conn
             .query_row("SELECT count(*) FROM symbols", [], |row| row.get(0))
             .unwrap_or(0);
-        Ok((files, symbols))
+        let embeddings: i64 = conn
+            .query_row("SELECT count(*) FROM symbol_embeddings", [], |row| row.get(0))
+            .unwrap_or(0);
+        Ok((files, symbols, embeddings))
     }
 }
 

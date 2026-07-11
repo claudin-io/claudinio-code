@@ -18,6 +18,7 @@ pub struct IndexStatus {
     pub status: String,
     pub files_count: i64,
     pub symbols_count: i64,
+    pub embeddings_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watcher_warning: Option<String>,
 }
@@ -61,12 +62,13 @@ pub async fn open_workspace(
     // Already open: switching back to this workspace must be cheap and must
     // not restart indexing/watcher/LSP under a possibly-running agent.
     if let Ok(ws) = state.workspace(&path).await {
-        let (files_count, symbols_count) = ws.index_db.index_stats().unwrap_or((0, 0));
+        let (files_count, symbols_count, embeddings_count) = ws.index_db.index_stats().unwrap_or((0, 0, 0));
         let warning = ws.watcher_warning.lock().await.clone();
         return Ok(IndexStatus {
             status: "ok".into(),
             files_count,
             symbols_count,
+            embeddings_count,
             watcher_warning: warning,
         });
     }
@@ -148,6 +150,10 @@ pub async fn open_workspace(
         .await
         .map_err(|e| format!("scan task panicked: {e}"))?
         .map_err(|e| e)?;
+
+    // Query persisted embeddings count from a prior session (embedding phase
+    // runs async after this and will be reflected on re-open).
+    let embeddings_count = db.index_stats().unwrap_or((0, 0, 0)).2;
 
     // Phase 4: If we spawned a load in Phase 2, await it with timeout.
     // Otherwise reuse the model already in state.
@@ -247,6 +253,7 @@ pub async fn open_workspace(
         status: "ok".into(),
         files_count,
         symbols_count,
+        embeddings_count,
         watcher_warning: None,
     })
 }
