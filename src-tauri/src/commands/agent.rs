@@ -854,6 +854,84 @@ pub async fn check_plan_exists(
     Ok(has_md)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEntry {
+    pub name: String,
+    pub path: String,
+    pub modified_at: u64,
+}
+
+#[tauri::command]
+pub async fn list_plans(
+    workspace: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<PlanEntry>, String> {
+    let ws = state.workspace(&workspace).await?;
+    let workspace_root = ws.root.to_string_lossy().to_string();
+
+    // Resolve plan_save_path respecting workspace-level override
+    let cfg = state.config.lock().await;
+    let global_plan_save_path = cfg.plan_save_path.clone();
+    drop(cfg);
+
+    let ws_config = crate::agent::provider::read_workspace_config(&workspace_root);
+    let effective_plan_save_path = ws_config
+        .as_ref()
+        .and_then(|w| w.get("plan_save_path"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or(global_plan_save_path);
+
+    let dir = crate::agent::tools::write_plan::plans_dir(
+        &workspace_root,
+        effective_plan_save_path.as_deref(),
+    );
+
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut plans: Vec<PlanEntry> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        == Some("md")
+                })
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())?;
+                    let modified_at = entry
+                        .metadata()
+                        .ok()?
+                        .modified()
+                        .ok()?
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    Some(PlanEntry {
+                        name,
+                        path: path.to_string_lossy().to_string(),
+                        modified_at,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    plans.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+
+    Ok(plans)
+}
+
 /// Set the interrupt flag on a running session's steering controller.
 #[tauri::command]
 pub async fn interrupt_session(

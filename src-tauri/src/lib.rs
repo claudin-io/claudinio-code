@@ -51,6 +51,7 @@ pub fn run() {
             commands::agent::set_session_mode,
             commands::agent::get_session_mode,
             commands::agent::check_plan_exists,
+            commands::agent::list_plans,
             commands::agent::set_workspace_config,
             commands::context::get_context_warning,
             commands::enhance::enhance_prompt,
