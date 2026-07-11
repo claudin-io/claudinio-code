@@ -53,6 +53,7 @@ import { setWorkspaceStatus } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
 import { GitIndicator } from "./GitIndicator";
 import { GitChangesModal } from "./GitChangesModal";
+import CommitPushModal from "./CommitPushModal";
 
 marked.use({
   renderer: {
@@ -312,7 +313,16 @@ function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
     if (kind === "compacted") {
       // Flush current assistant message into preCompact pile
       flush();
-      // Wrap all pre-compact messages into an ArchivedBlock
+      // Wrap all pre-compact messages into an ArchivedBlock.
+      // If the last item before the marker is a bare "user" record, peel it back out:
+      // compaction can be inserted after receiving a user message but before its
+      // response turns are written (e.g. high context triggered auto-compact on "oi").
+      // The peeled user starts the visible post-compact transcript so the chat
+      // renders the prompt + the activity that followed the compaction marker.
+      let liveLead: ChatMessage | null = null;
+      if (preCompact.length > 0 && preCompact[preCompact.length - 1].role === "user") {
+        liveLead = preCompact.pop()!;
+      }
       if (preCompact.length > 0) {
         out.push({
           role: "archived",
@@ -322,8 +332,9 @@ function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
             messages: [...preCompact],
           },
         });
-        preCompact = [];
       }
+      preCompact = [];
+      if (liveLead) preCompact.push(liveLead);
     } else if (kind === "user") {
       flush();
       preCompact.push({ role: "user", text: String(rec.text ?? "") });
@@ -456,6 +467,7 @@ export const ChatPanel: Component<{
   const dismissToast = () => setToastMessage(null);
   const [showEditor, setShowEditor] = createSignal(false);
   const [showGitModal, setShowGitModal] = createSignal(false);
+  const [showCommitPushModal, setShowCommitPushModal] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
   // @-mention autocomplete state
   const [mentionQuery, setMentionQuery] = createSignal("");
@@ -2102,27 +2114,17 @@ export const ChatPanel: Component<{
           workspace={props.workspace}
           open={showGitModal()}
           onClose={() => setShowGitModal(false)}
-          onCommitPush={async () => {
+          onCommitPush={() => {
             setShowGitModal(false);
-            await newSession(props.workspace);
-            const msg = t("git.autoCommitMessage");
-            setMessages((prev) => [
-              ...prev,
-              { role: "user", text: msg },
-            ]);
-            setCurrentSteps([]);
-            setThinkingStart(0);
-            setStatus("thinking");
-            scrollToBottom(true);
-            const result = await sendMessage(
-              props.workspace,
-              msg,
-              [],
-              handleEvent,
-              mode(),
-            );
-            setActiveSessionId(result.sessionId);
+            setShowCommitPushModal(true);
           }}
+        />
+      </Show>
+      <Show when={showCommitPushModal()}>
+        <CommitPushModal
+          workspace={props.workspace}
+          open={showCommitPushModal()}
+          onClose={() => setShowCommitPushModal(false)}
         />
       </Show>
       <ToastPill message={toastMessage()} onDismiss={dismissToast} />

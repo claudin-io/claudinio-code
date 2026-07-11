@@ -271,6 +271,7 @@ pub async fn send_message(
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),
         base_commit,
+        auto_approve_git: false,
     };
 
     let residual = steering.drain();
@@ -727,6 +728,7 @@ pub async fn compact_session(
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),
         base_commit: None,
+        auto_approve_git: false,
     };
 
     let summary = session::compact_history(
@@ -870,6 +872,121 @@ pub async fn interrupt_session(
         }
         None => Err("session not running".into()),
     }
+}
+
+/// Start a new standalone session that commits and pushes all changes, then
+/// cleans up. Unlike send_message, this does NOT attach to the workspace's
+/// active session — it creates a temporary session with auto-approval for git
+/// commands. The caller receives the session_id to stream events.
+#[tauri::command]
+pub async fn commit_and_push(
+    workspace: String,
+    event_channel: Channel<AgentEvent>,
+    state: State<'_, AppState>,
+) -> Result<SessionStarted, String> {
+    let config = {
+        let cfg = state.config.lock().await;
+        if cfg.api_key.is_empty() {
+            return Err("API key not configured.".into());
+        }
+        cfg.clone()
+    };
+
+    let ws = state.workspace(&workspace).await?;
+    let workspace_root = Some(ws.root.to_string_lossy().to_string());
+
+    // Merge workspace-level config (.claudinio.json) over local config
+    let mut config = config;
+    if let Some(ref root) = workspace_root {
+        if let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root) {
+            crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
+        }
+    }
+
+    // === FRESH session — NOT attached to ws.active_session ===
+    let id = uuid::Uuid::new_v4().to_string();
+    let store = SessionStore::create(&id, workspace_root.as_deref())?;
+
+    // History is empty for this brand-new session
+    let mut history = Vec::new();
+
+    let steering = state.steering_for(&id).await;
+
+    let db_path: Option<String> = workspace_root
+        .as_ref()
+        .map(|p| format!("{p}/.claudinio_index.db"));
+
+    let base_commit: Option<String> = workspace_root
+        .as_ref()
+        .and_then(|root| crate::agent::tools::git_head(root));
+
+    let ctx = ToolContext {
+        db_path,
+        lsp_manager: Some(ws.lsp_manager.clone()),
+        workspace_root,
+        embedding_model: state.embedding_model.clone(),
+        session_store_path: Some(store.path.to_string_lossy().to_string()),
+        read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        interrupt: Some(steering.interrupt.clone()),
+        agent_config: Some(config.clone()),
+        plan_save_path: config.plan_save_path.clone(),
+        base_commit,
+        auto_approve_git: true,
+    };
+
+    // Register the steering controller so interrupt_session can find it
+    {
+        let mut map = state.steering.lock().await;
+        map.insert(id.clone(), steering.clone());
+    }
+
+    let message = concat!(
+        "Please commit and push all changes. First run `git log --oneline -20` ",
+        "to understand the commit message pattern used in this project. Then stage ",
+        "the changes with `git add`, commit with an appropriate message following ",
+        "the project's convention, and push to the remote."
+    )
+    .to_string();
+
+    let mode_ctl = state.mode_for(&id, &store.path).await;
+
+    let sid = id.clone();
+    let chan = event_channel;
+    let appr = state.approvals.clone();
+    let answ = state.answers.clone();
+    let steering_map = state.steering_map();
+
+    tokio::spawn(async move {
+        if let Err(e) = session::run_workflow(
+            &config,
+            &mut history,
+            message,
+            Vec::new(),
+            &chan,
+            &appr,
+            &answ,
+            &sid,
+            &ctx,
+            &store,
+            &steering,
+            &mode_ctl,
+        )
+        .await
+        {
+            store.try_append(&SessionRecord::Error {
+                message: e.clone(),
+                ts: now_ms(),
+            });
+            let _ = chan.send(AgentEvent::Error(e));
+        }
+        // Clean up steering entry on completion
+        let mut map = steering_map.lock().await;
+        map.remove(&sid);
+    });
+
+    Ok(SessionStarted {
+        session_id: id,
+    })
 }
 
 /// Write a value to the workspace-level `.claudinio.json` config file.

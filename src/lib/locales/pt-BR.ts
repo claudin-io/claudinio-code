@@ -90,6 +90,14 @@ const dict: LocaleDict = {
   "git.filesChanged": "{0} arquivos alterados",
   "git.autoCommitMessage": "Por favor, faça commit e push de todas as alterações",
 
+  // ── CommitPush Modal ────────────────────────────────────────────
+  "commitPush.modalTitle": "Commit & Push",
+  "commitPush.cancel": "Cancelar",
+  "commitPush.completed": "Concluído",
+  "commitPush.failed": "Falhou",
+  "commitPush.interrupted": "Interrompido",
+  "commitPush.committing": "Comitando alterações...",
+
   // ── ChatPanel - Status ────────────────────────────────────────────
   "chat.status.thinking": "Trabalhando",
   "chat.status.awaitingApproval": "Aguardando aprovação",
