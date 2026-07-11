@@ -7,6 +7,7 @@ import {
   newSession,
   listSessions,
   loadSession,
+  listPlans,
   queueSteering,
   interruptSession,
   compactSession,
@@ -37,6 +38,7 @@ import {
   type SubagentDoneData,
   type Phase,
   type SessionSummary,
+  type PlanEntry,
   type SessionRecord,
   type UserAnswer,
 } from "../lib/ipc";
@@ -497,6 +499,8 @@ export const ChatPanel: Component<{
   const [liveExpandedStep, setLiveExpandedStep] = createSignal<number | null>(null);
   const [sessions, setSessions] = createSignal<SessionSummary[]>([]);
   const [showSessions, setShowSessions] = createSignal(false);
+  const [plans, setPlans] = createSignal<PlanEntry[]>([]);
+  const [showPlans, setShowPlans] = createSignal(false);
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   const [queuedSteering, setQueuedSteering] = createSignal<QueuedSteeringEntry[]>([]);
   const [retryableError, setRetryableError] = createSignal<string | null>(null);
@@ -983,6 +987,7 @@ export const ChatPanel: Component<{
   let scrollContainerRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
   let sessionsRef: HTMLDivElement | undefined;
+  let plansRef: HTMLDivElement | undefined;
   const [pendingMessage, setPendingMessage] = createSignal<string | null>(null);
   const [authSigningIn, setAuthSigningIn] = createSignal(false);
 
@@ -1594,6 +1599,34 @@ export const ChatPanel: Component<{
     }
   };
 
+  const togglePlans = async () => {
+    const next = !showPlans();
+    setShowPlans(next);
+    if (next) {
+      try {
+        setPlans(await listPlans(props.workspace));
+      } catch {
+        setPlans([]);
+      }
+    }
+  };
+
+  const openPlan = (path: string, title: string) => {
+    setShowPlans(false);
+    setViewerFile({ type: "text", path, title });
+  };
+
+  const readLatestPlan = async () => {
+    try {
+      const planList = await listPlans(props.workspace);
+      if (planList.length > 0) {
+        setViewerFile({ type: "text", path: planList[0].path, title: planList[0].name });
+      }
+    } catch {
+      // silently fail
+    }
+  };
+
   const reopenSession = async (id: string) => {
     if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
     flushPendingDone();
@@ -1659,6 +1692,21 @@ export const ChatPanel: Component<{
     }
   });
 
+  // Click-outside handler for the plans dropdown
+  createEffect(() => {
+    if (showPlans()) {
+      const handler = (e: MouseEvent) => {
+        setTimeout(() => {
+          if (showPlans() && plansRef && !plansRef.contains(e.target as Node)) {
+            setShowPlans(false);
+          }
+        }, 0);
+      };
+      document.addEventListener("click", handler);
+      onCleanup(() => document.removeEventListener("click", handler));
+    }
+  });
+
   const statusLabel = () => {
     switch (status()) {
       case "thinking": return t("chat.status.thinking");
@@ -1716,6 +1764,14 @@ export const ChatPanel: Component<{
             <Icon name="clock" class="h-3.5 w-3.5" />
             {t("chat.header.history")}
           </button>
+          <button
+            onClick={togglePlans}
+            class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
+            title={t("chat.header.plans")}
+          >
+            <Icon name="archive-drawer" class="h-3.5 w-3.5" />
+            {t("chat.header.plans")}
+          </button>
           <GitIndicator workspace={props.workspace} onShowChanges={() => setShowGitModal(true)} />
         </div>
 
@@ -1734,6 +1790,29 @@ export const ChatPanel: Component<{
                     <span class="truncate text-[12px] text-ink">{s.title}</span>
                     <span class="font-mono text-[10px] text-ink-faint">
                       {new Date(s.updatedAt).toLocaleString()} · {s.turnCount} {s.turnCount === 1 ? t("chat.header.turn") : t("chat.header.turns")}
+                    </span>
+                  </button>
+                )}
+              </For>
+            </Show>
+          </div>
+        </Show>
+
+        <Show when={showPlans()}>
+          <div ref={plansRef} class="absolute right-4 top-9 z-20 max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
+            <Show
+              when={plans().length > 0}
+              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{t("chat.header.noPlans")}</div>}
+            >
+              <For each={plans()}>
+                {(p) => (
+                  <button
+                    onClick={() => openPlan(p.path, p.name)}
+                    class="flex w-full flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-surface-2"
+                  >
+                    <span class="truncate text-[12px] text-ink">{p.name}</span>
+                    <span class="font-mono text-[10px] text-ink-faint">
+                      {new Date(p.modifiedAt * 1000).toLocaleString()}
                     </span>
                   </button>
                 )}
@@ -1837,7 +1916,14 @@ export const ChatPanel: Component<{
           </For>
 
           <Show when={mode() === "brain" && modeOrigin() === "human" && status() === "done" && hasPlanBeenWritten()}>
-            <div class="mb-6 flex justify-center">
+            <div class="mb-6 flex justify-center gap-3">
+              <button
+                onClick={readLatestPlan}
+                class="inline-flex items-center gap-2 rounded-full border border-border-subtle bg-surface-1 px-5 py-2.5 text-sm font-semibold text-ink-muted transition-all hover:bg-surface-2 hover:text-ink active:scale-[0.98]"
+              >
+                <Icon name="archive-drawer" class="h-4 w-4" />
+                {t("mode.readPlan")}
+              </button>
               <button
                 onClick={continueWithBuilder}
                 class="inline-flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-accent-ink shadow-lg shadow-accent/20 transition-all hover:bg-accent/90 hover:shadow-xl hover:shadow-accent/30 active:scale-[0.98]"

@@ -284,6 +284,16 @@ export function checkPlanExists(workspace: string): Promise<boolean> {
   return invoke<boolean>("check_plan_exists", { workspace });
 }
 
+export interface PlanEntry {
+  name: string;
+  path: string;
+  modifiedAt: number;
+}
+
+export function listPlans(workspace: string): Promise<PlanEntry[]> {
+  return invoke<PlanEntry[]>("list_plans", { workspace });
+}
+
 export function readAttachment(path: string): Promise<AttachmentData> {
   return invoke<AttachmentData>("read_attachment", { path });
 }
