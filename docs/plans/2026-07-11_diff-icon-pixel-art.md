@@ -47,3 +47,21 @@ O ícone `diff` deve ser visualmente consistente com o resto da iconografia da i
 ## Risks
 
 - **Baixo:** Mudança puramente cosmética em um recurso estático. Nenhuma dependência de runtime.
+
+
+## Implementation Log — 2026-07-11 13:21
+**Summary:** Redesenhar ícone diff em pixel-art style no grid 16×16
+**Changed files:** A	docs/plans/2026-07-11_diff-icon-pixel-art.md, M	docs/plans/2026-07-11_move-storage-to-claudinio-dir.md, M	src-tauri/src/agent/provider.rs, M	src-tauri/src/agent/session.rs, M	src-tauri/src/agent/subagent.rs, M	src/components/ChatPanel.tsx, A	src/lib/createSmoothText.test.ts, A	src/lib/createSmoothText.ts, M	src/lib/ipc.ts
+**Commits:** cb8ef4a feat: add live typewriter preview with TextDelta streaming and smooth word-by-word reveal
+**Journal:** O ícone `diff` usado no `GitIndicator` estava desenhado com paths SVG de curvas (arcos, beziers) que renderizavam como uma forma sólida preenchida — destoando visualmente de todos os outros ícones da interface que são pixel-art com retângulos de 1px.
+
+A solução foi redesenhá-lo no estilo pixel-art (grid 16×16, mesmo VIEWBOX) com 3 paths:
+1. Borda do documento (1px) — outline retangular
+2. Símbolo de + (adição) no centro-superior
+3. Símbolo de - (remoção) no centro-inferior
+
+Nenhuma outra alteração foi necessária — o `GitIndicator.tsx` já usava `name="diff"` que continua funcionando.
+
+**Task journal:**
+- Redesenhar ícone diff em pixel-art style: Paths SVG antigos substituídos por 3 paths pixel-art: borda do documento (1px), símbolo de + (adição) e - (remoção). Grid 16×16 mantido.
+- Verificação: build + inspeção visual: Build passou (npx vite build). Screenshot gerado em /tmp/diff-icon-preview.png. Ícone diff visualmente consistente: mesmo grid 16×16, mesmos retângulos de 1px, fill='currentColor' como os demais. GitChangesModal usa git-commit (inalterado).
