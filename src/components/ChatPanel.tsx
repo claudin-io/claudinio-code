@@ -1010,7 +1010,7 @@ export const ChatPanel: Component<{
     if (!force && !isAtBottom()) return;
     autoScrolling = true;
     setIsAtBottom(true);
-    setTimeout(() => messagesEndRef?.scrollIntoView({ behavior: "smooth" }), 50);
+    messagesEndRef?.scrollIntoView({ behavior: "instant" });
   };
 
   const addOrUpdateToolIn = (steps: TimelineItem[], item: TimelineItem): TimelineItem[] => {
@@ -1310,6 +1310,7 @@ export const ChatPanel: Component<{
     smoothLiveText.reset();
     setLiveThinkingText("");
     smoothThinking.reset();
+    scrollToBottom(true);
   };
 
   createEffect(() => {
