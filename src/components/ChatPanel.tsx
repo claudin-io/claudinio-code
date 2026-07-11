@@ -2106,7 +2106,6 @@ export const ChatPanel: Component<{
             setShowGitModal(false);
             await newSession(props.workspace);
             const msg = t("git.autoCommitMessage");
-            setInput(msg);
             setMessages((prev) => [
               ...prev,
               { role: "user", text: msg },
