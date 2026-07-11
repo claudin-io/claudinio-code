@@ -76,7 +76,12 @@ fn main() {
                 seen_files.push(base.clone());
             }
             let file_rank = seen_files.iter().position(|f| f == &base).unwrap() + 1;
-            if case.expected.iter().any(|e| e == &base) {
+            // A hit is either the expected file itself, or a doc section whose
+            // title names it (e.g. "6. Frontend: `src/App.tsx` — Settings
+            // modal") — the agent follows that pointer just the same.
+            let is_hit = case.expected.iter().any(|e| e == &base)
+                || (r.kind == "doc_section" && case.expected.iter().any(|e| r.name.contains(e.as_str())));
+            if is_hit {
                 if rank.is_none() {
                     rank = Some(file_rank);
                 }
