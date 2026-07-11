@@ -18,6 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentMeta {
     pub name: String,
+    /// Serialize as camelCase (mediaType) for frontend consistency.
+    /// Accept both camelCase and snake_case on deserialization for backward
+    /// compat with sessions written before the rename.
+    #[serde(rename = "mediaType", alias = "media_type")]
     pub media_type: String,
     pub size: u64,
 }

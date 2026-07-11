@@ -1077,6 +1077,13 @@ pub async fn run_workflow(
     let mut plan_finalized = false;
     let mut finalize_nudged = false;
 
+    // Brain progress guard: track consecutive rounds where the agent only uses
+    // explore tools without interviewing (ask_user), writing a plan (write_plan),
+    // or creating tasks (tasks_set). After BRAIN_EXPLORE_LIMIT rounds, inject
+    // a system reminder redirecting the agent to the required deliverables.
+    const BRAIN_EXPLORE_LIMIT: u32 = 4;
+    let mut brain_explore_streak: u32 = 0;
+
     // Anchor the diff window at the true start of the plan's work: record the
     // git HEAD once per session (guarded), so finalize_plan can report every
     // changed file / commit since planning began, even across resumed runs.
@@ -1102,6 +1109,66 @@ pub async fn run_workflow(
             cur_mode = mode_now;
             system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode);
             tools = api_tools(cur_mode, &mcp_defs);
+        }
+
+        // Per-round context re-check: tool_results from the previous round may
+        // have pushed the history over the compact threshold. Compact before
+        // the next LLM call so we never feed an oversized context.
+        if estimate_tokens(history, &system, &tools) >= COMPACT_THRESHOLD {
+            let _ = event_tx.send(AgentEvent::TextStep {
+                text: format!(
+                    "__compact_start__:{}/{}",
+                    estimate_tokens(history, &system, &tools) / 1000,
+                    MAX_CONTEXT_TOKENS / 1000
+                ),
+            });
+            match compact_history(config, store, ctx, event_tx, approvals, answers, session_id, steering).await {
+                Ok(_) => {
+                    *history = crate::agent::persist::history_from_records(
+                        &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                    );
+                    // Mode/system/tools may have changed mid-compact, refresh.
+                    let (mode_now2, _) = mode_ctl.get();
+                    if mode_now2 != cur_mode {
+                        cur_mode = mode_now2;
+                        system = system_prompt(
+                            ctx.workspace_root.as_deref(),
+                            skills_section.as_deref(),
+                            ctx.plan_save_path.as_deref(),
+                            cur_mode,
+                        );
+                        tools = api_tools(cur_mode, &mcp_defs);
+                    }
+                    let new_ctx = estimate_tokens(history, &system, &tools);
+                    let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
+                        &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                    );
+                    write_status(store, session_id, ci, co, cc, cci, cco, ccc, Some(new_ctx));
+                    let _ = event_tx.send(AgentEvent::SessionStats {
+                        input_tokens: ci as u32,
+                        output_tokens: co as u32,
+                        cumulative_cost: cc,
+                        cost_input: cci,
+                        cost_output: cco,
+                        cost_cache_read: ccc,
+                        context_tokens: new_ctx,
+                        max_context_tokens: MAX_CONTEXT_TOKENS,
+                        compact_threshold: COMPACT_THRESHOLD,
+                    });
+                    let _ = event_tx.send(AgentEvent::TextStep {
+                        text: format!(
+                            "__compact_done__:{}/{}",
+                            estimate_tokens(history, &system, &tools) / 1000,
+                            new_ctx / 1000
+                        ),
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(AgentEvent::TextStep {
+                        text: format!("__compact_fail__:{e}"),
+                    });
+                }
+            }
         }
 
         let mut assistant_text = String::new();
@@ -1713,7 +1780,50 @@ pub async fn run_workflow(
             },
         );
 
-        // D — Pós tool_results: checar interrupt ou steering.
+        // Brain progress guard: if the agent is in Brain mode and only using
+        // explore tools without interviewing/planning/tasking, redirect it.
+        let is_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
+        if is_brain {
+            let explore_tools = [
+                "spawn_agents", "semantic_search", "code_search", "grep",
+                "read_file", "file_outline", "list_dir", "symbol_lookup",
+                "go_to_definition", "find_references",
+            ];
+            let is_explore_only = tool_uses.iter().all(|t| {
+                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                explore_tools.contains(&name)
+            });
+            let has_progress_tool = tool_uses.iter().any(|t| {
+                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                name == "ask_user" || name == "write_plan" || name == "tasks_set"
+            });
+
+            if has_progress_tool {
+                brain_explore_streak = 0;
+            } else if is_explore_only {
+                brain_explore_streak += 1;
+                if brain_explore_streak >= BRAIN_EXPLORE_LIMIT {
+                    brain_explore_streak = 0; // Reset so we don't loop-spam
+                    push_user_blocks(
+                        history,
+                        store,
+                        vec![ContentBlock::text(
+                            "[system] You have been exploring for several consecutive rounds \
+                             in Brain mode without making progress on the required deliverables. \
+                             Brain mode is for planning — you MUST call ask_user to interview \
+                             the user, then write_plan to create the plan, then tasks_set to \
+                             create executable tasks. Do not continue exploring until you have \
+                             gathered the information you need.",
+                        )],
+                    );
+                    continue;
+                }
+            } else {
+                // Some mixed tools that aren't purely explore — don't count.
+            }
+        }
+
+        // Interrupt check after tool results.
         if steering.interrupt.swap(false, Ordering::SeqCst) {
             if inject_steering(history, store, steering, event_tx) {
                 continue;
@@ -1845,7 +1955,7 @@ pub(crate) async fn run_tool(
                         output: truncated,
                         error: None,
                     });
-                    ContentBlock::tool_result(tool_use_id, &content)
+                    tool_result_block(tool_use_id, &content)
                 }
                 Ok(ToolOutput::EditProposal { path, old_string, new_string, unified_diff }) => {
                     let proposal = EditProposalData {
@@ -1943,7 +2053,7 @@ pub(crate) async fn run_tool(
                                 output: truncated,
                                 error: None,
                             });
-                            ContentBlock::tool_result(tool_use_id, &content)
+                            tool_result_block(tool_use_id, &content)
                         }
                         _ => {
                             let err = "unexpected output type from bash".to_string();
@@ -1984,7 +2094,7 @@ pub(crate) async fn run_tool(
                                     output: truncated,
                                     error: None,
                                 });
-                                ContentBlock::tool_result(tool_use_id, &content)
+                                tool_result_block(tool_use_id, &content)
                             }
                             Ok(ToolOutput::EditProposal { .. }) => {
                                 let err_msg: String =
@@ -2055,7 +2165,7 @@ pub(crate) async fn run_tool(
                             output: truncated,
                             error: None,
                         });
-                        ContentBlock::tool_result(tool_use_id, &content)
+                        tool_result_block(tool_use_id, &content)
                     }
                     Ok(ToolOutput::EditProposal { .. }) => {
                         let err_msg = "MCP tools should not produce edit proposals".to_string();
@@ -2099,7 +2209,7 @@ pub(crate) async fn run_tool(
                         output: content.clone(),
                         error: None,
                     });
-                    ContentBlock::tool_result(tool_use_id, &content)
+                    tool_result_block(tool_use_id, &content)
                 }
                 Ok(ToolOutput::EditProposal {
                     path,
@@ -2395,6 +2505,10 @@ async fn ask_user(
     ContentBlock::tool_result(tool_use_id, &compiled)
 }
 
+/// Maximum chars for a tool_result stored in the conversation history.
+/// Prevents a large subagent report or file read from blowing up the context.
+const MAX_TOOL_RESULT_CHARS: usize = 24_000;
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
         // Respect char boundaries so we never slice mid-codepoint.
@@ -2406,6 +2520,14 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Build a truncated tool_result block for the conversation history.
+/// The event stream already truncates to MAX_EVENT_CHARS (~2k) for display;
+/// this cap limits the history copy so a giant tool result (e.g. a subagent
+/// report, file read, or search) can't blow up the context.
+fn tool_result_block(tool_use_id: &str, content: &str) -> ContentBlock {
+    ContentBlock::tool_result(tool_use_id, &truncate(content, MAX_TOOL_RESULT_CHARS))
 }
 
 #[cfg(test)]
