@@ -237,12 +237,40 @@ export function gitStatus(workspace: string): Promise<GitStatus> {
   return invoke<GitStatus>("git_status", { workspace });
 }
 
-export function gitFileDiff(workspace: string, path: string): Promise<string> {
-  return invoke<string>("git_file_diff", { workspace, path });
+export function gitFileDiff(workspace: string, path: string, staged?: boolean): Promise<string> {
+  return invoke<string>("git_file_diff", { workspace, path, staged });
 }
 
 export function gitBranch(workspace: string): Promise<string> {
   return invoke<string>("git_branch", { workspace });
+}
+
+export function gitStageFile(workspace: string, path: string): Promise<void> {
+  return invoke<void>("git_stage_file", { workspace, path });
+}
+
+export function gitUnstageFile(workspace: string, path: string): Promise<void> {
+  return invoke<void>("git_unstage_file", { workspace, path });
+}
+
+export function gitDiscardFile(workspace: string, path: string): Promise<void> {
+  return invoke<void>("git_discard_file", { workspace, path });
+}
+
+export function gitStageHunk(workspace: string, path: string, hunkText: string): Promise<void> {
+  return invoke<void>("git_stage_hunk", { workspace, path, hunkText });
+}
+
+export function gitUnstageHunk(workspace: string, path: string, hunkText: string): Promise<void> {
+  return invoke<void>("git_unstage_hunk", { workspace, path, hunkText });
+}
+
+export function gitStageAll(workspace: string): Promise<void> {
+  return invoke<void>("git_stage_all", { workspace });
+}
+
+export function gitUnstageAll(workspace: string): Promise<void> {
+  return invoke<void>("git_unstage_all", { workspace });
 }
 
 export function sendMessage(
@@ -266,10 +294,11 @@ export function sendMessage(
 export function commitAndPush(
   workspace: string,
   onEvent: (event: AgentEvent) => void,
+  stagedOnly?: boolean,
 ): Promise<{ sessionId: string }> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  return invoke<{ sessionId: string }>("commit_and_push", { workspace, eventChannel: channel });
+  return invoke<{ sessionId: string }>("commit_and_push", { workspace, stagedOnly, eventChannel: channel });
 }
 
 export function setSessionMode(workspace: string, mode: SessionMode): Promise<SessionStarted> {
