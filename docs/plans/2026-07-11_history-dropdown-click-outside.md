@@ -110,3 +110,14 @@ This is clean and handles the edge case properly. Let me update the plan.
 **Task journal:**
 - Add click-outside handler to history dropdown: Added `sessionsRef` at line 902; Added `ref={sessionsRef}` to the dropdown div at line 1513; Added `createEffect` with click-outside handler after the ESC onMount block (~line 1440); Used setTimeout(0) pattern to prevent race condition when clicking the History button itself
 - Verify the build compiles and behavior is correct: Build compiled successfully (`npm run build` — 0 errors, 13.29s)
+
+
+## Implementation Log — 2026-07-11 01:35
+**Summary:** Auto-recorded by the harness.
+**Changed files:** A	docs/plans/2026-07-11_history-dropdown-click-outside.md, M	src/components/ChatPanel.tsx
+**Commits:** 5f5086f fix: history dropdown closes when clicking outside
+**Journal:** Auto-recorded by the harness (finalize_plan was not called). See the Task journal below for what was done.
+
+**Task journal:**
+- Add click-outside handler to history dropdown: Added `sessionsRef` at line 902; Added `ref={sessionsRef}` to the dropdown div at line 1513; Added `createEffect` with click-outside handler after the ESC onMount block (~line 1440); Used setTimeout(0) pattern to prevent race condition when clicking the History button itself
+- Verify the build compiles and behavior is correct: Build compiled successfully (`npm run build` — 0 errors, 13.29s)
