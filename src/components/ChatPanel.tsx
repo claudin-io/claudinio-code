@@ -1292,6 +1292,13 @@ export const ChatPanel: Component<{
     }
   });
 
+  createEffect(() => {
+    // Assim que a resposta (final ou intermediária) começa a aparecer, o
+    // "Thought" correspondente para de fazer sentido animar em paralelo —
+    // pula pro texto completo pra não ter as duas animações rodando juntas.
+    if (liveText()) smoothThinking.flush();
+  });
+
   const handleAuthSignIn = async () => {
     setAuthSigningIn(true);
     try {
