@@ -50,6 +50,10 @@ pub struct ToolContext {
     /// Default false for normal chat sessions; set true for dedicated
     /// commit-and-push workflows.
     pub auto_approve_git: bool,
+    /// Handle to connected MCP servers for this workspace, if any. Populated
+    /// before the agent loop starts so `mcp__` tool calls can dispatch
+    /// synchronously through `tools::execute`.
+    pub mcp: Option<Arc<crate::agent::mcp::McpManager>>,
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -384,6 +388,14 @@ pub fn exit_plan_mode_def() -> ToolDef {
 }
 
 pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
+    if name.starts_with("mcp__") {
+        let mgr = ctx
+            .mcp
+            .as_ref()
+            .ok_or_else(|| "MCP is not initialized for this session".to_string())?;
+        let content = mgr.call(name, args).await?;
+        return Ok(ToolOutput::Text { content });
+    }
     match name {
         "read_file" => {
             let a: read_file::ReadFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
@@ -808,7 +820,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        }
+            mcp: None,        }
     }
 
     /// Write a temp file with 20 numbered lines, return its path.
@@ -1052,7 +1064,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
         assert!(validate_path("/home/user/project/src", &ctx).is_ok());
@@ -1073,7 +1085,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
         assert!(validate_path("/", &ctx).is_err());
@@ -1094,7 +1106,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
     }
@@ -1113,7 +1125,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
         assert!(result.is_err());
@@ -1135,7 +1147,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
         assert!(result.is_err());
@@ -1157,7 +1169,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
         assert!(result.is_err(), "rg likely not installed in test env");
@@ -1178,7 +1190,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
         let output = result.expect("bash should succeed");
@@ -1202,7 +1214,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-        };
+            mcp: None,        };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
         assert!(result.is_err());

@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, type IndexProgress, type IndexStatus } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -42,6 +42,40 @@ export function loadOpenWorkspaces(): string[] {
 
 export function saveOpenWorkspaces(workspaces: string[]) {
   localStorage.setItem(OPEN_KEY, JSON.stringify(workspaces));
+}
+
+/// Default template inserted into the MCP JSON editor for a fresh server
+/// entry — the user renames the key and fills in the real command/url.
+function mcpServerTemplate(): Record<string, unknown> {
+  return {
+    "new-server": {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-name"],
+      enabled: true,
+    },
+  };
+}
+
+/// Pretty-print an McpServerMap (or empty object) as the editor's initial text.
+function mcpMapToJsonText(map: McpServerMap | undefined): string {
+  return JSON.stringify(map ?? {}, null, 2);
+}
+
+/// Parse the editor's raw text into an McpServerMap. Returns an error message
+/// instead of throwing so the UI can show it inline without losing the draft.
+function parseMcpJson(text: string): { ok: true; value: McpServerMap } | { ok: false; error: string } {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return { ok: true, value: {} };
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { ok: false, error: "Expected a JSON object mapping server name -> config" };
+    }
+    return { ok: true, value: parsed as McpServerMap };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 export function addRecent(projects: () => string[], setter: (v: string[]) => void, path: string) {
@@ -86,6 +120,14 @@ function App() {
   const [keystrokeBuf, setKeystrokeBuf] = createSignal("");
   const [configOverrideBaseUrl, setConfigOverrideBaseUrl] = createSignal("");
   const [configOverrideApiKey, setConfigOverrideApiKey] = createSignal("");
+
+  // MCP server settings: edited as raw JSON text (`{ "name": { type, ... } }`),
+  // parsed only on save/test. Statuses come from a live workspace connection
+  // when one exists, otherwise reflect "configured, not connected".
+  const [configMcpJson, setConfigMcpJson] = createSignal("{}");
+  const [mcpJsonError, setMcpJsonError] = createSignal<string | null>(null);
+  const [mcpStatuses, setMcpStatuses] = createSignal<Record<string, McpServerStatus>>({});
+  const [mcpTesting, setMcpTesting] = createSignal(false);
 
   // Convenience views scoped to the currently visible workspace.
   const progress = () => {
@@ -182,6 +224,8 @@ function App() {
         setConfigPlanSavePath(cfg.planSavePath ?? "");
         setConfigOverrideBaseUrl(cfg.overrideBaseUrl ?? "");
         setConfigOverrideApiKey(cfg.overrideApiKey ?? "");
+        setConfigMcpJson(mcpMapToJsonText(cfg.mcp));
+        setMcpJsonError(null);
         setAccountLogin(cfg.accountLogin ?? null);
         setAccountTier(cfg.accountTier ?? null);
         // Build set of field names that come from workspace config
@@ -201,6 +245,12 @@ function App() {
     setEasterEggActive(false);
     setKeystrokeBuf("");
     setShowConfig(true);
+    try {
+      const statuses = await listMcpServers(activeWorkspace() ?? undefined);
+      setMcpStatuses(Object.fromEntries(statuses.map((s) => [s.name, s])));
+    } catch {
+      setMcpStatuses({});
+    }
   };
 
   const saveConfig = async () => {
@@ -219,6 +269,13 @@ function App() {
         }
       }
 
+      const mcpParsed = parseMcpJson(configMcpJson());
+      if (!mcpParsed.ok) {
+        setMcpJsonError(mcpParsed.error);
+        return; // Keep the modal open — don't lose the user's JSON draft
+      }
+      setMcpJsonError(null);
+
       await setConfig({
         apiKey: changedApiKey || undefined,
         brainModel: configBrainModel() || undefined,
@@ -235,6 +292,7 @@ function App() {
           .filter((s) => s.length > 0),
         overrideBaseUrl: configOverrideBaseUrl() || undefined,
         overrideApiKey: configOverrideApiKey() || undefined,
+        mcp: mcpParsed.value,
       });
       // If the user just saved an API key and isn't authenticated via OAuth,
       // mark them as authenticated so onboarding stays hidden.
@@ -292,6 +350,52 @@ function App() {
       setConfigPlanSavePath(rel || ".");
     } else {
       setConfigPlanSavePath(folder);
+    }
+  };
+
+  /// Merge a default server template into the JSON draft under a fresh key,
+  /// so "add server" always leaves valid, ready-to-edit JSON behind — even if
+  /// the current draft was invalid (in which case it's replaced outright).
+  const addMcpServerTemplate = () => {
+    const parsed = parseMcpJson(configMcpJson());
+    const base = parsed.ok ? parsed.value : {};
+    const template = mcpServerTemplate();
+    let key = "new-server";
+    let n = 1;
+    while (key in base) {
+      key = `new-server-${n}`;
+      n++;
+    }
+    const merged = { ...base, [key]: template["new-server"] };
+    setConfigMcpJson(JSON.stringify(merged, null, 2));
+    setMcpJsonError(null);
+  };
+
+  /// Parse the current JSON draft and test-connect every server in it,
+  /// populating the status list below the editor.
+  const testAllMcpServers = async () => {
+    const parsed = parseMcpJson(configMcpJson());
+    if (!parsed.ok) {
+      setMcpJsonError(parsed.error);
+      return;
+    }
+    setMcpJsonError(null);
+    setMcpTesting(true);
+    try {
+      const entries = Object.entries(parsed.value);
+      const results: Record<string, McpServerStatus> = {};
+      await Promise.all(
+        entries.map(async ([name, entry]) => {
+          try {
+            results[name] = await testMcpServer(name, entry, activeWorkspace() ?? undefined);
+          } catch (e) {
+            results[name] = { name, connected: false, toolCount: 0, toolNames: [], error: String(e) };
+          }
+        }),
+      );
+      setMcpStatuses(results);
+    } finally {
+      setMcpTesting(false);
     }
   };
 
@@ -794,6 +898,62 @@ function App() {
                 disabled={workspaceConfigFields().has("yolo_blacklist")}
               />
               <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{t("app.config.yoloBlacklistHint")}</p>
+            </Show>
+
+            <hr class="mb-4 border-border-subtle" />
+
+            <div class="mb-2 flex items-center justify-between">
+              <span class="text-sm font-medium text-ink">{t("app.config.mcpServers")}</span>
+              <div class="flex gap-2">
+                <button
+                  onClick={addMcpServerTemplate}
+                  class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
+                >
+                  {t("app.config.mcpAddServer")}
+                </button>
+                <button
+                  onClick={testAllMcpServers}
+                  disabled={mcpTesting()}
+                  class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
+                >
+                  {mcpTesting() ? t("app.config.mcpTesting") : t("app.config.mcpTest")}
+                </button>
+              </div>
+            </div>
+
+            <textarea
+              value={configMcpJson()}
+              onInput={(e) => setConfigMcpJson(e.currentTarget.value)}
+              rows={10}
+              spellcheck={false}
+              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 font-mono text-xs text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              classList={{ "border-red-500": !!mcpJsonError() }}
+            />
+            <Show when={mcpJsonError()}>
+              <p class="mb-2 text-[11px] text-red-500">{mcpJsonError()}</p>
+            </Show>
+            <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.mcpJsonHint")}</p>
+
+            <Show when={Object.keys(mcpStatuses()).length > 0}>
+              <div class="mb-4 space-y-1.5">
+                <For each={Object.entries(mcpStatuses())}>
+                  {([name, status]) => (
+                    <div class="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-1 px-2 py-1.5 text-xs">
+                      <span
+                        class="h-2 w-2 shrink-0 rounded-full"
+                        classList={{
+                          "bg-green-500": status.connected,
+                          "bg-red-500": !status.connected,
+                        }}
+                      />
+                      <span class="font-medium text-ink">{name}</span>
+                      <span class="text-ink-faint">
+                        {status.connected ? t("app.config.mcpToolCount", String(status.toolCount)) : (status.error ?? t("app.config.mcpNotConnected"))}
+                      </span>
+                    </div>
+                  )}
+                </For>
+              </div>
             </Show>
 
             <div class="flex justify-end gap-2">

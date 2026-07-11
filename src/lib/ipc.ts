@@ -49,6 +49,25 @@ export interface WriteClipboardBlobResult {
   size: number;
 }
 
+export type McpTransportConfig =
+  | { type: "stdio"; command: string; args?: string[]; env?: Record<string, string> }
+  | { type: "remote"; url: string; headers?: Record<string, string> };
+
+export type McpServerEntry = McpTransportConfig & {
+  enabled?: boolean;
+};
+
+// Keyed by server name, e.g. { "context7": { type: "remote", url: "...", headers: {...} } }
+export type McpServerMap = Record<string, McpServerEntry>;
+
+export interface McpServerStatus {
+  name: string;
+  connected: boolean;
+  toolCount: number;
+  toolNames: string[];
+  error?: string | null;
+}
+
 export interface AgentConfig {
   baseUrl: string;
   brainModel: string;
@@ -67,6 +86,7 @@ export interface AgentConfig {
   planSavePath?: string | null;
   overrideBaseUrl?: string | null;
   overrideApiKey?: string | null;
+  mcp?: McpServerMap;
   workspaceConfig?: Record<string, unknown> | null;
 }
 
@@ -84,6 +104,7 @@ export interface SetConfigArgs {
   planSavePath?: string | null;
   overrideBaseUrl?: string;
   overrideApiKey?: string;
+  mcp?: McpServerMap;
 }
 
 export interface ApproveArgs {
@@ -423,6 +444,18 @@ export function getConfig(workspace?: string): Promise<AgentConfig> {
 
 export function setWorkspaceConfig(workspaceRoot: string, planSavePath: string | null): Promise<void> {
   return invoke<void>("set_workspace_config", { workspaceRoot, planSavePath });
+}
+
+export function listMcpServers(workspace?: string): Promise<McpServerStatus[]> {
+  return invoke<McpServerStatus[]>("mcp_list_servers", { workspace: workspace ?? null });
+}
+
+export function testMcpServer(name: string, entry: McpServerEntry, workspace?: string): Promise<McpServerStatus> {
+  return invoke<McpServerStatus>("mcp_test_server", { name, entry, workspace: workspace ?? null });
+}
+
+export function reconnectMcp(workspace: string): Promise<McpServerStatus[]> {
+  return invoke<McpServerStatus[]>("mcp_reconnect", { workspace });
 }
 
 export function listModels(): Promise<string[]> {

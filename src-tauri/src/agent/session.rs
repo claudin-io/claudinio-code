@@ -611,7 +611,7 @@ pub type AnswerMap = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserAnswer>>>
 /// registry plus enter_plan_mode; Brain drops edit_file and gains
 /// write_plan + exit_plan_mode (bash stays but is gated to read-only commands
 /// in run_workflow).
-fn api_tools(mode: SessionMode) -> Vec<ToolDescription> {
+fn api_tools(mode: SessionMode, mcp_defs: &[tools::ToolDef]) -> Vec<ToolDescription> {
     let mut defs = tools::get_defs();
     match mode {
         SessionMode::Builder => {
@@ -624,6 +624,7 @@ fn api_tools(mode: SessionMode) -> Vec<ToolDescription> {
             defs.push(tools::exit_plan_mode_def());
         }
     }
+    defs.extend(mcp_defs.iter().cloned());
     defs.iter()
         .map(|t| ToolDescription {
             name: t.name.clone(),
@@ -976,7 +977,11 @@ pub async fn run_workflow(
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let (mut cur_mode, _) = mode_ctl.get();
     let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode);
-    let mut tools = api_tools(cur_mode);
+    // MCP tool discovery already happened before `run_workflow` was called
+    // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
+    // snapshot read, not a fresh connection attempt.
+    let mcp_defs = ctx.mcp.as_ref().map(|m| m.cached_defs()).unwrap_or_default();
+    let mut tools = api_tools(cur_mode, &mcp_defs);
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
@@ -1096,7 +1101,7 @@ pub async fn run_workflow(
         if mode_now != cur_mode {
             cur_mode = mode_now;
             system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode);
-            tools = api_tools(cur_mode);
+            tools = api_tools(cur_mode, &mcp_defs);
         }
 
         let mut assistant_text = String::new();
@@ -2017,6 +2022,72 @@ pub(crate) async fn run_tool(
                         }
                     }
                 }
+            }
+        }
+        // MCP tools return `ToolOutput::Text`, not `EditProposal` — the
+        // generic `RequiresApproval` arm below executes Text-producing tools
+        // BEFORE approval (it only gates edit proposals), so MCP needs its
+        // own approve-before-execute arm here, same shape as the bash one.
+        permissions::PermissionLevel::RequiresApproval if tool_name.starts_with("mcp__") => {
+            let approval_key = format!("{session_id}:{tool_use_id}");
+            let (approve_tx, approve_rx) = oneshot::channel::<bool>();
+            {
+                let mut map = approvals.lock().await;
+                map.insert(approval_key.clone(), approve_tx);
+            }
+
+            let _ = event_tx.send(AgentEvent::ToolCall {
+                session_id: session_id.to_string(),
+                tool_id: tool_use_id.to_string(),
+                tool_name: tool_name.to_string(),
+                args: tool_input.clone(),
+                permission: "requires_approval".into(),
+                edit_proposal: None,
+            });
+
+            match approve_rx.await {
+                Ok(true) => match tools::execute(tool_name, tool_input.clone(), ctx).await {
+                    Ok(ToolOutput::Text { content }) => {
+                        let truncated = truncate(&content, 2000);
+                        let _ = event_tx.send(AgentEvent::ToolResult {
+                            tool_id: tool_use_id.to_string(),
+                            tool_name: tool_name.to_string(),
+                            output: truncated,
+                            error: None,
+                        });
+                        ContentBlock::tool_result(tool_use_id, &content)
+                    }
+                    Ok(ToolOutput::EditProposal { .. }) => {
+                        let err_msg = "MCP tools should not produce edit proposals".to_string();
+                        let _ = event_tx.send(AgentEvent::ToolResult {
+                            tool_id: tool_use_id.to_string(),
+                            tool_name: tool_name.to_string(),
+                            output: err_msg.clone(),
+                            error: Some("unexpected output type".into()),
+                        });
+                        ContentBlock::tool_result(tool_use_id, &err_msg)
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(AgentEvent::ToolResult {
+                            tool_id: tool_use_id.to_string(),
+                            tool_name: tool_name.to_string(),
+                            output: String::new(),
+                            error: Some(e.clone()),
+                        });
+                        ContentBlock::tool_result(tool_use_id, &format!("Error: {e}"))
+                    }
+                },
+                Ok(false) => {
+                    let msg = "Tool call rejected by user".to_string();
+                    let _ = event_tx.send(AgentEvent::ToolResult {
+                        tool_id: tool_use_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        output: msg.clone(),
+                        error: None,
+                    });
+                    ContentBlock::tool_result(tool_use_id, &msg)
+                }
+                Err(_) => ContentBlock::tool_result(tool_use_id, "Approval channel closed"),
             }
         }
         permissions::PermissionLevel::RequiresApproval => {

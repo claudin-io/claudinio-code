@@ -11,6 +11,7 @@ pub fn tool_permission(name: &str) -> PermissionLevel {
     match name {
         "edit_file" | "batch_edit" | "write_file" => PermissionLevel::RequiresApproval,
         "bash" => PermissionLevel::RequiresApproval,
+        n if n.starts_with("mcp__") => PermissionLevel::RequiresApproval,
         _ => PermissionLevel::Auto,
     }
 }

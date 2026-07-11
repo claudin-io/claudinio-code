@@ -31,6 +31,47 @@ pub struct WorkspaceState {
     pub _watcher: Mutex<Option<crate::code_intel::watcher::FileWatcher>>,
     pub watcher_warning: Mutex<Option<String>>,
     pub active_session: Mutex<Option<SessionHandle>>,
+    /// Connected MCP servers for this workspace. Lives for the workspace's
+    /// whole lifetime (not per-session) so stdio servers aren't respawned on
+    /// every chat turn. `None` until the first `ensure_mcp_connected` call.
+    pub mcp: Mutex<Option<Arc<crate::agent::mcp::McpManager>>>,
+    /// Fingerprint of the `mcp_servers` config used for the current `mcp`
+    /// connection, so a config change triggers a reconnect.
+    pub mcp_fingerprint: Mutex<Option<String>>,
+}
+
+impl WorkspaceState {
+    /// Connect to configured MCP servers if not already connected with the
+    /// current config, and return the (possibly cached) manager. Reconnects
+    /// whenever `mcp_servers` changed since the last connection.
+    pub async fn ensure_mcp_connected(
+        &self,
+        config: &AgentConfig,
+    ) -> Arc<crate::agent::mcp::McpManager> {
+        let fingerprint = serde_json::to_string(&config.mcp).unwrap_or_default();
+        {
+            let current = self.mcp.lock().await;
+            let current_fp = self.mcp_fingerprint.lock().await;
+            if let (Some(mgr), Some(fp)) = (current.as_ref(), current_fp.as_ref()) {
+                if *fp == fingerprint {
+                    return mgr.clone();
+                }
+            }
+        }
+
+        // Config changed (or first run): drop the old connections (if any)
+        // and reconnect from scratch.
+        let stale = self.mcp.lock().await.take();
+        if let Some(mgr) = stale {
+            mgr.shutdown().await;
+        }
+
+        let workspace_root = self.root.to_str();
+        let manager = crate::agent::mcp::McpManager::connect_all(&config.mcp, workspace_root).await;
+        *self.mcp.lock().await = Some(manager.clone());
+        *self.mcp_fingerprint.lock().await = Some(fingerprint);
+        manager
+    }
 }
 
 pub struct AppState {

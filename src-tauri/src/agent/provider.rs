@@ -102,6 +102,44 @@ pub struct AgentConfig {
     /// websearch, or list_models.
     #[serde(default)]
     pub override_api_key: Option<String>,
+    /// Configured MCP (Model Context Protocol) servers, keyed by server name —
+    /// matches the `{ "mcp": { "name": { "type": ..., ... } } }` shape used by
+    /// other MCP-aware tools. Global servers live here; workspace-level
+    /// `.claudinio.json` servers are merged in on top (see
+    /// `merge_workspace_config`), overriding a global entry of the same name.
+    #[serde(default)]
+    pub mcp: std::collections::HashMap<String, McpServerEntry>,
+}
+
+/// How to reach an MCP server: a locally spawned process talking JSON-RPC
+/// over stdio, or a remote server speaking Streamable HTTP/SSE.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum McpTransportConfig {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: std::collections::HashMap<String, String>,
+    },
+    Remote {
+        url: String,
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    #[serde(flatten)]
+    pub transport: McpTransportConfig,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_claudinio() -> String {
@@ -134,6 +172,7 @@ impl Default for AgentConfig {
             install_fallback_seed: None,
             override_base_url: None,
             override_api_key: None,
+            mcp: std::collections::HashMap::new(),
         }
     }
 }
@@ -255,6 +294,15 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
             .iter()
             .filter_map(|item| item.as_str().map(|s| s.to_string()))
             .collect();
+    }
+    if let Some(v) = obj.get("mcp") {
+        if let Ok(ws_servers) =
+            serde_json::from_value::<std::collections::HashMap<String, McpServerEntry>>(v.clone())
+        {
+            for (name, entry) in ws_servers {
+                cfg.mcp.insert(name, entry);
+            }
+        }
     }
 }
 
@@ -1000,6 +1048,42 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tauri::ipc::InvokeResponseBody;
+
+    #[test]
+    fn test_merge_workspace_config_mcp_servers_appends_and_overrides_by_name() {
+        let mut cfg = AgentConfig::default();
+        cfg.mcp.insert(
+            "global-server".into(),
+            McpServerEntry {
+                transport: McpTransportConfig::Stdio {
+                    command: "global-cmd".into(),
+                    args: vec![],
+                    env: Default::default(),
+                },
+                enabled: true,
+            },
+        );
+
+        let ws = json!({
+            "mcp": {
+                "global-server": { "type": "stdio", "command": "overridden-cmd", "args": [] },
+                "workspace-only": { "type": "remote", "url": "http://localhost:9000/mcp" }
+            }
+        });
+        merge_workspace_config(&mut cfg, &ws);
+
+        assert_eq!(cfg.mcp.len(), 2);
+        let global = cfg.mcp.get("global-server").unwrap();
+        match &global.transport {
+            McpTransportConfig::Stdio { command, .. } => assert_eq!(command, "overridden-cmd"),
+            _ => panic!("expected stdio transport"),
+        }
+        let workspace_only = cfg.mcp.get("workspace-only").unwrap();
+        match &workspace_only.transport {
+            McpTransportConfig::Remote { url, .. } => assert_eq!(url, "http://localhost:9000/mcp"),
+            _ => panic!("expected remote transport"),
+        }
+    }
 
     #[test]
     fn test_budget_exceeded_message_detects_real_body() {

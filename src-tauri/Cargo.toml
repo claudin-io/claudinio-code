@@ -124,4 +124,13 @@ base64 = "0.22"
 image = "0.25"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 regex = "1.12.4"
+http = "1"
+rmcp = { version = "2", default-features = false, features = [
+    "client",
+    "macros",
+    "reqwest",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "base64",
+] }
 

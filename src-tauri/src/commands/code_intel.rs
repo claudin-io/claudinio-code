@@ -249,6 +249,8 @@ pub async fn open_workspace(
         _watcher: tokio::sync::Mutex::new(watcher),
         watcher_warning: tokio::sync::Mutex::new(watcher_warning),
         active_session: tokio::sync::Mutex::new(None),
+        mcp: tokio::sync::Mutex::new(None),
+        mcp_fingerprint: tokio::sync::Mutex::new(None),
     });
 
     {
@@ -272,8 +274,15 @@ pub async fn close_workspace(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut map = state.workspaces.lock().await;
-    map.remove(Path::new(&path));
+    let removed = {
+        let mut map = state.workspaces.lock().await;
+        map.remove(Path::new(&path))
+    };
+    if let Some(ws) = removed {
+        if let Some(mcp) = ws.mcp.lock().await.take() {
+            mcp.shutdown().await;
+        }
+    }
     Ok(())
 }
 
