@@ -266,6 +266,10 @@ export function gitBranch(workspace: string): Promise<string> {
   return invoke<string>("git_branch", { workspace });
 }
 
+export function checkGitAvailable(): Promise<boolean> {
+  return invoke<boolean>("check_git_available");
+}
+
 export function sendMessage(
   workspace: string,
   message: string,

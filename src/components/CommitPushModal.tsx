@@ -1,8 +1,9 @@
 import { Component, createSignal, createMemo, Show, For, onMount, onCleanup } from "solid-js";
 import { marked } from "marked";
-import { commitAndPush, interruptSession, AgentEvent, ToolCallData, ToolResultData } from "../lib/ipc";
+import { commitAndPush, interruptSession, AgentEvent, ToolCallData, ToolResultData, AskUserData, UserAnswer, submitAnswers } from "../lib/ipc";
 import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
+import QuestionCard from "./QuestionCard";
 
 interface TimelineStep {
   type: "thinking" | "tool" | "text";
@@ -20,6 +21,7 @@ const CommitPushModal: Component<{
   const [status, setStatus] = createSignal<"running" | "completed" | "failed" | "interrupted">("running");
   const [steps, setSteps] = createSignal<TimelineStep[]>([]);
   const [expandedStep, setExpandedStep] = createSignal<number | null>(null);
+  const [currentAskUser, setCurrentAskUser] = createSignal<AskUserData | null>(null);
 
   const handleEvent = (event: AgentEvent) => {
     switch (event.event) {
@@ -71,6 +73,9 @@ const CommitPushModal: Component<{
           { type: "text", text: event.data.text },
         ]);
         break;
+      case "AskUser":
+        setCurrentAskUser(event.data as AskUserData);
+        break;
       case "Done":
         setStatus("completed");
         break;
@@ -92,6 +97,17 @@ const CommitPushModal: Component<{
       }, 800);
     } else {
       props.onClose();
+    }
+  };
+
+  const handleAnswers = async (answers: UserAnswer[]) => {
+    const ask = currentAskUser();
+    if (!ask) return;
+    try {
+      await submitAnswers(ask.sessionId, ask.toolId, answers);
+      setCurrentAskUser(null);
+    } catch (e) {
+      console.error("Failed to submit answers:", e);
     }
   };
 
@@ -178,6 +194,11 @@ const CommitPushModal: Component<{
           </div>
           {/* Timeline */}
           <div class="overflow-y-auto px-5 py-3 space-y-4">
+            <Show when={currentAskUser()}>
+              <div class="pb-2">
+                <QuestionCard ask={currentAskUser()!} onSubmit={handleAnswers} />
+              </div>
+            </Show>
             <For each={steps()}>
               {(step, i) => (
                 <>
