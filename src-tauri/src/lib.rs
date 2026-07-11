@@ -53,6 +53,7 @@ pub fn run() {
             commands::agent::check_plan_exists,
             commands::agent::set_workspace_config,
             commands::context::get_context_warning,
+            commands::enhance::enhance_prompt,
             commands::skills::list_skills,
             commands::skills::get_skill_catalog,
             commands::skills::get_skill_content,

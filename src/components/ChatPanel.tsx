@@ -20,6 +20,9 @@ import {
   checkPlanExists,
   normalizeSessionMode,
   pickFiles,
+  enhancePrompt,
+  getTasks,
+  type EnhancePromptContext,
   type ModeOrigin,
   type SessionMode,
   type ModeChangedData,
@@ -466,6 +469,7 @@ export const ChatPanel: Component<{
   const showToast = (msg: string) => setToastMessage(msg);
   const dismissToast = () => setToastMessage(null);
   const [showEditor, setShowEditor] = createSignal(false);
+  const [isEnhancing, setIsEnhancing] = createSignal(false);
   const [showGitModal, setShowGitModal] = createSignal(false);
   const [showCommitPushModal, setShowCommitPushModal] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
@@ -1267,6 +1271,56 @@ export const ChatPanel: Component<{
     }
   };
 
+  const enhanceHandler = async (text: string): Promise<string> => {
+    setIsEnhancing(true);
+    try {
+      const ctx = await buildEnhanceContext(text);
+      return await enhancePrompt(props.workspace, text, ctx);
+    } catch (e) {
+      showToast(t("enhance.error", String(e)));
+      throw e;
+    } finally {
+      setIsEnhancing(false);
+    }
+  };
+
+  const buildEnhanceContext = async (text: string): Promise<EnhancePromptContext> => {
+    // Last 10 user/assistant messages, exclude archived
+    const msgs = messages();
+    const recent = msgs
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .slice(-10)
+      .map((m) => ({ role: m.role, text: m.text.length > 500 ? m.text.slice(0, 500) + "..." : m.text }));
+
+    // Extract @-mentioned files from the current input
+    const mentionPattern = /@([\w./-]+)/g;
+    const mentioned: string[] = [];
+    let match;
+    while ((match = mentionPattern.exec(text)) !== null) {
+      mentioned.push(match[1]!);
+    }
+
+    // Active task titles (best-effort)
+    let activeTaskTitles: string[] = [];
+    try {
+      const tasks = await getTasks(props.workspace);
+      activeTaskTitles = tasks.filter((t) => t.status === "doing" || t.status === "todo").map((t) => t.title);
+    } catch {
+      // best-effort
+    }
+
+    // Project name from workspace path
+    const projectSummary = props.workspace.split("/").pop() ?? props.workspace;
+
+    return {
+      messages: recent,
+      mode: mode(),
+      mentionedFiles: mentioned,
+      activeTaskTitles,
+      projectSummary,
+    };
+  };
+
   const send = async () => {
     const text = input().trim();
     if (!text || isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input") return;
@@ -1832,6 +1886,26 @@ export const ChatPanel: Component<{
         <div class="w-full">
           <div class="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-2 p-2 focus-within:border-accent/60">
             <button
+              onClick={async () => {
+                const text = input();
+                if (!text.trim() || isEnhancing()) return;
+                try {
+                  const enhanced = await enhanceHandler(text);
+                  setInput(enhanced);
+                  setShowEditor(true);
+                } catch {
+                  // error is shown via toast in enhanceHandler
+                }
+              }}
+              disabled={isEnhancing() || isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input" || !input().trim()}
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
+              title={isEnhancing() ? t("enhance.enhancing") : t("enhance.button")}
+            >
+              <Show when={!isEnhancing()} fallback={<Icon name="loader" class="h-4 w-4 animate-spin" />}>
+                <Icon name="magic-rabbit" class="h-4 w-4" />
+              </Show>
+            </button>
+            <button
               onClick={() => setShowEditor(true)}
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
               class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
@@ -2095,6 +2169,13 @@ export const ChatPanel: Component<{
       <Show when={showEditor()}>
         <TextEditorModal
           initialText={input()}
+          onEnhance={async (text) => {
+            try {
+              return await enhanceHandler(text);
+            } catch {
+              return text; // fallback to original on error
+            }
+          }}
           onClose={(text) => {
             setInput(text);
             setShowEditor(false);

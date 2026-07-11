@@ -1,4 +1,4 @@
-import { onMount, onCleanup, type Component } from "solid-js";
+import { onMount, onCleanup, createSignal, Show, type Component } from "solid-js";
 import * as monaco from "monaco-editor";
 import { Icon } from "./Icon";
 import { t } from "../lib/grill-me";
@@ -6,14 +6,28 @@ import { t } from "../lib/grill-me";
 interface TextEditorModalProps {
   initialText: string;
   onClose: (text: string) => void;
+  onEnhance?: (text: string) => Promise<string>;
 }
 
 const TextEditorModal: Component<TextEditorModalProps> = (props) => {
   let editorContainer: HTMLDivElement | undefined;
   let editor: monaco.editor.IStandaloneCodeEditor | undefined;
+  const [isEnhancing, setIsEnhancing] = createSignal(false);
 
   const handleClose = () => {
     props.onClose(editor?.getValue() ?? props.initialText);
+  };
+
+  const handleEnhance = async () => {
+    if (!props.onEnhance || !editor) return;
+    setIsEnhancing(true);
+    try {
+      const result = await props.onEnhance(editor.getValue());
+      editor.setValue(result);
+      editor.focus();
+    } finally {
+      setIsEnhancing(false);
+    }
   };
 
   onMount(() => {
@@ -51,12 +65,26 @@ const TextEditorModal: Component<TextEditorModalProps> = (props) => {
       <div class="flex w-[80vw] h-[80vh] flex-col rounded-xl bg-surface-0 shadow-2xl">
         <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
           <span class="font-semibold text-ink">{t("editor.title")}</span>
-          <button
-            onClick={handleClose}
-            class="rounded-md p-1 text-ink-faint transition-colors hover:bg-surface-2 hover:text-ink"
-          >
-            <Icon name="x" class="h-4 w-4" />
-          </button>
+          <div class="flex items-center gap-1">
+            <Show when={props.onEnhance}>
+              <button
+                onClick={handleEnhance}
+                disabled={isEnhancing()}
+                class="rounded-md p-1 text-ink-faint transition-colors hover:bg-surface-2 hover:text-accent disabled:opacity-50"
+                title={isEnhancing() ? t("enhance.enhancing") : t("enhance.button")}
+              >
+                <Show when={!isEnhancing()} fallback={<Icon name="loader" class="h-4 w-4 animate-spin" />}>
+                  <Icon name="magic-rabbit" class="h-4 w-4" />
+                </Show>
+              </button>
+            </Show>
+            <button
+              onClick={handleClose}
+              class="rounded-md p-1 text-ink-faint transition-colors hover:bg-surface-2 hover:text-ink"
+            >
+              <Icon name="x" class="h-4 w-4" />
+            </button>
+          </div>
         </div>
         <div ref={editorContainer} class="flex-1 min-h-0" />
       </div>

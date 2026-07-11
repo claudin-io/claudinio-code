@@ -565,6 +565,22 @@ export function setTasks(workspace: string, tasks: TaskItem[]): Promise<void> {
   return invoke<void>("set_tasks", { workspace, tasks });
 }
 
+export interface EnhancePromptContext {
+  messages: Array<{ role: string; text: string }>;
+  mode: string;
+  mentionedFiles: string[];
+  activeTaskTitles: string[];
+  projectSummary: string;
+}
+
+export function enhancePrompt(
+  workspace: string,
+  prompt: string,
+  context: EnhancePromptContext
+): Promise<string> {
+  return invoke("enhance_prompt", { workspace, prompt, context });
+}
+
 // --- Skills ---
 
 export interface SkillEntry {
