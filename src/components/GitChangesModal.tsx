@@ -181,9 +181,12 @@ export const GitChangesModal: Component<{
         <div class="flex w-[60vw] max-h-[80vh] flex-col rounded-lg border border-border-subtle bg-surface-1 shadow-xl">
           {/* Header */}
           <div class="flex items-center justify-between border-b border-border-subtle px-4 py-3">
-            <h2 class="text-[13px] font-semibold text-ink">
-              {t("git.modalTitle")} <span class="text-ink-faint">({fileCount()})</span>
-            </h2>
+          <div class="flex items-center gap-1.5">
+              <Icon name="diff" class="h-4 w-4 text-ink-muted" />
+              <h2 class="text-[13px] font-semibold text-ink">
+                {t("git.modalTitle")} <span class="text-ink-faint">({fileCount()})</span>
+              </h2>
+            </div>
             <button
               onClick={props.onClose}
               class="rounded p-1 text-ink-faint hover:bg-surface-2 hover:text-ink"
@@ -241,7 +244,7 @@ export const GitChangesModal: Component<{
               disabled={committing_() || fileCount() === 0}
               class="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:bg-accent-hover disabled:opacity-30"
             >
-              <Icon name="git-commit" class="h-4 w-4" />
+              <Icon name="git-commit" class="h-4 w-4" stroke />
               {t("git.commitPush")}
             </button>
           </div>
