@@ -44,7 +44,7 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri` and SQLite db files
-      ignored: ["**/src-tauri/**", "**/.claudinio_index.db*"],
+      ignored: ["**/src-tauri/**", "**/.claudinio/index.db*"],
     },
   },
 

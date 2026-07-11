@@ -251,7 +251,7 @@ pub async fn send_message(
 
     let db_path: Option<String> = workspace_root
         .as_ref()
-        .map(|p| format!("{p}/.claudinio_index.db"));
+        .map(|p| format!("{p}/.claudinio/index.db"));
 
     // Capture the git HEAD at run start so finalize_plan can compute the
     // changed files / commits since this plan's work began. Best-effort:
@@ -715,7 +715,7 @@ pub async fn compact_session(
 
     let db_path: Option<String> = workspace_root
         .as_ref()
-        .map(|p| format!("{p}/.claudinio_index.db"));
+        .map(|p| format!("{p}/.claudinio/index.db"));
 
     let ctx = ToolContext {
         db_path,
@@ -914,7 +914,7 @@ pub async fn commit_and_push(
 
     let db_path: Option<String> = workspace_root
         .as_ref()
-        .map(|p| format!("{p}/.claudinio_index.db"));
+        .map(|p| format!("{p}/.claudinio/index.db"));
 
     let base_commit: Option<String> = workspace_root
         .as_ref()

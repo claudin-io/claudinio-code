@@ -23,7 +23,7 @@ pub struct IndexStatus {
     pub watcher_warning: Option<String>,
 }
 
-fn resolve_model_dir(app_handle: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+fn resolve_model_dir(app_handle: &tauri::AppHandle, workspace_root: &Path) -> Option<std::path::PathBuf> {
     let subdir = format!("models/{}", embeddings::model_cache_dirname());
     let model_file = embeddings::model_filename();
     if let Ok(r) = app_handle.path().resource_dir() {
@@ -38,17 +38,16 @@ fn resolve_model_dir(app_handle: &tauri::AppHandle) -> Option<std::path::PathBuf
             return Some(p);
         }
     }
-    let cache = cache_model_dir();
+    let cache = cache_model_dir(workspace_root);
     if cache.join(model_file).exists() {
         return Some(cache);
     }
     None
 }
 
-fn cache_model_dir() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| Path::new(".").to_path_buf())
-        .join("claudinio-code/models")
+fn cache_model_dir(workspace_root: &Path) -> std::path::PathBuf {
+    workspace_root
+        .join(".claudinio/models")
         .join(embeddings::model_cache_dirname())
 }
 
@@ -73,7 +72,7 @@ pub async fn open_workspace(
         });
     }
 
-    let db_path = Path::new(&path).join(".claudinio_index.db");
+    let db_path = Path::new(&path).join(".claudinio/index.db");
     let db = Arc::new(IndexDb::open(&db_path)?);
 
     let _ = app_handle.emit("index-progress", indexer::IndexProgress {
@@ -84,9 +83,11 @@ pub async fn open_workspace(
         workspace: path.clone(),
     });
 
+    let ws_root = Path::new(&path);
+
     // Download model to cache if not bundled
-    if resolve_model_dir(&app_handle).is_none() {
-        let cache = cache_model_dir();
+    if resolve_model_dir(&app_handle, ws_root).is_none() {
+        let cache = cache_model_dir(ws_root);
         if let Err(e) = embeddings::ensure_model_downloaded(&cache).await {
             eprintln!("[open_workspace] failed to download embedding model: {e}");
             let _ = app_handle.emit("index-progress", indexer::IndexProgress {
@@ -128,7 +129,8 @@ pub async fn open_workspace(
             // First load: spawn in background (parallel with scan).
             Some(spawn_blocking({
                 let app_handle = app_handle.clone();
-                move || match resolve_model_dir(&app_handle) {
+                let path = path.clone();
+                move || match resolve_model_dir(&app_handle, std::path::Path::new(&path)) {
                     Some(d) => match embeddings::load_shared(&d) {
                         Ok(shared) => Some(shared),
                         Err(e) => {
