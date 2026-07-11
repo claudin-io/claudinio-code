@@ -299,6 +299,11 @@ const dict: LocaleDict = {
   "onboarding.signIn.error": "Falha ao entrar. Tente novamente.",
   "onboarding.next": "Próximo",
   "onboarding.prev": "Anterior",
+
+  "contentViewer.openExternally": "Abrir Externamente",
+  "contentViewer.close": "Fechar",
+  "contentViewer.loading": "Carregando...",
+  "contentViewer.error": "Falha ao carregar arquivo",
 };
 
 export default dict;

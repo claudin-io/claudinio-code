@@ -58,6 +58,7 @@ import { ToastPill } from "./ToastPill";
 import { GitIndicator } from "./GitIndicator";
 import { GitChangesModal } from "./GitChangesModal";
 import CommitPushModal from "./CommitPushModal";
+import ContentViewerModal from "./ContentViewerModal";
 
 marked.use({
   renderer: {
@@ -69,6 +70,22 @@ marked.use({
         ? `<span class="code-lang-label">${lang}</span>`
         : "";
       return `<div class="code-block">${label}<pre class="hljs"><code>${highlighted}</code></pre></div>`;
+    },
+    link({ href, title, text }) {
+      const clean = href.split('?')[0].split('#')[0];
+      const ext = clean.split('.').pop()?.toLowerCase();
+      let dataType = 'file';
+      if (href.match(/^https?:\/\//)) {
+        dataType = 'external';
+      } else if (ext && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) {
+        dataType = 'image';
+      } else if (ext && ['mp4', 'webm', 'mov'].includes(ext)) {
+        dataType = 'video';
+      } else if (ext && ['mp3', 'wav', 'ogg', 'flac'].includes(ext)) {
+        dataType = 'audio';
+      }
+      const titleAttr = title ? ` title="${title}"` : '';
+      return `<a href="${href}"${titleAttr} data-link-type="${dataType}">${text}</a>`;
     },
   },
 });
@@ -490,6 +507,30 @@ export const ChatPanel: Component<{
   const [toastMessage, setToastMessage] = createSignal<string | null>(null);
   const showToast = (msg: string) => setToastMessage(msg);
   const dismissToast = () => setToastMessage(null);
+  const [viewerFile, setViewerFile] = createSignal<{ type: "text" | "image" | "video" | "audio"; path: string; title: string } | null>(null);
+
+  const handleLinkClick = (href: string, linkType: string) => {
+    if (linkType === "external") {
+      openExternalUrl(href);
+      return;
+    }
+
+    // Resolve relative paths against workspace root
+    let p = href.replace(/^file:\/\//, "");
+    if (!p.startsWith("/")) {
+      const ws = props.workspace.replace(/\\/g, "/").replace(/\/$/, "");
+      p = ws + "/" + p.replace(/^\.\//, "");
+    }
+    const title = p.replace(/\\/g, "/").split("/").pop() ?? p;
+    const typeMap: Record<string, "text" | "image" | "video" | "audio"> = {
+      external: "text",
+      file: "text",
+      image: "image",
+      video: "video",
+      audio: "audio",
+    };
+    setViewerFile({ type: typeMap[linkType] ?? "text", path: p, title });
+  };
   const [showEditor, setShowEditor] = createSignal(false);
   const [, setIsEnhancing] = createSignal(false);
   const [showGitModal, setShowGitModal] = createSignal(false);
@@ -1774,6 +1815,12 @@ export const ChatPanel: Component<{
                     <div
                       class="prose-content text-[13px] text-ink"
                       innerHTML={marked.parse(msg.text, { async: false }) as string}
+                      onClick={(e) => {
+                        const a = (e.target as HTMLElement).closest("a[data-link-type]");
+                        if (!a) return;
+                        e.preventDefault();
+                        handleLinkClick(a.getAttribute("href")!, a.getAttribute("data-link-type")!);
+                      }}
                     />
                   </Show>
                 </Show>
@@ -1816,6 +1863,12 @@ export const ChatPanel: Component<{
                     <div
                       class="prose-content text-[13px] leading-[1.6] text-ink"
                       innerHTML={marked.parse(balanceMarkdown(smoothLiveText.displayed()), { async: false }) as string}
+                      onClick={(e) => {
+                        const a = (e.target as HTMLElement).closest("a[data-link-type]");
+                        if (!a) return;
+                        e.preventDefault();
+                        handleLinkClick(a.getAttribute("href")!, a.getAttribute("data-link-type")!);
+                      }}
                     />
                   </div>
                 </Show>
@@ -2293,6 +2346,15 @@ export const ChatPanel: Component<{
           workspace={props.workspace}
           open={showCommitPushModal()}
           onClose={() => setShowCommitPushModal(false)}
+        />
+      </Show>
+      <Show when={viewerFile()}>
+        <ContentViewerModal
+          contentType={viewerFile()!.type}
+          filePath={viewerFile()!.path}
+          title={viewerFile()!.title}
+          workspace={props.workspace}
+          onClose={() => setViewerFile(null)}
         />
       </Show>
       <ToastPill message={toastMessage()} onDismiss={dismissToast} />
@@ -2783,6 +2845,14 @@ const SubagentModal: Component<{
               <div
                 class="prose-content text-[12px] leading-[1.6] text-ink-muted"
                 innerHTML={marked.parse(props.subagent.report!, { async: false }) as string}
+                onClick={(e) => {
+                  const a = (e.target as HTMLElement).closest("a[data-link-type]");
+                  if (!a) return;
+                  e.preventDefault();
+                  const href = a.getAttribute("href")!;
+                  const linkType = a.getAttribute("data-link-type")!;
+                  if (linkType === "external") openExternalUrl(href);
+                }}
               />
             </div>
           </Show>
@@ -2812,6 +2882,14 @@ const PhaseResultRow: Component<{ phaseResult: { phase: Phase; text: string } }>
       <div
         class="prose-content text-[12px] leading-[1.6] text-ink-muted"
         innerHTML={marked.parse(props.phaseResult.text, { async: false }) as string}
+        onClick={(e) => {
+          const a = (e.target as HTMLElement).closest("a[data-link-type]");
+          if (!a) return;
+          e.preventDefault();
+          const href = a.getAttribute("href")!;
+          const linkType = a.getAttribute("data-link-type")!;
+          if (linkType === "external") openExternalUrl(href);
+        }}
       />
     </div>
   );
@@ -2831,6 +2909,14 @@ const TextRow: Component<{ text: string }> = (props) => {
             : "prose-content text-[12px] leading-[1.6] text-ink-muted"
         }
         innerHTML={marked.parse(props.text, { async: false }) as string}
+        onClick={(e) => {
+          const a = (e.target as HTMLElement).closest("a[data-link-type]");
+          if (!a) return;
+          e.preventDefault();
+          const href = a.getAttribute("href")!;
+          const linkType = a.getAttribute("data-link-type")!;
+          if (linkType === "external") openExternalUrl(href);
+        }}
       />
     </div>
   );
