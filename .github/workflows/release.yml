@@ -144,25 +144,56 @@ jobs:
           echo "=== Collected release files ==="
           ls -lh release-files/
 
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          CURRENT_TAG="${{ github.ref_name }}"
+          PREV_TAG=""
+
+          # Find the previous version tag (sorted by version, descending)
+          while IFS= read -r tag; do
+            [ "$tag" = "$CURRENT_TAG" ] && continue
+            PREV_TAG="$tag"
+            break
+          done <<< "$(git tag --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$')"
+
+          NOTES_FILE="release-notes.md"
+          {
+            echo "## Claudinio Code v${{ steps.version.outputs.version }}"
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              echo "### Changes since $PREV_TAG"
+            else
+              echo "### Initial Release"
+            fi
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              git log "$PREV_TAG"..HEAD --oneline --no-merges --format="* %h %s"
+            else
+              git log HEAD --oneline --no-merges --format="* %h %s"
+            fi
+            echo ""
+            echo "### Downloads"
+            echo ""
+            echo "| Platform | File |"
+            echo "|----------|------|"
+            echo "| Windows (x64) | \`Claudinio-Code-Windows-x64-*.msi\` / \`*.exe\` |"
+            echo "| macOS (Apple Silicon) | \`Claudinio-Code-macOS-arm64-*.dmg\` |"
+            echo "| Linux (x64) | \`Claudinio-Code-Linux-x64-*.deb\` / \`*.AppImage\` |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "*Built with [Tauri v2](https://v2.tauri.app)*"
+          } > "$NOTES_FILE"
+          echo "notes_path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Claudinio Code v${{ steps.version.outputs.version }}
-          body: |
-            ## Claudinio Code v${{ steps.version.outputs.version }}
-
-            ### Downloads
-
-            | Platform | File |
-            |----------|------|
-            | Windows (x64) | `Claudinio-Code-Windows-x64-*.msi` / `*.exe` |
-            | macOS (Apple Silicon) | `Claudinio-Code-macOS-arm64-*.dmg` |
-            | Linux (x64) | `Claudinio-Code-Linux-x64-*.deb` / `*.AppImage` |
-
-            ---
-
-            *Built with [Tauri v2](https://v2.tauri.app)*
+          body_path: ${{ steps.notes.outputs.notes_path }}
           files: release-files/*
           draft: false
           prerelease: false
