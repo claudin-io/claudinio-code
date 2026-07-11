@@ -114,8 +114,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Determine version
+        with:
+          fetch-depth: 0
+          fetch-tags: true
         id: version
         shell: bash
         run: |
