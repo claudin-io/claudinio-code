@@ -51,6 +51,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
 import { setWorkspaceStatus } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
+import { GitIndicator } from "./GitIndicator";
+import { GitChangesModal } from "./GitChangesModal";
 
 marked.use({
   renderer: {
@@ -453,6 +455,7 @@ export const ChatPanel: Component<{
   const showToast = (msg: string) => setToastMessage(msg);
   const dismissToast = () => setToastMessage(null);
   const [showEditor, setShowEditor] = createSignal(false);
+  const [showGitModal, setShowGitModal] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
   // @-mention autocomplete state
   const [mentionQuery, setMentionQuery] = createSignal("");
@@ -1507,6 +1510,7 @@ export const ChatPanel: Component<{
             <Icon name="clock" class="h-3.5 w-3.5" />
             {t("chat.header.history")}
           </button>
+          <GitIndicator workspace={props.workspace} onShowChanges={() => setShowGitModal(true)} />
         </div>
 
         <Show when={showSessions()}>
@@ -2090,6 +2094,35 @@ export const ChatPanel: Component<{
                 el.setSelectionRange(pos, pos);
               }
             }, 0);
+          }}
+        />
+      </Show>
+      <Show when={showGitModal()}>
+        <GitChangesModal
+          workspace={props.workspace}
+          open={showGitModal()}
+          onClose={() => setShowGitModal(false)}
+          onCommitPush={async () => {
+            setShowGitModal(false);
+            await newSession(props.workspace);
+            const msg = t("git.autoCommitMessage");
+            setInput(msg);
+            setMessages((prev) => [
+              ...prev,
+              { role: "user", text: msg },
+            ]);
+            setCurrentSteps([]);
+            setThinkingStart(0);
+            setStatus("thinking");
+            scrollToBottom(true);
+            const result = await sendMessage(
+              props.workspace,
+              msg,
+              [],
+              handleEvent,
+              mode(),
+            );
+            setActiveSessionId(result.sessionId);
           }}
         />
       </Show>

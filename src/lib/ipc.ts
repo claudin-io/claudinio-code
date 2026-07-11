@@ -216,6 +216,34 @@ export interface DoneData {
   outputTokens: number;
 }
 
+// --- Git ---
+
+export interface ChangedFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface GitStatus {
+  hasChanges: boolean;
+  files: ChangedFile[];
+  totalAdditions: number;
+  totalDeletions: number;
+}
+
+export function gitStatus(workspace: string): Promise<GitStatus> {
+  return invoke<GitStatus>("git_status", { workspace });
+}
+
+export function gitFileDiff(workspace: string, path: string): Promise<string> {
+  return invoke<string>("git_file_diff", { workspace, path });
+}
+
+export function gitBranch(workspace: string): Promise<string> {
+  return invoke<string>("git_branch", { workspace });
+}
+
 export function sendMessage(
   workspace: string,
   message: string,
