@@ -90,7 +90,7 @@ export const GitIndicator: Component<{
       title={tooltip()}
       class={btnClass()}
     >
-      <Icon name="git-branch" class="h-3.5 w-3.5" />
+      <Icon name="diff" class="h-3.5 w-3.5" />
       <span>{label()}</span>
     </button>
   );

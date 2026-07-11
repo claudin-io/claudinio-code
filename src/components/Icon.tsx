@@ -143,7 +143,15 @@ const PATHS: Record<string, string[]> = {
     "M6 15a3 3 0 1 1 0 6a3 3 0 0 1 0-6z",
   ],
   "git-commit": [
-    "M18 6v2h-1V6h1zm-3 0v2h-1V6h1zm-3 6v-2h1v2h-1zm3 0v-2h1v2h-1zm3 5v-1h1v1h-1zm-1-2h-1v-1h1v1zm-1-1v-1h1v1h-1zm0 3v1h-1v-1h1zm-3-10v1h-1V7h1zm-8-4v14h2V3H6zm0 14H4v2h2v-2zm10-8V3h2v6h-2zm-2 8v-4h2v4h-2zm-5 0v-2h2v2H9zm-2-2v-2h2v2H7zm-1-2V7h2v4H6zm12 0V7h2v4h-2z",
+    "M8 5.75a2.25 2.25 0 1 1 0 4.5 2.25 2.25 0 0 1 0-4.5z",
+    "M8 10.75v3.5",
+    "M8 1.75v3.5",
+  ],
+  diff: [
+    "M12.561 4.354L9.647 1.44A1.5 1.5 0 0 0 8.586 1H4c-1.103 0-2 .897-2 2v10c0 1.103.897 2 2 2h7c1.103 0 2-.897 2-2V5.414c0-.395-.16-.78-.439-1.06",
+    "M12 13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h4.586c.132 0 .261.054.354.146l2.914 2.914A.5.5 0 0 1 12 5.414z",
+    "M10 6.5a.5.5 0 0 1-.5.5H8v1.5a.5.5 0 0 1-1 0V7H5.5a.5.5 0 0 1 0-1H7V4.5a.5.5 0 0 1 1 0V6h1.5a.5.5 0 0 1 .5.5",
+    "M10 11.5a.5.5 0 0 1-.5.5h-4a.5.5 0 0 1 0-1h4a.5.5 0 0 1 .5.5",
   ],
 };
 
@@ -154,6 +162,8 @@ const VIEWBOX: Partial<Record<IconName, string>> = {
   "thinking-face": "0 0 16 16",
   "construction-worker": "0 0 32 32",
   goal: "0 0 16 16",
+  "git-commit": "0 0 16 16",
+  diff: "0 0 16 16",
 };
 
 export const Icon: Component<{ name: IconName; class?: string; stroke?: boolean }> = (props) => {

@@ -152,7 +152,7 @@ const CommitPushModal: Component<{
           {/* Header */}
           <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
             <div class="flex items-center gap-2">
-              <Icon name="git-commit" class="h-4 w-4 text-ink-muted" />
+              <Icon name="git-commit" class="h-4 w-4 text-ink-muted" stroke />
               <span class="font-semibold text-[14px] text-ink">{t("commitPush.modalTitle")}</span>
               <span class={`rounded px-1.5 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
                 {statusLabel()}
