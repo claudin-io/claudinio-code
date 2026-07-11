@@ -55,4 +55,29 @@ export function defineMonacoThemes() {
       "scrollbarSlider.activeBackground": "#b8ae9e",
     },
   });
+
+  monaco.editor.defineTheme("claudinio-sepia", {
+    base: "vs",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": "#f4ecd8",
+      "editor.foreground": "#4a3728",
+      "editor.lineHighlightBackground": "#efe6cc",
+      "editor.selectionBackground": "#d4c594",
+      "editor.inactiveSelectionBackground": "#e0d5b0",
+      "editorCursor.foreground": "#c77d3a",
+      "editorLineNumber.foreground": "#b8a58c",
+      "editorLineNumber.activeForeground": "#8a7560",
+      "editorGutter.background": "#f4ecd8",
+      "editor.selectionHighlightBackground": "#d4c59444",
+      "diffEditor.insertedTextBackground": "#6b8c4222",
+      "diffEditor.removedTextBackground": "#c2553a22",
+      "diffEditor.insertedLineBackground": "#6b8c4211",
+      "diffEditor.removedLineBackground": "#c2553a11",
+      "scrollbarSlider.background": "#d4c59488",
+      "scrollbarSlider.hoverBackground": "#b8a56c88",
+      "scrollbarSlider.activeBackground": "#b8a56c",
+    },
+  });
 }

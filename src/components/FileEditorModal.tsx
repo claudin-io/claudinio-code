@@ -4,6 +4,7 @@ import { Icon } from "./Icon";
 import { t } from "../lib/grill-me";
 import { readFile, writeFile } from "../lib/ipc";
 import { defineMonacoThemes } from "../lib/monacoThemes";
+import { theme } from "../lib/theme";
 
 interface FileEditorModalProps {
   filePath: string;
@@ -106,10 +107,19 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
     if (!mounted) return;
     setOriginalContent(content);
 
+    const monacoTheme = (() => {
+      switch (theme()) {
+        case "sepia": return "claudinio-sepia";
+        case "light": return "claudinio-light";
+        case "dark":
+        default:     return "claudinio-dark";
+      }
+    })();
+
     editor = monaco.editor.create(editorContainer, {
       value: content,
       language: language(),
-      theme: "claudinio-dark",
+      theme: monacoTheme,
       automaticLayout: true,
       minimap: { enabled: true },
       scrollBeyondLastLine: false,

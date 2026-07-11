@@ -46,6 +46,24 @@
   color-scheme: light;
 }
 
+[data-theme="sepia"] {
+  --surface-0: #f4ecd8;
+  --surface-1: #efe6cc;
+  --surface-2: #e8ddbc;
+  --surface-3: #dfd2a8;
+  --border-subtle: #d4c594;
+  --border-strong: #b8a56c;
+  --ink: #4a3728;
+  --ink-muted: #8a7560;
+  --ink-faint: #b8a58c;
+  --accent: #c77d3a;
+  --accent-hover: #d98d4a;
+  --accent-ink: #fff;
+  --success: #6b8c42;
+  --danger: #c2553a;
+  color-scheme: light;
+}
+
 @theme inline {
   --color-surface-0: var(--surface-0);
   --color-surface-1: var(--surface-1);

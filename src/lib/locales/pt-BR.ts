@@ -54,6 +54,7 @@ const dict: LocaleDict = {
   "app.config.default": "padrão",
   "app.config.sourceWorkspace": "Workspace",
   "app.config.sourceLocal": "Local",
+  "app.config.theme": "Tema",
   "app.config.overrideBaseUrl": "URL Anthropic (Override)",
   "app.config.overrideBaseUrlHint": "Substitui o endpoint da API apenas para chamadas ao LLM. Deixe vazio para usar o padrão.",
   "app.config.overrideApiKey": "Chave API (Override)",
@@ -302,6 +303,12 @@ const dict: LocaleDict = {
   "onboarding.signIn.error": "Falha ao entrar. Tente novamente.",
   "onboarding.next": "Próximo",
   "onboarding.prev": "Anterior",
+
+  // ── Theme ─────────────────────────────────────────────────────────
+  "theme.system": "Sistema",
+  "theme.dark": "Escuro",
+  "theme.light": "Claro",
+  "theme.sepia": "Sépia",
 
   "contentViewer.openExternally": "Abrir Externamente",
   "contentViewer.close": "Fechar",
