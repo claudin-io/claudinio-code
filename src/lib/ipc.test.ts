@@ -798,7 +798,7 @@ describe("openWorkspace", () => {
   });
 
   it("calls invoke with open_workspace, path and progressChannel, returns IndexStatus", async () => {
-    const fake: import("./ipc").IndexStatus = { status: "ready", filesCount: 10, symbolsCount: 100 };
+    const fake: import("./ipc").IndexStatus = { status: "ready", filesCount: 10, symbolsCount: 100, embeddingsCount: 95 };
     mockInvokeFor(fake);
     const onProgress = vi.fn();
     const { openWorkspace } = await import("./ipc");
@@ -812,7 +812,7 @@ describe("openWorkspace", () => {
   });
 
   it("defaults onProgress to a noop when omitted", async () => {
-    mockInvokeFor({ status: "indexing", filesCount: 0, symbolsCount: 0 });
+    mockInvokeFor({ status: "indexing", filesCount: 0, symbolsCount: 0, embeddingsCount: 0 });
     const { openWorkspace } = await import("./ipc");
     // Should not throw when no callback provided
     await expect(openWorkspace("/ws")).resolves.not.toThrow();

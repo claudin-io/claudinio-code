@@ -406,6 +406,7 @@ export interface IndexStatus {
   status: string;
   filesCount: number;
   symbolsCount: number;
+  embeddingsCount: number;
   watcherWarning?: string;
 }
 
