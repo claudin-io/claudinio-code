@@ -25,6 +25,117 @@ pub fn compute_hash(content: &str) -> String {
     format!("{:x}", xxh3_64(content.as_bytes()))
 }
 
+/// Flat i18n key -> user-visible copy, merged across locale files.
+pub type I18nDict = std::collections::HashMap<String, String>;
+
+/// Whether a file looks like a localization resource, across ecosystems:
+/// web (locales/i18n/l10n/translations/lang dirs with ts/js/json), Flutter
+/// (.arb), iOS (.strings), Android (res/values*/strings.xml).
+fn is_locale_resource(path_lower: &str) -> bool {
+    if path_lower.ends_with(".arb") || path_lower.ends_with(".strings") {
+        return true;
+    }
+    if path_lower.ends_with("strings.xml") && path_lower.contains("/values") {
+        return true;
+    }
+    let in_locale_dir = ["/locales/", "/locale/", "/i18n/", "/l10n/", "/translations/", "/lang/"]
+        .iter()
+        .any(|seg| path_lower.contains(seg));
+    in_locale_dir
+        && (path_lower.ends_with(".ts")
+            || path_lower.ends_with(".tsx")
+            || path_lower.ends_with(".js")
+            || path_lower.ends_with(".json"))
+}
+
+/// Flatten nested JSON (i18next-style) into dotted keys.
+fn flatten_json_into(prefix: &str, value: &serde_json::Value, dict: &mut I18nDict) {
+    match value {
+        serde_json::Value::String(s) => {
+            if !prefix.is_empty() && !s.trim().is_empty() {
+                dict.insert(prefix.to_string(), s.clone());
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                flatten_json_into(&key, v, dict);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect translation strings from locale resource files. Components
+/// reference copy through keys like `t("onboarding.features.agent.title")`,
+/// so without this the user-visible vocabulary never reaches their embeddings
+/// and NL queries about visible text can't find the component.
+///
+/// English files are merged last so their values win — the embedding model
+/// is English-centric — but keys that only exist in other locales still land.
+pub fn load_i18n_dict(root: &str) -> I18nDict {
+    let mut locale_files: Vec<String> = Vec::new();
+    let walker = ignore::WalkBuilder::new(root).git_ignore(true).build();
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(path_str) = path.to_str() else { continue };
+        if is_locale_resource(&path_str.to_lowercase()) {
+            locale_files.push(path_str.to_string());
+        }
+    }
+    // Non-English first, English last (its inserts overwrite). English markers
+    // cover "en-US.ts", "en.json", "app_en.arb", iOS "en.lproj" and Android's
+    // default "values/strings.xml".
+    locale_files.sort_by_key(|p| {
+        let lower = p.to_lowercase();
+        let base = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+        base.starts_with("en")
+            || base.contains("_en.")
+            || base.contains("-en.")
+            || lower.contains("/en.lproj/")
+            || lower.ends_with("/values/strings.xml")
+    });
+
+    // `"key": "value"` (TS/JS dicts) and `"key" = "value";` (iOS .strings).
+    let kv_re = regex::Regex::new(r#""([A-Za-z0-9_.\-]+)"\s*[:=]\s*"((?:[^"\\]|\\.)*)""#)
+        .expect("static regex");
+    // Android `<string name="key">value</string>`.
+    let xml_re = regex::Regex::new(r#"<string\s+name="([A-Za-z0-9_.\-]+)"[^>]*>([^<]*)</string>"#)
+        .expect("static regex");
+
+    let mut dict = I18nDict::new();
+    for file in locale_files {
+        let Ok(content) = std::fs::read_to_string(&file) else { continue };
+        let lower = file.to_lowercase();
+        if lower.ends_with(".json") || lower.ends_with(".arb") {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                flatten_json_into("", &parsed, &mut dict);
+                continue;
+            }
+        }
+        if lower.ends_with(".xml") {
+            for cap in xml_re.captures_iter(&content) {
+                let value = cap[2].trim();
+                if !value.is_empty() {
+                    dict.insert(cap[1].to_string(), value.to_string());
+                }
+            }
+            continue;
+        }
+        for cap in kv_re.captures_iter(&content) {
+            let key = cap[1].to_string();
+            let value = cap[2].replace("\\\"", "\"").replace("\\n", " ");
+            if !value.trim().is_empty() {
+                dict.insert(key, value);
+            }
+        }
+    }
+    dict
+}
+
 /// Symbol kinds excluded from the embedding index: they carry no retrieval
 /// signal and crowd out real results. `import` is our own synthesized kind
 /// (see parser::IMPORT_KINDS); the others are TS/JS, C/C++/C#, and Kotlin/
@@ -63,6 +174,7 @@ pub fn index_file(
     path: &str,
     content: &str,
     mut embedder: Option<&mut CodeEmbedder>,
+    i18n: Option<&I18nDict>,
 ) -> Result<ParseResult, String> {
     let lang = parser::detect_language(path).unwrap_or("unknown");
     let hash = compute_hash(content);
@@ -114,7 +226,7 @@ pub fn index_file(
     db.update_fts_for_file(file_id)?;
 
     if let Some(ref mut emb) = embedder {
-        let chunks = collect_embedding_chunks(&parse_result.symbols, &symbol_ids);
+        let chunks = collect_embedding_chunks(&parse_result.symbols, &symbol_ids, i18n);
         encode_and_store_batched(db, emb, &chunks);
     }
 
@@ -127,6 +239,7 @@ pub fn index_file(
 fn collect_embedding_chunks(
     symbols: &[parser::ParsedSymbol],
     symbol_ids: &[(String, i64)],
+    i18n: Option<&I18nDict>,
 ) -> Vec<(i64, EmbedChunk)> {
     let mut out: Vec<(i64, EmbedChunk)> = Vec::new();
     for (sym, (_, id)) in symbols.iter().zip(symbol_ids.iter()) {
@@ -148,6 +261,7 @@ fn collect_embedding_chunks(
             sym.body_text.as_deref(),
             sym.start_line,
             sym.end_line,
+            i18n,
         ) {
             out.push((*id, chunk));
         }
@@ -160,6 +274,7 @@ pub fn index_doc_file(
     path: &str,
     content: &str,
     mut embedder: Option<&mut CodeEmbedder>,
+    i18n: Option<&I18nDict>,
 ) -> Result<usize, String> {
     let lang = parser::detect_doc_language(path).unwrap_or("markdown");
     let hash = compute_hash(content);
@@ -193,7 +308,7 @@ pub fn index_doc_file(
     if let Some(ref mut emb) = embedder {
         // Doc symbols carry no doc_comment (the body is the content), so the
         // shared chunk collector works for them unchanged.
-        let chunks = collect_embedding_chunks(&doc_symbols, &symbol_ids);
+        let chunks = collect_embedding_chunks(&doc_symbols, &symbol_ids, i18n);
         encode_and_store_batched(db, emb, &chunks);
     }
 
@@ -226,6 +341,11 @@ pub fn scan_workspace(
     let mut total_files = 0i64;
     let mut total_symbols = 0i64;
     let mut counted = 0i64;
+
+    // Resolved once per scan; empty when the project has no locale resources,
+    // in which case chunk texts are unchanged.
+    let i18n_dict = load_i18n_dict(root);
+    let i18n = if i18n_dict.is_empty() { None } else { Some(&i18n_dict) };
 
     let walker = ignore::WalkBuilder::new(root)
         .git_ignore(true)
@@ -267,7 +387,7 @@ pub fn scan_workspace(
             Err(_) => continue,
         };
 
-        match index_file(db, path_str, &content, embedder.as_deref_mut()) {
+        match index_file(db, path_str, &content, embedder.as_deref_mut(), i18n) {
             Ok(parse_result) => {
                 total_files += 1;
                 total_symbols += parse_result.symbols.len() as i64;
@@ -340,7 +460,7 @@ pub fn scan_workspace(
             Err(_) => continue,
         };
 
-        match index_doc_file(db, path_str, &content, embedder.as_deref_mut()) {
+        match index_doc_file(db, path_str, &content, embedder.as_deref_mut(), i18n) {
             Ok(num_symbols) => {
                 total_files += 1;
                 total_symbols += num_symbols as i64;
@@ -389,6 +509,8 @@ pub fn generate_all_embeddings(
     let mut processed = 0i64;
     let mut total_embeddings = 0i64;
     let mut failed = 0i64;
+    let i18n_dict = load_i18n_dict(workspace);
+    let i18n = if i18n_dict.is_empty() { None } else { Some(&i18n_dict) };
 
     for file in &files {
         processed += 1;
@@ -439,6 +561,7 @@ pub fn generate_all_embeddings(
                     sym.body_text.as_deref(),
                     sym.start_line,
                     sym.end_line,
+                    i18n,
                 )
                 .into_iter()
                 .map(move |c| (sym, c))
@@ -506,7 +629,12 @@ pub fn generate_all_embeddings(
     Ok((processed, total_embeddings))
 }
 
-pub fn reindex_file(db: &IndexDb, path: &str, embedder: Option<&mut CodeEmbedder>) -> Result<Option<ParseResult>, String> {
+pub fn reindex_file(
+    db: &IndexDb,
+    path: &str,
+    embedder: Option<&mut CodeEmbedder>,
+    workspace_root: Option<&str>,
+) -> Result<Option<ParseResult>, String> {
     let existing = db.file_by_path(path)?;
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -526,9 +654,14 @@ pub fn reindex_file(db: &IndexDb, path: &str, embedder: Option<&mut CodeEmbedder
         }
     }
 
+    // Cheap per-event reload (locale resources are few and small), so copy
+    // edits are reflected without waiting for a full rescan.
+    let i18n_dict = workspace_root.map(load_i18n_dict).unwrap_or_default();
+    let i18n = if i18n_dict.is_empty() { None } else { Some(&i18n_dict) };
+
     // Doc files use the doc-specific indexer instead of tree-sitter parsing
     if path.ends_with(".md") || path.ends_with(".mdx") || path.ends_with(".txt") {
-        let _ = index_doc_file(db, path, &content, embedder);
+        let _ = index_doc_file(db, path, &content, embedder, i18n);
         return Ok(Some(ParseResult {
             language: "markdown".into(),
             symbols: vec![],
@@ -537,8 +670,37 @@ pub fn reindex_file(db: &IndexDb, path: &str, embedder: Option<&mut CodeEmbedder
         }));
     }
 
-    let result = index_file(db, path, &content, embedder).ok();
+    let result = index_file(db, path, &content, embedder, i18n).ok();
     Ok(result)
+}
+
+#[cfg(test)]
+mod i18n_dict_tests {
+    use super::*;
+
+    #[test]
+    fn locale_resource_detection_across_ecosystems() {
+        assert!(is_locale_resource("src/lib/locales/en-us.ts"));
+        assert!(is_locale_resource("public/i18n/pt-br.json"));
+        assert!(is_locale_resource("lib/l10n/app_en.arb"));
+        assert!(is_locale_resource("ios/en.lproj/localizable.strings"));
+        assert!(is_locale_resource("android/app/src/main/res/values/strings.xml"));
+        assert!(is_locale_resource("android/app/src/main/res/values-pt/strings.xml"));
+        assert!(!is_locale_resource("src/components/chatpanel.tsx"));
+        assert!(!is_locale_resource("res/layout/strings.xml.bak"));
+        assert!(!is_locale_resource("src/lib/locales/readme.md"));
+    }
+
+    #[test]
+    fn flatten_nested_json_to_dotted_keys() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"chat":{"input":{"placeholder":"Type here"}},"title":"App"}"#)
+                .unwrap();
+        let mut dict = I18nDict::new();
+        flatten_json_into("", &v, &mut dict);
+        assert_eq!(dict.get("chat.input.placeholder").map(String::as_str), Some("Type here"));
+        assert_eq!(dict.get("title").map(String::as_str), Some("App"));
+    }
 }
 
 #[cfg(test)]

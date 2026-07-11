@@ -128,8 +128,11 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "ini" | "cfg" => Some("ini"),
         // Java
         "java" => Some("java"),
-        // JavaScript (also handled by typescript grammar)
-        "js" | "jsx" | "mjs" | "cjs" => Some("typescript"),
+        // JavaScript (also handled by typescript grammar); JSX needs the TSX
+        // grammar — the plain TS grammar turns JSX into ERROR nodes and the
+        // components' bodies become invisible to the index.
+        "js" | "mjs" | "cjs" => Some("typescript"),
+        "jsx" => Some("tsx"),
         // JSON
         "json" | "jsonc" => Some("json"),
         // Julia
@@ -201,8 +204,9 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "swift" => Some("swift"),
         // SystemVerilog
         "sv" | "svh" => Some("systemverilog"),
-        // TypeScript / TSX
-        "ts" | "tsx" => Some("typescript"),
+        // TypeScript / TSX (separate grammars: `<T>` casts parse differently)
+        "ts" => Some("typescript"),
+        "tsx" => Some("tsx"),
         // Verilog
         "v" | "vh" => Some("verilog"),
         // VHDL
@@ -413,6 +417,7 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         "swift" => Ok(tree_sitter_swift::LANGUAGE.into()),
         "tsquery" => Ok(tree_sitter_tsquery::LANGUAGE.into()),
         "typescript" => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Ok(tree_sitter_typescript::LANGUAGE_TSX.into()),
         "verilog" => Ok(tree_sitter_verilog::LANGUAGE.into()),
         "vhdl" => Ok(tree_sitter_vhdl::LANGUAGE.into()),
         "xml" => Ok(tree_sitter_xml::LANGUAGE_XML.into()),
@@ -986,6 +991,45 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                     end_line: el,
                     end_col: end.column as i64 + 1,
                 });
+            }
+        }
+
+        // --- Function-valued variable declarations (JS/TS/etc.) ---
+        // `const OnboardingWizard = (props) => {...}` is a variable_declarator,
+        // not a function_declaration — but it IS the component/function. Without
+        // this, arrow-function components produce no symbol at all and their
+        // bodies are invisible to the embedding index.
+        if kind == "variable_declarator" {
+            let value_is_function = node
+                .child_by_field_name("value")
+                .map(|v| {
+                    matches!(
+                        v.kind(),
+                        "arrow_function" | "function_expression" | "function" | "generator_function"
+                    )
+                })
+                .unwrap_or(false);
+            if value_is_function {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
+                        let start = node.start_position();
+                        let end = node.end_position();
+                        let sl = start.row as i64 + 1;
+                        let el = end.row as i64 + 1;
+                        symbols.push(ParsedSymbol {
+                            name: name.trim().to_string(),
+                            kind: "function_declaration".into(),
+                            parent_context: collect_parent_context(&node, content),
+                            signature: Some(get_node_text(content, &node, 80)),
+                            doc_comment: extract_doc_comment(content, sl),
+                            body_text: extract_body_text(content, sl, el),
+                            start_line: sl,
+                            start_col: start.column as i64 + 1,
+                            end_line: el,
+                            end_col: end.column as i64 + 1,
+                        });
+                    }
+                }
             }
         }
 

@@ -115,7 +115,7 @@ impl FileWatcher {
                         }));
 
                         let mut emb = embedder.as_ref().and_then(|e| e.lock().ok());
-                        match indexer::reindex_file(&db, path_str, emb.as_deref_mut()) {
+                        match indexer::reindex_file(&db, path_str, emb.as_deref_mut(), Some(&ws)) {
                             Ok(Some(result)) => {
                                 let _ = h.emit("index-progress", serde_json::json!({
                                     "status": "reindexed",
