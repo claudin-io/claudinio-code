@@ -16,6 +16,9 @@ pub struct FileRecord {
     pub hash: Option<String>,
     pub last_modified: i64,
     pub size: i64,
+    /// Content hash the symbol_embeddings for this file were last generated
+    /// from. Compared against `hash` to skip re-embedding unchanged files.
+    pub embed_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,7 +64,7 @@ pub struct SemanticSearchResult {
 
 /// Bump when the index format changes (schema, embedding layout, ignore
 /// rules). A mismatched on-disk index is deleted and rebuilt from scratch.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Minimum final score (cosine similarity + lexical boost, clamped to
 /// [0, 1]) for a semantic search hit to be returned at all. Calibrated
@@ -206,7 +209,8 @@ impl IndexDb {
                 language TEXT,
                 hash TEXT,
                 last_modified INTEGER,
-                size INTEGER
+                size INTEGER,
+                embed_hash TEXT
             );
 
             CREATE TABLE IF NOT EXISTS symbols (
@@ -296,7 +300,7 @@ impl IndexDb {
     pub fn all_files(&self) -> Result<Vec<FileRecord>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, path, language, hash, last_modified, size FROM files ORDER BY id")
+            .prepare("SELECT id, path, language, hash, last_modified, size, embed_hash FROM files ORDER BY id")
             .map_err(|e| format!("prepare: {e}"))?;
         let results = stmt
             .query_map([], |row| {
@@ -307,12 +311,25 @@ impl IndexDb {
                     hash: row.get(3)?,
                     last_modified: row.get(4)?,
                     size: row.get(5)?,
+                    embed_hash: row.get(6)?,
                 })
             })
             .map_err(|e| format!("query: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(results)
+    }
+
+    /// Records that `symbol_embeddings` for this file now reflect `hash`, so a
+    /// future scan can skip re-embedding it while the content stays the same.
+    pub fn set_embed_hash(&self, file_id: i64, hash: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE files SET embed_hash = ?1 WHERE id = ?2",
+            params![hash, file_id],
+        )
+        .map_err(|e| format!("set embed_hash: {e}"))?;
+        Ok(())
     }
 
     /// Remove file rows (and, via cascade, their symbols/relations/embeddings)
@@ -349,7 +366,7 @@ impl IndexDb {
     pub fn file_by_path(&self, path: &str) -> Result<Option<FileRecord>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, path, language, hash, last_modified, size FROM files WHERE path = ?1")
+            .prepare("SELECT id, path, language, hash, last_modified, size, embed_hash FROM files WHERE path = ?1")
             .map_err(|e| format!("prepare: {e}"))?;
         let result = stmt
             .query_row(params![path], |row| {
@@ -360,6 +377,7 @@ impl IndexDb {
                     hash: row.get(3)?,
                     last_modified: row.get(4)?,
                     size: row.get(5)?,
+                    embed_hash: row.get(6)?,
                 })
             })
             .ok();
@@ -801,5 +819,42 @@ mod tests {
             .search_by_embedding("totally different query", &query_vec, 10)
             .expect("search_by_embedding");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn embed_hash_tracks_content_independently_of_re_scan() {
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db
+            .upsert_file("src/foo.ts", "typescript", "hash-v1", 0, 0)
+            .expect("upsert file");
+
+        // No embed_hash yet — file has never been embedded.
+        let file = db.file_by_path("src/foo.ts").unwrap().unwrap();
+        assert_eq!(file.embed_hash, None);
+        assert_ne!(file.hash, file.embed_hash);
+
+        // Embedding generation records the hash it embedded from.
+        db.set_embed_hash(file_id, "hash-v1").expect("set embed_hash");
+        let file = db.file_by_path("src/foo.ts").unwrap().unwrap();
+        assert_eq!(file.embed_hash.as_deref(), Some("hash-v1"));
+        assert_eq!(file.hash, file.embed_hash, "hash == embed_hash means the file is up to date");
+
+        // Re-scanning with unchanged content re-upserts the same hash and
+        // must NOT disturb embed_hash — this is what lets a second
+        // generate_all_embeddings pass skip the file entirely.
+        db.upsert_file("src/foo.ts", "typescript", "hash-v1", 1, 0)
+            .expect("re-upsert unchanged file");
+        let file = db.file_by_path("src/foo.ts").unwrap().unwrap();
+        assert_eq!(file.embed_hash.as_deref(), Some("hash-v1"));
+        assert_eq!(file.hash, file.embed_hash);
+
+        // Editing the file changes hash but leaves embed_hash pointing at
+        // the stale content, so the mismatch correctly flags it as pending.
+        db.upsert_file("src/foo.ts", "typescript", "hash-v2", 2, 0)
+            .expect("re-upsert changed file");
+        let file = db.file_by_path("src/foo.ts").unwrap().unwrap();
+        assert_eq!(file.hash.as_deref(), Some("hash-v2"));
+        assert_eq!(file.embed_hash.as_deref(), Some("hash-v1"));
+        assert_ne!(file.hash, file.embed_hash, "content changed — embedding is now stale");
     }
 }
