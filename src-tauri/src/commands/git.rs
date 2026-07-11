@@ -9,6 +9,8 @@ pub struct ChangedFile {
     pub status: String,
     pub additions: u32,
     pub deletions: u32,
+    #[serde(default)]
+    pub staged: bool,
 }
 
 #[derive(Serialize)]
@@ -119,11 +121,25 @@ pub fn git_status(workspace: String) -> Result<GitStatus, String> {
         total_deletions += del;
 
         files.push(ChangedFile {
-            path: file_path,
+            path: file_path.clone(),
             status: status.to_string(),
             additions: add,
             deletions: del,
+            staged: false,
         });
+    }
+
+    // Get staged file paths from --cached diff
+    let staged_output = run_git(&workspace, &["diff", "--cached", "--name-only"]).unwrap_or_default();
+    let staged_paths: std::collections::HashSet<String> = staged_output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect();
+
+    for file in &mut files {
+        if staged_paths.contains(&file.path) {
+            file.staged = true;
+        }
     }
 
     Ok(GitStatus {
@@ -135,7 +151,16 @@ pub fn git_status(workspace: String) -> Result<GitStatus, String> {
 }
 
 #[tauri::command]
-pub fn git_file_diff(workspace: String, path: String) -> Result<String, String> {
+pub fn git_file_diff(workspace: String, path: String, staged: Option<bool>) -> Result<String, String> {
+    // If staged is true, return the cached diff only
+    if staged.unwrap_or(false) {
+        let cached = run_git(&workspace, &["diff", "--cached", "--", &path]).unwrap_or_default();
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        // If nothing staged, fall through to the fallback logic below
+    }
+
     // Try unstaged diff first
     let unstaged = run_git(&workspace, &["diff", "--", &path]).unwrap_or_default();
     if !unstaged.is_empty() {
@@ -195,4 +220,86 @@ pub fn git_file_diff(workspace: String, path: String) -> Result<String, String> 
 pub fn git_branch(workspace: String) -> Result<String, String> {
     let branch = run_git(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     Ok(branch.trim().to_string())
+}
+
+#[tauri::command]
+pub fn git_stage_file(workspace: String, path: String) -> Result<(), String> {
+    run_git(&workspace, &["add", "--", &path])?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage_file(workspace: String, path: String) -> Result<(), String> {
+    run_git(&workspace, &["reset", "HEAD", "--", &path])?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_discard_file(workspace: String, path: String) -> Result<(), String> {
+    // Check if file is staged. If so, run git reset HEAD -- <path> first.
+    let staged = run_git(&workspace, &["diff", "--cached", "--name-only", "--", &path]).unwrap_or_default();
+    if !staged.trim().is_empty() {
+        run_git(&workspace, &["reset", "HEAD", "--", &path])?;
+    }
+    // Also discard working tree changes (git checkout) OR delete if untracked
+    let porcelain = run_git(&workspace, &["status", "--porcelain", "--", &path]).unwrap_or_default();
+    if porcelain.starts_with("??") {
+        // Untracked file — delete from disk
+        let full_path = std::path::Path::new(&workspace).join(&path);
+        let _ = std::fs::remove_file(&full_path);
+    } else {
+        let _ = run_git(&workspace, &["checkout", "--", &path]);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_stage_hunk(workspace: String, path: String, hunk_text: String) -> Result<(), String> {
+    // Build a proper patch and apply to index
+    // Get the diff header from git diff
+    let header = run_git(&workspace, &["diff", "--", &path]).unwrap_or_default();
+    let diff_header: String = header.lines()
+        .take_while(|l| !l.starts_with("@@"))
+        .chain(std::iter::once(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    
+    let patch = format!("{}\n{}", diff_header, hunk_text);
+    
+    let temp = std::env::temp_dir().join(format!("hunk_{}.patch", std::process::id()));
+    std::fs::write(&temp, &patch).map_err(|e| format!("Failed to write patch: {e}"))?;
+    let result = run_git(&workspace, &["apply", "--cached", temp.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&temp);
+    result.map(|_| ())
+}
+
+#[tauri::command]
+pub fn git_unstage_hunk(workspace: String, path: String, hunk_text: String) -> Result<(), String> {
+    // Same as stage but with --reverse
+    let header = run_git(&workspace, &["diff", "--cached", "--", &path]).unwrap_or_default();
+    let diff_header: String = header.lines()
+        .take_while(|l| !l.starts_with("@@"))
+        .chain(std::iter::once(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    
+    let patch = format!("{}\n{}", diff_header, hunk_text);
+    
+    let temp = std::env::temp_dir().join(format!("hunk_{}.patch", std::process::id()));
+    std::fs::write(&temp, &patch).map_err(|e| format!("Failed to write patch: {e}"))?;
+    let result = run_git(&workspace, &["apply", "--cached", "--reverse", temp.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&temp);
+    result.map(|_| ())
+}
+
+#[tauri::command]
+pub fn git_stage_all(workspace: String) -> Result<(), String> {
+    run_git(&workspace, &["add", "-A"])?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage_all(workspace: String) -> Result<(), String> {
+    run_git(&workspace, &["reset", "HEAD"])?;
+    Ok(())
 }

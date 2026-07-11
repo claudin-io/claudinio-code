@@ -76,6 +76,8 @@ pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel
             || lower == "git commit"
             || lower.starts_with("git push ")
             || lower == "git push"
+            || lower.starts_with("git pull ")
+            || lower == "git pull"
         {
             return PermissionLevel::Auto;
         }
@@ -231,6 +233,27 @@ mod tests {
         assert!(matches!(
             bash_permission("git push", true),
             PermissionLevel::Auto
+        ));
+    }
+
+    #[test]
+    fn auto_approve_git_pull_with_flag() {
+        assert!(matches!(
+            bash_permission("git pull origin main", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git pull --rebase", true),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git pull", true),
+            PermissionLevel::Auto
+        ));
+        // Without the flag, git pull requires approval.
+        assert!(matches!(
+            bash_permission("git pull", false),
+            PermissionLevel::RequiresApproval
         ));
     }
 
