@@ -2,7 +2,6 @@ node_modules
 dist
 src-tauri/target
 .DS_Store
-.claudinio_index.db*
 .claudinio/
 .serena/
 coverage/
