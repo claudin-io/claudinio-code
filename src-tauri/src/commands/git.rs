@@ -196,3 +196,12 @@ pub fn git_branch(workspace: String) -> Result<String, String> {
     let branch = run_git(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     Ok(branch.trim().to_string())
 }
+
+#[tauri::command]
+pub fn check_git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}

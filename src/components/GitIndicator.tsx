@@ -1,5 +1,5 @@
-import { createSignal, createMemo, onCleanup, type Component } from "solid-js";
-import { gitStatus, gitBranch, type GitStatus } from "../lib/ipc";
+import { createSignal, createMemo, createEffect, onCleanup, Show, type Component } from "solid-js";
+import { gitStatus, gitBranch, checkGitAvailable, type GitStatus } from "../lib/ipc";
 import { Icon } from "./Icon";
 import { t } from "../lib/grill-me";
 
@@ -10,6 +10,7 @@ export const GitIndicator: Component<{
   const [status, setStatus] = createSignal<GitStatus | null>(null);
   const [branch, setBranch] = createSignal<string>("");
   const [loading, setLoading] = createSignal(true);
+  const [gitAvailable, setGitAvailable] = createSignal<boolean | null>(null);
 
   const refreshStatus = async () => {
     try {
@@ -34,17 +35,23 @@ export const GitIndicator: Component<{
     }
   };
 
-  // Poll changes every 5s
-  const intervalId = setInterval(refreshStatus, 5000);
-  // Poll branch every 30s
-  const branchIntervalId = setInterval(refreshBranch, 30000);
+  // Check git availability once on mount
+  checkGitAvailable().then(setGitAvailable);
 
-  refreshStatus();
-  refreshBranch();
+  // Start polling only when git is confirmed available; cleanup on unmount
+  createEffect(() => {
+    if (gitAvailable() !== true) return;
 
-  onCleanup(() => {
-    clearInterval(intervalId);
-    clearInterval(branchIntervalId);
+    refreshStatus();
+    refreshBranch();
+
+    const intervalId = setInterval(refreshStatus, 5000);
+    const branchIntervalId = setInterval(refreshBranch, 30000);
+
+    onCleanup(() => {
+      clearInterval(intervalId);
+      clearInterval(branchIntervalId);
+    });
   });
 
   const s = status;
@@ -85,13 +92,15 @@ export const GitIndicator: Component<{
   });
 
   return (
-    <button
-      onClick={props.onShowChanges}
-      title={tooltip()}
-      class={btnClass()}
-    >
-      <Icon name="diff" class="h-3.5 w-3.5" />
-      <span>{label()}</span>
-    </button>
+    <Show when={gitAvailable() === true}>
+      <button
+        onClick={props.onShowChanges}
+        title={tooltip()}
+        class={btnClass()}
+      >
+        <Icon name="diff" class="h-3.5 w-3.5" />
+        <span>{label()}</span>
+      </button>
+    </Show>
   );
 };

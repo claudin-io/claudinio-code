@@ -36,6 +36,7 @@ pub fn run() {
             commands::git::git_status,
             commands::git::git_file_diff,
             commands::git::git_branch,
+            commands::git::check_git_available,
             commands::code_intel::open_workspace,
             commands::code_intel::close_workspace,
             commands::code_intel::search_symbols,
