@@ -899,6 +899,7 @@ export const ChatPanel: Component<{
   let messagesEndRef: HTMLDivElement | undefined;
   let scrollContainerRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
+  let sessionsRef: HTMLDivElement | undefined;
   const [pendingMessage, setPendingMessage] = createSignal<string | null>(null);
   const [authSigningIn, setAuthSigningIn] = createSignal(false);
 
@@ -1434,6 +1435,21 @@ export const ChatPanel: Component<{
     onCleanup(() => document.removeEventListener("keydown", onKey));
   });
 
+  // Click-outside handler for the sessions/history dropdown
+  createEffect(() => {
+    if (showSessions()) {
+      const handler = (e: MouseEvent) => {
+        setTimeout(() => {
+          if (showSessions() && sessionsRef && !sessionsRef.contains(e.target as Node)) {
+            setShowSessions(false);
+          }
+        }, 0);
+      };
+      document.addEventListener("click", handler);
+      onCleanup(() => document.removeEventListener("click", handler));
+    }
+  });
+
   const statusLabel = () => {
     switch (status()) {
       case "thinking": return t("chat.status.thinking");
@@ -1494,7 +1510,7 @@ export const ChatPanel: Component<{
         </div>
 
         <Show when={showSessions()}>
-          <div class="absolute right-4 top-9 z-20 max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
+          <div ref={sessionsRef} class="absolute right-4 top-9 z-20 max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
             <Show
               when={sessions().length > 0}
               fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{t("chat.header.noSessions")}</div>}
