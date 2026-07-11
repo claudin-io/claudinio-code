@@ -228,6 +228,7 @@ pub fn index_file(
     if let Some(ref mut emb) = embedder {
         let chunks = collect_embedding_chunks(&parse_result.symbols, &symbol_ids, i18n);
         encode_and_store_batched(db, emb, &chunks);
+        let _ = db.set_embed_hash(file_id, &hash);
     }
 
     Ok(parse_result)
@@ -310,6 +311,7 @@ pub fn index_doc_file(
         // shared chunk collector works for them unchanged.
         let chunks = collect_embedding_chunks(&doc_symbols, &symbol_ids, i18n);
         encode_and_store_batched(db, emb, &chunks);
+        let _ = db.set_embed_hash(file_id, &hash);
     }
 
     Ok(doc_symbols.len())
@@ -386,6 +388,19 @@ pub fn scan_workspace(
             Ok(c) => c,
             Err(_) => continue,
         };
+
+        // Skip files whose content hasn't changed since the last scan —
+        // reparsing/re-embedding them here would be pure waste, and worse,
+        // deletes their existing symbols/embeddings via cascade for nothing.
+        let new_hash = compute_hash(&content);
+        if let Ok(Some(existing)) = db.file_by_path(path_str) {
+            if existing.hash.as_deref() == Some(new_hash.as_str()) {
+                total_files += 1;
+                total_symbols += db.symbols_in_file(path_str).map(|s| s.len() as i64).unwrap_or(0);
+                counted += 1;
+                continue;
+            }
+        }
 
         match index_file(db, path_str, &content, embedder.as_deref_mut(), i18n) {
             Ok(parse_result) => {
@@ -515,6 +530,13 @@ pub fn generate_all_embeddings(
     for file in &files {
         processed += 1;
 
+        // Already embedded from this exact content — nothing to do. This is
+        // what keeps re-opening a workspace from re-embedding every symbol
+        // in it every time.
+        if file.hash.is_some() && file.embed_hash == file.hash {
+            continue;
+        }
+
         let content = match std::fs::read_to_string(&file.path) {
             Ok(c) => c,
             Err(_) => continue,
@@ -568,6 +590,7 @@ pub fn generate_all_embeddings(
             })
             .collect();
 
+        let mut encode_failed = false;
         if !filtered.is_empty() {
             let db_symbols = db.symbols_in_file(&file.path)?;
             // Encode in small batches, locking per batch, so the watcher and
@@ -602,11 +625,19 @@ pub fn generate_all_embeddings(
                     }
                     Err(e) => {
                         failed += 1;
+                        encode_failed = true;
                         eprintln!("[embeddings] encode failed for {}: {e}", file.path);
                         break;
                     }
                 }
             }
+        }
+
+        // Only mark this file's content as "embedded" if nothing failed —
+        // otherwise a transient encode error would permanently skip it.
+        if !encode_failed {
+            let hash = compute_hash(&content);
+            let _ = db.set_embed_hash(file.id, &hash);
         }
 
         if processed % 10 == 0 {
