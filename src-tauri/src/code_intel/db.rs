@@ -61,7 +61,7 @@ pub struct SemanticSearchResult {
 
 /// Bump when the index format changes (schema, embedding layout, ignore
 /// rules). A mismatched on-disk index is deleted and rebuilt from scratch.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Minimum final score (cosine similarity + lexical boost, clamped to
 /// [0, 1]) for a semantic search hit to be returned at all. Calibrated

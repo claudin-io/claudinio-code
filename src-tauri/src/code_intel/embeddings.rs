@@ -310,10 +310,50 @@ pub struct EmbedChunk {
     pub text: String,
 }
 
+/// Max chars of resolved i18n copy appended to one chunk's embedding text.
+const MAX_I18N_CHARS: usize = 400;
+
+/// Resolve i18n keys referenced in a code slice into their user-visible copy.
+/// Framework-agnostic: instead of parsing call syntax (`t(...)`,
+/// `NSLocalizedString(...)`, `I18n.t(...)`, `$t(...)`, ...), every quoted
+/// string literal in the slice is checked for exact membership in the dict —
+/// translation keys are distinctive enough that membership is the filter.
+fn resolve_i18n_keys(slice: &str, dict: &std::collections::HashMap<String, String>) -> String {
+    let bytes = slice.as_bytes();
+    let mut out: Vec<&str> = Vec::new();
+    let mut total = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() && total < MAX_I18N_CHARS {
+        let b = bytes[i];
+        if b == b'"' || b == b'\'' {
+            if let Some(end) = slice[i + 1..].find(b as char) {
+                let literal = &slice[i + 1..i + 1 + end];
+                if !literal.is_empty()
+                    && literal.len() <= 128
+                    && literal.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+                {
+                    if let Some(value) = dict.get(literal) {
+                        if !out.contains(&value.as_str()) {
+                            total += value.len() + 1;
+                            out.push(value);
+                        }
+                    }
+                }
+                i += 1 + end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.join(" ")
+}
+
 /// Split a symbol into embedding chunks. Line-based and language-agnostic:
 /// works identically for any tree-sitter grammar (and doc sections), since it
 /// only sees the extracted body text. Every chunk repeats the symbol header
-/// (kind/name/context/doc) so it stays anchored to its symbol.
+/// (kind/name/context/doc) so it stays anchored to its symbol. When an i18n
+/// dict is given, copy referenced via `t("key")` inside a chunk is resolved
+/// and appended to that chunk's text, so user-visible wording is searchable.
 pub fn build_embedding_chunks(
     kind: &str,
     name: &str,
@@ -322,6 +362,7 @@ pub fn build_embedding_chunks(
     body: Option<&str>,
     symbol_start_line: i64,
     symbol_end_line: i64,
+    i18n: Option<&std::collections::HashMap<String, String>>,
 ) -> Vec<EmbedChunk> {
     let mut header_parts = vec![format!("{kind}: {name}")];
     if let Some(ctx) = parent_context {
@@ -370,11 +411,19 @@ pub fn build_embedding_chunks(
         let slice = lines[i..j].join("\n");
         let slice = slice.trim();
         if !slice.is_empty() {
+            let mut text = format!("{header} | {slice}");
+            if let Some(dict) = i18n {
+                let copy = resolve_i18n_keys(slice, dict);
+                if !copy.is_empty() {
+                    text.push_str(" | i18n: ");
+                    text.push_str(&copy);
+                }
+            }
             chunks.push(EmbedChunk {
                 chunk_index: chunks.len() as i64,
                 start_line: body_first_line + i as i64,
                 end_line: body_first_line + j as i64 - 1,
-                text: format!("{header} | {slice}"),
+                text,
             });
         }
         if j >= lines.len() {
@@ -476,7 +525,7 @@ mod tests {
 
     #[test]
     fn small_body_yields_single_chunk_with_symbol_lines() {
-        let chunks = build_embedding_chunks("function", "foo", None, None, Some("let x = 1;"), 10, 10);
+        let chunks = build_embedding_chunks("function", "foo", None, None, Some("let x = 1;"), 10, 10, None);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].chunk_index, 0);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (10, 10));
@@ -486,7 +535,7 @@ mod tests {
 
     #[test]
     fn no_body_yields_header_only_chunk() {
-        let chunks = build_embedding_chunks("struct", "Config", Some("mod db"), None, None, 5, 8);
+        let chunks = build_embedding_chunks("struct", "Config", Some("mod db"), None, None, 5, 8, None);
         assert_eq!(chunks.len(), 1);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 8));
         assert_eq!(chunks[0].text, "struct: Config | context: mod db");
@@ -498,7 +547,7 @@ mod tests {
         let body: Vec<String> = (0..100).map(|i| format!("line {i} {}", "x".repeat(32))).collect();
         let body = body.join("\n");
         // Symbol spans lines 50..149 and body covers the whole range.
-        let chunks = build_embedding_chunks("function", "big", None, None, Some(&body), 50, 149);
+        let chunks = build_embedding_chunks("function", "big", None, None, Some(&body), 50, 149, None);
         assert!(chunks.len() > 2, "expected multiple chunks, got {}", chunks.len());
         assert_eq!(chunks[0].start_line, 50);
         assert_eq!(chunks.last().unwrap().end_line, 149);
@@ -517,11 +566,47 @@ mod tests {
     }
 
     #[test]
+    fn i18n_keys_resolve_into_chunk_text_framework_agnostic() {
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("onboarding.features.agent.title".to_string(), "Agent-first coding".to_string());
+        dict.insert("app.title".to_string(), "Claudinio Code".to_string());
+        // t("...") (web), NSLocalizedString (iOS), I18n.t (Rails) all reduce
+        // to a quoted literal that is a dict key.
+        let body = concat!(
+            "const a = t(\"onboarding.features.agent.title\");\n",
+            "let b = NSLocalizedString('app.title', comment: '');\n",
+            "let c = other(\"not.a.key\");"
+        );
+        let chunks = build_embedding_chunks("function", "Wizard", None, None, Some(body), 1, 3, Some(&dict));
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.contains("i18n: "));
+        assert!(chunks[0].text.contains("Agent-first coding"));
+        assert!(chunks[0].text.contains("Claudinio Code"));
+        assert!(!chunks[0].text.contains("not.a.key\" resolved"));
+
+        // Without a dict, text is unchanged (no i18n marker).
+        let plain = build_embedding_chunks("function", "Wizard", None, None, Some(body), 1, 3, None);
+        assert!(!plain[0].text.contains("i18n:"));
+    }
+
+    #[test]
+    fn i18n_resolution_is_capped_and_deduped() {
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("k".to_string(), "x".repeat(300));
+        dict.insert("k2".to_string(), "y".repeat(300));
+        let body = "t(\"k\") t(\"k\") t(\"k2\") t(\"k2\")";
+        let out = resolve_i18n_keys(body, &dict);
+        // Deduped: each value once; capped near MAX_I18N_CHARS.
+        assert!(out.len() <= MAX_I18N_CHARS + 310);
+        assert_eq!(out.matches(&"x".repeat(300)).count(), 1);
+    }
+
+    #[test]
     fn doc_section_body_anchors_lines_from_symbol_end() {
         // Doc sections: body starts after the heading line, so absolute lines
         // are anchored from end_line (body = last N lines of the range).
         let body = "para one\npara two\npara three";
-        let chunks = build_embedding_chunks("doc_section", "Intro", None, None, Some(body), 4, 7);
+        let chunks = build_embedding_chunks("doc_section", "Intro", None, None, Some(body), 4, 7, None);
         assert_eq!(chunks.len(), 1);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 7));
     }
