@@ -178,6 +178,18 @@ impl SessionMode {
     }
 }
 
+/// Which situational prompt/toolset a workflow run uses. `Standard` is the
+/// full agent (task system, Brain/Builder modes, skills, subagents, golden
+/// tasks). Other variants are lean, purpose-built profiles for a single kind
+/// of job — no task system, no modes, minimal toolset — so the model isn't
+/// paying for ceremony it doesn't need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptProfile {
+    Standard,
+    /// Commit & push: a single-purpose git operator. Bash + ask_user only.
+    GitSync,
+}
+
 /// Who put the session in its current mode. The agent may only exit Brain
 /// on its own if it was the one who entered it; a human-initiated Brain
 /// can only be exited by the human toggle.
@@ -324,6 +336,27 @@ Tasks whose id starts with 'golden-' are mandatory goals set by the user via <go
 - If you end your turn while golden tasks are pending, the system automatically switches mode (Brain to plan, Builder to execute) and sends you back to work on them, up to a cycle limit.\n\
 - Never delete golden tasks in tasks_set; keep them in the list and update their status.";
 
+/// Lean, single-purpose prompt for the `GitSync` profile (commit & push).
+/// No task system, no Brain/Builder modes, no skills/subagents — the model's
+/// only job is to get local changes committed and pushed, fast.
+const GIT_SYNC_PROMPT: &str = r#"Role: Claudinio git operator. Single goal: get the workspace's local changes committed and pushed to the remote, fast.
+
+# WORKFLOW (minimal commands, no ceremony)
+1. Run `git status --porcelain=v1 -b` and `git log --oneline -10` to see what changed and the commit message convention used in this project.
+2. Stage the relevant changes (`git add -A` unless something clearly must be excluded), then commit with ONE message following the repo's convention.
+3. `git push`. If it is rejected as non-fast-forward, run `git pull --rebase` and push again.
+4. If the rebase hits conflicts, run `git rebase --abort` immediately and use `ask_user` to ask how to proceed. Never edit files to resolve a conflict yourself.
+
+# RULES
+- No task lists, no plans, no subagents, no skills — those tools don't exist in this session.
+- Do not ask permission before pushing: pushing IS the goal the user already chose by opening this flow.
+- Never run a destructive command (reset --hard, push --force, clean, checkout that discards changes).
+- Finish with one short summary: branch, commit subject, and whether the push succeeded.
+
+# LANGUAGE POLICY
+- Final user-facing summary: language of the user's most recent message if known, else English.
+- Reasoning and commands MUST be in English."#;
+
 /// Build the per-session system prompt. The base is byte-identical for every
 /// request in the same workspace so the provider's prefix cache stays warm;
 /// the mode block is appended last and only changes when the mode switches.
@@ -332,7 +365,18 @@ fn system_prompt(
     skills_section: Option<&str>,
     plan_save_path: Option<&str>,
     mode: SessionMode,
+    profile: PromptProfile,
 ) -> String {
+    if profile == PromptProfile::GitSync {
+        return match workspace_root {
+            Some(root) => format!(
+                "{GIT_SYNC_PROMPT}\n\nProject workspace root: {root}. \
+The bash tool already runs with this directory as its working directory - run commands directly \
+(e.g. \"git status\"), use relative paths, and never cd into guessed paths."
+            ),
+            None => GIT_SYNC_PROMPT.to_string(),
+        };
+    }
     let base = match workspace_root {
         Some(root) => format!(
             "{SYSTEM_PROMPT}\n\nProject workspace root: {root}. \
@@ -607,11 +651,23 @@ pub struct UserAnswer {
 
 pub type AnswerMap = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserAnswer>>>>>;
 
-/// Tools offered to the model for a given mode. Builder gets the full
-/// registry plus enter_plan_mode; Brain drops edit_file and gains
-/// write_plan + exit_plan_mode (bash stays but is gated to read-only commands
-/// in run_workflow).
-fn api_tools(mode: SessionMode, mcp_defs: &[tools::ToolDef]) -> Vec<ToolDescription> {
+/// Tools offered to the model for a given mode/profile. `GitSync` gets only
+/// `bash` + `ask_user` — no task system, no subagents, no MCP tools. Builder
+/// gets the full registry plus enter_plan_mode; Brain drops edit_file and
+/// gains write_plan + exit_plan_mode (bash stays but is gated to read-only
+/// commands in run_workflow).
+fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolDef]) -> Vec<ToolDescription> {
+    if profile == PromptProfile::GitSync {
+        return tools::get_defs()
+            .into_iter()
+            .filter(|t| t.name == "bash" || t.name == "ask_user")
+            .map(|t| ToolDescription {
+                name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+            })
+            .collect();
+    }
     let mut defs = tools::get_defs();
     match mode {
         SessionMode::Builder => {
@@ -962,6 +1018,32 @@ pub async fn run_workflow(
     steering: &Arc<SteeringCtl>,
     mode_ctl: &Arc<ModeCtl>,
 ) -> Result<(), String> {
+    run_workflow_with_profile(
+        config, history, user_message, attachment_blocks, event_tx, approvals, answers,
+        session_id, ctx, store, steering, mode_ctl, PromptProfile::Standard,
+    )
+    .await
+}
+
+/// Same loop as `run_workflow`, with an explicit prompt/toolset profile.
+/// `run_workflow` is the `Standard`-profile shorthand used by normal chat
+/// sessions; dedicated flows (e.g. commit & push) call this directly.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_workflow_with_profile(
+    config: &AgentConfig,
+    history: &mut Vec<Message>,
+    user_message: String,
+    attachment_blocks: Vec<ContentBlock>,
+    event_tx: &Channel<AgentEvent>,
+    approvals: &ApprovalMap,
+    answers: &AnswerMap,
+    session_id: &str,
+    ctx: &ToolContext,
+    store: &SessionStore,
+    steering: &Arc<SteeringCtl>,
+    mode_ctl: &Arc<ModeCtl>,
+    profile: PromptProfile,
+) -> Result<(), String> {
     reject_non_english(&user_message)?;
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
@@ -976,12 +1058,12 @@ pub async fn run_workflow(
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let (mut cur_mode, _) = mode_ctl.get();
-    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode);
+    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile);
     // MCP tool discovery already happened before `run_workflow` was called
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
     // snapshot read, not a fresh connection attempt.
     let mcp_defs = ctx.mcp.as_ref().map(|m| m.cached_defs()).unwrap_or_default();
-    let mut tools = api_tools(cur_mode, &mcp_defs);
+    let mut tools = api_tools(cur_mode, profile, &mcp_defs);
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
@@ -1107,8 +1189,8 @@ pub async fn run_workflow(
         let (mode_now, _) = mode_ctl.get();
         if mode_now != cur_mode {
             cur_mode = mode_now;
-            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode);
-            tools = api_tools(cur_mode, &mcp_defs);
+            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile);
+            tools = api_tools(cur_mode, profile, &mcp_defs);
         }
 
         // Per-round context re-check: tool_results from the previous round may
@@ -1136,8 +1218,9 @@ pub async fn run_workflow(
                             skills_section.as_deref(),
                             ctx.plan_save_path.as_deref(),
                             cur_mode,
+                            profile,
                         );
-                        tools = api_tools(cur_mode, &mcp_defs);
+                        tools = api_tools(cur_mode, profile, &mcp_defs);
                     }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
@@ -3205,7 +3288,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn brain_prompt_mandates_size_and_verbatim_assets() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard);
         // Size/dimensions must be a mandatory interview item.
         assert!(
             sys.contains("Sizing and layout"),
@@ -3224,7 +3307,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn builder_prompt_requires_complete_subagent_spec() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
         assert!(
             sys.contains("COMPLETE technical spec"),
             "Builder prompt must require complete subagent specs"
@@ -3237,7 +3320,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn system_prompt_warns_against_similar_to_guessing() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
         assert!(
             sys.contains("similar to"),
             "subagent guidance must call out the 'similar to X' anti-pattern"
@@ -3246,6 +3329,36 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             sys.contains("isn't yet concrete data"),
             "subagent guidance must require resolving user references before delegating"
         );
+    }
+
+    #[test]
+    fn git_sync_prompt_has_no_task_system_or_modes() {
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::GitSync);
+        assert!(
+            !sys.contains("tasks_get") && !sys.contains("tasks_set"),
+            "GitSync prompt must not mention the task system"
+        );
+        assert!(
+            !sys.contains("CURRENT MODE"),
+            "GitSync prompt must not include a Brain/Builder mode block"
+        );
+        assert!(
+            sys.contains("git push"),
+            "GitSync prompt must describe the git workflow"
+        );
+    }
+
+    #[test]
+    fn git_sync_tools_are_bash_and_ask_user_only() {
+        let defs = api_tools(SessionMode::Builder, PromptProfile::GitSync, &[]);
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "GitSync toolset must be exactly bash + ask_user, got {names:?}"
+        );
+        assert!(names.contains(&"bash"));
+        assert!(names.contains(&"ask_user"));
     }
 
     // ---- Live-API evals (ignored by default; need CLAUDINIO_API_KEY) ----
@@ -3270,7 +3383,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             eprintln!("skipping: CLAUDINIO_API_KEY not set");
             return;
         };
-        let system = system_prompt(Some(ROOT), None, None, SessionMode::Brain);
+        let system = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard);
         let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
         let user = format!(
             "{SESSION_REQUEST}\n\n---\nDo NOT call any tool and do NOT write a plan. Instead, output \
@@ -3303,7 +3416,7 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
             eprintln!("skipping: CLAUDINIO_API_KEY not set");
             return;
         };
-        let system = system_prompt(Some(ROOT), None, None, SessionMode::Builder);
+        let system = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
         let model = cfg.model_for_mode(SessionMode::Builder.as_str()).to_string();
         let user = "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
 specified the EXACT icon to use with this reference: \

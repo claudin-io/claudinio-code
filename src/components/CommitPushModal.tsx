@@ -160,10 +160,7 @@ const CommitPushModal: Component<{
 
   return (
     <Show when={props.open}>
-      <div
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-        onClick={(e) => { if (e.target === e.currentTarget) handleCancel(); }}
-      >
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
         <div class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl bg-surface-0 shadow-2xl">
           {/* Header */}
           <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
