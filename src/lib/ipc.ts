@@ -621,6 +621,12 @@ export function setTasks(workspace: string, tasks: TaskItem[]): Promise<void> {
   return invoke<void>("set_tasks", { workspace, tasks });
 }
 
+/// Drop golden tasks so a stale `<goal>` from an earlier turn stops
+/// re-triggering the golden loop. Omit `taskId` to drop all golden tasks.
+export function dismissGoldenTasks(workspace: string, taskId?: string): Promise<TaskItem[]> {
+  return invoke<TaskItem[]>("dismiss_golden_tasks", { workspace, taskId: taskId ?? null });
+}
+
 export interface EnhancePromptContext {
   messages: Array<{ role: string; text: string }>;
   mode: string;

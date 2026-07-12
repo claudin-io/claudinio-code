@@ -1,6 +1,6 @@
 import { createSignal, For, Show, onMount, onCleanup, type Component } from "solid-js";
 import { Portal } from "solid-js/web";
-import { getTasks, setTasks, type TaskItem } from "../lib/ipc";
+import { getTasks, setTasks, dismissGoldenTasks, type TaskItem } from "../lib/ipc";
 import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 
@@ -47,6 +47,17 @@ export const TasksPanel: Component<{
     setTasksState(updated);
     try {
       await setTasks(props.workspace, updated);
+    } catch {
+      load();
+    }
+  };
+
+  const dismissGolden = async (id: string) => {
+    setHoveredId(null);
+    try {
+      const remaining = await dismissGoldenTasks(props.workspace, id);
+      setTasksState(remaining);
+      props.onTasksChange?.(remaining.length);
     } catch {
       load();
     }
@@ -214,6 +225,18 @@ export const TasksPanel: Component<{
 
               {/* Click hint */}
               <p class="mt-2 text-[10px] text-ink-faint">{t("tasks.panel.cycleStatus")}</p>
+
+              {/* Dismiss — golden tasks can be completed but not deleted by
+                  the model; this lets the user drop a stale goal so it stops
+                  re-triggering the golden loop on later turns. */}
+              <Show when={isGolden(task)}>
+                <button
+                  onClick={() => dismissGolden(task.id)}
+                  class="mt-2 text-[10px] font-medium text-ink-faint hover:text-ink-muted hover:underline"
+                >
+                  {t("golden.task.dismiss")}
+                </button>
+              </Show>
             </div>
           )}
         </Show>
