@@ -1278,3 +1278,375 @@ describe("pickFiles", () => {
     expect(result).toEqual([]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// openInTerminal
+// ─────────────────────────────────────────────────────────────
+
+describe("openInTerminal", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with open_in_terminal and path", async () => {
+    mockInvokeFor(undefined);
+    const { openInTerminal } = await import("./ipc");
+    await openInTerminal("/workspace");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("open_in_terminal", { path: "/workspace" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// copyPath
+// ─────────────────────────────────────────────────────────────
+
+describe("copyPath", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("writes path to clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const { copyPath } = await import("./ipc");
+    await copyPath("/some/file.ts");
+    expect(writeText).toHaveBeenCalledWith("/some/file.ts");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Git
+// ─────────────────────────────────────────────────────────────
+
+describe("gitStatus", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with git_status and workspace", async () => {
+    const fake: import("./ipc").GitStatus = {
+      hasChanges: true,
+      files: [{ path: "a.ts", status: "M", additions: 1, deletions: 0 }],
+      totalAdditions: 1,
+      totalDeletions: 0,
+    };
+    mockInvokeFor(fake);
+    const { gitStatus } = await import("./ipc");
+    const result = await gitStatus("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("git_status", { workspace: "/ws" });
+    expect(result).toEqual(fake);
+  });
+});
+
+describe("gitFileDiff", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with git_file_diff, workspace and path", async () => {
+    mockInvokeFor("@@ -1,2 +1,3 @@");
+    const { gitFileDiff } = await import("./ipc");
+    const result = await gitFileDiff("/ws", "a.ts");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("git_file_diff", { workspace: "/ws", path: "a.ts" });
+    expect(result).toBe("@@ -1,2 +1,3 @@");
+  });
+});
+
+describe("gitBranch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with git_branch and workspace", async () => {
+    mockInvokeFor("main");
+    const { gitBranch } = await import("./ipc");
+    const result = await gitBranch("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("git_branch", { workspace: "/ws" });
+    expect(result).toBe("main");
+  });
+});
+
+describe("checkGitAvailable", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with check_git_available and returns true", async () => {
+    mockInvokeFor(true);
+    const { checkGitAvailable } = await import("./ipc");
+    const result = await checkGitAvailable();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("check_git_available");
+    expect(result).toBe(true);
+  });
+
+  it("returns false when git is not available", async () => {
+    mockInvokeFor(false);
+    const { checkGitAvailable } = await import("./ipc");
+    const result = await checkGitAvailable();
+    expect(result).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// commitAndPush — uses Channel
+// ─────────────────────────────────────────────────────────────
+
+describe("commitAndPush", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with commit_and_push, workspace and eventChannel", async () => {
+    mockInvokeFor({ sessionId: "s1" });
+    const { commitAndPush } = await import("./ipc");
+    const onEvent = vi.fn();
+    const result = await commitAndPush("/ws", onEvent);
+    expect(vi.mocked(invoke)).toHaveBeenCalledTimes(1);
+    const callArgs = vi.mocked(invoke).mock.calls[0];
+    expect(callArgs[0]).toBe("commit_and_push");
+    expect(callArgs[1]).toMatchObject({ workspace: "/ws" });
+    expect(callArgs[1]).toHaveProperty("eventChannel");
+    expect(result).toEqual({ sessionId: "s1" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// checkPlanExists
+// ─────────────────────────────────────────────────────────────
+
+describe("checkPlanExists", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with check_plan_exists and workspace, returns true", async () => {
+    mockInvokeFor(true);
+    const { checkPlanExists } = await import("./ipc");
+    const result = await checkPlanExists("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("check_plan_exists", { workspace: "/ws" });
+    expect(result).toBe(true);
+  });
+
+  it("returns false when no plan exists", async () => {
+    mockInvokeFor(false);
+    const { checkPlanExists } = await import("./ipc");
+    const result = await checkPlanExists("/ws");
+    expect(result).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// listPlans
+// ─────────────────────────────────────────────────────────────
+
+describe("listPlans", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with list_plans and workspace, returns PlanEntry[]", async () => {
+    const fake: import("./ipc").PlanEntry[] = [
+      { name: "plan1", path: "/ws/plans/plan1.json", modifiedAt: 1000 },
+    ];
+    mockInvokeFor(fake);
+    const { listPlans } = await import("./ipc");
+    const result = await listPlans("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("list_plans", { workspace: "/ws" });
+    expect(result).toEqual(fake);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// writeClipboardBlob
+// ─────────────────────────────────────────────────────────────
+
+describe("writeClipboardBlob", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with write_clipboard_blob, data, name and mediaType", async () => {
+    const fake: import("./ipc").WriteClipboardBlobResult = {
+      path: "/tmp/blob.png",
+      name: "img.png",
+      mediaType: "image/png",
+      size: 1234,
+    };
+    mockInvokeFor(fake);
+    const { writeClipboardBlob } = await import("./ipc");
+    const result = await writeClipboardBlob("base64data", "img.png", "image/png");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("write_clipboard_blob", {
+      data: "base64data",
+      name: "img.png",
+      mediaType: "image/png",
+    });
+    expect(result).toEqual(fake);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// getConfig with workspace arg
+// ─────────────────────────────────────────────────────────────
+
+describe("getConfig with workspace", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("passes workspace to invoke when provided", async () => {
+    const fake: import("./ipc").AgentConfig = {
+      baseUrl: "http://localhost",
+      brainModel: "gpt-4",
+      builderModel: "gpt-3.5",
+      hasApiKey: true,
+      maxContextTokens: 100000,
+      compactThreshold: 1000,
+    };
+    mockInvokeFor(fake);
+    const { getConfig } = await import("./ipc");
+    await getConfig("/my/workspace");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("get_config", { workspace: "/my/workspace" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// MCP servers — covers uncovered lines 461-470
+// ─────────────────────────────────────────────────────────────
+
+describe("listMcpServers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with mcp_list_servers and workspace", async () => {
+    const fake: import("./ipc").McpServerStatus[] = [
+      { name: "server1", connected: true, toolCount: 2, toolNames: ["a", "b"] },
+    ];
+    mockInvokeFor(fake);
+    const { listMcpServers } = await import("./ipc");
+    const result = await listMcpServers("ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("mcp_list_servers", { workspace: "ws" });
+    expect(result).toEqual(fake);
+  });
+
+  it("passes null workspace when omitted", async () => {
+    mockInvokeFor([]);
+    const { listMcpServers } = await import("./ipc");
+    await listMcpServers();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("mcp_list_servers", { workspace: null });
+  });
+});
+
+describe("testMcpServer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with mcp_test_server, name, entry and workspace", async () => {
+    const fake: import("./ipc").McpServerStatus = {
+      name: "ctx7", connected: true, toolCount: 3, toolNames: ["x", "y", "z"],
+    };
+    mockInvokeFor(fake);
+    const { testMcpServer } = await import("./ipc");
+    const entry: import("./ipc").McpServerEntry = { type: "remote", url: "https://api.example.com", enabled: true };
+    const result = await testMcpServer("ctx7", entry, "ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("mcp_test_server", {
+      name: "ctx7",
+      entry,
+      workspace: "ws",
+    });
+    expect(result).toEqual(fake);
+  });
+
+  it("passes null workspace when omitted", async () => {
+    mockInvokeFor({ name: "s", connected: false, toolCount: 0, toolNames: [] });
+    const { testMcpServer } = await import("./ipc");
+    const entry: import("./ipc").McpServerEntry = { type: "stdio", command: "npx" };
+    await testMcpServer("s", entry);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("mcp_test_server", {
+      name: "s",
+      entry,
+      workspace: null,
+    });
+  });
+});
+
+describe("reconnectMcp", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with mcp_reconnect and workspace", async () => {
+    const fake: import("./ipc").McpServerStatus[] = [
+      { name: "ctx7", connected: true, toolCount: 2, toolNames: ["a", "b"] },
+    ];
+    mockInvokeFor(fake);
+    const { reconnectMcp } = await import("./ipc");
+    const result = await reconnectMcp("ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("mcp_reconnect", { workspace: "ws" });
+    expect(result).toEqual(fake);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// dismissGoldenTasks — covers uncovered lines 626-628
+// ─────────────────────────────────────────────────────────────
+
+describe("dismissGoldenTasks", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with dismiss_golden_tasks, workspace and taskId", async () => {
+    const fake: import("./ipc").TaskItem[] = [
+      { id: "g1", title: "golden", description: "do x", journal: [], status: "done" },
+    ];
+    mockInvokeFor(fake);
+    const { dismissGoldenTasks } = await import("./ipc");
+    const result = await dismissGoldenTasks("ws", "g1");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("dismiss_golden_tasks", {
+      workspace: "ws",
+      taskId: "g1",
+    });
+    expect(result).toEqual(fake);
+  });
+
+  it("passes null taskId when omitted", async () => {
+    mockInvokeFor([]);
+    const { dismissGoldenTasks } = await import("./ipc");
+    await dismissGoldenTasks("ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("dismiss_golden_tasks", {
+      workspace: "ws",
+      taskId: null,
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// enhancePrompt — covers uncovered lines 638-644
+// ─────────────────────────────────────────────────────────────
+
+describe("enhancePrompt", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls invoke with enhance_prompt, workspace, prompt and context", async () => {
+    mockInvokeFor("enhanced prompt text");
+    const { enhancePrompt } = await import("./ipc");
+    const context: import("./ipc").EnhancePromptContext = {
+      messages: [{ role: "user", text: "hi" }],
+      mode: "brain",
+      mentionedFiles: ["/a.ts"],
+      activeTaskTitles: ["Fix bug"],
+      projectSummary: "A cool project",
+    };
+    const result = await enhancePrompt("ws", "my prompt", context);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("enhance_prompt", {
+      workspace: "ws",
+      prompt: "my prompt",
+      context,
+    });
+    expect(result).toBe("enhanced prompt text");
+  });
+});
