@@ -93,19 +93,14 @@ export const GitIndicator: Component<{
 
   return (
     <Show when={gitAvailable() === true}>
-      <div class="flex flex-col items-end">
-        <button
-          onClick={props.onShowChanges}
-          title={tooltip()}
-          class={btnClass()}
-        >
-          <Icon name="diff" class="h-3.5 w-3.5" />
-          <span>{label()}</span>
-        </button>
-        <Show when={branch_()}>
-          <span class="text-[10px] leading-none text-ink-faint">{branch_()}</span>
-        </Show>
-      </div>
+      <button
+        onClick={props.onShowChanges}
+        title={tooltip()}
+        class={btnClass()}
+      >
+        <Icon name="diff" class="h-3.5 w-3.5" />
+        <span>{label()}</span>
+      </button>
     </Show>
   );
 };

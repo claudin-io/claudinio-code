@@ -151,10 +151,7 @@ const PATHS: Record<string, string[]> = {
     "m10 2l2 2m0 0l2 2m-2-2l-2 2m2-2l2-2",
   ],
   "git-branch": [
-    "M6 3v12",
-    "M18 9a9 9 0 0 1-9 9",
-    "M18 3a3 3 0 1 1 0 6a3 3 0 0 1 0-6z",
-    "M6 15a3 3 0 1 1 0 6a3 3 0 0 1 0-6z",
+    "M4 14h4v2H4zm0 6h4v2H4zm-2-4h2v4H2zm6 0h2v4H8zm8-14h4v2h-4zm0 6h4v2h-4zm-2-4h2v4h-2zm6 0h2v4h-2zm-8 13h5v2h-5zm5-5h2v5h-2zM5 2h2v10H5z",
   ],
   "git-commit": [
     "M8 5.75a2.25 2.25 0 1 1 0 4.5 2.25 2.25 0 0 1 0-4.5z",
