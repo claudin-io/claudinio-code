@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::path::Path;
-use std::process::Command;
+use tokio::process::Command;
+
+use super::procutil::no_window_tokio;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,12 +22,13 @@ pub struct GitStatus {
     pub total_deletions: u32,
 }
 
-fn run_git(workspace: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args(args)
+async fn run_git(workspace: &str, args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(workspace).args(args);
+    no_window_tokio(&mut cmd);
+    let output = cmd
         .output()
+        .await
         .map_err(|e| format!("Failed to run git: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -35,10 +38,10 @@ fn run_git(workspace: &str, args: &[&str]) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn git_status(workspace: String) -> Result<GitStatus, String> {
+pub async fn git_status(workspace: String) -> Result<GitStatus, String> {
     // Get porcelain status
-    let porcelain = run_git(&workspace, &["status", "--porcelain"])?;
-    
+    let porcelain = run_git(&workspace, &["status", "--porcelain"]).await?;
+
     if porcelain.is_empty() {
         return Ok(GitStatus {
             has_changes: false,
@@ -48,8 +51,15 @@ pub fn git_status(workspace: String) -> Result<GitStatus, String> {
         });
     }
 
-    // Get numstat for tracked modified/added/deleted files
-    let numstat = run_git(&workspace, &["diff", "--numstat"]).unwrap_or_default();
+    // Get numstat for tracked modified/added/deleted files, and for staged
+    // files, concurrently.
+    let (numstat, staged_numstat) = tokio::join!(
+        run_git(&workspace, &["diff", "--numstat"]),
+        run_git(&workspace, &["diff", "--numstat", "--cached"]),
+    );
+    let numstat = numstat.unwrap_or_default();
+    let staged_numstat = staged_numstat.unwrap_or_default();
+
     let mut numstat_map: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
     for line in numstat.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
@@ -60,8 +70,6 @@ pub fn git_status(workspace: String) -> Result<GitStatus, String> {
         }
     }
 
-    // Get numstat for staged files
-    let staged_numstat = run_git(&workspace, &["diff", "--numstat", "--cached"]).unwrap_or_default();
     for line in staged_numstat.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
@@ -101,15 +109,16 @@ pub fn git_status(workspace: String) -> Result<GitStatus, String> {
         };
 
         let (add, del) = numstat_map.get(&file_path).copied().unwrap_or((0, 0));
-        
+
         // For untracked files, estimate from file content
         let (add, del) = if status == "?" && add == 0 && del == 0 {
             let full_path = Path::new(&workspace).join(&file_path);
-            if let Ok(content) = std::fs::read_to_string(&full_path) {
-                let lines = content.lines().count() as u32;
-                (lines, 0u32)
-            } else {
-                (0, 0)
+            match tokio::fs::read_to_string(&full_path).await {
+                Ok(content) => {
+                    let lines = content.lines().count() as u32;
+                    (lines, 0u32)
+                }
+                Err(_) => (0, 0),
             }
         } else {
             (add, del)
@@ -135,15 +144,15 @@ pub fn git_status(workspace: String) -> Result<GitStatus, String> {
 }
 
 #[tauri::command]
-pub fn git_file_diff(workspace: String, path: String) -> Result<String, String> {
+pub async fn git_file_diff(workspace: String, path: String) -> Result<String, String> {
     // Try unstaged diff first
-    let unstaged = run_git(&workspace, &["diff", "--", &path]).unwrap_or_default();
+    let unstaged = run_git(&workspace, &["diff", "--", &path]).await.unwrap_or_default();
     if !unstaged.is_empty() {
         return Ok(unstaged);
     }
 
     // Try staged diff
-    let staged = run_git(&workspace, &["diff", "--cached", "--", &path]).unwrap_or_default();
+    let staged = run_git(&workspace, &["diff", "--cached", "--", &path]).await.unwrap_or_default();
     if !staged.is_empty() {
         return Ok(staged);
     }
@@ -152,7 +161,7 @@ pub fn git_file_diff(workspace: String, path: String) -> Result<String, String> 
     let full_path = Path::new(&workspace).join(&path);
     if full_path.exists() {
         // Read the file and format as a unified diff (all lines added)
-        match std::fs::read_to_string(&full_path) {
+        match tokio::fs::read_to_string(&full_path).await {
             Ok(content) => {
                 let lines: Vec<&str> = content.lines().collect();
                 let line_count = lines.len();
@@ -173,7 +182,7 @@ pub fn git_file_diff(workspace: String, path: String) -> Result<String, String> 
     }
 
     // File was deleted — show the full deletion from HEAD
-    let show_result = run_git(&workspace, &["show", &format!("HEAD:{}", path)]).unwrap_or_default();
+    let show_result = run_git(&workspace, &["show", &format!("HEAD:{}", path)]).await.unwrap_or_default();
     if !show_result.is_empty() {
         let old_lines: Vec<&str> = show_result.lines().collect();
         let line_count = old_lines.len();
@@ -192,16 +201,18 @@ pub fn git_file_diff(workspace: String, path: String) -> Result<String, String> 
 }
 
 #[tauri::command]
-pub fn git_branch(workspace: String) -> Result<String, String> {
-    let branch = run_git(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+pub async fn git_branch(workspace: String) -> Result<String, String> {
+    let branch = run_git(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     Ok(branch.trim().to_string())
 }
 
 #[tauri::command]
-pub fn check_git_available() -> bool {
-    std::process::Command::new("git")
-        .arg("--version")
-        .output()
+pub async fn check_git_available() -> bool {
+    let mut cmd = Command::new("git");
+    cmd.arg("--version");
+    no_window_tokio(&mut cmd);
+    cmd.output()
+        .await
         .map(|o| o.status.success())
         .unwrap_or(false)
 }

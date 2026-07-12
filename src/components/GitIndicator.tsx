@@ -12,26 +12,37 @@ export const GitIndicator: Component<{
   const [loading, setLoading] = createSignal(true);
   const [gitAvailable, setGitAvailable] = createSignal<boolean | null>(null);
 
+  // Guards against overlapping invokes: if a git call is slow (large repo,
+  // antivirus scanning on Windows, etc.), the next poll tick skips instead of
+  // queuing another invoke on top of the one still in flight.
+  let statusInFlight = false;
+  let branchInFlight = false;
+
   const refreshStatus = async () => {
+    if (statusInFlight) return;
+    statusInFlight = true;
     try {
       const s = await gitStatus(props.workspace);
-      console.log("[GitIndicator] status:", s);
       setStatus(s);
     } catch (e) {
       console.warn("[GitIndicator] gitStatus failed:", e);
       setStatus(null);
     } finally {
       setLoading(false);
+      statusInFlight = false;
     }
   };
 
   const refreshBranch = async () => {
+    if (branchInFlight) return;
+    branchInFlight = true;
     try {
       const b = await gitBranch(props.workspace);
-      console.log("[GitIndicator] branch:", b);
       setBranch(b);
     } catch (e) {
       setBranch("");
+    } finally {
+      branchInFlight = false;
     }
   };
 
@@ -45,7 +56,7 @@ export const GitIndicator: Component<{
     refreshStatus();
     refreshBranch();
 
-    const intervalId = setInterval(refreshStatus, 5000);
+    const intervalId = setInterval(refreshStatus, 10000);
     const branchIntervalId = setInterval(refreshBranch, 30000);
 
     onCleanup(() => {
