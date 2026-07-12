@@ -148,7 +148,25 @@ pub async fn enhance_prompt(
     let reply = provider::one_shot(&config, &model, ENHANCER_SYSTEM_PROMPT, &user_message, 4096)
         .await?;
 
+    // The draft is the only source of truth for <goal> tags (they create
+    // mandatory golden tasks). If the enhancer hallucinates or "helpfully"
+    // wraps inferred intent in <goal> that wasn't in the draft, strip the
+    // tags from the rewrite so no golden task gets created behind the
+    // user's back.
+    let (_, draft_goals) = crate::agent::session::parse_goals(&prompt);
+    let reply = if draft_goals.is_empty() {
+        strip_goal_tags(&reply)
+    } else {
+        reply
+    };
+
     Ok(reply)
+}
+
+/// Remove `<goal>`/`</goal>` markup while keeping the enclosed text, so an
+/// enhancer rewrite can't manufacture a goal tag the user never wrote.
+fn strip_goal_tags(text: &str) -> String {
+    text.replace("<goal>", "").replace("</goal>", "")
 }
 
 async fn build_git_section(workspace: &str) -> Option<String> {
@@ -358,5 +376,22 @@ fn attach_snippets(results: &mut [SemanticSearchResult]) {
         if !snippet.is_empty() {
             r.snippet = Some(snippet);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_goal_tags_removes_markup_keeps_text() {
+        let input = "Please <goal>ship the feature</goal> by Friday";
+        assert_eq!(strip_goal_tags(input), "Please ship the feature by Friday");
+    }
+
+    #[test]
+    fn strip_goal_tags_noop_without_tags() {
+        let input = "Please ship the feature by Friday";
+        assert_eq!(strip_goal_tags(input), input);
     }
 }

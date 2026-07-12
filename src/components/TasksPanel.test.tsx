@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render } from "solid-js/web";
-import { getTasks, setTasks, type TaskItem } from "../lib/ipc";
+import { getTasks, setTasks, dismissGoldenTasks, type TaskItem } from "../lib/ipc";
 import { TasksPanel } from "./TasksPanel";
 
 // ── Mocks ──────────────────────────────────────────────────────────
@@ -8,6 +8,7 @@ import { TasksPanel } from "./TasksPanel";
 vi.mock("../lib/ipc", () => ({
   getTasks: vi.fn(),
   setTasks: vi.fn().mockResolvedValue(undefined),
+  dismissGoldenTasks: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../lib/grill-me", () => ({
@@ -248,6 +249,40 @@ describe("TasksPanel", () => {
     // golden-plan-0 ends in -0 → "plan" phase → t("golden.task.plan", title)
     buttons[2].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     expect(document.body.textContent).toContain("golden.task.plan: Refactor auth flow");
+
+    dispose();
+  });
+
+  it("shows a dismiss button for golden tasks and calls dismissGoldenTasks on click", async () => {
+    const remaining = sampleTasks.filter((t) => t.id !== "golden-plan-0");
+    vi.mocked(dismissGoldenTasks).mockResolvedValueOnce(remaining);
+    const dispose = await mount();
+    const buttons = document.body.querySelectorAll("button");
+
+    buttons[2].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    const dismissBtn = Array.from(document.body.querySelectorAll("button")).find(
+      (b) => b.textContent === "golden.task.dismiss",
+    );
+    expect(dismissBtn).toBeTruthy();
+
+    dismissBtn!.click();
+    await flush();
+
+    expect(dismissGoldenTasks).toHaveBeenCalledWith("/test", "golden-plan-0");
+    expect(document.body.querySelectorAll("button").length).toBe(remaining.length);
+
+    dispose();
+  });
+
+  it("does not show a dismiss button for non-golden tasks", async () => {
+    const dispose = await mount();
+    const buttons = document.body.querySelectorAll("button");
+
+    buttons[0].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    const dismissBtn = Array.from(document.body.querySelectorAll("button")).find(
+      (b) => b.textContent === "golden.task.dismiss",
+    );
+    expect(dismissBtn).toBeFalsy();
 
     dispose();
   });

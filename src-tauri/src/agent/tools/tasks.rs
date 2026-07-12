@@ -22,17 +22,47 @@ pub fn execute_set(
 ) -> Result<String, String> {
     let path = ctx.session_store_path.as_ref().ok_or("session_store_path not set")?;
     let prev = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
-    let (merged, preserved) = merge_preserving_golden(&prev, args.tasks);
+    let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
+    let (merged, preserved) = merge_preserving_golden(&prev, incoming);
     crate::commands::tasks::append_tasks(Path::new(path), &merged)?;
-    if preserved > 0 {
-        Ok(format!(
-            "Tasks updated: {} task(s) saved. {} golden task(s) are mandatory and were \
-             preserved — golden tasks cannot be deleted, only completed.",
-            merged.len(), preserved
-        ))
-    } else {
-        Ok(format!("Tasks updated: {} task(s) saved.", merged.len()))
+    let mut note = String::new();
+    if renamed > 0 {
+        note.push_str(&format!(
+            " {} task(s) used the reserved 'golden-' id prefix and were renamed — \
+             golden tasks can only be created by the user via <goal> tags.",
+            renamed
+        ));
     }
+    if preserved > 0 {
+        note.push_str(&format!(
+            " {} golden task(s) are mandatory and were preserved — golden tasks cannot be \
+             deleted, only completed.",
+            preserved
+        ));
+    }
+    Ok(format!("Tasks updated: {} task(s) saved.{}", merged.len(), note))
+}
+
+/// Strip the reserved `golden-` prefix from any incoming task id that isn't
+/// already a known golden task, so the model can't mint new mandatory goals
+/// by imitating the id convention in `tasks_set`. Ids that already exist as
+/// golden tasks in `prev` (legitimate status updates) pass through untouched.
+/// Returns the sanitized list and how many ids were renamed.
+fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<TaskItem>, usize) {
+    use std::collections::HashSet;
+    let known_golden: HashSet<&str> = prev.iter().filter(|t| is_golden(t)).map(|t| t.id.as_str()).collect();
+    let mut renamed = 0;
+    let sanitized = incoming
+        .into_iter()
+        .map(|mut t| {
+            if is_golden(&t) && !known_golden.contains(t.id.as_str()) {
+                t.id = format!("task-{}", &t.id[crate::agent::session::GOLDEN_TASK_PREFIX.len()..]);
+                renamed += 1;
+            }
+            t
+        })
+        .collect();
+    (sanitized, renamed)
 }
 
 /// Merge an incoming task list with the previous snapshot, guaranteeing that
@@ -214,6 +244,25 @@ mod golden_tests {
         assert_eq!(preserved, 0);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].id, "normal-2");
+    }
+
+    #[test]
+    fn test_strip_forged_golden_ids_renames_unknown() {
+        let prev = vec![task("normal", "todo")];
+        let incoming = vec![task("golden-fake-0", "todo")];
+        let (sanitized, renamed) = strip_forged_golden_ids(&prev, incoming);
+        assert_eq!(renamed, 1);
+        assert_eq!(sanitized[0].id, "task-fake-0");
+    }
+
+    #[test]
+    fn test_strip_forged_golden_ids_allows_known() {
+        let prev = vec![task("golden-a-0", "todo")];
+        let incoming = vec![task("golden-a-0", "done")];
+        let (sanitized, renamed) = strip_forged_golden_ids(&prev, incoming);
+        assert_eq!(renamed, 0);
+        assert_eq!(sanitized[0].id, "golden-a-0");
+        assert_eq!(sanitized[0].status, "done");
     }
 
     #[test]

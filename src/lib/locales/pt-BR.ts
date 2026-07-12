@@ -280,6 +280,7 @@ const dict: LocaleDict = {
   "golden.task.execute": "Executar: {0}",
   "golden.task.plan.desc": "Criar um plano detalhado para atingir o goal: {0}",
   "golden.task.execute.desc": "Executar o plano e verificar se o goal foi atingido: {0}",
+  "golden.task.dismiss": "Descartar esse goal",
   "settings.maxGoldenCycles": "Máx. ciclos golden",
   "settings.maxGoldenCyclesHint": "Quantos ciclos automáticos Brain↔Builder rodar enquanto golden goals (tags <goal>) estiverem pendentes. Vazio = 5.",
   "settings.maxGoldenStalls": "Máx. estagnações golden",
