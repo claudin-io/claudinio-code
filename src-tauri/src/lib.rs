@@ -68,6 +68,7 @@ pub fn run() {
             commands::mcp::mcp_list_servers,
             commands::mcp::mcp_test_server,
             commands::mcp::mcp_reconnect,
+            commands::shell::open_in_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

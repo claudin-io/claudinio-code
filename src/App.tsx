@@ -14,6 +14,10 @@ import { OnboardingWizard } from "./components/OnboardingWizard";
 import { TasksPanel } from "./components/TasksPanel";
 import { Icon } from "./components/Icon";
 import FileEditorModal from "./components/FileEditorModal";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { openInTerminal, copyPath } from "./lib/ipc";
+import { platform } from "./lib/platform";
+import { ContextMenu } from "./components/ContextMenu";
 
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
@@ -112,6 +116,7 @@ function App() {
   const [onboardingApiKeyError, setOnboardingApiKeyError] = createSignal<string | null>(null);
   const [settingsApiKeyError, setSettingsApiKeyError] = createSignal<string | null>(null);
   const [showTree, setShowTree] = createSignal(false);
+  const [contextPos, setContextPos] = createSignal<{ x: number; y: number; path: string } | null>(null);
   const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
   const [onboardingSignInError, setOnboardingSignInError] = createSignal<string | null>(null);
@@ -1007,6 +1012,10 @@ function App() {
                         classList={{
                           "border-accent bg-surface-2": activeWorkspace() === proj,
                         }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setContextPos({ x: e.clientX, y: e.clientY, path: proj });
+                        }}
                       >
                         <button
                           class="flex min-w-0 flex-1 items-center gap-2 text-left"
@@ -1062,7 +1071,12 @@ function App() {
                   {/* Recent projects not currently open */}
                   <For each={recentProjects().filter((p) => !openWorkspaces().includes(p))}>
                     {(proj) => (
-                      <div class="group flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm opacity-70 hover:bg-surface-2 hover:opacity-100">
+                      <div class="group flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm opacity-70 hover:bg-surface-2 hover:opacity-100"
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setContextPos({ x: e.clientX, y: e.clientY, path: proj });
+                        }}
+                      >
                         <button
                           class="flex min-w-0 flex-1 items-center gap-2 text-left"
                           onClick={() => openRecent(proj)}
@@ -1282,6 +1296,32 @@ function App() {
           rootPath={activeWorkspace()!}
           onClose={() => setEditorFilePath(null)}
         />
+      </Show>
+      <Show when={contextPos()}>
+        {(pos) => (
+          <ContextMenu
+            x={pos().x}
+            y={pos().y}
+            items={[
+              {
+                label: platform() === 'mac' ? 'Reveal in Finder' : platform() === 'win' ? 'Show in Explorer' : 'Open in File Manager',
+                icon: 'external-link',
+                action: () => openPath(pos().path),
+              },
+              {
+                label: 'Open in Terminal',
+                icon: 'terminal',
+                action: () => openInTerminal(pos().path),
+              },
+              {
+                label: 'Copy Path',
+                icon: 'file-text',
+                action: () => copyPath(pos().path),
+              },
+            ]}
+            onClose={() => setContextPos(null)}
+          />
+        )}
       </Show>
       </Show>
     </div>

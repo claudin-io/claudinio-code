@@ -8,5 +8,6 @@ pub mod fs;
 pub mod git;
 pub mod lsp;
 pub mod mcp;
+pub mod shell;
 pub mod skills;
 pub mod tasks;
