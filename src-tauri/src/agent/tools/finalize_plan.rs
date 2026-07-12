@@ -18,6 +18,7 @@ use std::process::Command;
 
 use crate::agent::persist::{self, SessionRecord, SessionStore};
 use crate::agent::tools::{write_plan, ToolContext};
+use crate::commands::procutil::no_window;
 
 #[derive(Deserialize)]
 pub struct FinalizePlanArgs {
@@ -44,12 +45,10 @@ pub struct FinalizeOutcome {
 /// The current git HEAD sha for `root`, or None when not a git repo / git
 /// unavailable. Best-effort; used to anchor the diff window at run start.
 pub fn git_head(root: &str) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).args(["rev-parse", "HEAD"]);
+    no_window(&mut cmd);
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -95,12 +94,10 @@ fn commits(root: &str, base: Option<&str>) -> Vec<String> {
 /// Run a git subcommand and split stdout into non-empty trimmed lines.
 /// None when git errors (not a repo, bad range, git missing).
 fn run_git_lines(root: &str, args: &[&str]) -> Option<Vec<String>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).args(args);
+    no_window(&mut cmd);
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
