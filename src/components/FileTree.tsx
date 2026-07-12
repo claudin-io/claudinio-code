@@ -101,12 +101,12 @@ export const FileTree: Component<{
               {
                 label: platform() === 'mac' ? 'Reveal in Finder' : platform() === 'win' ? 'Show in Explorer' : 'Open in File Manager',
                 icon: 'external-link',
-                action: () => openPath(revealPath),
+                action: () => openPath(revealPath).catch(console.error),
               },
               {
                 label: 'Open in Terminal',
                 icon: 'terminal',
-                action: () => openInTerminal(pos().path),
+                action: () => openInTerminal(pos().path).catch(console.error),
               },
               {
                 label: 'Copy Path',

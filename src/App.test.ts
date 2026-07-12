@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // App.tsx imports several modules as side-effects that execute
 // browser APIs (window.matchMedia, localStorage.getItem) at module

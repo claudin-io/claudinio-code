@@ -54,12 +54,21 @@ describe("theme", () => {
   });
 
   it("returns 'dark' when window is undefined (SSR — skips browser code)", async () => {
-    vi.stubGlobal("window", undefined);
-    vi.stubGlobal("matchMedia", undefined);
-    vi.stubGlobal("localStorage", undefined);
-    const mod = await import("./theme");
+    // Patch window/globals via stubGlobals-like approach within the test scope
+    // then restore. NOTE: We cannot use stubGlobals here because localStorage
+    // stubs need to be set up before importing.
+    const origWindow = (globalThis as any).window;
+    const origMatchMedia = (globalThis as any).matchMedia;
+    const origLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).window = undefined;
+    (globalThis as any).matchMedia = undefined;
+    (globalThis as any).localStorage = undefined;
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
     expect(mod.theme()).toBe("dark");
+    (globalThis as any).window = origWindow;
+    (globalThis as any).matchMedia = origMatchMedia;
+    (globalThis as any).localStorage = origLocalStorage;
   });
 
   it("reacts to matchMedia change event — toggles between dark/light", async () => {
@@ -74,21 +83,21 @@ describe("theme", () => {
     })));
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn() });
 
-    const mod = await import("./theme");
-    __resetState = mod.__resetState;
-    expect(mod.theme()).toBe("dark");
+    const _mod = await import("./theme") as any;
+    __resetState = (_mod as any).__resetState;
+    expect((_mod as any).theme()).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
 
     // Simulate OS switching to light
     matchesLight = true;
-    if (listener) listener({ matches: true });
-    expect(mod.theme()).toBe("light");
+    (listener as any)({ matches: true });
+    expect((_mod as any).theme()).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
 
     // Simulate OS switching back to dark
     matchesLight = false;
-    if (listener) listener({ matches: false });
-    expect(mod.theme()).toBe("dark");
+    (listener as any)({ matches: false });
+    expect((_mod as any).theme()).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
@@ -96,14 +105,14 @@ describe("theme", () => {
 
   it("preference() defaults to 'system' with no stored value", async () => {
     stubGlobals(false);
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
     expect(mod.preference()).toBe("system");
   });
 
   it("preference() reads 'dark' from localStorage", async () => {
     stubGlobals(true, "dark"); // OS says light, but stored says dark
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
     expect(mod.preference()).toBe("dark");
     expect(mod.theme()).toBe("dark");
@@ -112,7 +121,7 @@ describe("theme", () => {
 
   it("preference() reads 'light' from localStorage", async () => {
     stubGlobals(false, "light");
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
     expect(mod.preference()).toBe("light");
     expect(mod.theme()).toBe("light");
@@ -121,7 +130,7 @@ describe("theme", () => {
 
   it("preference() reads 'sepia' from localStorage", async () => {
     stubGlobals(false, "sepia");
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
     expect(mod.preference()).toBe("sepia");
     expect(mod.theme()).toBe("sepia");
@@ -130,7 +139,7 @@ describe("theme", () => {
 
   it("cycleTheme() cycles system → dark → light → sepia → system", async () => {
     stubGlobals(false);
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
 
     mod.setThemePreference("system");
@@ -151,7 +160,7 @@ describe("theme", () => {
 
   it("setThemePreference persists to localStorage", async () => {
     const { store } = stubGlobals(false);
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
 
     mod.setThemePreference("sepia");
@@ -165,7 +174,7 @@ describe("theme", () => {
 
   it("setThemePreference('system') removes stored override", async () => {
     const { store } = stubGlobals(false, "dark");
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
 
     expect(mod.preference()).toBe("dark");
@@ -179,7 +188,7 @@ describe("theme", () => {
 
   it("resolvedTheme() returns the same value as theme()", async () => {
     stubGlobals(false, "light");
-    const mod = await import("./theme");
+    const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
     expect(mod.resolvedTheme()).toBe(mod.theme());
     expect(mod.resolvedTheme()).toBe("light");

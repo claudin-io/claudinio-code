@@ -29,10 +29,10 @@ export const DiffViewer: Component<{
 
     // Set container height to match content before creating editor
     if (props.inline) {
-      containerRef.style.height = `${estimateHeight()}px`;
+      containerRef!.style.height = `${estimateHeight()}px`;
     }
 
-    editor = monaco.editor.createDiffEditor(containerRef, {
+    editor = monaco.editor.createDiffEditor(containerRef!, {
       theme: theme() === "dark" ? "claudinio-dark" : theme() === "sepia" ? "claudinio-sepia" : "claudinio-light",
       fontSize: 13,
       fontFamily: "'JetBrains Mono', monospace",

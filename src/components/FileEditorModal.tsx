@@ -53,7 +53,7 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
 
   const [originalContent, setOriginalContent] = createSignal("");
   const [isDirty, setIsDirty] = createSignal(false);
-  const [loading, setLoading] = createSignal(true);
+  const [_loading, setLoading] = createSignal(true);
 
   const basename = () => getBasename(props.filePath);
   const relativePath = () => getRelativePath(props.filePath, props.rootPath);
@@ -82,23 +82,11 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
     editor = undefined;
   };
 
-  const initEditor = async (filePath: string, rootPath: string) => {
+  const initEditor = async (filePath: string) => {
     disposeEditor();
-    setLoading(true);
     setIsDirty(false);
 
     defineMonacoThemes();
-
-    // Mute the built-in TS/JS worker diagnostics — we only want syntax highlighting.
-    // Without this, Monaco's default TS worker emits red squigglies for any project
-    // imports/types it cannot resolve in isolation.
-    const muteDiags: monaco.languages.typescript.DiagnosticsOptions = {
-      noSemanticValidation: true,
-      noSyntaxValidation: true,
-      noSuggestionDiagnostics: true,
-    };
-    monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions(muteDiags);
-    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions(muteDiags);
 
     if (!mounted) return;
     if (!editorContainer) return;
@@ -142,7 +130,7 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
     const fp = props.filePath;
     const rp = props.rootPath;
     if (fp && rp) {
-      initEditor(fp, rp);
+      initEditor(fp);
     }
   });
 

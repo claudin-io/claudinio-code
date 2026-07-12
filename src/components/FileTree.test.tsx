@@ -136,7 +136,7 @@ describe("FileTree", () => {
     expect(document.body.textContent).toContain("index.ts");
     expect(document.body.textContent).toContain("utils.ts");
     // listDir is called: 1st for root (with info arg), 2nd for src (without info, via arrow fn)
-    expect(listDir.mock.calls[1][0]).toBe("/test/workspace/src");
+    expect(vi.mocked(listDir).mock.calls[1][0]).toBe("/test/workspace/src");
 
     dispose();
   });

@@ -66,14 +66,14 @@ function createThemeState() {
 }
 
 // ── Module-level root (lazy init via createRoot, same pattern as grill-me.ts) ─
-let rootState: ReturnType<typeof createThemeState>;
+let rootState: ReturnType<typeof createThemeState> | undefined;
 function initState() {
   if (!rootState) {
     createRoot(() => {
       rootState = createThemeState();
     });
   }
-  return rootState;
+  return rootState!;
 }
 
 // ── Backward-compatible export: theme() returns the resolved theme ──

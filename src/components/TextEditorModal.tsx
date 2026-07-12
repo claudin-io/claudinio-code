@@ -25,6 +25,8 @@ const TextEditorModal: Component<TextEditorModalProps> = (props) => {
       const result = await props.onEnhance(editor.getValue());
       editor.setValue(result);
       editor.focus();
+    } catch (err) {
+      console.error("enhance failed", err);
     } finally {
       setIsEnhancing(false);
     }

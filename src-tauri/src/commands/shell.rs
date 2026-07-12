@@ -1,22 +1,25 @@
 use std::process::Command;
 
 #[tauri::command]
-pub fn open_in_terminal(path: String) -> Result<(), String> {
+pub async fn open_in_terminal(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
             .args(["-b", "com.apple.Terminal", &path])
-            .output()
+            .spawn()
             .map_err(|e| format!("Failed to open Terminal: {e}"))?;
     }
     #[cfg(target_os = "windows")]
     {
-        // `start` opens a new visible terminal window on purpose here (that's
-        // the point of "Open in Terminal"), so CREATE_NO_WINDOW is NOT applied
-        // to this spawn — unlike the background git/rg spawns elsewhere.
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW suppresses the console flash of the wrapper `cmd`
+        // process itself; the `start`-ed terminal window it launches is a
+        // separate process and remains visible, which is the whole point.
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         Command::new("cmd")
             .args(["/c", "start", "cmd", "/k", "cd", "/d", &path])
-            .output()
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
             .map_err(|e| format!("Failed to open Terminal: {e}"))?;
     }
     #[cfg(target_os = "linux")]
@@ -25,7 +28,7 @@ pub fn open_in_terminal(path: String) -> Result<(), String> {
             .unwrap_or_else(|_| "x-terminal-emulator".to_string());
         Command::new(&terminal)
             .arg(&path)
-            .output()
+            .spawn()
             .map_err(|e| format!("Failed to open Terminal: {e}"))?;
     }
 

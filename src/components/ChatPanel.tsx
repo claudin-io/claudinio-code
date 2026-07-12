@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
 import {
   sendMessage,
   approveTool,
@@ -496,6 +496,19 @@ export const ChatPanel: Component<{
   const smoothThinking = createSmoothText(liveThinkingText, () => !liveThinkingActive());
   const [subagentState, setSubagentState] = createSignal<Record<string, SubagentTimelineState>>({});
   const [openSubagentId, setOpenSubagentId] = createSignal<string | null>(null);
+  // Resolves the subagent shown in the modal. `subagentState` is cleared once
+  // the parent turn finishes (Done/Error), so a click on a subagent row that
+  // belongs to a completed message needs to fall back to the snapshot
+  // embedded in that message's steps (or the live `currentSteps`).
+  const openSubagent = createMemo<SubagentTimelineState | undefined>(() => {
+    const id = openSubagentId();
+    if (!id) return undefined;
+    const live = subagentState()[id];
+    if (live) return live;
+    const findIn = (steps: TimelineItem[] | undefined) =>
+      steps?.find((s) => s.type === "subagent" && s.subagent?.id === id)?.subagent;
+    return findIn(currentSteps()) ?? messages().map((m) => findIn(m.steps)).find((s) => s);
+  });
   const [thinkingStart, setThinkingStart] = createSignal(0);
   const [liveExpandedStep, setLiveExpandedStep] = createSignal<number | null>(null);
   const [sessions, setSessions] = createSignal<SessionSummary[]>([]);
@@ -1046,15 +1059,6 @@ export const ChatPanel: Component<{
     return next;
   };
 
-  const updateSubagentTimelineItem = (subagents: Record<string, SubagentTimelineState>): TimelineItem[] | null => {
-    const values = Object.values(subagents);
-    if (values.length === 0) return null;
-    return values.map((sa) => ({
-      type: "subagent" as const,
-      subagent: sa,
-    }));
-  };
-
   const processSubagentEvent = (
     subagents: Record<string, SubagentTimelineState>,
     subagentId: string,
@@ -1223,21 +1227,14 @@ export const ChatPanel: Component<{
       const d = event.data;
       const result = processSubagentEvent(subagentState(), d.subagentId, d.event);
       setSubagentState(result.subagents);
-      // sync timeline items
-      const items = updateSubagentTimelineItem(result.subagents);
-      if (items) {
-        setCurrentSteps((prev) => {
-          // replace subagent items in-place
-          const newSteps = prev.map((s) => {
-            if (s.type === "subagent") {
-              const found = items.find((i) => i.subagent?.id === s.subagent?.id);
-              return found ?? s;
-            }
-            return s;
-          });
-          return newSteps;
-        });
-      }
+      // Note: the inline timeline item is intentionally NOT resynced here.
+      // SubagentRow only renders name/mode/status/rounds/tokens/goal/report,
+      // none of which change mid-run (only the inner `steps`, read by the
+      // modal from subagentState() directly). Resyncing on every streaming
+      // event replaced the item's object identity continuously, which made
+      // the reference-keyed <For> recreate the bubble's DOM node and eat
+      // clicks. See syncSubagentTimelineItems for the one real sync point
+      // (SubagentDone).
       if (result.approval) {
         setPendingApprovals((prev) => [...prev, result.approval!]);
         setStatus("awaiting_approval");
@@ -1245,7 +1242,12 @@ export const ChatPanel: Component<{
       scrollToBottom();
     } else if (event.event === "Done") {
       const data = event.data as DoneData;
-      const steps = currentSteps();
+      // Sync subagent snapshots into the timeline before promoting into
+      // `messages`: the inline items are no longer resynced on every
+      // streaming event (see the Subagent handler above), so a run that
+      // ends without a SubagentDone (e.g. an interrupt mid-subagent) would
+      // otherwise promote a stale snapshot.
+      const steps = syncSubagentTimelineItems(currentSteps(), subagentState());
       const final = steps.map((s) => {
         if (s.type === "thinking") {
           return { ...s, thinking: { ...s.thinking!, endedAt: Date.now() } };
@@ -2020,9 +2022,9 @@ export const ChatPanel: Component<{
         </Show>
       </div>
 
-      <Show when={openSubagentId()}>
+      <Show when={openSubagent()}>
         <SubagentModal
-          subagent={subagentState()[openSubagentId()!]}
+          subagent={openSubagent()!}
           onClose={() => setOpenSubagentId(null)}
         />
       </Show>
