@@ -1251,11 +1251,12 @@ mod tests {
 
     #[test]
     fn test_read_file_large_truncated() {
-        // Large file (> 5000 tokens) — should return warning + truncated content.
-        // Each line "lineN" is ~7 chars → ~2 tokens per line in cl100k_base.
-        // With 5000 lines (~10000 tokens), truncation stops at ~2500 lines (~5000 tokens).
-        // Output = ~9 lines of warning + ~2500 lines content = ~2509 total.
-        let p = write_large_file("large_truncated", 5000);
+        // Large file (> 25000 tokens) — should return warning + truncated content.
+        // Each line "lineN" is ~7–9 chars → ~2–4 tokens per line in cl100k_base.
+        // With 30000 lines (~60000–120000 tokens), truncation stops when MAX_TOKENS
+        // (25000) is reached, at roughly 6250–12500 lines.
+        // Output = ~9 lines of warning + truncated content.
+        let p = write_large_file("large_truncated", 30000);
         let ctx = test_ctx();
         let args = serde_json::json!({"path": p.to_string_lossy()});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
@@ -1272,8 +1273,8 @@ mod tests {
                 );
                 let line_count = content.lines().count();
                 assert!(
-                    line_count < 4900,
-                    "truncated content should have far fewer than 4900 lines, got {line_count}"
+                    line_count < 29000,
+                    "truncated content should have far fewer than 29000 lines, got {line_count}"
                 );
                 assert!(
                     line_count > 10,
