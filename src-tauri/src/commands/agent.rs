@@ -1031,13 +1031,7 @@ pub async fn commit_and_push(
         map.insert(id.clone(), steering.clone());
     }
 
-    let message = concat!(
-        "Please commit and push all changes. First run `git log --oneline -20` ",
-        "to understand the commit message pattern used in this project. Then stage ",
-        "the changes with `git add`, commit with an appropriate message following ",
-        "the project's convention, and push to the remote."
-    )
-    .to_string();
+    let message = "Commit and push all current changes.".to_string();
 
     let mode_ctl = state.mode_for(&id, &store.path).await;
 
@@ -1048,7 +1042,7 @@ pub async fn commit_and_push(
     let steering_map = state.steering_map();
 
     tokio::spawn(async move {
-        if let Err(e) = session::run_workflow(
+        if let Err(e) = session::run_workflow_with_profile(
             &config,
             &mut history,
             message,
@@ -1061,6 +1055,7 @@ pub async fn commit_and_push(
             &store,
             &steering,
             &mode_ctl,
+            session::PromptProfile::GitSync,
         )
         .await
         {
