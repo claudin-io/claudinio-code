@@ -27,6 +27,14 @@ export async function pickFiles(): Promise<string[]> {
   return Array.isArray(selected) ? selected : [selected];
 }
 
+export function openInTerminal(path: string): Promise<void> {
+  return invoke<void>("open_in_terminal", { path });
+}
+
+export async function copyPath(path: string): Promise<void> {
+  await navigator.clipboard.writeText(path);
+}
+
 export interface SessionStarted {
   sessionId: string;
 }

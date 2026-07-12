@@ -1,5 +1,8 @@
 import { createResource, createSignal, For, Show, type Component } from "solid-js";
-import { listDir, type DirEntry } from "../lib/ipc";
+import { listDir, openInTerminal, copyPath, type DirEntry } from "../lib/ipc";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { platform } from "../lib/platform";
 
 const TreeNode: Component<{
   entry: DirEntry;
@@ -8,6 +11,7 @@ const TreeNode: Component<{
   onDblClickFile: (path: string) => void;
   onOpenExternal: (path: string) => void;
   selectedPath: () => string | null;
+  onContextMenu: (x: number, y: number, path: string, isDir: boolean) => void;
 }> = (props) => {
   const [expanded, setExpanded] = createSignal(false);
   const [children] = createResource(
@@ -32,6 +36,10 @@ const TreeNode: Component<{
         style={{ "padding-left": `${8 + props.depth * 14}px` }}
         onClick={handleClick}
         onDblClick={handleDblClick}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          props.onContextMenu(e.clientX, e.clientY, props.entry.path, props.entry.isDir);
+        }}
       >
         <span class="w-3 shrink-0 text-ink-muted">
           {props.entry.isDir ? (expanded() ? "▾" : "▸") : ""}
@@ -48,6 +56,7 @@ const TreeNode: Component<{
               onDblClickFile={props.onDblClickFile}
               onOpenExternal={props.onOpenExternal}
               selectedPath={props.selectedPath}
+              onContextMenu={props.onContextMenu}
             />
           )}
         </For>
@@ -64,6 +73,7 @@ export const FileTree: Component<{
   selectedPath: () => string | null;
 }> = (props) => {
   const [entries] = createResource(() => props.root, listDir);
+  const [contextPos, setContextPos] = createSignal<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
 
   return (
     <div class="h-full overflow-y-auto py-1">
@@ -79,9 +89,42 @@ export const FileTree: Component<{
             onDblClickFile={props.onDblClickFile}
             onOpenExternal={props.onOpenExternal}
             selectedPath={props.selectedPath}
+            onContextMenu={(x, y, path, isDir) => setContextPos({ x, y, path, isDir })}
           />
         )}
       </For>
+      <Show when={contextPos()}>
+        {(pos) => {
+          const items = (): ContextMenuItem[] => {
+            const revealPath = pos().isDir ? pos().path : pos().path.substring(0, pos().path.lastIndexOf("/"));
+            return [
+              {
+                label: platform() === 'mac' ? 'Reveal in Finder' : platform() === 'win' ? 'Show in Explorer' : 'Open in File Manager',
+                icon: 'external-link',
+                action: () => openPath(revealPath),
+              },
+              {
+                label: 'Open in Terminal',
+                icon: 'terminal',
+                action: () => openInTerminal(pos().path),
+              },
+              {
+                label: 'Copy Path',
+                icon: 'file-text',
+                action: () => copyPath(pos().path),
+              },
+            ];
+          };
+          return (
+            <ContextMenu
+              x={pos().x}
+              y={pos().y}
+              items={items()}
+              onClose={() => setContextPos(null)}
+            />
+          );
+        }}
+      </Show>
     </div>
   );
 };

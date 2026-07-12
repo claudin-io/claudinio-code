@@ -321,6 +321,13 @@ const dict: LocaleDict = {
   "contentViewer.close": "Fechar",
   "contentViewer.loading": "Carregando...",
   "contentViewer.error": "Falha ao carregar arquivo",
+
+  // ── Context Menu ────────────────────────────────────────────
+  "context.revealInFinder": "Revelar no Finder",
+  "context.revealInExplorer": "Mostrar no Explorer",
+  "context.revealInFileManager": "Abrir no Gerenciador de Arquivos",
+  "context.openInTerminal": "Abrir no Terminal",
+  "context.copyPath": "Copiar caminho",
 };
 
 export default dict;
