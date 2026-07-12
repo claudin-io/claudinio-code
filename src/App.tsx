@@ -15,7 +15,7 @@ import { TasksPanel } from "./components/TasksPanel";
 import { Icon } from "./components/Icon";
 import FileEditorModal from "./components/FileEditorModal";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { openInTerminal, copyPath } from "./lib/ipc";
+import { openInTerminal, copyPath, gitBranch, checkGitAvailable } from "./lib/ipc";
 import { platform } from "./lib/platform";
 import { ContextMenu } from "./components/ContextMenu";
 
@@ -125,6 +125,30 @@ function App() {
   const [keystrokeBuf, setKeystrokeBuf] = createSignal("");
   const [configOverrideBaseUrl, setConfigOverrideBaseUrl] = createSignal("");
   const [configOverrideApiKey, setConfigOverrideApiKey] = createSignal("");
+
+  // --- Git branch in header ---
+  const [gitBranchName, setGitBranchName] = createSignal("");
+  const [gitAvailable, setGitAvailable] = createSignal<boolean | null>(null);
+
+  checkGitAvailable().then(setGitAvailable);
+
+  createEffect(() => {
+    if (gitAvailable() !== true) return;
+    const ws = activeWorkspace();
+    if (!ws) return;
+
+    const refresh = async () => {
+      try {
+        const b = await gitBranch(ws);
+        setGitBranchName(b);
+      } catch {
+        setGitBranchName("");
+      }
+    };
+    refresh();
+    const intervalId = setInterval(refresh, 30000);
+    onCleanup(() => clearInterval(intervalId));
+  });
 
   // MCP server settings: edited as raw JSON text (`{ "name": { type, ... } }`),
   // parsed only on save/test. Statuses come from a live workspace connection
@@ -553,9 +577,17 @@ function App() {
           Claudinio <span class="text-accent">Code</span>
         </span>
         <div class="ml-auto flex items-center gap-3">
-          <span class="max-w-[280px] truncate font-mono text-[12px] text-ink-faint" data-tauri-drag-region>
-            {activeWorkspace()}
-          </span>
+          <div class="flex flex-col items-end">
+            <span class="max-w-[280px] truncate font-mono text-[12px] text-ink-faint" data-tauri-drag-region>
+              {activeWorkspace()}
+            </span>
+            <Show when={gitBranchName()}>
+              <span class="flex items-center gap-1 text-[10px] leading-none text-ink-faint">
+                <Icon name="git-branch" class="h-3 w-3" />
+                {gitBranchName()}
+              </span>
+            </Show>
+          </div>
           <button
             onClick={openConfig}
             class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
