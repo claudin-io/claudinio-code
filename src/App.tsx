@@ -137,12 +137,17 @@ function App() {
     const ws = activeWorkspace();
     if (!ws) return;
 
+    let inFlight = false;
     const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const b = await gitBranch(ws);
         setGitBranchName(b);
       } catch {
         setGitBranchName("");
+      } finally {
+        inFlight = false;
       }
     };
     refresh();

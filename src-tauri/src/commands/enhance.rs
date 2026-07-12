@@ -72,13 +72,7 @@ pub async fn enhance_prompt(
     // Best-effort project grounding: neither git nor the index may be
     // available (fresh workspace, embedder still loading) — the enhancer
     // must keep working exactly as before in that case.
-    let git_section = {
-        let workspace = workspace.clone();
-        tokio::task::spawn_blocking(move || build_git_section(&workspace))
-            .await
-            .ok()
-            .flatten()
-    };
+    let git_section = build_git_section(&workspace).await;
     let code_section =
         build_code_section(&ws, &state, &config, &model, &prompt, &context.messages).await;
 
@@ -157,9 +151,9 @@ pub async fn enhance_prompt(
     Ok(reply)
 }
 
-fn build_git_section(workspace: &str) -> Option<String> {
-    let branch = super::git::git_branch(workspace.to_string()).ok();
-    let status = super::git::git_status(workspace.to_string()).ok();
+async fn build_git_section(workspace: &str) -> Option<String> {
+    let branch = super::git::git_branch(workspace.to_string()).await.ok();
+    let status = super::git::git_status(workspace.to_string()).await.ok();
 
     let mut section = String::from("=== GIT STATE ===\n");
     let mut has_content = false;
