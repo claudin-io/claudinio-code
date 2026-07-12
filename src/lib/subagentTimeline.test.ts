@@ -336,4 +336,31 @@ describe("syncSubagentTimelineItems", () => {
     expect(result[0]).toBe(msg);
     expect(result[1].subagent?.status).toBe("failed");
   });
+
+  it("preserves item identity when the mapped subagent is unchanged (reference equal)", () => {
+    const sa = createSubagent({ id: "sa-1", status: "running" });
+    const step: TimelineNode = { type: "subagent", subagent: sa };
+    const steps: TimelineNode[] = [step];
+    const map: Record<string, SubagentNode> = { "sa-1": sa };
+
+    const result = syncSubagentTimelineItems(steps, map);
+
+    expect(result[0]).toBe(step);
+  });
+
+  it("only recreates the item whose subagent actually changed, leaving others' identity intact", () => {
+    const saA = createSubagent({ id: "sa-a", status: "running" });
+    const saBOld = createSubagent({ id: "sa-b", status: "running" });
+    const saBNew = createSubagent({ id: "sa-b", status: "completed" });
+    const stepA: TimelineNode = { type: "subagent", subagent: saA };
+    const stepB: TimelineNode = { type: "subagent", subagent: saBOld };
+    const steps: TimelineNode[] = [stepA, stepB];
+    const map: Record<string, SubagentNode> = { "sa-a": saA, "sa-b": saBNew };
+
+    const result = syncSubagentTimelineItems(steps, map);
+
+    expect(result[0]).toBe(stepA);
+    expect(result[1]).not.toBe(stepB);
+    expect(result[1].subagent?.status).toBe("completed");
+  });
 });

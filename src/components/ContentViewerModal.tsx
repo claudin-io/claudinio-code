@@ -56,6 +56,14 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
     }
   });
 
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => document.removeEventListener("keydown", onKey));
+  });
+
   onCleanup(() => {
     mounted = false;
     editor?.dispose();
@@ -92,15 +100,10 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
     if (e.target === e.currentTarget) props.onClose();
   };
 
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Escape") props.onClose();
-  };
-
   return (
     <div
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
       onClick={handleBackdrop}
-      onKeyDown={handleKeyDown}
     >
       <div class="flex w-[80vw] h-[80vh] flex-col overflow-hidden rounded-xl bg-surface-0 shadow-2xl">
         {/* Header */}

@@ -22,6 +22,7 @@ export type SubagentStatus =
 export interface TimelineNode {
   type: string;
   thinking?: { text: string; startedAt: number; endedAt?: number };
+  text?: string;
   subagent?: SubagentNode;
 }
 
@@ -105,7 +106,7 @@ export function syncSubagentTimelineItems<T extends TimelineNode>(
   return steps.map((s) => {
     if (s.type === "subagent" && s.subagent) {
       const latest = subagents[s.subagent.id];
-      if (latest) return { ...s, subagent: latest } as T;
+      if (latest && latest !== s.subagent) return { ...s, subagent: latest } as T;
     }
     return s;
   });

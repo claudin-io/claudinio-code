@@ -109,7 +109,7 @@ function App() {
   const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
   const [workspaceConfigFields, setWorkspaceConfigFields] = createSignal<Set<string>>(new Set());
   const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
-  const [accountTier, setAccountTier] = createSignal<string | null>(null);
+  const [, setAccountTier] = createSignal<string | null>(null);
   const [loggingIn, setLoggingIn] = createSignal(false);
   const [hasApiKey, setHasApiKey] = createSignal(false);
   const [apiKeyValidating, setApiKeyValidating] = createSignal(false);
@@ -1343,12 +1343,12 @@ function App() {
               {
                 label: platform() === 'mac' ? 'Reveal in Finder' : platform() === 'win' ? 'Show in Explorer' : 'Open in File Manager',
                 icon: 'external-link',
-                action: () => openPath(pos().path),
+                action: () => openPath(pos().path).catch(console.error),
               },
               {
                 label: 'Open in Terminal',
                 icon: 'terminal',
-                action: () => openInTerminal(pos().path),
+                action: () => openInTerminal(pos().path).catch(console.error),
               },
               {
                 label: 'Copy Path',

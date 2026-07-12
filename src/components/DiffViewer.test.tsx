@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import type { Mock } from "vitest";
 import { render } from "solid-js/web";
 import { type Signal } from "solid-js";
 
@@ -203,7 +204,7 @@ describe("DiffViewer", () => {
 
     // Make defineMonacoThemes throw so onMount never assigns `editor`.
     // Solid catches lifecycle errors internally; onCleanup still runs.
-    defineMonacoThemes.mockImplementationOnce(() => {
+    (defineMonacoThemes as unknown as Mock).mockImplementationOnce(() => {
       throw new Error("prevent editor assignment");
     });
 

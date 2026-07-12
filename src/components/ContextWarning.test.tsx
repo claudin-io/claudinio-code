@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { createRoot, createSignal, Show } from "solid-js";
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { getContextWarning } from "../lib/ipc";
 import type { ContextWarningData } from "../lib/ipc";

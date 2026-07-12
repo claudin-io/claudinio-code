@@ -1,3 +1,4 @@
+/// <reference types="vitest/globals" />
 /**
  * Vitest setup file: mocks Tauri modules so tests can run in jsdom.
  * 

@@ -55,7 +55,7 @@ vi.mock("./locales/en-US", () => ({
 async function flushUntil(cond: () => boolean, maxCycles = 500) {
   for (let i = 0; i < maxCycles; i++) {
     if (cond()) return;
-    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setTimeout(r, 0));
     await Promise.resolve();
   }
 }
