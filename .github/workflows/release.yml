@@ -117,6 +117,8 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Determine version
         id: version
         shell: bash
         run: |
