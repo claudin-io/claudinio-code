@@ -20,10 +20,11 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: vi.fn((path: string) => `tauri://localhost${path}`),
 }));
 
+vi.mock("../lib/theme", () => ({ theme: vi.fn(() => "dark") }));
+
 vi.mock("./Icon", () => ({ Icon: () => null }));
 vi.mock("../lib/grill-me", () => ({ t: (k: string) => k }));
 vi.mock("../lib/monacoThemes", () => ({ defineMonacoThemes: vi.fn() }));
-vi.mock("../lib/theme", () => ({ theme: vi.fn(() => "dark") }));
 vi.mock("./FileEditorModal", () => ({
   detectLanguage: vi.fn(() => "typescript"),
 }));
@@ -39,6 +40,7 @@ vi.mock("../lib/ipc", () => ({
 import ContentViewerModal from "./ContentViewerModal";
 import { readFile, openExternal } from "../lib/ipc";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { theme } from "../lib/theme";
 import * as monaco from "monaco-editor";
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -459,5 +461,290 @@ describe("ContentViewerModal", () => {
     expect(img.getAttribute("src")).toBe(
       "tauri://localhost/absolute/path/banner.jpg",
     );
+  });
+
+  // ────── Editor cleanup (line 69) ────────────────────────────
+
+  it("disposes editor when component unmounts after text load", async () => {
+    vi.mocked(readFile).mockResolvedValue("some code");
+    const onClose = vi.fn();
+
+    const dispose = render(
+      () => (
+        <ContentViewerModal
+          contentType="text"
+          filePath="/f.ts"
+          title="File"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    // Editor was created
+    expect(monaco.editor.create).toHaveBeenCalledTimes(1);
+
+    // Unmount the component — onCleanup runs editor?.dispose()
+    dispose();
+
+    expect(mockEditorInstance.dispose).toHaveBeenCalled();
+  });
+
+  // ────── Theme branches in the createEffect ──────────────────
+
+  it("creates editor with sepia monaco theme when theme is sepia", async () => {
+    vi.mocked(readFile).mockResolvedValue("code");
+    vi.mocked(theme).mockReturnValue("sepia");
+
+    const onClose = vi.fn();
+    render(
+      () => (
+        <ContentViewerModal
+          contentType="text"
+          filePath="/f.ts"
+          title="File"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    expect(monaco.editor.create).toHaveBeenCalledWith(
+      expect.any(HTMLElement),
+      expect.objectContaining({ theme: "claudinio-sepia" }),
+    );
+  });
+
+  it("creates editor with light monaco theme when theme is light", async () => {
+    vi.mocked(readFile).mockResolvedValue("code");
+    vi.mocked(theme).mockReturnValue("light");
+
+    const onClose = vi.fn();
+    render(
+      () => (
+        <ContentViewerModal
+          contentType="text"
+          filePath="/f.ts"
+          title="File"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    expect(monaco.editor.create).toHaveBeenCalledWith(
+      expect.any(HTMLElement),
+      expect.objectContaining({ theme: "claudinio-light" }),
+    );
+  });
+
+  // ────── Unmount before readFile resolves (mounted = false guard) ──
+
+  it("does not set content or create editor when unmounted before readFile resolves", async () => {
+    // readFile doesn't resolve immediately — hold it open
+    let resolveReadFile!: (v: string) => void;
+    vi.mocked(readFile).mockReturnValue(
+      new Promise((resolve) => {
+        resolveReadFile = resolve;
+      }),
+    );
+
+    const onClose = vi.fn();
+    const dispose = render(
+      () => (
+        <ContentViewerModal
+          contentType="text"
+          filePath="/f.ts"
+          title="File"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    // Unmount before readFile resolves — mounted becomes false
+    dispose();
+
+    // Now resolve — the `if (!mounted) return` guards should fire
+    resolveReadFile("should be ignored");
+    await flush();
+
+    // Editor should NOT have been created
+    expect(monaco.editor.create).not.toHaveBeenCalled();
+
+    // mockEditorInstance.dispose may or may not be called, but editor was
+    // never assigned (create was never called), so the optional chain on
+    // editor?.dispose() should short-circuit without error.
+  });
+
+  it("shows error that respects mounted guard (unmount before reject)", async () => {
+    let rejectReadFile!: (e: Error) => void;
+    vi.mocked(readFile).mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectReadFile = reject;
+      }),
+    );
+
+    const onClose = vi.fn();
+    const dispose = render(
+      () => (
+        <ContentViewerModal
+          contentType="text"
+          filePath="/f.ts"
+          title="File"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    dispose();
+
+    rejectReadFile(new Error("too late"));
+    await flush();
+
+    // No error content should appear since mounted is false
+    expect(monaco.editor.create).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("contentViewer.error");
+  });
+
+  // ────── Empty string content (falsy value in Show condition) ──
+
+  it("does not render editor container when readFile returns empty string", async () => {
+    vi.mocked(readFile).mockResolvedValue(""); // empty string is falsy
+    const onClose = vi.fn();
+
+    render(
+      () => (
+        <ContentViewerModal
+          contentType="text"
+          filePath="/empty.txt"
+          title="Empty"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    // Loading is finished
+    expect(document.body.textContent).not.toContain("contentViewer.loading");
+    // No error
+    expect(document.body.textContent).not.toContain("contentViewer.error");
+
+    // content() is "" which is falsy, so the Show condition
+    // !loading() && !error() && content() evaluates to false
+    // → editor container div should NOT be rendered
+    // → monaco.editor.create should NOT be called
+    const editorContainers = document.body.querySelectorAll('[class*="h-full w-full"]');
+    expect(editorContainers.length).toBe(0);
+    expect(monaco.editor.create).not.toHaveBeenCalled();
+  });
+
+  // ────── Aspect-ratio image (cover vs contain variant) ────────
+
+  it("renders conversion asset:// URL for image via convertFileSrc", async () => {
+    const onClose = vi.fn();
+    render(
+      () => (
+        <ContentViewerModal
+          contentType="image"
+          filePath="/assets/hero.svg"
+          title="Hero"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    expect(convertFileSrc).toHaveBeenCalledWith("/assets/hero.svg");
+    const img = document.body.querySelector("img")!;
+    expect(img.getAttribute("src")).toBe("tauri://localhost/assets/hero.svg");
+  });
+
+  it("renders open externally button for image with correctly resolved path from file prefix", async () => {
+    const onClose = vi.fn();
+    render(
+      () => (
+        <ContentViewerModal
+          contentType="image"
+          filePath="file:///photos/wallpaper.jpg"
+          title="Wallpaper"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    const buttons = Array.from(document.body.querySelectorAll("button"));
+    const externalBtn = buttons.find((b) =>
+      b.textContent?.includes("contentViewer.openExternally"),
+    );
+    expect(externalBtn).not.toBeUndefined();
+    externalBtn!.click();
+    expect(openExternal).toHaveBeenCalledWith("/photos/wallpaper.jpg");
+  });
+
+  // ────── Non-text content type — ensure createEffect short-circuits at contentType check ──
+
+  it("does not attempt to create Monaco editor for non-text contentType", async () => {
+    const onClose = vi.fn();
+    // Use image (already tested to render img) and verify editor.create was NEVER called
+    render(
+      () => (
+        <ContentViewerModal
+          contentType="image"
+          filePath="/img.png"
+          title="No Editor"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    expect(monaco.editor.create).not.toHaveBeenCalled();
+  });
+
+  // ────── Modal closes only on backdrop, not on inner content clicks, for audio type ──
+
+  it("does not close when clicking inside the modal content for audio contentType", async () => {
+    const onClose = vi.fn();
+    render(
+      () => (
+        <ContentViewerModal
+          contentType="audio"
+          filePath="/s.mp3"
+          title="Song"
+          workspace="/ws"
+          onClose={onClose}
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    const innerModal = document.body.querySelector(
+      ".rounded-xl",
+    ) as HTMLElement;
+    expect(innerModal).not.toBeNull();
+    innerModal.click();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

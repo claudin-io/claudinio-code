@@ -18,8 +18,8 @@ const { mockModel, mockDiffEditor } = vi.hoisted(() => {
 // Expose setter so tests can drive theme signal from outside the mock factory.
 // The factory will call this after creating the signal — must be assigned
 // before the test body runs.
-const _setThemeModeRef = vi.hoisted(() => ({ current: undefined as ((m: "dark" | "light") => void) | undefined }));
-const _themeRef = vi.hoisted(() => ({ current: undefined as Signal<"dark" | "light">[0] | undefined }));
+const _setThemeModeRef = vi.hoisted(() => ({ current: undefined as ((m: "dark" | "light" | "sepia") => void) | undefined }));
+const _themeRef = vi.hoisted(() => ({ current: undefined as Signal<"dark" | "light" | "sepia">[0] | undefined }));
 
 // ── Mocks ──────────────────────────────────────────────────────────
 
@@ -34,7 +34,7 @@ vi.mock("monaco-editor", () => ({
 
 vi.mock("../lib/theme", async () => {
   const { createSignal } = await import("solid-js");
-  const [mode, setMode] = createSignal<"dark" | "light">("dark");
+  const [mode, setMode] = createSignal<"dark" | "light" | "sepia">("dark");
   _setThemeModeRef.current = setMode;
   _themeRef.current = mode;
   return { theme: mode };
@@ -54,7 +54,7 @@ function flush() {
 }
 
 /** Programmatically change the theme signal as if `theme()` changed. */
-function setThemeMode(mode: "dark" | "light") {
+function setThemeMode(mode: "dark" | "light" | "sepia") {
   _setThemeModeRef.current!(mode);
 }
 
@@ -261,6 +261,73 @@ describe("DiffViewer", () => {
 
     const container = document.body.firstElementChild as HTMLElement;
     expect(container.style.height).toBe("230px");
+
+    dispose();
+  });
+
+  it("clamps height to maxHeight when maxHeight is smaller than estimateHeight", async () => {
+    // 10 lines → contentHeight = 10×20 + 30 = 230, clamped to min 100 = 230
+    // maxHeight="150" → Math.min(230, 150) = 150
+    const longContent = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join("\n");
+    const dispose = render(
+      () => (
+        <DiffViewer
+          original={longContent}
+          modified={longContent}
+          inline
+          maxHeight="150"
+        />
+      ),
+      document.body,
+    );
+    await flush();
+
+    const container = document.body.firstElementChild as HTMLElement;
+    expect(container.style.height).toBe("150px");
+
+    dispose();
+  });
+
+  it("creates diff editor with sepia theme when theme is sepia at mount time", async () => {
+    const { editor } = await import("monaco-editor");
+    // Change theme to "sepia" BEFORE mount so onMount reads "sepia"
+    setThemeMode("sepia");
+
+    const dispose = render(
+      () => <DiffViewer original="a" modified="b" />,
+      document.body,
+    );
+    await flush();
+
+    // createDiffEditor should receive "claudinio-sepia" theme
+    expect(editor.createDiffEditor).toHaveBeenCalledWith(
+      expect.any(HTMLElement),
+      expect.objectContaining({ theme: "claudinio-sepia" }),
+    );
+
+    dispose();
+  });
+
+  it("reacts to theme changes to sepia via createEffect", async () => {
+    const { editor } = await import("monaco-editor");
+
+    // Reset theme to dark before rendering (previous test may have set it to sepia)
+    setThemeMode("dark");
+
+    const dispose = render(
+      () => <DiffViewer original="a" modified="b" />,
+      document.body,
+    );
+    await flush();
+
+    // Default theme signal is "dark" → "claudinio-dark"
+    expect(editor.setTheme).toHaveBeenCalledWith("claudinio-dark");
+
+    // Switch to sepia
+    setThemeMode("sepia");
+    await flush();
+
+    expect(editor.setTheme).toHaveBeenCalledWith("claudinio-sepia");
 
     dispose();
   });
