@@ -149,6 +149,11 @@ const dict: LocaleDict = {
   "chat.timeline.steps": "{0} step{1}",
   "chat.timeline.args": "Arguments",
   "chat.timeline.result": "Result",
+  "chat.timeline.showRaw": "Show raw JSON",
+  "chat.timeline.hideRaw": "Hide raw JSON",
+  "chat.timeline.noResults": "No results",
+  "chat.timeline.truncated": "Output truncated",
+  "chat.timeline.more": "more",
 
   // ── ChatPanel - Subagent ──────────────────────────────────────────
   "chat.subagent.running": "Working",

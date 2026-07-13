@@ -243,8 +243,25 @@ export const Icon: Component<{ name: IconName; class?: string; stroke?: boolean 
 
 export function toolIcon(name: string): IconName {
   if (name === "read_file") return "file";
-  if (name === "grep") return "search";
   if (name === "edit_file") return "pencil";
   if (name === "list_dir") return "folder";
+  if (
+    name === "grep" ||
+    name === "code_search" ||
+    name === "semantic_search" ||
+    name === "symbol_lookup" ||
+    name === "go_to_definition" ||
+    name === "find_references" ||
+    name === "web_search"
+  ) {
+    return "search";
+  }
+  if (name === "file_outline") return "file-text";
+  if (name === "ask_user") return "notebook-pen";
+  if (name === "tasks_get" || name === "tasks_set") return "layers";
+  if (name === "write_plan" || name === "finalize_plan") return "file-text";
+  if (name === "spawn_agents") return "git-branch";
+  if (name === "enter_plan_mode" || name === "exit_plan_mode") return "goal";
+  if (name.startsWith("mcp__")) return "package";
   return "terminal";
 }

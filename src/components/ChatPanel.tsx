@@ -48,6 +48,8 @@ import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
 import { Icon, toolIcon, type IconName } from "./Icon";
+import { ToolBody } from "./tool-renderers/ToolBody";
+import { alwaysShowsBody, detectLanguageFromPath, toolSummary, toolTitle } from "./tool-renderers/toolPresentation";
 import TextEditorModal from "./TextEditorModal";
 import { FileMentionPopover } from "./FileMentionPopover";
 import { TagMentionPopover } from "./TagMentionPopover";
@@ -167,31 +169,9 @@ function formatTokens(n: number): string {
   return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
 }
 
-function summarizeArgs(args: Record<string, unknown>): string {
-  const path = args.path as string | undefined;
-  if (path) return path;
-  const pattern = args.pattern as string | undefined;
-  if (pattern) return `/${pattern}/`;
-  const content = args.content as string | undefined;
-  if (content) return `${content.slice(0, 60)}…`;
-  return JSON.stringify(args).slice(0, 80);
-}
-
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function detectLanguageFromPath(path: string): string {
-  if (path.endsWith(".ts") || path.endsWith(".tsx")) return "typescript";
-  if (path.endsWith(".rs")) return "rust";
-  if (path.endsWith(".py")) return "python";
-  if (path.endsWith(".swift")) return "swift";
-  if (path.endsWith(".js") || path.endsWith(".jsx")) return "javascript";
-  if (path.endsWith(".css")) return "css";
-  if (path.endsWith(".json")) return "json";
-  if (path.endsWith(".html")) return "html";
-  return "plaintext";
 }
 
 interface ContentBlockJson {
@@ -3118,9 +3098,10 @@ const ToolRow: Component<{
   onToggle: () => void;
 }> = (props) => {
   const icon = () => toolIcon(props.tool.call.toolName) as IconName;
-  const label = () => props.tool.call.toolName;
-  const summary = () => summarizeArgs(props.tool.call.args);
-  const isEditFile = () => props.tool.call.toolName === "edit_file";
+  const title = () => toolTitle(props.tool.call.toolName);
+  const summary = () => toolSummary(props.tool.call);
+  const alwaysShown = () => alwaysShowsBody(props.tool.call.toolName);
+  const [showRaw, setShowRaw] = createSignal(false);
 
   const statusIcon = () => {
     if (props.tool.status === "running") return "loader";
@@ -3137,46 +3118,47 @@ const ToolRow: Component<{
   return (
     <div>
       <button
-        onClick={isEditFile() ? undefined : props.onToggle}
+        onClick={alwaysShown() ? undefined : props.onToggle}
         class="flex h-7 w-full items-center gap-2 rounded px-1 text-xs hover:bg-surface-2"
-        classList={{ "cursor-default": isEditFile() }}
+        classList={{ "cursor-default": alwaysShown() }}
       >
         <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
           <Icon name={icon()} class="h-[14px] w-[14px] text-ink-muted" />
         </span>
-        <span class="font-mono text-[12px] text-ink-muted">{label()}</span>
-        <span class="truncate text-[12px] text-ink-faint">{summary()}</span>
+        <span class="shrink-0 whitespace-nowrap text-[12px] text-ink-muted">{title()}</span>
+        <span class="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-faint">{summary()}</span>
         <div class="ml-auto flex items-center gap-1">
           <Icon name={statusIcon() as IconName} class={`h-3 w-3 ${statusClass()}`} />
-          <Icon
-            name="chevron-right"
-            class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${isEditFile() || props.isExpanded ? "rotate-90" : ""}`}
-          />
+          <Show when={!alwaysShown()}>
+            <Icon
+              name="chevron-right"
+              class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${props.isExpanded ? "rotate-90" : ""}`}
+            />
+          </Show>
         </div>
       </button>
-      <Show when={isEditFile() || props.isExpanded}>
+      <Show when={alwaysShown() || props.isExpanded}>
         <div class="ml-6 rounded-md bg-surface-1 p-2 text-xs">
-          <Show when={isEditFile()}>
-            <div class="mb-3 overflow-hidden rounded border border-border-subtle">
-              <DiffViewer
-                original={props.tool.call.args.old_string as string ?? ""}
-                modified={props.tool.call.args.new_string as string ?? ""}
-                language={detectLanguageFromPath(props.tool.call.args.path as string ?? "")}
-                inline
-              />
+          <ToolBody call={props.tool.call} result={props.tool.result} />
+          <button
+            onClick={() => setShowRaw(!showRaw())}
+            class="mt-2 text-[10px] text-ink-faint underline decoration-dotted hover:text-ink-muted"
+          >
+            {showRaw() ? t("chat.timeline.hideRaw") : t("chat.timeline.showRaw")}
+          </button>
+          <Show when={showRaw()}>
+            <div class="mt-1">
+              <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.args")}</div>
+              <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
+                {JSON.stringify(props.tool.call.args, null, 2)}
+              </pre>
+              <Show when={props.tool.result}>
+                <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.result")}</div>
+                <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+                  {(props.tool.result!.error ?? props.tool.result!.output).slice(0, 5000)}
+                </pre>
+              </Show>
             </div>
-          </Show>
-          <Show when={!isEditFile()}>
-            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.args")}</div>
-            <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
-              {JSON.stringify(props.tool.call.args, null, 2)}
-            </pre>
-          </Show>
-          <Show when={props.tool.result}>
-            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.result")}</div>
-            <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
-              {(props.tool.result!.error ?? props.tool.result!.output).slice(0, 5000)}
-            </pre>
           </Show>
         </div>
       </Show>
