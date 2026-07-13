@@ -128,7 +128,7 @@ pub enum ToolOutput {
     EditProposal { path: String, old_string: String, new_string: String, unified_diff: String },
 }
 
-pub fn get_defs() -> Vec<ToolDef> {
+pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read_file".into(),
@@ -332,13 +332,13 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "spawn_agents".into(),
-            description: "ONE call spawns ALL agents: pass 'agents', an array of 1-4 specs ({name, goal, mode, expected_output}); every spec in the call runs in parallel, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints.".into(),
+            description: format!("ONE call spawns ALL agents: pass 'agents', an array of 1-{n} specs ({{name, goal, mode, expected_output}}); every spec in the call runs in parallel, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints.", n = max_parallel).into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["agents"],
                 "properties": {
                     "agents": {
-                        "type": "array", "minItems": 1, "maxItems": 4,
+                        "type": "array", "minItems": 1, "maxItems": max_parallel,
                         "items": {
                             "type": "object",
                             "required": ["name", "goal", "mode"],

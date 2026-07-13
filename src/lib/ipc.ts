@@ -91,6 +91,7 @@ export interface AgentConfig {
   accountTier?: string | null;
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
+  maxParallelAgents?: number | null;
   planSavePath?: string | null;
   overrideBaseUrl?: string | null;
   overrideApiKey?: string | null;
@@ -109,6 +110,7 @@ export interface SetConfigArgs {
   yoloBlacklist?: string[];
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
+  maxParallelAgents?: number | null;
   planSavePath?: string | null;
   overrideBaseUrl?: string;
   overrideApiKey?: string;

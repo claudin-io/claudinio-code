@@ -488,6 +488,7 @@ pub struct SetConfigArgs {
     pub yolo_blacklist: Option<Vec<String>>,
     pub max_golden_cycles: Option<Option<usize>>,
     pub max_golden_stalls: Option<Option<usize>>,
+    pub max_parallel_agents: Option<Option<usize>>,
     pub plan_save_path: Option<String>,
     pub override_base_url: Option<String>,
     pub override_api_key: Option<String>,
@@ -529,6 +530,9 @@ pub async fn set_config(
     }
     if let Some(max_golden_stalls) = args.max_golden_stalls {
         cfg.max_golden_stalls = max_golden_stalls;
+    }
+    if let Some(max_parallel_agents) = args.max_parallel_agents {
+        cfg.max_parallel_agents = max_parallel_agents.map(|n| n.clamp(1, 8));
     }
     if let Some(plan_save_path) = args.plan_save_path {
         cfg.plan_save_path = if plan_save_path.is_empty() {
@@ -582,6 +586,7 @@ pub async fn get_config(
         "accountTier": cfg.account_tier,
         "maxGoldenCycles": cfg.max_golden_cycles,
         "maxGoldenStalls": cfg.max_golden_stalls,
+        "maxParallelAgents": cfg.max_parallel_agents,
         "planSavePath": cfg.plan_save_path,
         "overrideBaseUrl": cfg.override_base_url,
         "overrideApiKey": cfg.override_api_key,

@@ -104,6 +104,7 @@ function App() {
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
   const [configMaxGoldenCycles, setConfigMaxGoldenCycles] = createSignal<number | null>(null);
   const [configMaxGoldenStalls, setConfigMaxGoldenStalls] = createSignal<number | null>(null);
+  const [configMaxParallelAgents, setConfigMaxParallelAgents] = createSignal<number>(4);
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
@@ -253,6 +254,7 @@ function App() {
         setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
         setConfigMaxGoldenCycles(cfg.maxGoldenCycles ?? null);
         setConfigMaxGoldenStalls(cfg.maxGoldenStalls ?? null);
+        setConfigMaxParallelAgents(cfg.maxParallelAgents ?? 4);
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
         setConfigPlanSavePath(cfg.planSavePath ?? "");
@@ -318,6 +320,7 @@ function App() {
         subMaxRounds: configSubMaxRounds(),
         maxGoldenCycles: configMaxGoldenCycles(),
         maxGoldenStalls: configMaxGoldenStalls(),
+        maxParallelAgents: configMaxParallelAgents(),
         yoloMode: configYoloMode(),
         planSavePath: configPlanSavePath() || undefined,
         yoloBlacklist: configYoloBlacklist()
@@ -811,6 +814,37 @@ function App() {
               />
             </Show>
             </div>
+            </div>
+
+            {/* Max Parallel Agents slider — full width */}
+            <div class="mb-4">
+              <div class="flex items-center gap-2 mb-1">
+                <label class="block text-xs text-ink-muted">{t("app.config.maxParallelAgents")}: {configMaxParallelAgents()}</label>
+                <Show when={workspaceConfigFields().has("max_parallel_agents")}>
+                  <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
+                </Show>
+                <Show when={!workspaceConfigFields().has("max_parallel_agents")}>
+                  <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
+                </Show>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] text-ink-faint w-10 text-right">{t("app.config.slower")}</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="8"
+                  step="1"
+                  value={configMaxParallelAgents()}
+                  onInput={(e) => setConfigMaxParallelAgents(parseInt(e.currentTarget.value, 10) || 4)}
+                  disabled={workspaceConfigFields().has("max_parallel_agents")}
+                  class="flex-1 h-2 rounded-lg appearance-none cursor-pointer accent-accent"
+                  classList={{
+                    "opacity-50 cursor-not-allowed": workspaceConfigFields().has("max_parallel_agents"),
+                  }}
+                />
+                <span class="text-[10px] text-ink-faint w-10">{t("app.config.faster")}</span>
+              </div>
+              <p class="mt-1 mb-0 text-[11px] text-ink-faint">{t("app.config.maxParallelAgentsHint")}</p>
             </div>
 
             <hr class="mb-4 border-border-subtle" />

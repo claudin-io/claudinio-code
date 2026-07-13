@@ -658,9 +658,10 @@ pub type AnswerMap = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserAnswer>>>
 /// gets the full registry plus enter_plan_mode; Brain drops edit_file and
 /// gains write_plan + exit_plan_mode (bash stays but is gated to read-only
 /// commands in run_workflow).
-fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolDef]) -> Vec<ToolDescription> {
+fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolDef], config: &AgentConfig) -> Vec<ToolDescription> {
+    let maxp = crate::agent::subagent::effective_max_parallel(config);
     if profile == PromptProfile::GitSync {
-        return tools::get_defs()
+        return tools::get_defs(maxp)
             .into_iter()
             .filter(|t| t.name == "bash" || t.name == "ask_user")
             .map(|t| ToolDescription {
@@ -670,7 +671,7 @@ fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolD
             })
             .collect();
     }
-    let mut defs = tools::get_defs();
+    let mut defs = tools::get_defs(maxp);
     match mode {
         SessionMode::Builder => {
             defs.push(tools::enter_plan_mode_def());
@@ -1065,7 +1066,7 @@ pub async fn run_workflow_with_profile(
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
     // snapshot read, not a fresh connection attempt.
     let mcp_defs = ctx.mcp.as_ref().map(|m| m.cached_defs()).unwrap_or_default();
-    let mut tools = api_tools(cur_mode, profile, &mcp_defs);
+    let mut tools = api_tools(cur_mode, profile, &mcp_defs, config);
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
@@ -1192,7 +1193,7 @@ pub async fn run_workflow_with_profile(
         if mode_now != cur_mode {
             cur_mode = mode_now;
             system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile);
-            tools = api_tools(cur_mode, profile, &mcp_defs);
+            tools = api_tools(cur_mode, profile, &mcp_defs, config);
         }
 
         // Per-round context re-check: tool_results from the previous round may
@@ -1222,7 +1223,7 @@ pub async fn run_workflow_with_profile(
                             cur_mode,
                             profile,
                         );
-                        tools = api_tools(cur_mode, profile, &mcp_defs);
+                        tools = api_tools(cur_mode, profile, &mcp_defs, config);
                     }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
@@ -3377,7 +3378,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn git_sync_tools_are_bash_and_ask_user_only() {
-        let defs = api_tools(SessionMode::Builder, PromptProfile::GitSync, &[]);
+        let defs = api_tools(SessionMode::Builder, PromptProfile::GitSync, &[], &AgentConfig::default());
         let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names.len(),
