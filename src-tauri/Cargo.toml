@@ -1,6 +1,6 @@
 [package]
 name = "claudinio-code"
-version = "0.1.5"
+version = "0.1.6"
 description = "Claudinio Code — agentic coding platform"
 authors = ["Victor Tavernari"]
 edition = "2021"
