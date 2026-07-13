@@ -290,6 +290,8 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 - Never use bash search tools (grep/find/rg) when a dedicated tool exists.
 
 # 3. SUBAGENTS (`spawn_agents`)
+- Call shape: spawn_agents is ONE call carrying ALL parallel agents in its 'agents' array: {"agents": [{"name", "goal", "mode", "expected_output"}, ...]}. Never flatten a single agent's fields to the top level.
+- There is NO 'agent', 'task', or per-agent tool — never emit one call per agent.
 - Core strategy: aggressively use subagents for search and verification. Keeping the main context lean saves significant tokens and boosts your reasoning intelligence (the fuller the main context, the harder it is to reason).
 - When delegating, provide clear hints about where to look or what to do, letting subagents filter and distill key results for you.
 - Use for broad/parallel tasks. Max 4 per call. Modes: 'explore' or 'code'.
@@ -2418,7 +2420,10 @@ fn deny_tool(
 
 /// Rewrite a spawn_agents input so every agent runs in 'explore' mode.
 /// Brain must never spawn code-mode (write-capable) subagents.
-fn force_explore_mode(mut tool_input: Value) -> Value {
+/// Normalizes flattened single-spec inputs first so they can't bypass the
+/// rewrite and reach run_spawn_agents still carrying mode='code'.
+fn force_explore_mode(tool_input: Value) -> Value {
+    let mut tool_input = subagent::normalize_spawn_input(tool_input);
     if let Some(agents) = tool_input.get_mut("agents").and_then(|v| v.as_array_mut()) {
         for agent in agents {
             if let Some(obj) = agent.as_object_mut() {
@@ -2622,6 +2627,28 @@ mod tests {
         SessionStore {
             path: std::env::temp_dir().join(format!("claudinio_test_{}.jsonl", now_ms())),
         }
+    }
+
+    #[test]
+    fn force_explore_mode_rewrites_all_agents() {
+        let input = json!({ "agents": [
+            { "name": "a", "goal": "g", "mode": "code" },
+            { "name": "b", "goal": "g", "mode": "explore" }
+        ]});
+        let out = force_explore_mode(input);
+        for agent in out["agents"].as_array().unwrap() {
+            assert_eq!(agent["mode"], "explore");
+        }
+    }
+
+    #[test]
+    fn force_explore_mode_normalizes_flattened_code_spec() {
+        // A flattened single spec must not bypass the explore rewrite.
+        let input = json!({ "name": "a", "goal": "g", "mode": "code" });
+        let out = force_explore_mode(input);
+        let agents = out["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["mode"], "explore");
     }
 
     #[test]

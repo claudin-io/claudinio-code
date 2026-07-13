@@ -111,6 +111,20 @@ fn wrap_channel(parent: &Channel<AgentEvent>, subagent_id: &str) -> Channel<Agen
     })
 }
 
+/// Leniency: models trained on per-agent tools sometimes flatten a single
+/// agent spec to the top level. If the input lacks an 'agents' array but
+/// looks like one spec (has a string 'goal'), wrap it into {"agents": [input]}
+/// instead of failing the round.
+pub(crate) fn normalize_spawn_input(tool_input: Value) -> Value {
+    if tool_input.get("agents").is_none()
+        && tool_input.get("goal").and_then(|v| v.as_str()).is_some()
+    {
+        serde_json::json!({ "agents": [tool_input] })
+    } else {
+        tool_input
+    }
+}
+
 /// Spawn 1-4 parallel subagents, each with their own fresh context.
 /// Returns a combined ContentBlock with each agent's report and aggregated
 /// token usage.
@@ -125,6 +139,7 @@ pub async fn run_spawn_agents(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
 ) -> (ContentBlock, u32, u32) {
+    let tool_input = normalize_spawn_input(tool_input);
     let agents = match tool_input.get("agents").and_then(|v| v.as_array()) {
         Some(a) if !a.is_empty() && a.len() <= MAX_PARALLEL_AGENTS => a,
         other => {
@@ -137,7 +152,8 @@ pub async fn run_spawn_agents(
                     max = MAX_PARALLEL_AGENTS
                 ),
                 _ => format!(
-                    "spawn_agents requires 1-{} agents in the 'agents' array",
+                    "spawn_agents requires an 'agents' array with 1-{} specs: \
+                     {{\"agents\": [{{\"name\", \"goal\", \"mode\", \"expected_output\"}}]}}",
                     MAX_PARALLEL_AGENTS
                 ),
             };
@@ -532,6 +548,34 @@ mod tests {
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"edit_file"), "code should include edit_file");
         assert!(names.contains(&"bash"), "code should include bash");
+    }
+
+    #[test]
+    fn test_normalize_spawn_input_wraps_flattened_spec() {
+        // The exact failure shape from session 5fd0dd80: one agent's fields
+        // at the top level, no 'agents' wrapper.
+        let flat = serde_json::json!({
+            "name": "logo-locator",
+            "goal": "find the logo",
+            "mode": "explore",
+            "expected_output": "file:line"
+        });
+        let normalized = normalize_spawn_input(flat.clone());
+        let agents = normalized.get("agents").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0], flat);
+        let spec: SubagentSpec = serde_json::from_value(agents[0].clone()).unwrap();
+        assert_eq!(spec.name, "logo-locator");
+    }
+
+    #[test]
+    fn test_normalize_spawn_input_passes_through_valid_and_invalid() {
+        // Proper shape is untouched
+        let ok = serde_json::json!({ "agents": [{ "name": "a", "goal": "g", "mode": "explore" }] });
+        assert_eq!(normalize_spawn_input(ok.clone()), ok);
+        // No 'goal' and no 'agents' → left as-is so the caller errors with guidance
+        let bad = serde_json::json!({ "name": "x" });
+        assert_eq!(normalize_spawn_input(bad.clone()), bad);
     }
 
     #[test]
