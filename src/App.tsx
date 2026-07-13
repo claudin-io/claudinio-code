@@ -580,6 +580,7 @@ function App() {
         <span class="flex items-center gap-2 rounded-full border border-accent/30 px-3 py-1 text-[13px] font-semibold" data-tauri-drag-region>
           <img src="/reddit_icon_256.png" alt="Claudinio" class="h-8 w-8" />
           Claudinio <span class="text-accent">Code</span>
+          <span class="ml-0.5 text-[9px] font-extralight text-ink-faint">· v{APP_VERSION}</span>
         </span>
         <div class="ml-auto flex items-center gap-3">
           <div class="flex flex-col items-end">
