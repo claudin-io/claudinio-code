@@ -78,9 +78,17 @@ describe("toolIcon", () => {
     expect(toolIcon("list_dir")).toBe("folder");
   });
 
-  it('maps anything else -> "terminal"', () => {
-    expect(toolIcon("code_search")).toBe("terminal");
-    expect(toolIcon("symbol_lookup")).toBe("terminal");
+  it('maps search-family tools -> "search"', () => {
+    expect(toolIcon("code_search")).toBe("search");
+    expect(toolIcon("symbol_lookup")).toBe("search");
+  });
+
+  it('maps mcp__* tools -> "package"', () => {
+    expect(toolIcon("mcp__github__list_issues")).toBe("package");
+  });
+
+  it('maps unknown tools -> "terminal"', () => {
     expect(toolIcon("")).toBe("terminal");
+    expect(toolIcon("some_future_tool")).toBe("terminal");
   });
 });
