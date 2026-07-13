@@ -312,6 +312,7 @@ body,
 
 .prose-content {
   line-height: 1.7;
+  text-align: left;
 }
 
 .prose-content > :first-child {
