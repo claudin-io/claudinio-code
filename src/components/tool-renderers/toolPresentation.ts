@@ -1,4 +1,6 @@
 import type { ToolCallData } from "../../lib/ipc";
+import type { IconName } from "../Icon";
+import { toolIcon } from "../Icon";
 
 export function detectLanguageFromPath(path: string): string {
   if (path.endsWith(".ts") || path.endsWith(".tsx")) return "typescript";
@@ -44,6 +46,30 @@ export function toolTitle(name: string): string {
     return parts[parts.length - 1].replace(/_/g, " ");
   }
   return name.replace(/_/g, " ");
+}
+
+const SEARCH_COMMANDS = new Set(["grep", "rg", "egrep", "fgrep", "ag", "ack"]);
+
+/** First real command of a bash invocation, skipping leading env assignments. */
+function bashLeadCommand(command: string): string {
+  const tokens = command.trimStart().split(/\s+/);
+  for (const token of tokens) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
+    return token.replace(/^.*\//, "");
+  }
+  return "";
+}
+
+/**
+ * Header icon + title for a tool call. Mostly delegates to toolIcon/toolTitle,
+ * but reclassifies bash invocations that are really searches (grep/rg/…) so
+ * the timeline reads "Searched files" instead of "Ran command".
+ */
+export function toolHeader(call: ToolCallData): { icon: IconName; title: string } {
+  if (call.toolName === "bash" && SEARCH_COMMANDS.has(bashLeadCommand(String(call.args.command ?? "")))) {
+    return { icon: "search", title: TITLES.grep };
+  }
+  return { icon: toolIcon(call.toolName), title: toolTitle(call.toolName) };
 }
 
 /** Tools whose body is always shown — small enough to skip the click-to-expand step. */
