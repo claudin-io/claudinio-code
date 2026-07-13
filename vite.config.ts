@@ -2,6 +2,7 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
+import pkg from "./package.json";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -27,6 +28,9 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
+  define: {
+    APP_VERSION: JSON.stringify(pkg.version),
+  },
   build: {
     chunkSizeWarningLimit: 8000,
   },
