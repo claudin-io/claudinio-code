@@ -203,6 +203,11 @@ const PATHS: Record<string, string[]> = {
     "M7 15h2v2H7z",
     "M15 15h2v2h-2z",
   ],
+  // Dinkie Icons by atelierAnchor (12×12)
+  // https://github.com/atelier-anchor/dinkie-icons/blob/main/LICENSE
+  "speech-balloon": [
+    "M1 12h3v-1H3V9H2v2H1Zm0-3h1V8H1Zm3 2h1v-1H4ZM0 8h1V3H0Zm5 2h4V9H5Zm0-2h1V7H5ZM1 3h1V2H1Zm4 3h1V5H5Zm4 3h1V8H9ZM6 5h1V3H4v1h2ZM2 2h7V1H2Zm8 6h1V3h-1ZM9 3h1V2H9Zm0 0",
+  ],
   // streamline-ultimate:archive-locker-bold by Streamline (24×24)
   "archive-drawer": [
     "M21.5 8a.5.5 0 0 0 .5-.5V2a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v5.5a.5.5 0 0 0 .5.5Zm-7.24-3.18l-.17.5a1 1 0 0 1-.95.68h-2.28a1 1 0 0 1-.95-.68l-.16-.5a1 1 0 0 1 .13-.9a1 1 0 0 1 .81-.42h2.62a1 1 0 0 1 .81.42a1 1 0 0 1 .14.9M21.5 15.5a.5.5 0 0 0 .5-.5V9.5a.5.5 0 0 0-.5-.5h-19a.5.5 0 0 0-.5.5V15a.5.5 0 0 0 .5.5ZM9.88 11.42a1 1 0 0 1 .81-.42h2.62a1 1 0 0 1 .81.42a1 1 0 0 1 .14.9l-.17.5a1 1 0 0 1-.95.68h-2.28a1 1 0 0 1-.95-.68l-.16-.5a1 1 0 0 1 .13-.9M2.5 16.5a.5.5 0 0 0-.5.5v5a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5a.5.5 0 0 0-.5-.5Zm7.38 2.42a1 1 0 0 1 .81-.42h2.62a1 1 0 0 1 .81.42a1 1 0 0 1 .14.9l-.17.5a1 1 0 0 1-.95.68h-2.28a1 1 0 0 1-.95-.68l-.16-.5a1 1 0 0 1 .13-.9",
@@ -213,6 +218,7 @@ export type IconName = keyof typeof PATHS;
 
 // Icons that use a non-standard viewBox (e.g. 16×16 codicon glyphs)
 const VIEWBOX: Partial<Record<IconName, string>> = {
+  "speech-balloon": "0 0 12 12",
   "thinking-face": "0 0 16 16",
   "construction-worker": "0 0 32 32",
   goal: "0 0 16 16",
@@ -257,7 +263,7 @@ export function toolIcon(name: string): IconName {
     return "search";
   }
   if (name === "file_outline") return "file-text";
-  if (name === "ask_user") return "notebook-pen";
+  if (name === "ask_user") return "speech-balloon";
   if (name === "tasks_get" || name === "tasks_set") return "layers";
   if (name === "write_plan" || name === "finalize_plan") return "file-text";
   if (name === "spawn_agents") return "git-branch";
