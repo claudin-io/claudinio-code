@@ -226,20 +226,27 @@ const VIEWBOX: Partial<Record<IconName, string>> = {
   diff: "0 0 16 16",
 };
 
+// Icons drawn as strokes (e.g. Lucide glyphs) — rendered stroked even when
+// the caller doesn't pass the stroke prop, since filling them looks broken.
+const STROKE_ICONS: Partial<Record<IconName, boolean>> = {
+  "notebook-pen": true,
+};
+
 export const Icon: Component<{ name: IconName; class?: string; stroke?: boolean }> = (props) => {
   const paths = PATHS[props.name];
   if (!paths) return null;
+  const stroked = props.stroke ?? STROKE_ICONS[props.name] ?? false;
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
       width="24"
       height="24"
       viewBox={VIEWBOX[props.name] ?? "0 0 24 24"}
-      fill={props.stroke ? "none" : "currentColor"}
-      stroke={props.stroke ? "currentColor" : undefined}
-      stroke-width={props.stroke ? "1.5" : undefined}
-      stroke-linecap={props.stroke ? "round" : undefined}
-      stroke-linejoin={props.stroke ? "round" : undefined}
+      fill={stroked ? "none" : "currentColor"}
+      stroke={stroked ? "currentColor" : undefined}
+      stroke-width={stroked ? "1.5" : undefined}
+      stroke-linecap={stroked ? "round" : undefined}
+      stroke-linejoin={stroked ? "round" : undefined}
       class={props.class}
     >
       <For each={paths}>{(d) => <path d={d} />}</For>
@@ -265,7 +272,7 @@ export function toolIcon(name: string): IconName {
   if (name === "file_outline") return "file-text";
   if (name === "ask_user") return "speech-balloon";
   if (name === "tasks_get" || name === "tasks_set") return "layers";
-  if (name === "write_plan" || name === "finalize_plan") return "file-text";
+  if (name === "write_plan" || name === "finalize_plan") return "notebook-pen";
   if (name === "spawn_agents") return "git-branch";
   if (name === "enter_plan_mode" || name === "exit_plan_mode") return "goal";
   if (name.startsWith("mcp__")) return "package";
