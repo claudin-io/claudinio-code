@@ -1847,7 +1847,7 @@ export const ChatPanel: Component<{
                   </Show>
                   <Show when={msg.text !== "__auth_card__"}>
                   <div class="border-l-2 border-accent/60 pl-3">
-                    <p class="whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink">
+                    <p class="whitespace-pre-wrap break-words text-left text-[13px] leading-[1.65] text-ink">
                       {msg.text}
                     </p>
                     <Show when={msg.attachments && msg.attachments!.length > 0}>
@@ -3079,8 +3079,8 @@ const ThinkingRow: Component<{
         <span class="ml-auto font-mono text-[11px] text-ink-faint">{duration()}</span>
       </button>
       <Show when={showText()}>
-        <div class="ml-6 rounded-md bg-surface-1 p-2">
-          <p class="whitespace-pre-wrap break-words text-[12px] leading-[1.6] text-ink-muted">
+        <div class="ml-6 rounded-md bg-surface-1 p-2 text-left">
+          <p class="whitespace-pre-wrap break-words text-left text-[12px] leading-[1.6] text-ink-muted">
             {bodyText()}
             <Show when={props.isLive && props.isLast}>
               <span class="stream-cursor" />
@@ -3126,7 +3126,7 @@ const ToolRow: Component<{
           <Icon name={icon()} class="h-[14px] w-[14px] text-ink-muted" />
         </span>
         <span class="shrink-0 whitespace-nowrap text-[12px] text-ink-muted">{title()}</span>
-        <span class="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-faint">{summary()}</span>
+        <span class="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-ink-faint">{summary()}</span>
         <div class="ml-auto flex items-center gap-1">
           <Icon name={statusIcon() as IconName} class={`h-3 w-3 ${statusClass()}`} />
           <Show when={!alwaysShown()}>
@@ -3138,7 +3138,7 @@ const ToolRow: Component<{
         </div>
       </button>
       <Show when={alwaysShown() || props.isExpanded}>
-        <div class="ml-6 rounded-md bg-surface-1 p-2 text-xs">
+        <div class="ml-6 rounded-md bg-surface-1 p-2 text-left text-xs">
           <ToolBody call={props.tool.call} result={props.tool.result} />
           <button
             onClick={() => setShowRaw(!showRaw())}
