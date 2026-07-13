@@ -164,6 +164,12 @@ fn is_test_symbol(name: &str) -> bool {
 
 impl IndexDb {
     pub fn open(db_path: &Path) -> Result<Self, String> {
+        // Ensure the parent directory exists — SQLite cannot create the file
+        // when the directory it belongs to doesn't exist yet.
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create db dir {}: {e}", parent.display()))?;
+        }
         let mut conn = Connection::open(db_path).map_err(|e| format!("db open: {e}"))?;
 
         let version: i64 = conn
