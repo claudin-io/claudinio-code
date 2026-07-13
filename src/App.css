@@ -663,3 +663,62 @@ body,
     transition: none;
   }
 }
+
+/* ── Range slider track styling (maxParallelAgents slider) ── */
+/* WebKit track — visible line behind the thumb */
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-subtle);
+}
+
+/* Firefox track */
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-subtle);
+  border: none;
+}
+
+/* WebKit thumb — keep accent color */
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  margin-top: -5px; /* center thumb over the 4px track */
+  border: 2px solid var(--surface-0);
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.4);
+}
+
+/* Firefox thumb */
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--surface-0);
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.4);
+}
+
+/* Disabled — dim the track and thumb */
+input[type="range"]:disabled::-webkit-slider-runnable-track {
+  background: var(--border-subtle);
+  opacity: 0.4;
+}
+input[type="range"]:disabled::-moz-range-track {
+  background: var(--border-subtle);
+  opacity: 0.4;
+}
+input[type="range"]:disabled::-webkit-slider-thumb {
+  background: var(--ink-faint);
+  cursor: not-allowed;
+}
+input[type="range"]:disabled::-moz-range-thumb {
+  background: var(--ink-faint);
+  cursor: not-allowed;
+}

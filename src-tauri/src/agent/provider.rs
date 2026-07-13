@@ -91,6 +91,11 @@ pub struct AgentConfig {
     /// read, so the fallback `install_id` is itself stable. Never transmitted.
     #[serde(default)]
     pub install_fallback_seed: Option<String>,
+    /// Max number of subagents that can run in parallel in a single
+    /// spawn_agents call. None = default (4). Clamped to 1-8 at the
+    /// set_config boundary and at every point of use.
+    #[serde(default)]
+    pub max_parallel_agents: Option<usize>,
     /// Override base URL for LLM inference calls only (stream_message,
     /// classify_turn_completion, one_shot). When set, `/v1/messages` is sent
     /// here instead of `base_url`. Does NOT affect login, websearch, or
@@ -170,6 +175,7 @@ impl Default for AgentConfig {
             plan_save_path: None,
             install_id: None,
             install_fallback_seed: None,
+            max_parallel_agents: None,
             override_base_url: None,
             override_api_key: None,
             mcp: std::collections::HashMap::new(),
@@ -259,7 +265,7 @@ pub fn read_workspace_config(workspace_root: &str) -> Option<Value> {
 /// Merge workspace config values into an AgentConfig.
 /// Workspace values OVERRIDE the local config for these fields ONLY:
 /// plan_save_path, brain_model, builder_model, max_rounds, sub_max_rounds,
-/// yolo_mode, yolo_blacklist.
+/// yolo_mode, yolo_blacklist, max_parallel_agents.
 /// Fields like api_key, base_url, account_*, max_golden_*, services_url
 /// are NEVER read from workspace config.
 pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
@@ -285,6 +291,9 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
     }
     if let Some(v) = obj.get("sub_max_rounds") {
         cfg.sub_max_rounds = v.as_u64().map(|n| n as usize);
+    }
+    if let Some(v) = obj.get("max_parallel_agents") {
+        cfg.max_parallel_agents = v.as_u64().map(|n| n as usize);
     }
     if let Some(v) = obj.get("yolo_mode").and_then(|v| v.as_bool()) {
         cfg.yolo_mode = v;

@@ -9,6 +9,17 @@ use std::sync::Arc;
 use tauri::ipc::Channel;
 
 pub const MAX_PARALLEL_AGENTS: usize = 4;
+pub const MAX_PARALLEL_AGENTS_CAP: usize = 8;
+
+/// Resolve the effective max-parallel-agents limit from config, clamped to
+/// [1, MAX_PARALLEL_AGENTS_CAP]. Returns `MAX_PARALLEL_AGENTS` (4) when
+/// the config field is `None`.
+pub fn effective_max_parallel(config: &AgentConfig) -> usize {
+    config
+        .max_parallel_agents
+        .unwrap_or(MAX_PARALLEL_AGENTS)
+        .clamp(1, MAX_PARALLEL_AGENTS_CAP)
+}
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -58,8 +69,8 @@ is missing, state your assumption and proceed, or report what is missing. \
 Work autonomously and efficiently: use the fewest tool calls that accomplish the goal.\
 ";
 
-pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef]) -> Vec<ToolDef> {
-    let mut tools: Vec<ToolDef> = tools::get_defs()
+pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef], max_parallel: usize) -> Vec<ToolDef> {
+    let mut tools: Vec<ToolDef> = tools::get_defs(max_parallel)
         .into_iter()
         .filter(|t| t.name != "spawn_agents" && t.name != "ask_user")
         .collect();
@@ -78,7 +89,7 @@ pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef]) -> Vec<ToolDef> {
 }
 
 fn api_tools(mode: SubagentMode, mcp_defs: &[ToolDef]) -> Vec<ToolDescription> {
-    subagent_defs(mode, mcp_defs)
+    subagent_defs(mode, mcp_defs, MAX_PARALLEL_AGENTS)
         .iter()
         .map(|t| ToolDescription {
             name: t.name.clone(),
@@ -140,21 +151,21 @@ pub async fn run_spawn_agents(
     steering: &Arc<SteeringCtl>,
 ) -> (ContentBlock, u32, u32) {
     let tool_input = normalize_spawn_input(tool_input);
+    let max = effective_max_parallel(config);
     let agents = match tool_input.get("agents").and_then(|v| v.as_array()) {
-        Some(a) if !a.is_empty() && a.len() <= MAX_PARALLEL_AGENTS => a,
+        Some(a) if !a.is_empty() && a.len() <= max => a,
         other => {
             let msg = match other {
-                Some(a) if a.len() > MAX_PARALLEL_AGENTS => format!(
+                Some(a) if a.len() > max => format!(
                     "spawn_agents got {} agents; the maximum is {max} per call. \
                      Nothing was spawned. Re-issue the call now with at most {max} \
                      agents and run the remainder as a follow-up wave — do not stop.",
                     a.len(),
-                    max = MAX_PARALLEL_AGENTS
                 ),
                 _ => format!(
                     "spawn_agents requires an 'agents' array with 1-{} specs: \
                      {{\"agents\": [{{\"name\", \"goal\", \"mode\", \"expected_output\"}}]}}",
-                    MAX_PARALLEL_AGENTS
+                    max
                 ),
             };
             let _ = event_tx.send(AgentEvent::ToolResult {
@@ -517,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_explore_excludes_spawn_and_ask() {
-        let defs = subagent_defs(SubagentMode::Explore, &[]);
+        let defs = subagent_defs(SubagentMode::Explore, &[], MAX_PARALLEL_AGENTS);
         for d in &defs {
             assert_ne!(d.name, "spawn_agents", "explore should not include spawn_agents");
             assert_ne!(d.name, "ask_user", "explore should not include ask_user");
@@ -526,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_explore_excludes_edit_and_bash() {
-        let defs = subagent_defs(SubagentMode::Explore, &[]);
+        let defs = subagent_defs(SubagentMode::Explore, &[], MAX_PARALLEL_AGENTS);
         for d in &defs {
             assert_ne!(d.name, "edit_file", "explore should not include edit_file");
             assert_ne!(d.name, "bash", "explore should not include bash");
@@ -535,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_code_excludes_spawn_and_ask() {
-        let defs = subagent_defs(SubagentMode::Code, &[]);
+        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS);
         for d in &defs {
             assert_ne!(d.name, "spawn_agents", "code should not include spawn_agents");
             assert_ne!(d.name, "ask_user", "code should not include ask_user");
@@ -544,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_code_includes_edit_and_bash() {
-        let defs = subagent_defs(SubagentMode::Code, &[]);
+        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"edit_file"), "code should include edit_file");
         assert!(names.contains(&"bash"), "code should include bash");
@@ -619,5 +630,19 @@ mod tests {
     fn test_max_parallel_constants() {
         assert!(MAX_PARALLEL_AGENTS >= 1);
         assert!(MAX_PARALLEL_AGENTS <= 4);
+        assert!(MAX_PARALLEL_AGENTS_CAP == 8);
+        // effective_max_parallel with None -> 4
+        let default_cfg = AgentConfig::default();
+        assert_eq!(effective_max_parallel(&default_cfg), 4);
+        // effective_max_parallel with Some(8) -> 8
+        let mut cfg = AgentConfig::default();
+        cfg.max_parallel_agents = Some(8);
+        assert_eq!(effective_max_parallel(&cfg), 8);
+        // effective_max_parallel with Some(0) -> clamped to 1
+        cfg.max_parallel_agents = Some(0);
+        assert_eq!(effective_max_parallel(&cfg), 1);
+        // effective_max_parallel with Some(99) -> clamped to 8
+        cfg.max_parallel_agents = Some(99);
+        assert_eq!(effective_max_parallel(&cfg), 8);
     }
 }
