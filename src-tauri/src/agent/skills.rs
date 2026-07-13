@@ -73,7 +73,7 @@ pub enum SkillSource {
 // Within each scope, we scan in order: .agents/skills/ → .claudinio/skills/ → .claude/skills/
 // The first skill with a given name wins (higher priority scopes override lower).
 
-const SKILL_DIR_NAMES: &[&str] = &[".agents", ".claudinio", ".claude"];
+pub const SKILL_DIR_NAMES: &[&str] = &[".agents", ".claudinio", ".claude"];
 
 fn scan_for_skills(root: &Path, scope: SkillScope, skills: &mut HashMap<String, (SkillEntry, SkillScope)>) {
     for dir_name in SKILL_DIR_NAMES {

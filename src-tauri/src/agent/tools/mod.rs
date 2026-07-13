@@ -80,6 +80,39 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     ))
 }
 
+/// Like `validate_path`, but additionally allows READ access to user-level
+/// skill directories (`~/{.agents,.claudinio,.claude}/skills`), which live
+/// outside the workspace yet are referenced by the skills system prompt.
+/// Never use this for tools that write or edit files.
+pub fn validate_read_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
+    let workspace_err = match validate_path(requested, ctx) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+
+    if let Some(home) = dirs::home_dir() {
+        let req = std::path::Path::new(requested);
+        let req = match req.canonicalize() {
+            Ok(c) => c,
+            // Uncanonicalizable path: refuse '..' components so a lexical
+            // prefix match can't be escaped via traversal.
+            Err(_) if req.components().any(|c| matches!(c, std::path::Component::ParentDir)) => {
+                return Err(workspace_err);
+            }
+            Err(_) => req.to_path_buf(),
+        };
+        for dir_name in crate::agent::skills::SKILL_DIR_NAMES {
+            let skills_root = home.join(dir_name).join("skills");
+            let skills_root = skills_root.canonicalize().unwrap_or(skills_root);
+            if req.starts_with(&skills_root) {
+                return Ok(());
+            }
+        }
+    }
+
+    Err(workspace_err)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDef {
@@ -299,7 +332,7 @@ pub fn get_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "spawn_agents".into(),
-            description: "Spawn 1-4 parallel subagents, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints. All agents in one call run in parallel.".into(),
+            description: "ONE call spawns ALL agents: pass 'agents', an array of 1-4 specs ({name, goal, mode, expected_output}); every spec in the call runs in parallel, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["agents"],
@@ -399,7 +432,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
     match name {
         "read_file" => {
             let a: read_file::ReadFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            validate_path(&a.path, ctx)?;
+            validate_read_path(&a.path, ctx)?;
             let path = a.path.clone();
             let start_line = a.start_line;
             let end_line = a.end_line;
@@ -413,14 +446,14 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         }
         "list_dir" => {
             let a: list_dir::ListDirArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            validate_path(&a.path, ctx)?;
+            validate_read_path(&a.path, ctx)?;
             let entries = list_dir::execute(a)?;
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&entries).unwrap_or_default() })
         }
         "grep" => {
             let a: grep::GrepArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             if let Some(ref path) = a.path {
-                validate_path(path, ctx)?;
+                validate_read_path(path, ctx)?;
             } else if let Some(ref root) = ctx.workspace_root {
                 let a2 = grep::GrepArgs { pattern: a.pattern.clone(), path: Some(root.clone()) };
                 let matches = grep::execute(a2)?;
@@ -456,7 +489,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "file_outline" => {
             let db = open_db(&ctx.db_path)?;
             let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
-            validate_path(file_path, ctx)?;
+            validate_read_path(file_path, ctx)?;
             let results = db.symbols_in_file(file_path)?;
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }
@@ -583,6 +616,11 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "enter_plan_mode" | "exit_plan_mode" => {
             Err("mode switch tools are handled by the session orchestrator".into())
         }
+        "agent" | "task" | "spawn_agent" | "subagent" => Err(format!(
+            "unknown tool: {name}. To spawn subagents, make ONE spawn_agents call with an \
+             'agents' array (1-4 specs: name, goal, mode, expected_output) — all agents in \
+             the call run in parallel."
+        )),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -1109,6 +1147,52 @@ mod tests {
             mcp: None,        };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
+    }
+
+    #[test]
+    fn test_validate_read_path_allows_user_skill_dirs() {
+        let ctx = ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: Some("/home/user/project".into()),
+            embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            mcp: None,        };
+        let home = dirs::home_dir().unwrap();
+        for dir_name in crate::agent::skills::SKILL_DIR_NAMES {
+            let p = home.join(dir_name).join("skills/typeset/SKILL.md");
+            assert!(
+                validate_read_path(&p.to_string_lossy(), &ctx).is_ok(),
+                "should allow read under {dir_name}/skills"
+            );
+        }
+        // Still rejects everything else outside the workspace
+        assert!(validate_read_path("/etc/passwd", &ctx).is_err());
+        let other = home.join(".ssh/id_rsa");
+        assert!(validate_read_path(&other.to_string_lossy(), &ctx).is_err());
+        // Traversal out of a skill dir is rejected
+        let escape = home.join(".agents/skills/x/../../../.ssh/id_rsa");
+        assert!(validate_read_path(&escape.to_string_lossy(), &ctx).is_err());
+        // edit_file's validator stays strict: skill dirs are read-only
+        let skill = home.join(".agents/skills/typeset/SKILL.md");
+        assert!(validate_path(&skill.to_string_lossy(), &ctx).is_err());
+    }
+
+    #[test]
+    fn test_unknown_agent_tool_returns_spawn_agents_hint() {
+        let ctx = test_ctx();
+        for name in ["agent", "task", "spawn_agent", "subagent"] {
+            let result = futures::executor::block_on(execute(name, serde_json::json!({}), &ctx));
+            let err = result.unwrap_err();
+            assert!(err.contains("spawn_agents"), "{name}: got: {err}");
+            assert!(err.contains("'agents' array"), "{name}: got: {err}");
+        }
     }
 
     #[test]
