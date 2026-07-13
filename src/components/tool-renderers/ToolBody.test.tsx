@@ -55,6 +55,13 @@ describe("toolPresentation", () => {
     expect(toolSummary(call)).toBe("git status");
   });
 
+  it("drops the redundant command and flags from bash search summaries", () => {
+    expect(toolSummary(makeCall("bash", { command: "grep -o 'v0\\.1\\.5' dist/index.js | head -5" }))).toBe(
+      "'v0\\.1\\.5' dist/index.js | head -5",
+    );
+    expect(toolSummary(makeCall("bash", { command: "rg -n --hidden pattern src/" }))).toBe("pattern src/");
+  });
+
   it("summarizes tasks_set as a done/total ratio", () => {
     const call = makeCall("tasks_set", {
       tasks: [{ status: "done" }, { status: "doing" }, { status: "done" }],

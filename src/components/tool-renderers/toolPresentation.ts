@@ -50,14 +50,19 @@ export function toolTitle(name: string): string {
 
 const SEARCH_COMMANDS = new Set(["grep", "rg", "egrep", "fgrep", "ag", "ack"]);
 
-/** First real command of a bash invocation, skipping leading env assignments. */
-function bashLeadCommand(command: string): string {
+/**
+ * Split a bash invocation into its lead command (skipping env assignments and
+ * paths) and the arguments after the command's leading flags — the part worth
+ * showing when the command name is already implied by the bubble title.
+ */
+function splitBashCommand(command: string): { lead: string; args: string } {
   const tokens = command.trimStart().split(/\s+/);
-  for (const token of tokens) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
-    return token.replace(/^.*\//, "");
-  }
-  return "";
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+  const lead = (tokens[i] ?? "").replace(/^.*\//, "");
+  let j = i + 1;
+  while (j < tokens.length && tokens[j].startsWith("-")) j++;
+  return { lead, args: tokens.slice(j).join(" ") };
 }
 
 /**
@@ -66,7 +71,7 @@ function bashLeadCommand(command: string): string {
  * the timeline reads "Searched files" instead of "Ran command".
  */
 export function toolHeader(call: ToolCallData): { icon: IconName; title: string } {
-  if (call.toolName === "bash" && SEARCH_COMMANDS.has(bashLeadCommand(String(call.args.command ?? "")))) {
+  if (call.toolName === "bash" && SEARCH_COMMANDS.has(splitBashCommand(String(call.args.command ?? "")).lead)) {
     return { icon: "search", title: TITLES.grep };
   }
   return { icon: toolIcon(call.toolName), title: toolTitle(call.toolName) };
@@ -86,8 +91,14 @@ function truncate(s: string, n: number): string {
 export function toolSummary(call: ToolCallData): string {
   const args = call.args;
   switch (call.toolName) {
-    case "bash":
-      return truncate(String(args.command ?? ""), 80);
+    case "bash": {
+      const command = String(args.command ?? "");
+      // Search commands are retitled "Searched files" by toolHeader, so the
+      // command name and its flags would be redundant — show just the args.
+      const { lead, args: cmdArgs } = splitBashCommand(command);
+      if (SEARCH_COMMANDS.has(lead) && cmdArgs) return truncate(cmdArgs, 80);
+      return truncate(command, 80);
+    }
     case "read_file":
     case "edit_file":
     case "list_dir": {
