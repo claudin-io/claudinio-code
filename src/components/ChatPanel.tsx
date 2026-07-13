@@ -47,9 +47,9 @@ import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
 import { marked } from "marked";
 import hljs from "highlight.js";
 import { DiffViewer } from "./DiffViewer";
-import { Icon, toolIcon, type IconName } from "./Icon";
+import { Icon, type IconName } from "./Icon";
 import { ToolBody } from "./tool-renderers/ToolBody";
-import { alwaysShowsBody, detectLanguageFromPath, toolSummary, toolTitle } from "./tool-renderers/toolPresentation";
+import { alwaysShowsBody, detectLanguageFromPath, toolHeader, toolSummary } from "./tool-renderers/toolPresentation";
 import TextEditorModal from "./TextEditorModal";
 import { FileMentionPopover } from "./FileMentionPopover";
 import { TagMentionPopover } from "./TagMentionPopover";
@@ -3097,8 +3097,9 @@ const ToolRow: Component<{
   isExpanded: boolean;
   onToggle: () => void;
 }> = (props) => {
-  const icon = () => toolIcon(props.tool.call.toolName) as IconName;
-  const title = () => toolTitle(props.tool.call.toolName);
+  const header = () => toolHeader(props.tool.call);
+  const icon = () => header().icon;
+  const title = () => header().title;
   const summary = () => toolSummary(props.tool.call);
   const alwaysShown = () => alwaysShowsBody(props.tool.call.toolName);
   const [showRaw, setShowRaw] = createSignal(false);

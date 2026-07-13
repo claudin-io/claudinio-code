@@ -6,7 +6,8 @@ vi.mock("../../lib/grill-me", () => ({
   t: (key: string) => key,
 }));
 
-vi.mock("../Icon", () => ({
+vi.mock("../Icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../Icon")>()),
   Icon: (props: { name: string; class?: string }) => <span data-testid={`icon-${props.name}`} class={props.class} />,
 }));
 
@@ -19,7 +20,7 @@ vi.mock("../DiffViewer", () => ({
 }));
 
 import { ToolBody, parseJsonList } from "./ToolBody";
-import { toolTitle, toolSummary, alwaysShowsBody, detectLanguageFromPath } from "./toolPresentation";
+import { toolTitle, toolSummary, toolHeader, alwaysShowsBody, detectLanguageFromPath } from "./toolPresentation";
 
 function makeCall(toolName: string, args: Record<string, unknown>): ToolCallData {
   return { sessionId: "s", toolId: "t", toolName, args, permission: "auto" };
@@ -76,6 +77,21 @@ describe("toolPresentation", () => {
   it("detects language from file extension", () => {
     expect(detectLanguageFromPath("src/foo.rs")).toBe("rust");
     expect(detectLanguageFromPath("src/foo.unknownext")).toBe("plaintext");
+  });
+
+  it("reclassifies bash grep/rg commands as Searched files", () => {
+    expect(toolHeader(makeCall("bash", { command: "grep -o 'v0' dist/index.js | head -5" }))).toEqual({
+      icon: "search",
+      title: "Searched files",
+    });
+    expect(toolHeader(makeCall("bash", { command: "rg pattern src/" })).title).toBe("Searched files");
+    expect(toolHeader(makeCall("bash", { command: "FOO=1 grep pattern file" })).title).toBe("Searched files");
+    expect(toolHeader(makeCall("bash", { command: "/usr/bin/grep pattern file" })).title).toBe("Searched files");
+  });
+
+  it("keeps Ran command for bash that merely mentions grep", () => {
+    expect(toolHeader(makeCall("bash", { command: "cat file | grep foo" })).title).toBe("Ran command");
+    expect(toolHeader(makeCall("bash", { command: "git status" })).title).toBe("Ran command");
   });
 });
 
