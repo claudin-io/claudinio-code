@@ -239,23 +239,78 @@ interface ListRow {
 }
 
 function pickRow(obj: Record<string, unknown>): ListRow {
-  const title = String(obj.name ?? obj.path ?? obj.filePath ?? obj.file ?? obj.symbol ?? JSON.stringify(obj).slice(0, 60));
+  // Symbol result (code_search / semantic_search / symbol_lookup / file_outline):
+  // lead with the symbol name, kind as badge, location as the muted tail.
+  if (typeof obj.name === "string" && typeof obj.filePath === "string") {
+    const line = obj.startLine ?? obj.line;
+    return {
+      title: obj.name,
+      badge: typeof obj.kind === "string" ? obj.kind : undefined,
+      sub: `${obj.filePath}${line != null ? `:${line}` : ""}`,
+    };
+  }
+  // Grep match: file:line first, matched text as the tail.
+  if (typeof obj.file === "string" && obj.line != null) {
+    return { title: `${obj.file}:${obj.line}`, sub: obj.content != null ? String(obj.content).trim() : undefined };
+  }
+  const title = String(obj.name ?? obj.path ?? obj.filePath ?? obj.symbol ?? JSON.stringify(obj).slice(0, 60));
   const line = obj.line ?? obj.startLine ?? obj.lineNumber;
   const badge = line != null ? `L${line}` : undefined;
   const subRaw = obj.snippet ?? obj.preview ?? obj.text ?? obj.kind ?? obj.signature;
   return { title, badge, sub: subRaw != null ? String(subRaw) : undefined, isDir: obj.isDir === true };
 }
 
+/**
+ * Parse a JSON array result, salvaging complete top-level objects when the
+ * output was truncated mid-array (the backend caps live ToolResult payloads,
+ * e.g. `[{...}, {...}, {"na...(truncated, N chars total)`).
+ */
+export function parseJsonList(output: string): { list: unknown[]; truncated: boolean } | null {
+  const text = output.trim();
+  try {
+    const v = JSON.parse(text);
+    return Array.isArray(v) ? { list: v, truncated: false } : null;
+  } catch {
+    /* fall through to salvage */
+  }
+  if (!text.startsWith("[")) return null;
+  const list: unknown[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 1; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try {
+          list.push(JSON.parse(text.slice(start, i + 1)));
+        } catch {
+          /* skip malformed element */
+        }
+        start = -1;
+      }
+    }
+  }
+  return list.length > 0 ? { list, truncated: true } : null;
+}
+
 const JsonListBody: Component<{ result?: ToolResultData }> = (props) => {
   const parsed = createMemo(() => {
     const output = props.result?.output;
     if (props.result?.error || !output) return null;
-    try {
-      const v = JSON.parse(output);
-      return Array.isArray(v) ? v : null;
-    } catch {
-      return null;
-    }
+    return parseJsonList(output)?.list ?? null;
   });
 
   return (
@@ -280,14 +335,14 @@ const JsonListBody: Component<{ result?: ToolResultData }> = (props) => {
               {(item) => {
                 const row = typeof item === "string" ? { title: item } : pickRow(item as Record<string, unknown>);
                 return (
-                  <div class="flex items-baseline gap-2 truncate text-[11px]">
+                  <div class="flex items-center gap-2 truncate text-[11px]">
                     <Icon name={row.isDir ? "folder" : "file"} class="h-3 w-3 shrink-0 text-ink-faint" />
                     <span class="truncate font-mono text-ink-muted">{row.title}</span>
                     <Show when={row.badge}>
-                      <span class="shrink-0 text-ink-faint">{row.badge}</span>
+                      <span class="shrink-0 rounded bg-surface-2 px-1 text-[10px] text-ink-faint">{row.badge}</span>
                     </Show>
                     <Show when={row.sub}>
-                      <span class="truncate text-ink-faint">{row.sub}</span>
+                      <span class="min-w-0 flex-1 truncate font-mono text-ink-faint">{row.sub}</span>
                     </Show>
                   </div>
                 );

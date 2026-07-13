@@ -18,7 +18,7 @@ vi.mock("../DiffViewer", () => ({
   ),
 }));
 
-import { ToolBody } from "./ToolBody";
+import { ToolBody, parseJsonList } from "./ToolBody";
 import { toolTitle, toolSummary, alwaysShowsBody, detectLanguageFromPath } from "./toolPresentation";
 
 function makeCall(toolName: string, args: Record<string, unknown>): ToolCallData {
@@ -76,6 +76,26 @@ describe("toolPresentation", () => {
   it("detects language from file extension", () => {
     expect(detectLanguageFromPath("src/foo.rs")).toBe("rust");
     expect(detectLanguageFromPath("src/foo.unknownext")).toBe("plaintext");
+  });
+});
+
+describe("parseJsonList", () => {
+  it("parses a complete JSON array", () => {
+    expect(parseJsonList('[{"a":1},{"a":2}]')).toEqual({ list: [{ a: 1 }, { a: 2 }], truncated: false });
+  });
+
+  it("returns null for non-array JSON and plain text", () => {
+    expect(parseJsonList('{"a":1}')).toBeNull();
+    expect(parseJsonList("plain text answer")).toBeNull();
+  });
+
+  it("salvages complete objects from a truncated array", () => {
+    const out = parseJsonList('[{"a":1},{"b":"x}y"},{"c":...(truncated, 999 chars total)');
+    expect(out).toEqual({ list: [{ a: 1 }, { b: "x}y" }], truncated: true });
+  });
+
+  it("returns null when nothing can be salvaged", () => {
+    expect(parseJsonList('[{"a":...(truncated)')).toBeNull();
   });
 });
 
@@ -177,6 +197,60 @@ describe("ToolBody", () => {
     );
     const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
     expect(document.body.textContent).toContain("foo.ts");
+    dispose();
+  });
+
+  it("renders code_search symbol results as name + kind + location rows", () => {
+    const call = makeCall("code_search", { query: "ToolRow" });
+    const result = makeResult(
+      "code_search",
+      JSON.stringify([
+        {
+          symbolId: 82943,
+          name: "ToolRow",
+          kind: "function_declaration",
+          filePath: "/repo/src/components/ChatPanel.tsx",
+          startLine: 3140,
+          signature: "ToolRow: Component<...>",
+          snippet: "const ToolRow = ...",
+        },
+      ]),
+    );
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.textContent).toContain("ToolRow");
+    expect(document.body.textContent).toContain("function_declaration");
+    expect(document.body.textContent).toContain("/repo/src/components/ChatPanel.tsx:3140");
+    // The raw snippet noise must not leak into the row
+    expect(document.body.textContent).not.toContain("const ToolRow = ...");
+    dispose();
+  });
+
+  it("renders grep matches as file:line + matched text", () => {
+    const call = makeCall("grep", { pattern: "foo" });
+    const result = makeResult(
+      "grep",
+      JSON.stringify([{ file: "src/a.ts", line: 12, content: "  const foo = 1;" }]),
+    );
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.textContent).toContain("src/a.ts:12");
+    expect(document.body.textContent).toContain("const foo = 1;");
+    dispose();
+  });
+
+  it("salvages rows from a JSON array truncated mid-object", () => {
+    const full = JSON.stringify([
+      { name: "A", filePath: "/x/a.ts", kind: "function", startLine: 1 },
+      { name: "B", filePath: "/x/b.ts", kind: "class", startLine: 2 },
+    ]);
+    const truncated = `${full.slice(0, full.length - 20)}...(truncated, ${full.length} chars total)`;
+    const call = makeCall("semantic_search", { query: "anything" });
+    const result = makeResult("semantic_search", truncated);
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    // First object is complete and must render as a row, not raw JSON
+    expect(document.body.textContent).toContain("A");
+    expect(document.body.textContent).toContain("/x/a.ts:1");
+    expect(document.body.textContent).not.toContain("symbolId");
+    expect(document.body.textContent).not.toContain('"name"');
     dispose();
   });
 
