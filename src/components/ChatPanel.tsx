@@ -1955,7 +1955,7 @@ export const ChatPanel: Component<{
             <div class="mb-6">
               <div class="trajectory-rail flex flex-col gap-0.5">
                 <TimelineSteps
-                  steps={currentSteps()}
+                  steps={status() === "thinking" ? currentSteps().filter((s) => s.type !== "thinking") : currentSteps()}
                   expandedStep={liveExpandedStep()}
                   onToggle={(i) => setLiveExpandedStep(liveExpandedStep() === i ? null : i)}
                   isLive={status() === "thinking"}
@@ -2024,6 +2024,10 @@ export const ChatPanel: Component<{
           </button>
         </Show>
       </div>
+
+      <Show when={liveThinkingActive()}>
+        <ThinkingBar text={smoothThinking.displayed} />
+      </Show>
 
       <Show when={openSubagent()}>
         <SubagentModal
@@ -3046,6 +3050,47 @@ const CompactionRow: Component<{ compaction: { kind: "start" | "done" | "fail"; 
         <Show when={props.compaction.kind === "start"}>
           <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
         </Show>
+      </div>
+    </div>
+  );
+};
+
+const thinkingSvgSpinner = (
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
+    <defs>
+      <filter id="tbGlow">
+        <feGaussianBlur in="SourceGraphic" result="y" stdDeviation="1" />
+        <feColorMatrix in="y" result="z" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 18 -7" />
+        <feBlend in="SourceGraphic" in2="z" />
+      </filter>
+    </defs>
+    <g filter="url(#tbGlow)">
+      <circle cx="5" cy="12" r="4" fill="currentColor">
+        <animate attributeName="cx" calcMode="spline" dur="2s" keySplines=".36,.62,.43,.99;.79,0,.58,.57" repeatCount="indefinite" values="5;8;5" />
+      </circle>
+      <circle cx="19" cy="12" r="4" fill="currentColor">
+        <animate attributeName="cx" calcMode="spline" dur="2s" keySplines=".36,.62,.43,.99;.79,0,.58,.57" repeatCount="indefinite" values="19;16;19" />
+      </circle>
+      <animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12" />
+    </g>
+  </svg>
+);
+
+const ThinkingBar: Component<{
+  text: () => string;
+}> = (props) => {
+  return (
+    <div class="thinking-bar-wrapper">
+      <div class="thinking-bar">
+        <span class="thinking-bar-spinner">
+          {thinkingSvgSpinner}
+        </span>
+        <span class="thinking-bar-label">
+          {t("chat.status.thinking")}
+        </span>
+      </div>
+      <div class="thinking-bar-tooltip">
+        {props.text() || ""}
       </div>
     </div>
   );
