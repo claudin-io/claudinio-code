@@ -121,6 +121,7 @@ interface SubagentTimelineState {
   rounds: number;
   inputTokens: number;
   outputTokens: number;
+  cost: number;
   report?: string;
   steps: TimelineItem[];
 }
@@ -1187,12 +1188,13 @@ export const ChatPanel: Component<{
           rounds: 0,
           inputTokens: 0,
           outputTokens: 0,
+          cost: 0,
           steps: [{ type: "thinking" as const, thinking: { text: t("chat.timeline.waiting"), startedAt: now } }],
         },
       }));
       setCurrentSteps((prev) => [
         ...prev,
-        { type: "subagent" as const, subagent: { id: d.subagentId, name: d.name, goal: d.goal, mode: d.mode, status: "running", rounds: 0, inputTokens: 0, outputTokens: 0, steps: [] } },
+        { type: "subagent" as const, subagent: { id: d.subagentId, name: d.name, goal: d.goal, mode: d.mode, status: "running", rounds: 0, inputTokens: 0, outputTokens: 0, cost: 0, steps: [] } },
       ]);
       scrollToBottom();
     } else if (event.event === "SubagentDone") {
@@ -2822,6 +2824,16 @@ const SubagentRow: Component<{
             <Show when={props.subagent.inputTokens > 0}>
               <span class="font-mono text-[10px] text-ink-faint">
                 {formatTokens(props.subagent.inputTokens)}→{formatTokens(props.subagent.outputTokens)}
+                <Show when={props.subagent.cost > 0}>
+                  <span class="text-ink-faint">
+                    {" · $"}
+                    {props.subagent.cost < 0.01
+                      ? props.subagent.cost.toFixed(6)
+                      : props.subagent.cost < 1
+                        ? props.subagent.cost.toFixed(4)
+                        : props.subagent.cost.toFixed(2)}
+                  </span>
+                </Show>
               </span>
             </Show>
             <Icon name="external-link" class="h-3 w-3 text-ink-faint" />

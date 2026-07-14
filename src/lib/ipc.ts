@@ -140,6 +140,7 @@ export interface SubagentDoneData {
   rounds: number;
   inputTokens: number;
   outputTokens: number;
+  cost: number;
   report?: string;
 }
 

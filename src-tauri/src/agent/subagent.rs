@@ -42,6 +42,7 @@ pub struct SubagentResult {
     pub rounds: u32,
     pub in_tok: u32,
     pub out_tok: u32,
+    pub cost: f64,
 }
 
 const TOOL_PREFERENCE: &str = "\
@@ -237,6 +238,7 @@ pub async fn run_spawn_agents(
                 rounds: 0,
                 in_tok: 0,
                 out_tok: 0,
+                cost: 0.0,
             },
         };
 
@@ -248,6 +250,7 @@ pub async fn run_spawn_agents(
             input_tokens: result.in_tok,
             output_tokens: result.out_tok,
             report: result.report.clone(),
+            cost: result.cost,
         });
 
         total_in += result.in_tok;
@@ -310,6 +313,7 @@ pub async fn run_subagent(
 
     let mut total_in = 0u32;
     let mut total_out = 0u32;
+    let mut total_cost = 0.0f64;
     let mut rounds: u32 = 0;
     let interrupt = &steering.interrupt;
 
@@ -338,6 +342,7 @@ pub async fn run_subagent(
                     rounds,
                     in_tok: total_in,
                     out_tok: total_out,
+                    cost: total_cost,
                 };
             }
         };
@@ -345,10 +350,20 @@ pub async fn run_subagent(
         if let Some(u) = &stream_output.usage {
             total_in += u.input_tokens;
             total_out += u.output_tokens;
+            // Accumulate cost — prefer provider-reported, fall back to estimate
+            if let Some(c) = u.cost {
+                total_cost += c;
+            }
         }
         rounds += 1;
 
         if stream_output.interrupted {
+            let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
+                let est = session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
+                est.input + est.output
+            } else {
+                total_cost
+            };
             return SubagentResult {
                 status: "interrupted",
                 report: if assistant_text.is_empty() {
@@ -359,10 +374,17 @@ pub async fn run_subagent(
                 rounds,
                 in_tok: total_in,
                 out_tok: total_out,
+                cost: final_cost,
             };
         }
 
         if stream_output.tool_uses.is_empty() {
+            let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
+                let est = session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
+                est.input + est.output
+            } else {
+                total_cost
+            };
             return SubagentResult {
                 status: "completed",
                 report: if assistant_text.is_empty() {
@@ -373,6 +395,7 @@ pub async fn run_subagent(
                 rounds,
                 in_tok: total_in,
                 out_tok: total_out,
+                cost: final_cost,
             };
         }
 
@@ -449,6 +472,7 @@ pub async fn run_subagent(
         rounds,
         in_tok: total_in,
         out_tok: total_out,
+        cost: total_cost,
     }
 }
 
