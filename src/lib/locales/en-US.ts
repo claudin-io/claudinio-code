@@ -51,6 +51,8 @@ const dict: LocaleDict = {
   "app.config.yoloModeHint": "Auto-approves tool calls except those in the blacklist below.",
   "app.config.yoloBlacklist": "YOLO Blacklist (comma-separated tool names)",
   "app.config.yoloBlacklistHint": "These tools still require manual approval even with YOLO on. Ex: edit_file, bash",
+  "app.config.keepAwake": "☕ Keep awake while working",
+  "app.config.keepAwakeHint": "Prevents the system from sleeping while a session is running (display can still turn off).",
   "app.config.mcpServers": "MCP Servers",
   "app.config.mcpAddServer": "+ Add server",
   "app.config.mcpTest": "Test all",

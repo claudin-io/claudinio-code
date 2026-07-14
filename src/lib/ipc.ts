@@ -87,6 +87,7 @@ export interface AgentConfig {
   subMaxRounds?: number | null;
   yoloMode?: boolean;
   yoloBlacklist?: string[];
+  keepAwake?: boolean;
   accountLogin?: string | null;
   accountTier?: string | null;
   maxGoldenCycles?: number | null;
@@ -108,6 +109,7 @@ export interface SetConfigArgs {
   subMaxRounds?: number | null;
   yoloMode?: boolean;
   yoloBlacklist?: string[];
+  keepAwake?: boolean;
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
   maxParallelAgents?: number | null;
@@ -455,6 +457,10 @@ export function setConfig(args: SetConfigArgs): Promise<void> {
 
 export function getConfig(workspace?: string): Promise<AgentConfig> {
   return invoke<AgentConfig>("get_config", { workspace: workspace ?? null });
+}
+
+export function setKeepAwake(active: boolean): Promise<void> {
+  return invoke<void>("set_keep_awake", { active });
 }
 
 export function setWorkspaceConfig(workspaceRoot: string, planSavePath: string | null): Promise<void> {

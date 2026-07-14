@@ -51,6 +51,8 @@ const dict: LocaleDict = {
   "app.config.yoloModeHint": "Auto-aprova chamadas de ferramentas exceto as na blacklist abaixo.",
   "app.config.yoloBlacklist": "YOLO Blacklist (nomes separados por vírgula)",
   "app.config.yoloBlacklistHint": "Essas ferramentas ainda exigem aprovação manual mesmo com YOLO ativo. Ex: edit_file, bash",
+  "app.config.keepAwake": "☕ Manter acordado enquanto trabalha",
+  "app.config.keepAwakeHint": "Impede que o sistema durma enquanto uma sessão está rodando (a tela ainda pode apagar).",
   "app.config.mcpServers": "Servidores MCP",
   "app.config.mcpAddServer": "+ Adicionar servidor",
   "app.config.mcpTest": "Testar todos",

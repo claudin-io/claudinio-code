@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -107,6 +107,7 @@ function App() {
   const [configMaxParallelAgents, setConfigMaxParallelAgents] = createSignal<number>(4);
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
+  const [configKeepAwake, setConfigKeepAwake] = createSignal(true);
   const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
   const [workspaceConfigFields, setWorkspaceConfigFields] = createSignal<Set<string>>(new Set());
   const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
@@ -126,6 +127,13 @@ function App() {
   const [keystrokeBuf, setKeystrokeBuf] = createSignal("");
   const [configOverrideBaseUrl, setConfigOverrideBaseUrl] = createSignal("");
   const [configOverrideApiKey, setConfigOverrideApiKey] = createSignal("");
+
+  // Prevent the system from sleeping while any workspace session is actively
+  // thinking. Waiting on user input/approval does not hold the wake lock.
+  createEffect(() => {
+    const anyThinking = Object.values(workspaceStatus).some((s) => s === "thinking");
+    setKeepAwake(configKeepAwake() && anyThinking).catch(() => {});
+  });
 
   // --- Git branch in header ---
   const [gitBranchName, setGitBranchName] = createSignal("");
@@ -257,6 +265,7 @@ function App() {
         setConfigMaxParallelAgents(cfg.maxParallelAgents ?? 4);
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
+        setConfigKeepAwake(cfg.keepAwake ?? true);
         setConfigPlanSavePath(cfg.planSavePath ?? "");
         setConfigOverrideBaseUrl(cfg.overrideBaseUrl ?? "");
         setConfigOverrideApiKey(cfg.overrideApiKey ?? "");
@@ -322,6 +331,7 @@ function App() {
         maxGoldenStalls: configMaxGoldenStalls(),
         maxParallelAgents: configMaxParallelAgents(),
         yoloMode: configYoloMode(),
+        keepAwake: configKeepAwake(),
         planSavePath: configPlanSavePath() || undefined,
         yoloBlacklist: configYoloBlacklist()
           .split(",")
@@ -969,6 +979,17 @@ function App() {
               />
               <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{t("app.config.yoloBlacklistHint")}</p>
             </Show>
+
+            <label class="mb-4 flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={configKeepAwake()}
+                onChange={(e) => setConfigKeepAwake(e.currentTarget.checked)}
+                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+              />
+              <span class="text-sm font-medium text-ink">{t("app.config.keepAwake")}</span>
+              <span class="text-[11px] text-ink-faint">{t("app.config.keepAwakeHint")}</span>
+            </label>
 
             <hr class="mb-4 border-border-subtle" />
 
