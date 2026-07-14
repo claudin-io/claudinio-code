@@ -228,6 +228,7 @@ function runningSubagent(id: string): SubagentNode {
     rounds: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cost: 0,
     steps: [
       { type: "thinking", thinking: { text: "waiting…", startedAt: 100 } },
       { type: "text", text: "did a thing" } as TimelineNode,
@@ -270,7 +271,7 @@ describe("applySubagentDone", () => {
     const subagents = { "sid:0": runningSubagent("sid:0") };
     const next = applySubagentDone(
       subagents,
-      { subagentId: "sid:0", status: "completed", rounds: 4, inputTokens: 1200, outputTokens: 340, report: "done" },
+      { subagentId: "sid:0", status: "completed", rounds: 4, inputTokens: 1200, outputTokens: 340, cost: 0.0423, report: "done" },
       777,
     );
     const sa = next["sid:0"];
@@ -278,6 +279,7 @@ describe("applySubagentDone", () => {
     expect(sa.rounds).toBe(4);
     expect(sa.inputTokens).toBe(1200);
     expect(sa.outputTokens).toBe(340);
+    expect(sa.cost).toBe(0.0423);
     expect(sa.report).toBe("done");
     // Open thinking spinner is closed out.
     expect(sa.steps[0].thinking!.endedAt).toBe(777);
@@ -285,13 +287,13 @@ describe("applySubagentDone", () => {
 
   it("does not mutate the input map", () => {
     const subagents = { "sid:0": runningSubagent("sid:0") };
-    applySubagentDone(subagents, { subagentId: "sid:0", status: "completed", rounds: 1, inputTokens: 0, outputTokens: 0 }, 1);
+    applySubagentDone(subagents, { subagentId: "sid:0", status: "completed", rounds: 1, inputTokens: 0, outputTokens: 0, cost: 0.0 }, 1);
     expect(subagents["sid:0"].status).toBe("running");
   });
 
   it("is a no-op for an unknown subagent id", () => {
     const subagents = { "sid:0": runningSubagent("sid:0") };
-    const next = applySubagentDone(subagents, { subagentId: "sid:missing", status: "completed", rounds: 1, inputTokens: 0, outputTokens: 0 }, 1);
+    const next = applySubagentDone(subagents, { subagentId: "sid:missing", status: "completed", rounds: 1, inputTokens: 0, outputTokens: 0, cost: 0.0 }, 1);
     expect(next).toBe(subagents);
   });
 });
@@ -309,7 +311,7 @@ describe("syncSubagentTimelineItems (the fix)", () => {
     // Subagent finishes: authoritative map is updated…
     const doneMap = applySubagentDone(
       { "sid:0": running },
-      { subagentId: "sid:0", status: "completed", rounds: 3, inputTokens: 500, outputTokens: 200, report: "ok" },
+      { subagentId: "sid:0", status: "completed", rounds: 3, inputTokens: 500, outputTokens: 200, cost: 0.0155, report: "ok" },
       50,
     );
     // …and the timeline snapshot is synced from it.
@@ -346,6 +348,7 @@ describe("SubagentDoneData", () => {
       rounds: number;
       inputTokens: number;
       outputTokens: number;
+      cost: number;
       report?: string;
     }
 
@@ -355,6 +358,7 @@ describe("SubagentDoneData", () => {
       rounds: 3,
       inputTokens: 1000,
       outputTokens: 500,
+      cost: 0.0123,
       report: "Found the main function at src/main.ts:42",
     };
     expect(withReport.report).toBeTruthy();
@@ -365,6 +369,7 @@ describe("SubagentDoneData", () => {
       rounds: 2,
       inputTokens: 500,
       outputTokens: 200,
+      cost: 0.0,
     };
     expect(withoutReport.report).toBeUndefined();
   });

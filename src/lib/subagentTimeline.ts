@@ -33,6 +33,7 @@ export interface SubagentNode {
   rounds: number;
   inputTokens: number;
   outputTokens: number;
+  cost: number;
   report?: string;
   steps: TimelineNode[];
 }
@@ -43,6 +44,7 @@ export interface SubagentDoneInput {
   rounds: number;
   inputTokens: number;
   outputTokens: number;
+  cost: number;
   report?: string;
 }
 
@@ -89,6 +91,7 @@ export function applySubagentDone<S extends SubagentNode>(
     rounds: data.rounds,
     inputTokens: data.inputTokens,
     outputTokens: data.outputTokens,
+    cost: data.cost,
     report: data.report,
     steps: markThinkingEnded(sa.steps, now),
   };

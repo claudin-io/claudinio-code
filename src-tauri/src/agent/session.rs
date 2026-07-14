@@ -586,6 +586,8 @@ pub enum AgentEvent {
         output_tokens: u32,
         #[serde(rename = "report")]
         report: String,
+        #[serde(rename = "cost")]
+        cost: f64,
     },
     #[serde(rename = "Subagent")]
     Subagent {
@@ -814,13 +816,13 @@ fn write_status(
 /// Per-million-token rates for a model (claudin.io official pricing).
 /// Fallback estimate for when the litellm proxy's cost_injector middleware
 /// doesn't report a real breakdown (unpriced model, older proxy deploy).
-struct Pricing {
+pub(crate) struct Pricing {
     input: f64,
     cache_read: f64,
     output: f64,
 }
 
-fn model_pricing(model: &str) -> Pricing {
+pub(crate) fn model_pricing(model: &str) -> Pricing {
     if model.contains("claudius") {
         Pricing { input: 3.00, cache_read: 0.90, output: 8.00 }
     } else {
@@ -830,15 +832,15 @@ fn model_pricing(model: &str) -> Pricing {
 }
 
 /// Cost broken down by token category, in USD.
-struct CostBreakdown {
-    input: f64,
-    output: f64,
-    cache_read: f64,
+pub(crate) struct CostBreakdown {
+    pub(crate) input: f64,
+    pub(crate) output: f64,
+    pub(crate) cache_read: f64,
 }
 
 /// Estimate cost breakdown for provider calls when the provider does not
 /// report a real cost breakdown.
-fn cost_breakdown_for(model: &str, input: u32, cache_read: u32, output: u32) -> CostBreakdown {
+pub(crate) fn cost_breakdown_for(model: &str, input: u32, cache_read: u32, output: u32) -> CostBreakdown {
     let p = model_pricing(model);
     CostBreakdown {
         input: input as f64 * p.input / 1_000_000.0,
@@ -850,7 +852,7 @@ fn cost_breakdown_for(model: &str, input: u32, cache_read: u32, output: u32) -> 
 /// This round's cost breakdown: the provider-reported values when present,
 /// otherwise the local per-million-token estimate.
 #[allow(clippy::too_many_arguments)]
-fn cost_or_estimate(
+pub(crate) fn cost_or_estimate(
     model: &str,
     total_in: u32,
     total_cache: u32,
@@ -2808,6 +2810,7 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             report: String::new(),
+            cost: 0.0,
         };
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
