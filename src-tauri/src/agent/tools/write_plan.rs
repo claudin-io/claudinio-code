@@ -20,8 +20,10 @@ pub const LLD_HEADING: &str = "## Low-Level Design";
 
 /// True when `content` contains a heading line equal to `heading` (trimmed,
 /// ascii-case-insensitive) followed by at least one non-whitespace character
-/// before the next `#`-level heading or EOF.
+/// or a sub-heading (deeper `#` level) before the next heading at the same
+/// or higher level (`<= target_level`) or EOF.
 pub fn has_nonempty_section(content: &str, heading: &str) -> bool {
+    let target_level = heading.chars().take_while(|c| *c == '#').count();
     let mut in_section = false;
     for line in content.lines() {
         let trimmed = line.trim();
@@ -31,7 +33,12 @@ pub fn has_nonempty_section(content: &str, heading: &str) -> bool {
                 continue;
             }
             if in_section {
-                return false;
+                let line_level = trimmed.chars().take_while(|c| *c == '#').count();
+                if line_level <= target_level {
+                    return false; // end of section at same/higher level, no body
+                } else {
+                    return true; // sub-heading is body content
+                }
             }
             continue;
         }
@@ -206,6 +213,34 @@ mod tests {
     fn nonempty_section_heading_as_last_line_fails() {
         let content = "# Plan\nintro\n## Low-Level Design";
         assert!(!has_nonempty_section(content, LLD_HEADING));
+    }
+
+    /// LLD starts with a sub-heading (###) — should count as body (the bug).
+    #[test]
+    fn nonempty_section_subheading_counts_as_body() {
+        let content = "## Low-Level Design\n### Files to Change\n- src/foo.rs\n";
+        assert!(has_nonempty_section(content, LLD_HEADING));
+    }
+
+    /// LLD followed by another ## heading before any body — empty section.
+    #[test]
+    fn nonempty_section_ends_at_same_level() {
+        let content = "## Low-Level Design\n## Risks\nnone";
+        assert!(!has_nonempty_section(content, LLD_HEADING));
+    }
+
+    /// LLD followed by a # heading before any body — ends at higher level, empty.
+    #[test]
+    fn nonempty_section_ends_at_higher_level() {
+        let content = "## Low-Level Design\n# Other\nbody";
+        assert!(!has_nonempty_section(content, LLD_HEADING));
+    }
+
+    /// LLD with only a sub-heading and no other text — sub-heading itself is body.
+    #[test]
+    fn nonempty_section_subheading_only_no_text() {
+        let content = "## Low-Level Design\n### Files\n";
+        assert!(has_nonempty_section(content, LLD_HEADING));
     }
 
     #[test]
