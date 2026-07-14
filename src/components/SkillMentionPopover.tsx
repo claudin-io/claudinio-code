@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
-import { Portal } from "solid-js/web";
+
 import Fuse from "fuse.js";
 import { listSkills, type SkillEntry } from "../lib/ipc";
 import { Icon } from "./Icon";
@@ -7,8 +7,6 @@ import { t } from "../lib/grill-me";
 
 interface SkillMentionPopoverProps {
   workspace: string;
-  bottom: number;
-  left: number;
   query: string;
   onSelect: (skillName: string) => void;
   onClose: () => void;
@@ -85,10 +83,6 @@ export const SkillMentionPopover: Component<SkillMentionPopoverProps> = (props) 
         e.stopPropagation();
         const selected = r[highlightIndex()];
         if (selected) props.onSelect(selected.name);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        props.onClose();
       }
     };
 
@@ -106,61 +100,48 @@ export const SkillMentionPopover: Component<SkillMentionPopoverProps> = (props) 
   });
 
   return (
-    <Portal>
-      {/* Transparent backdrop to catch outside clicks */}
-      <div
-        class="fixed inset-0 z-40"
-        onClick={props.onClose}
-      />
-      <div
-        class="fixed z-50 min-w-[280px] max-w-[420px] rounded-lg border border-border-subtle bg-surface-1 shadow-lg"
-        style={{
-          bottom: `${props.bottom}px`,
-          left: `${props.left}px`,
-        }}
-      >
-        <div ref={scrollRef} class="max-h-[280px] overflow-y-auto py-1">
-          <Show when={!loading() && !error()}>
-            <Show
-              when={results().length > 0}
-              fallback={
-                <div class="px-3 py-2 text-[12px] text-ink-faint">{t("mention.noSkills")}</div>
-              }
-            >
-              <For each={results()}>
-                {(skill, i) => (
-                  <button
-                    data-index={i()}
-                    onClick={() => props.onSelect(skill.name)}
-                    onMouseEnter={() => setHighlightIndex(i())}
-                    class="w-full px-3 py-1.5 text-left"
-                    classList={{
-                      "bg-accent/10 text-ink": highlightIndex() === i(),
-                      "text-ink-muted hover:bg-surface-2": highlightIndex() !== i(),
-                    }}
-                  >
-                    <div class="font-mono text-[12px] text-ink font-medium">{skill.name}</div>
-                    <div class="text-[11px] text-ink-faint truncate" style="max-width: 380px">
-                      {skill.description}
-                    </div>
-                  </button>
-                )}
-              </For>
-            </Show>
+    <div class="min-w-[280px] max-w-[420px] rounded-lg border border-border-subtle bg-surface-1 shadow-lg">
+      <div ref={scrollRef} class="max-h-[280px] overflow-y-auto py-1">
+        <Show when={!loading() && !error()}>
+          <Show
+            when={results().length > 0}
+            fallback={
+              <div class="px-3 py-2 text-[12px] text-ink-faint">{t("mention.noSkills")}</div>
+            }
+          >
+            <For each={results()}>
+              {(skill, i) => (
+                <button
+                  data-index={i()}
+                  onClick={() => props.onSelect(skill.name)}
+                  onMouseEnter={() => setHighlightIndex(i())}
+                  class="w-full px-3 py-1.5 text-left"
+                  classList={{
+                    "bg-accent/10 text-ink": highlightIndex() === i(),
+                    "text-ink-muted hover:bg-surface-2": highlightIndex() !== i(),
+                  }}
+                >
+                  <div class="font-mono text-[12px] text-ink font-medium">{skill.name}</div>
+                  <div class="text-[11px] text-ink-faint truncate" style="max-width: 380px">
+                    {skill.description}
+                  </div>
+                </button>
+              )}
+            </For>
           </Show>
+        </Show>
 
-          <Show when={loading()}>
-            <div class="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-faint">
-              <Icon name="loader" class="animate-spin" />
-              Loading skills…
-            </div>
-          </Show>
+        <Show when={loading()}>
+          <div class="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-faint">
+            <Icon name="loader" class="animate-spin" />
+            Loading skills…
+          </div>
+        </Show>
 
-          <Show when={error() !== null && !loading()}>
-            <div class="px-3 py-2 text-[12px] text-danger">{error()}</div>
-          </Show>
-        </div>
+        <Show when={error() !== null && !loading()}>
+          <div class="px-3 py-2 text-[12px] text-danger">{error()}</div>
+        </Show>
       </div>
-    </Portal>
+    </div>
   );
 };

@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, type Component } from "solid-js";
-import { Portal } from "solid-js/web";
+
 import Fuse from "fuse.js";
 import { Icon, type IconName } from "./Icon";
 
@@ -18,8 +18,6 @@ const TAGS: TagType[] = [
 ];
 
 interface TagMentionPopoverProps {
-  bottom: number;
-  left: number;
   query: string;
   onSelect: (tagType: string) => void;
   onClose: () => void;
@@ -76,10 +74,6 @@ export const TagMentionPopover: Component<TagMentionPopoverProps> = (props) => {
         e.stopPropagation();
         const selected = r[highlightIndex()];
         if (selected?.enabled) props.onSelect(selected.id);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        props.onClose();
       }
     };
 
@@ -88,54 +82,44 @@ export const TagMentionPopover: Component<TagMentionPopoverProps> = (props) => {
   });
 
   return (
-    <Portal>
-      {/* Transparent backdrop to catch outside clicks */}
-      <div class="fixed inset-0 z-40" onClick={props.onClose} />
-      <div
-        class="fixed z-50 min-w-[180px] max-w-[260px] rounded-lg border border-border-subtle bg-surface-1 shadow-lg"
-        style={{
-          bottom: `${props.bottom}px`,
-          left: `${props.left}px`,
-        }}
-      >
-        <div class="max-h-[240px] overflow-y-auto py-1">
-          <For each={results()}>
-            {(tag, i) => (
-              <button
-                onClick={() => {
-                  if (tag.enabled) props.onSelect(tag.id);
-                }}
-                onMouseEnter={() => setHighlightIndex(i())}
-                disabled={!tag.enabled}
-                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px]"
-                classList={{
-                  "bg-accent/10 text-ink": highlightIndex() === i(),
-                  "text-ink-muted hover:bg-surface-2": highlightIndex() !== i(),
-                }}
+    <div class="min-w-[180px] max-w-[260px] rounded-lg border border-border-subtle bg-surface-1 shadow-lg">
+      <div class="max-h-[240px] overflow-y-auto py-1">
+        <For each={results()}>
+          {(tag, i) => (
+            <button
+              onClick={() => {
+                if (tag.enabled) props.onSelect(tag.id);
+              }}
+              onMouseEnter={() => setHighlightIndex(i())}
+              disabled={!tag.enabled}
+              class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px]"
+              classList={{
+                "bg-accent/10 text-ink": highlightIndex() === i(),
+                "text-ink-muted hover:bg-surface-2": highlightIndex() !== i(),
+              }}
+            >
+              <Icon
+                name={tag.icon}
+                class={`h-3.5 w-3.5 shrink-0 ${
+                  tag.enabled ? "text-ink-muted" : "text-ink-faint"
+                }`}
+              />
+              <span
+                class={
+                  tag.enabled ? "text-ink" : "text-ink-faint"
+                }
               >
-                <Icon
-                  name={tag.icon}
-                  class={`h-3.5 w-3.5 shrink-0 ${
-                    tag.enabled ? "text-ink-muted" : "text-ink-faint"
-                  }`}
-                />
-                <span
-                  class={
-                    tag.enabled ? "text-ink" : "text-ink-faint"
-                  }
-                >
-                  {tag.label}
+                {tag.label}
+              </span>
+              {!tag.enabled && (
+                <span class="ml-auto rounded bg-ink-faint/10 px-1 py-0.5 text-[10px] text-ink-faint font-medium">
+                  soon
                 </span>
-                {!tag.enabled && (
-                  <span class="ml-auto rounded bg-ink-faint/10 px-1 py-0.5 text-[10px] text-ink-faint font-medium">
-                    soon
-                  </span>
-                )}
-              </button>
-            )}
-          </For>
-        </div>
+              )}
+            </button>
+          )}
+        </For>
       </div>
-    </Portal>
+    </div>
   );
 };

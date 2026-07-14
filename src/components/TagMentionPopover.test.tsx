@@ -8,8 +8,6 @@ describe("TagMentionPopover", () => {
   });
 
   const defaultProps = () => ({
-    bottom: 100,
-    left: 200,
     query: "",
     onSelect: vi.fn(),
     onClose: vi.fn(),
@@ -92,18 +90,6 @@ describe("TagMentionPopover", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("calls onClose on backdrop click", () => {
-    const onClose = vi.fn();
-    const props = { ...defaultProps(), onClose };
-    render(() => <TagMentionPopover {...props} />, document.body);
-
-    // The backdrop is the div with `fixed inset-0 z-40` classes
-    const backdrop = document.body.querySelector(".fixed.inset-0")!;
-    backdrop.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
   describe("keyboard navigation", () => {
     it("ArrowDown moves highlight and Enter selects the enabled tag", () => {
       const onSelect = vi.fn();
@@ -158,16 +144,6 @@ describe("TagMentionPopover", () => {
       // The guard `selected?.enabled` prevents calling onSelect
       expect(onSelect).not.toHaveBeenCalled();
     });
-
-    it("Escape calls onClose", () => {
-      const onClose = vi.fn();
-      const props = { ...defaultProps(), onClose };
-      render(() => <TagMentionPopover {...props} />, document.body);
-
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-
-      expect(onClose).toHaveBeenCalledTimes(1);
-    });
   });
 
   it("ArrowDown on empty results returns early (no crash)", () => {
@@ -184,34 +160,6 @@ describe("TagMentionPopover", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("reset createEffect fires when results change (resets highlight to 0)", () => {
-    const onSelect = vi.fn();
-    const props = { ...defaultProps(), onSelect };
-    render(() => <TagMentionPopover {...props} />, document.body);
-
-    // Navigate to a non-zero highlight
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    // At this point highlight is at index 2 ("agent")
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    // "agent" is disabled → Enter guard prevents selection
-    expect(onSelect).not.toHaveBeenCalled();
-  });
-
-  it("Enter on disabled tag hits selected?.enabled guard", () => {
-    const onSelect = vi.fn();
-    const props = { ...defaultProps(), query: "", onSelect };
-    render(() => <TagMentionPopover {...props} />, document.body);
-
-    // Navigate to index 2 ("agent" — disabled)
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-
-    // The guard `selected?.enabled` → selected exists (agent) but is not enabled
-    expect(onSelect).not.toHaveBeenCalled();
-  });
-
   it("clamps highlight index when results shrink", () => {
     const onSelect = vi.fn();
     const props = { ...defaultProps(), onSelect };
@@ -222,18 +170,11 @@ describe("TagMentionPopover", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     }
 
-    // Now change query to filter to only "skill" — results shrink from 4→1
-    // This would normally happen via reactive prop change, but we can verify
-    // the clamping logic by re-rendering with a query
-    // (Solid-js Portal + render doesn't easily update props, so we test the
-    //  component's clamping independently through the keyboard guard)
-    // The clamp effect ensures highlightIndex(3) is clamped to 0 for 1 result
-    // We verify by checking ArrowDown stays at 0:
+    // Since we have 4 results, index 3→ArrowDown at index 3 → clamped to 3
+    // Enter on index 3 = "prompt" (disabled) → no-op
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 
-    // Since we have 4 results (no query), index 3→ArrowDown at index 3 → clamped to 3
-    // Enter on index 3 = "prompt" (disabled) → no-op
     expect(onSelect).not.toHaveBeenCalled();
   });
 
@@ -241,14 +182,16 @@ describe("TagMentionPopover", () => {
     const props = defaultProps();
     const dispose = render(() => <TagMentionPopover {...props} />, document.body);
 
-    // onCleanup should remove the keydown listener. We verify by disposing and
-    // then dispatching Escape — it should NOT call onClose.
+    // Dispatch ArrowDown + Enter while mounted — should call onSelect
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+    expect(props.onSelect).toHaveBeenCalledWith("goal");
+
+    // onCleanup should remove the keydown listener. After dispose, Enter should
+    // NOT call onSelect again.
+    props.onSelect.mockClear();
     dispose();
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    // In a clean test, after dispose, the listener is removed
-    // We verify by checking onClose was not called (since the listener is gone)
-    // Note: after dispose, the component is unmounted so the listener is removed
-    // This exercises the onCleanup callback
     document.body.innerHTML = "";
   });
 

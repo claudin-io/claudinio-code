@@ -1,11 +1,10 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
-import { Portal } from "solid-js/web";
+
 import Fuse from "fuse.js";
 import { t } from "../lib/grill-me";
 
 interface FileMentionPopoverProps {
   fileList: string[];
-  position: { top: number; left: number; height: number };
   query: string;
   onSelect: (path: string) => void;
   onClose: () => void;
@@ -67,10 +66,6 @@ export const FileMentionPopover: Component<FileMentionPopoverProps> = (props) =>
         // selected is always truthy because r.length > 0 was checked above and
         // highlightIndex is clamped to [0, r.length-1]
         props.onSelect(selected);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        props.onClose();
       }
     };
 
@@ -79,44 +74,31 @@ export const FileMentionPopover: Component<FileMentionPopoverProps> = (props) =>
   });
 
   return (
-    <Portal>
-      {/* Transparent backdrop to catch outside clicks */}
-      <div
-        class="fixed inset-0 z-40"
-        onClick={props.onClose}
-      />
-      <div
-        class="fixed z-50 min-w-[260px] max-w-[420px] rounded-lg border border-border-subtle bg-surface-1 shadow-lg"
-        style={{
-          top: `${props.position.top}px`,
-          left: `${props.position.left}px`,
-        }}
-      >
-        <div class="max-h-[240px] overflow-y-auto py-1">
-          <Show
-            when={results().length > 0}
-            fallback={
-              <div class="px-3 py-2 text-[12px] text-ink-faint">{t("mention.noFiles")}</div>
-            }
-          >
-            <For each={results()}>
-              {(path, i) => (
-                <button
-                  onClick={() => props.onSelect(path)}
-                  onMouseEnter={() => setHighlightIndex(i())}
-                  class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px]"
-                  classList={{
-                    "bg-accent/10 text-ink": highlightIndex() === i(),
-                    "text-ink-muted hover:bg-surface-2": highlightIndex() !== i(),
-                  }}
-                >
-                  {path}
-                </button>
-              )}
-            </For>
-          </Show>
-        </div>
+    <div class="min-w-[260px] max-w-[420px] rounded-lg border border-border-subtle bg-surface-1 shadow-lg">
+      <div class="max-h-[240px] overflow-y-auto py-1">
+        <Show
+          when={results().length > 0}
+          fallback={
+            <div class="px-3 py-2 text-[12px] text-ink-faint">{t("mention.noFiles")}</div>
+          }
+        >
+          <For each={results()}>
+            {(path, i) => (
+              <button
+                onClick={() => props.onSelect(path)}
+                onMouseEnter={() => setHighlightIndex(i())}
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px]"
+                classList={{
+                  "bg-accent/10 text-ink": highlightIndex() === i(),
+                  "text-ink-muted hover:bg-surface-2": highlightIndex() !== i(),
+                }}
+              >
+                {path}
+              </button>
+            )}
+          </For>
+        </Show>
       </div>
-    </Portal>
+    </div>
   );
 };

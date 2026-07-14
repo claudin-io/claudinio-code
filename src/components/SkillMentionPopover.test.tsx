@@ -29,8 +29,6 @@ vi.mock("../lib/grill-me", () => ({
 // ── Default props ─────────────────────────────────────────────────
 const defaultProps = () => ({
   workspace: "/test",
-  bottom: 100,
-  left: 200,
   query: "",
   onSelect: vi.fn(),
   onClose: vi.fn(),
@@ -117,25 +115,6 @@ describe("SkillMentionPopover", () => {
     expect(onSelect).toHaveBeenCalledWith("design");
   });
 
-  it("calls onClose on backdrop click", async () => {
-    mockListSkills.mockResolvedValue({ skills: sampleSkills, count: sampleSkills.length });
-    const onClose = vi.fn();
-    const props = { ...defaultProps(), onClose };
-    render(() => <SkillMentionPopover {...props} />, document.body);
-
-    // Wait for skills to load
-    await vi.waitFor(() => {
-      expect(document.body.textContent).toContain("design");
-    });
-
-    // The backdrop is the div with `fixed inset-0 z-40` classes
-    const backdrop = document.body.querySelector('[class*="inset-0"]') as HTMLElement;
-    expect(backdrop).toBeTruthy();
-    backdrop.click();
-
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
   describe("keyboard navigation", () => {
     it("ArrowDown moves highlight and Enter selects the highlighted item", async () => {
       mockListSkills.mockResolvedValue({ skills: sampleSkills, count: sampleSkills.length });
@@ -188,21 +167,6 @@ describe("SkillMentionPopover", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 
       expect(onSelect).toHaveBeenCalledWith("design");
-    });
-
-    it("Escape calls onClose", async () => {
-      mockListSkills.mockResolvedValue({ skills: sampleSkills, count: sampleSkills.length });
-      const onClose = vi.fn();
-      const props = { ...defaultProps(), onClose };
-      render(() => <SkillMentionPopover {...props} />, document.body);
-
-      await vi.waitFor(() => {
-        expect(document.body.textContent).toContain("design");
-      });
-
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-
-      expect(onClose).toHaveBeenCalledTimes(1);
     });
 
     it("triggers scrollIntoView on highlighted element when highlightIndex changes", async () => {
@@ -265,20 +229,26 @@ describe("SkillMentionPopover", () => {
 
   it("dispose triggers onCleanup (removes keydown listener)", async () => {
     mockListSkills.mockResolvedValue({ skills: sampleSkills, count: sampleSkills.length });
-    const onClose = vi.fn();
-    const props = { ...defaultProps(), onClose };
+    const onSelect = vi.fn();
+    const props = { ...defaultProps(), onSelect };
     const dispose = render(() => <SkillMentionPopover {...props} />, document.body);
 
     await vi.waitFor(() => {
       expect(document.body.textContent).toContain("design");
     });
 
+    // Verify listener is active: dispatch ArrowDown + Enter
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(onSelect).toHaveBeenCalledWith("debug");
+
     // Dispose unmounts the component, triggering onCleanup which removes the keydown listener
+    onSelect.mockClear();
     dispose();
 
-    // After dispose, the listener should be gone — dispatch Escape, should not call onClose
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    expect(onClose).not.toHaveBeenCalled();
+    // After dispose, the listener should be gone — dispatch Enter, should NOT call onSelect
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it("highlights a skill on mouse enter (covers onMouseEnter lambda)", async () => {
