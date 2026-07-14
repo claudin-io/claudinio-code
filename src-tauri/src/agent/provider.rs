@@ -114,6 +114,10 @@ pub struct AgentConfig {
     /// `merge_workspace_config`), overriding a global entry of the same name.
     #[serde(default)]
     pub mcp: std::collections::HashMap<String, McpServerEntry>,
+    /// Prevent the system from sleeping while an agent session is actively
+    /// running (display can still turn off). See commands::power.
+    #[serde(default = "default_true")]
+    pub keep_awake: bool,
 }
 
 /// How to reach an MCP server: a locally spawned process talking JSON-RPC
@@ -179,6 +183,7 @@ impl Default for AgentConfig {
             override_base_url: None,
             override_api_key: None,
             mcp: std::collections::HashMap::new(),
+            keep_awake: true,
         }
     }
 }

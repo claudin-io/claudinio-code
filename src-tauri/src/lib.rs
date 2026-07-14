@@ -12,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
+        .manage(commands::power::KeepAwakeState::default())
         .invoke_handler(tauri::generate_handler![
             commands::fs::list_dir,
             commands::fs::read_file,
@@ -70,6 +71,7 @@ pub fn run() {
             commands::mcp::mcp_test_server,
             commands::mcp::mcp_reconnect,
             commands::shell::open_in_terminal,
+            commands::power::set_keep_awake,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

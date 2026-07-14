@@ -8,6 +8,7 @@ pub mod fs;
 pub mod git;
 pub mod lsp;
 pub mod mcp;
+pub mod power;
 pub mod procutil;
 pub mod shell;
 pub mod skills;

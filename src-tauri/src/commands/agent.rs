@@ -487,6 +487,7 @@ pub struct SetConfigArgs {
     pub sub_max_rounds: Option<Option<usize>>,
     pub yolo_mode: Option<bool>,
     pub yolo_blacklist: Option<Vec<String>>,
+    pub keep_awake: Option<bool>,
     pub max_golden_cycles: Option<Option<usize>>,
     pub max_golden_stalls: Option<Option<usize>>,
     pub max_parallel_agents: Option<Option<usize>>,
@@ -525,6 +526,9 @@ pub async fn set_config(
     }
     if let Some(yolo_blacklist) = args.yolo_blacklist {
         cfg.yolo_blacklist = yolo_blacklist;
+    }
+    if let Some(keep_awake) = args.keep_awake {
+        cfg.keep_awake = keep_awake;
     }
     if let Some(max_golden_cycles) = args.max_golden_cycles {
         cfg.max_golden_cycles = max_golden_cycles;
@@ -583,6 +587,7 @@ pub async fn get_config(
         "subMaxRounds": cfg.sub_max_rounds,
         "yoloMode": cfg.yolo_mode,
         "yoloBlacklist": cfg.yolo_blacklist,
+        "keepAwake": cfg.keep_awake,
         "accountLogin": cfg.account_login,
         "accountTier": cfg.account_tier,
         "maxGoldenCycles": cfg.max_golden_cycles,
