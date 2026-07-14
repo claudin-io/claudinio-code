@@ -20,6 +20,7 @@ pub fn execute_set(
     args: SetTasksArgs,
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
+    check_brain_lld_gate(ctx)?;
     let path = ctx.session_store_path.as_ref().ok_or("session_store_path not set")?;
     let prev = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
@@ -41,6 +42,45 @@ pub fn execute_set(
         ));
     }
     Ok(format!("Tasks updated: {} task(s) saved.{}", merged.len(), note))
+}
+
+/// Brain-mode gate: tasks may only be created once the most recent plan file
+/// carries a non-empty `## Low-Level Design` section, so every task can
+/// reference concrete technical detail instead of guesses. No-op in Builder
+/// mode or when no mode handle / workspace is attached (tests, aux workflows).
+fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext) -> Result<(), String> {
+    use crate::agent::tools::write_plan::{has_nonempty_section, latest_plan_path, LLD_HEADING};
+    if !ctx.is_brain() {
+        return Ok(());
+    }
+    let root = match ctx.workspace_root.as_deref() {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+    match latest_plan_path(root, ctx.plan_save_path.as_deref()) {
+        None => Err("tasks_set rejected: no plan file exists yet. In Brain mode tasks may only \
+                     be created after the plan is complete: write the Solution Design via \
+                     write_plan, then call write_plan again with the full content plus a \
+                     '## Low-Level Design' section, then retry tasks_set."
+            .into()),
+        Some(path) => {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| format!("tasks_set: cannot read plan {}: {e}", path.display()))?;
+            if has_nonempty_section(&content, LLD_HEADING) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "tasks_set rejected: the most recent plan ({}) has no non-empty \
+                     '## Low-Level Design' section. Research the codebase first (spawn_agents \
+                     'explore' mode, semantic_search, file reading), then call write_plan again \
+                     with the FULL plan content including a '## Low-Level Design' section \
+                     (files/symbols to touch, data flow, APIs/schemas, patterns to reuse) - \
+                     then retry tasks_set.",
+                    path.display()
+                ))
+            }
+        }
+    }
 }
 
 /// Strip the reserved `golden-` prefix from any incoming task id that isn't
@@ -161,6 +201,97 @@ pub fn slugify(s: &str) -> String {
         result[..40].to_string()
     } else {
         result
+    }
+}
+
+#[cfg(test)]
+mod lld_gate_tests {
+    use super::*;
+    use crate::agent::session::{ModeCtl, ModeOrigin, SessionMode};
+    use std::sync::Arc;
+
+    /// Tempdir workspace with a session JSONL; `mode` = None disables the gate.
+    fn ctx_for(name: &str, mode: Option<SessionMode>) -> (crate::agent::tools::ToolContext, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("lld-gate-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = root.join("session.jsonl");
+        std::fs::write(&store, "").unwrap();
+        let ctx = crate::agent::tools::ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            embedding_model: Arc::new(tokio::sync::Mutex::new(None)),
+            session_store_path: Some(store.to_string_lossy().to_string()),
+            read_tracker: Arc::new(tokio::sync::Mutex::new(crate::agent::tools::ReadTracker::default())),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            mcp: None,
+            mode_ctl: mode.map(|m| Arc::new(ModeCtl::new(m, ModeOrigin::Human))),
+        };
+        (ctx, root)
+    }
+
+    fn one_task() -> SetTasksArgs {
+        SetTasksArgs {
+            tasks: vec![TaskItem {
+                id: "t1".into(),
+                title: "t".into(),
+                description: "d".into(),
+                journal: vec![],
+                status: "todo".into(),
+            }],
+        }
+    }
+
+    fn write_plan_file(root: &std::path::Path, content: &str) {
+        let dir = root.join(".claudinio").join("plans");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026-07-14_plan.md"), content).unwrap();
+    }
+
+    #[test]
+    fn brain_without_plan_rejected() {
+        let (ctx, root) = ctx_for("no-plan", Some(SessionMode::Brain));
+        let err = execute_set(one_task(), &ctx).unwrap_err();
+        assert!(err.contains("Low-Level Design"), "unexpected error: {err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn brain_plan_without_lld_rejected() {
+        let (ctx, root) = ctx_for("no-lld", Some(SessionMode::Brain));
+        write_plan_file(&root, "# Plan\n## Solution Design\nagreed stuff\n");
+        let err = execute_set(one_task(), &ctx).unwrap_err();
+        assert!(err.contains("Low-Level Design"), "unexpected error: {err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn brain_plan_with_lld_accepted() {
+        let (ctx, root) = ctx_for("with-lld", Some(SessionMode::Brain));
+        write_plan_file(&root, "# Plan\n## Solution Design\nagreed\n## Low-Level Design\nsrc/foo.rs: add bar()\n");
+        let res = execute_set(one_task(), &ctx);
+        assert!(res.is_ok(), "unexpected error: {res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn builder_mode_not_gated() {
+        let (ctx, root) = ctx_for("builder", Some(SessionMode::Builder));
+        let res = execute_set(one_task(), &ctx);
+        assert!(res.is_ok(), "unexpected error: {res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_mode_handle_not_gated() {
+        let (ctx, root) = ctx_for("no-handle", None);
+        let res = execute_set(one_task(), &ctx);
+        assert!(res.is_ok(), "unexpected error: {res:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 }
 

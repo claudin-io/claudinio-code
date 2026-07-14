@@ -6,6 +6,31 @@
  * when called unless the test explicitly mocks them via `vi.mock`.
  */
 
+// ── Global browser API polyfills ─────────────────────────────────
+// jsdom does not implement ResizeObserver. Popover.tsx uses it to
+// track its content size, and any test rendering a component that
+// contains a Popover will trigger an uncaught exception without this.
+vi.stubGlobal(
+  "ResizeObserver",
+  vi.fn(function MockResizeObserver(callback: ResizeObserverCallback) {
+    let observed = false;
+    return {
+      observe: vi.fn(() => {
+        if (observed) return;
+        observed = true;
+        queueMicrotask(() => {
+          callback(
+            [{ contentRect: { width: 280, height: 160 } } as ResizeObserverEntry],
+            null as unknown as ResizeObserver,
+          );
+        });
+      }),
+      disconnect: vi.fn(),
+      unobserve: vi.fn(),
+    };
+  }),
+);
+
 // ── @tauri-apps/api/core ───────────────────────────────────────────
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockRejectedValue(new Error("invoke not mocked")),
