@@ -288,6 +288,7 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 - Conceptual questions MUST start with `semantic_search`.
 - Use `file_outline` before `read_file` on unfamiliar files.
 - Never use bash search tools (grep/find/rg) when a dedicated tool exists.
+- For current/external information not in the codebase or your training data (docs, library versions, news, APIs), use `web_search` if available instead of guessing.
 
 # 3. SUBAGENTS (`spawn_agents`)
 - Call shape: spawn_agents is ONE call carrying ALL parallel agents in its 'agents' array: {"agents": [{"name", "goal", "mode", "expected_output"}, ...]}. Never flatten a single agent's fields to the top level.
@@ -430,6 +431,7 @@ File tools take absolute paths inside this root."
                 "* `code_search`/`symbol_lookup` only when you already know the exact symbol or keyword.\n",
                 "* For unfamiliar files, `file_outline` before `read_file`; use `go_to_definition`/`find_references` to trace relationships.\n",
                 "* `grep` and bash search are last resorts, used only after indexed tools return empty results.\n",
+                "* `web_search` (if available) for current/external information not in the codebase or your training data.\n",
                 "For any broad task, aggressively use `spawn_agents` ('explore' mode) - to map areas and verify theories without polluting your context - ",
                 "and instruct each subagent to follow the same tool order. Explore before interviewing, so your questions are grounded in facts.\n",
                 "\n### Requirements interview (MANDATORY - never skip)\n",
@@ -509,7 +511,8 @@ File tools take absolute paths inside this root."
                 "(key decisions, gotchas, what was learned). It auto-records the changed files and commit(s) into the plan file, ",
                 "so the journal should focus on the 'why' and what you learned - not a file list. This feeds the plan with data for future reference.\n",
                 "Investigate with the smart tools first - `semantic_search` for behavior questions, `code_search`/`symbol_lookup` for known names, ",
-                "`file_outline` before reading - and leave `grep`/bash searching as the last resort. Tell your subagents to do the same.\n",
+                "`file_outline` before reading - and leave `grep`/bash searching as the last resort. ",
+                "For current/external information not in the codebase or training data, use `web_search` if available. Tell your subagents to do the same.\n",
                 "\n# LANGUAGE POLICY\n",
                 "- User-facing replies: write in the language of the user's latest message. If unclear or mixed, default to English.\n",
                 "- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English.\n"
@@ -696,6 +699,7 @@ fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolD
             .collect();
     }
     let mut defs = tools::get_defs(maxp);
+    defs.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     match mode {
         SessionMode::Builder => {
             defs.push(tools::enter_plan_mode_def());

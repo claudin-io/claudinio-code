@@ -120,6 +120,14 @@ pub struct AgentConfig {
     pub keep_awake: bool,
 }
 
+impl AgentConfig {
+    /// True when the session uses claudinio's own API key (not a BYOK override)
+    /// and that key is present. This gates subscriber-only features like web_search.
+    pub fn is_claudinio_account(&self) -> bool {
+        self.override_api_key.is_none() && !self.api_key.is_empty()
+    }
+}
+
 /// How to reach an MCP server: a locally spawned process talking JSON-RPC
 /// over stdio, or a remote server speaking Streamable HTTP/SSE.
 #[derive(Debug, Clone, Serialize, Deserialize)]
