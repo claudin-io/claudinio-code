@@ -78,6 +78,9 @@ const PATHS: Record<string, string[]> = {
     // pixel:exclamation-triangle-solid
     "M22 20v-2h-1v-2h-1v-2h-1v-2h-1v-2h-1V8h-1V6h-1V4h-1V2h-1V1h-2v1h-1v2H9v2H8v2H7v2H6v2H5v2H4v2H3v2H2v2H1v2h1v1h20v-1h1v-2zM10 11h4v3h-1v3h-2v-3h-1zM11 18h2v2h-2z",
   ],
+  "alert-triangle-filled": [
+    "M12 17q.425 0 .713-.288T13 16t-.288-.712T12 15t-.712.288T11 16t.288.713T12 17m-1-4h2V7h-2zm1 10.3L8.65 20H4v-4.65L.7 12L4 8.65V4h4.65L12 .7L15.35 4H20v4.65L23.3 12L20 15.35V20h-4.65zm0-2.8l2.5-2.5H18v-3.5l2.5-2.5L18 9.5V6h-3.5L12 3.5L9.5 6H6v3.5L3.5 12L6 14.5V18h3.5zm0-8.5",
+  ],
   plus: [
     "M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z",
   ],

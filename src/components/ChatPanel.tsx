@@ -57,12 +57,13 @@ import { SkillMentionPopover } from "./SkillMentionPopover";
 import ContextWarning from "./ContextWarning";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
-import { setWorkspaceStatus } from "../lib/workspaceStatus";
+import { setWorkspaceStatus, isBusy } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
 import { GitIndicator } from "./GitIndicator";
 import { GitChangesModal } from "./GitChangesModal";
 import CommitPushModal from "./CommitPushModal";
 import ContentViewerModal from "./ContentViewerModal";
+import { NewSessionPopover } from "./NewSessionPopover";
 import QuestionCard from "./QuestionCard";
 
 marked.use({
@@ -496,6 +497,8 @@ export const ChatPanel: Component<{
   const [showSessions, setShowSessions] = createSignal(false);
   const [plans, setPlans] = createSignal<PlanEntry[]>([]);
   const [showPlans, setShowPlans] = createSignal(false);
+  const [showNewPopover, setShowNewPopover] = createSignal(false);
+  const [buttonRect, setButtonRect] = createSignal<DOMRect | null>(null);
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   const [queuedSteering, setQueuedSteering] = createSignal<QueuedSteeringEntry[]>([]);
   const [retryableError, setRetryableError] = createSignal<string | null>(null);
@@ -1556,7 +1559,27 @@ export const ChatPanel: Component<{
   };
 
   const startNewSession = async () => {
-    if (status() === "thinking" || status() === "awaiting_approval" || status() === "awaiting_input") return;
+    if (isBusy(status())) {
+      setShowNewPopover(true);
+      return;
+    }
+    flushPendingDone();
+    try {
+      await newSession(props.workspace);
+    } catch {
+      /* fresh session is best-effort */
+    }
+    setMessages([]);
+    setCurrentSteps([]);
+    setThinkingStart(0);
+    setContextStats({ contextTokens: 0, cumulativeTokens: 0 });
+    setMode("builder");
+    setStatus("idle");
+    setShowSessions(false);
+  };
+
+  const handleConfirmNew = async () => {
+    setShowNewPopover(false);
     flushPendingDone();
     try {
       await newSession(props.workspace);
@@ -1743,9 +1766,15 @@ export const ChatPanel: Component<{
 
         <div class="flex items-center gap-1">
           <button
-            onClick={startNewSession}
-            disabled={status() === "thinking" || status() === "awaiting_approval"}
-            class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2 disabled:opacity-30"
+            onClick={(e) => {
+              if (isBusy(status())) {
+                setButtonRect(e.currentTarget.getBoundingClientRect());
+                setShowNewPopover(true);
+              } else {
+                startNewSession();
+              }
+            }}
+            class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
             title={t("chat.header.newSession")}
           >
             <Icon name="plus" class="h-3.5 w-3.5" />
@@ -1770,6 +1799,21 @@ export const ChatPanel: Component<{
           </button>
           <GitIndicator workspace={props.workspace} onShowChanges={() => setShowGitModal(true)} />
         </div>
+
+        <Show when={showNewPopover() && buttonRect()}>
+          <NewSessionPopover
+            position={{
+              top: buttonRect()!.top,
+              left: buttonRect()!.left,
+              height: buttonRect()!.height,
+            }}
+            onConfirm={handleConfirmNew}
+            onClose={() => {
+              setShowNewPopover(false);
+              setButtonRect(null);
+            }}
+          />
+        </Show>
 
         <Show when={showSessions()}>
           <div ref={sessionsRef} class="absolute right-4 top-9 z-20 max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
