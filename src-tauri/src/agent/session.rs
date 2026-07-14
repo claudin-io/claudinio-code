@@ -1209,6 +1209,22 @@ pub async fn run_workflow_with_profile(
     let mut run_cost_output: Option<f64> = None;
     let mut run_cost_cache: Option<f64> = None;
     let mut subagent_cost: f64 = 0.0;
+    let emit_final_stats = |cumul_in: u64, cumul_out: u64, cumul_cost: Option<f64>,
+                            cumul_cost_input: Option<f64>, cumul_cost_output: Option<f64>,
+                            cumul_cost_cache: Option<f64>, last_context: u64|
+    {
+        let _ = event_tx.send(AgentEvent::SessionStats {
+            input_tokens: cumul_in as u32,
+            output_tokens: cumul_out as u32,
+            cumulative_cost: cumul_cost,
+            cost_input: cumul_cost_input,
+            cost_output: cumul_cost_output,
+            cost_cache_read: cumul_cost_cache,
+            context_tokens: last_context,
+            max_context_tokens: MAX_CONTEXT_TOKENS,
+            compact_threshold: COMPACT_THRESHOLD,
+        });
+    };
     let mut last_text = String::new();
     // Size of the context for the next request: the real number reported by
     // the API when available, the char-based estimate otherwise.
@@ -1407,7 +1423,7 @@ pub async fn run_workflow_with_profile(
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: total_in + cumul_in as u32,
             output_tokens: total_out + cumul_out as u32,
-            cumulative_cost: Some(live_cost_input + live_cost_output + live_cost_cache),
+            cumulative_cost: Some(cumul_cost.unwrap_or(0.0) + round_ci + round_co + round_cc + subagent_cost),
             cost_input: Some(live_cost_input),
             cost_output: Some(live_cost_output),
             cost_cache_read: Some(live_cost_cache),
@@ -1454,6 +1470,8 @@ pub async fn run_workflow_with_profile(
                 store, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
+            emit_final_stats(cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -1524,6 +1542,8 @@ pub async fn run_workflow_with_profile(
                 store, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
+            emit_final_stats(cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "max_tokens".into(),
                 text_output: last_text,
@@ -1773,6 +1793,8 @@ pub async fn run_workflow_with_profile(
                 store, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
+            emit_final_stats(cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: stop_reason.into(),
                 text_output: last_text,
@@ -2025,6 +2047,8 @@ pub async fn run_workflow_with_profile(
                 store, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
+            emit_final_stats(cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -2060,6 +2084,8 @@ pub async fn run_workflow_with_profile(
         store, session_id, cumul_in, cumul_out, cumul_cost,
         cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
     );
+    emit_final_stats(cumul_in, cumul_out, cumul_cost,
+        cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
     let _ = event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
