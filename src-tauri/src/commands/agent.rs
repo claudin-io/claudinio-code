@@ -20,20 +20,20 @@ use image::GenericImageView;
 /// Compress an image to reduce its token footprint before base64-encoding.
 ///
 /// Rules (in order):
-/// 1. If the raw bytes are under 200 KB, return as-is.
-/// 2. If the longest edge exceeds 2048 px, resize down.
+/// 1. Decode the image to get dimensions.
+/// 2. If the longest edge exceeds 1568 px (the Anthropic server-side resize
+///    threshold — beyond this the provider resizes server-side without quality
+///    gain), resize down to 1568 px.
 /// 3. Re-encode: JPEG at quality 80; convert large PNG/BMP to JPEG.
 /// 4. On any error, fall back to the original bytes silently.
-fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String) {
-    if bytes.len() < 200 * 1024 {
-        return (bytes.to_vec(), media_type.to_string());
-    }
+/// Returns (compressed_bytes, media_type, width, height).
+fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String, u32, u32) {
     let img = match image::load_from_memory(bytes) {
         Ok(img) => img,
-        Err(_) => return (bytes.to_vec(), media_type.to_string()),
+        Err(_) => return (bytes.to_vec(), media_type.to_string(), 0, 0),
     };
     let (w, h) = img.dimensions();
-    let max_dim = 2048u32;
+    let max_dim = 1568u32;
     let (new_w, new_h) = if w > max_dim || h > max_dim {
         let ratio = (w as f64).max(h as f64) / max_dim as f64;
         ((w as f64 / ratio).round() as u32, (h as f64 / ratio).round() as u32)
@@ -45,6 +45,8 @@ fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String
     } else {
         img
     };
+    let final_w = resized.width();
+    let final_h = resized.height();
     let encode_as_jpeg = ext == "png" || ext == "bmp";
     let out_type = if encode_as_jpeg { "image/jpeg" } else { media_type };
     let mut out = Vec::new();
@@ -58,8 +60,8 @@ fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String
         resized.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
     };
     match result {
-        Ok(_) if out.len() < bytes.len() => (out, out_type.to_string()),
-        _ => (bytes.to_vec(), media_type.to_string()),
+        Ok(_) => (out, out_type.to_string(), final_w, final_h),
+        _ => (bytes.to_vec(), media_type.to_string(), w, h),
     }
 }
 
@@ -132,9 +134,9 @@ pub fn process_attachments(
                 "bmp" => "image/bmp",
                 _ => "image/png",
             };
-            let (compressed_bytes, final_media_type) = compress_image(&bytes, &media_type, &ext);
+            let (compressed_bytes, final_media_type, img_w, img_h) = compress_image(&bytes, &media_type, &ext);
             let data = base64::engine::general_purpose::STANDARD.encode(&compressed_bytes);
-            results.push((ContentBlock::image(&final_media_type, &data), meta));
+            results.push((ContentBlock::image(&final_media_type, &data, img_w, img_h), meta));
         } else if is_text {
             let text = match std::fs::read_to_string(file_path) {
                 Ok(t) => t,

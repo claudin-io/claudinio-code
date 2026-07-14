@@ -13,7 +13,7 @@ use tauri::ipc::Channel;
 use tokio::sync::{oneshot, Mutex};
 
 /// Context window of the supported models (claudinio and claudius: 256K).
-pub const MAX_CONTEXT_TOKENS: u64 = 256_000;
+pub const MAX_CONTEXT_TOKENS: u64 = 200_000;
 
 /// Threshold for auto-compaction: if the context exceeds this before a
 /// request, the history is compacted first (75% of the window).
@@ -42,10 +42,32 @@ pub fn parse_goals(text: &str) -> (String, Vec<String>) {
     (cleaned, goals)
 }
 
-/// Rough token estimation: count chars / 3 + per-message overhead + system prompt + tools.
+/// Rough token estimation per message. For image blocks, estimates based on
+/// pixel dimensions (w*h/750) since base64 serialization overestimates ~50x.
+/// Other blocks use serialized length / 3.
 fn estimate_message_tokens(msg: &Message) -> u64 {
-    let json = serde_json::to_string(msg).unwrap_or_default();
-    json.len() as u64 / 3 + 4 // +4 for role/format overhead
+    // Per-message overhead for the role field and envelope (~4 tokens)
+    let mut total: u64 = 4;
+    for block in &msg.content {
+        match block {
+            ContentBlock::Image { source, .. } => {
+                if source.width > 0 && source.height > 0 {
+                    // Anthropic's cost model: ~w*h/750 tokens per image
+                    total += (source.width as u64 * source.height as u64) / 750;
+                } else {
+                    // Conservative fallback: max cost of a 1568px image
+                    total += 1_600;
+                }
+            }
+            _ => {
+                // Serialize only this block (not the full message) to estimate tokens
+                if let Ok(json) = serde_json::to_string(block) {
+                    total += json.len() as u64 / 3;
+                }
+            }
+        }
+    }
+    total
 }
 
 fn estimate_tokens(history: &[Message], system: &str, tools: &[ToolDescription]) -> u64 {
@@ -1151,6 +1173,23 @@ pub async fn run_workflow_with_profile(
         }
     }
 
+    // Pre-flight guard: if after (attempted) compaction the context still
+    // exceeds the real model limit, return a friendly error instead of
+    // calling the API and wasting tokens on a guaranteed failure.
+    {
+        let post_compact = estimate_tokens(history, &system, &tools)
+            .max(crate::agent::persist::last_context_tokens(
+                &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+            ).unwrap_or(0));
+        if post_compact >= MAX_CONTEXT_TOKENS {
+            return Err(
+                "A mensagem excede o limite de contexto do modelo (200k tokens). \
+                 Reduza os anexos ou inicie uma nova sessão para continuar."
+                    .into(),
+            );
+        }
+    }
+
     // Load cumulative totals from the last Status record
     let cumul = crate::agent::persist::cumulative_stats(
         &crate::agent::persist::load_records(&store.path).unwrap_or_default()
@@ -1284,6 +1323,22 @@ pub async fn run_workflow_with_profile(
                         text: format!("__compact_fail__:{e}"),
                     });
                 }
+            }
+        }
+
+        // Pre-flight guard (per-round): if compaction failed or context still
+        // exceeds the limit, return friendly error.
+        {
+            let cur_ctx = estimate_tokens(history, &system, &tools)
+                .max(crate::agent::persist::last_context_tokens(
+                    &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                ).unwrap_or(0));
+            if cur_ctx >= MAX_CONTEXT_TOKENS {
+                return Err(
+                    "A mensagem excede o limite de contexto do modelo (200k tokens). \
+                     Reduza os anexos ou inicie uma nova sessão para continuar."
+                        .into(),
+                );
             }
         }
 
@@ -2949,7 +3004,7 @@ mod tests {
         };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["data"]["contextTokens"], 42_000);
-        assert_eq!(json["data"]["maxContextTokens"], 256_000);
+        assert_eq!(json["data"]["maxContextTokens"], 200_000);
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         match back {
             AgentEvent::SessionStats {
@@ -3093,8 +3148,8 @@ mod tests {
 
     #[test]
     fn compact_threshold_is_75_percent_of_window() {
-        assert_eq!(MAX_CONTEXT_TOKENS, 256_000);
-        assert_eq!(COMPACT_THRESHOLD, 192_000);
+        assert_eq!(MAX_CONTEXT_TOKENS, 200_000);
+        assert_eq!(COMPACT_THRESHOLD, 150_000);
     }
 
     // --- completion-judge verdict parsing (harness must never go idle after
