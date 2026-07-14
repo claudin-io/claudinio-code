@@ -79,12 +79,26 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     let req_clean = std::path::Path::new(requested);
     let root_clean = std::path::Path::new(root);
 
-    if let (Ok(canon_req), Ok(canon_root)) = (req_clean.canonicalize(), root_clean.canonicalize()) {
+    // Resolve relative paths against the workspace root so canonicalize
+    // doesn't resolve against the process CWD (which in Tauri GUI is wrong).
+    let req_effective = if req_clean.is_relative() {
+        root_clean.join(req_clean)
+    } else {
+        req_clean.to_path_buf()
+    };
+
+    if let (Ok(canon_req), Ok(canon_root)) =
+        (req_effective.canonicalize(), root_clean.canonicalize())
+    {
         if canon_req.starts_with(&canon_root) {
             return Ok(());
         }
     } else {
-        if req_clean.starts_with(root_clean) {
+        // Fallback: lexical check. Reject paths with `..` components since
+        // they can't be resolved safely without canonicalize.
+        if !req_effective.components().any(|c| matches!(c, std::path::Component::ParentDir))
+            && req_effective.starts_with(root_clean)
+        {
             return Ok(());
         }
     }
@@ -1197,6 +1211,68 @@ mod tests {
         // edit_file's validator stays strict: skill dirs are read-only
         let skill = home.join(".agents/skills/typeset/SKILL.md");
         assert!(validate_path(&skill.to_string_lossy(), &ctx).is_err());
+    }
+
+    /// Relative path inside the workspace — should be allowed, but current code
+    /// doesn't resolve relative paths against workspace_root, so this FAILS (RED).
+    #[test]
+    fn test_validate_path_allows_relative_within_workspace() {
+        let tmp = std::env::temp_dir().join(format!("claudinio_vp_rel_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp.join("src")).unwrap();
+        let file_path = tmp.join("src").join("main.rs");
+        std::fs::write(&file_path, "fn main() {}").unwrap();
+
+        let ctx = ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: Some(tmp.to_string_lossy().to_string()),
+            embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            mcp: None,
+            mode_ctl: None,
+        };
+
+        // Relative path within workspace — should be allowed
+        assert!(validate_path("src/main.rs", &ctx).is_ok());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Relative path with traversal (..) — must be rejected.
+    /// Current code already rejects this by accident (fallback lexical check
+    /// can't match relative-vs-absolute), but we assert explicitly as regression.
+    #[test]
+    fn test_validate_path_rejects_relative_with_traversal() {
+        // Use a real temp dir as workspace so the fix's join+canonicalize logic fires.
+        let tmp = std::env::temp_dir().join(format!("claudinio_vp_trav_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let ctx = ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: Some(tmp.to_string_lossy().to_string()),
+            embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            mcp: None,
+            mode_ctl: None,
+        };
+
+        // ".." traversal from root should escape the workspace
+        assert!(validate_path("../outside.txt", &ctx).is_err());
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
