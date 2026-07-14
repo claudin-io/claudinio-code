@@ -1,20 +1,242 @@
 import { createSignal, createMemo, createRoot } from "solid-js";
 
-export type ThemePreference = "system" | "dark" | "light" | "sepia";
-export type ResolvedTheme = "dark" | "light" | "sepia";
+// ── Theme identity ───────────────────────────────────────────────────
+export type ThemeId =
+  | "claudinio"
+  | "claudinio-light"
+  | "claudinio-sepia"
+  | "dracula"
+  | "nord"
+  | "solarized-dark"
+  | "solarized-light"
+  | "monokai"
+  | "one-dark"
+  | "catppuccin"
+  | "tokyo-night"
+  | "gruvbox-dark"
+  | "gruvbox-light"
+  | "rose-pine"
+  | "everforest";
 
+export type ThemePreference = "system" | ThemeId;
+export type ResolvedTheme = ThemeId;
+
+// ── Theme metadata ───────────────────────────────────────────────────
+export interface ThemeMeta {
+  labelKey: string;
+  category: "dark" | "light";
+  /** 5 representative oklch colours for the preview swatch card */
+  previewColors: string[];
+}
+
+export const themeMetadata: Record<ThemeId, ThemeMeta> = {
+  claudinio: {
+    labelKey: "theme.claudinio",
+    category: "dark",
+    previewColors: [
+      "oklch(0.145 0.015 280)",
+      "oklch(0.185 0.018 280)",
+      "oklch(0.95 0.01 280)",
+      "oklch(0.62 0.19 277)",
+      "oklch(0.72 0.17 155)",
+    ],
+  },
+  "claudinio-light": {
+    labelKey: "theme.claudinio-light",
+    category: "light",
+    previewColors: [
+      "oklch(0.98 0.003 280)",
+      "oklch(0.91 0.01 280)",
+      "oklch(0.18 0.02 280)",
+      "oklch(0.50 0.20 277)",
+      "oklch(0.58 0.17 155)",
+    ],
+  },
+  "claudinio-sepia": {
+    labelKey: "theme.claudinio-sepia",
+    category: "light",
+    previewColors: [
+      "oklch(0.96 0.015 90)",
+      "oklch(0.87 0.025 88)",
+      "oklch(0.22 0.03 80)",
+      "oklch(0.55 0.16 65)",
+      "oklch(0.58 0.17 145)",
+    ],
+  },
+  dracula: {
+    labelKey: "theme.dracula",
+    category: "dark",
+    previewColors: [
+      "oklch(0.14 0.02 325)",
+      "oklch(0.19 0.03 325)",
+      "oklch(0.94 0.02 325)",
+      "oklch(0.72 0.15 335)",
+      "oklch(0.65 0.15 145)",
+    ],
+  },
+  nord: {
+    labelKey: "theme.nord",
+    category: "dark",
+    previewColors: [
+      "oklch(0.17 0.015 220)",
+      "oklch(0.22 0.02 220)",
+      "oklch(0.93 0.01 220)",
+      "oklch(0.68 0.10 210)",
+      "oklch(0.62 0.08 150)",
+    ],
+  },
+  "solarized-dark": {
+    labelKey: "theme.solarized-dark",
+    category: "dark",
+    previewColors: [
+      "oklch(0.16 0.01 45)",
+      "oklch(0.22 0.015 45)",
+      "oklch(0.90 0.02 45)",
+      "oklch(0.55 0.06 190)",
+      "oklch(0.55 0.06 45)",
+    ],
+  },
+  "solarized-light": {
+    labelKey: "theme.solarized-light",
+    category: "light",
+    previewColors: [
+      "oklch(0.96 0.01 45)",
+      "oklch(0.88 0.015 45)",
+      "oklch(0.18 0.015 45)",
+      "oklch(0.45 0.06 190)",
+      "oklch(0.45 0.06 45)",
+    ],
+  },
+  monokai: {
+    labelKey: "theme.monokai",
+    category: "dark",
+    previewColors: [
+      "oklch(0.14 0.01 50)",
+      "oklch(0.19 0.02 50)",
+      "oklch(0.95 0.01 50)",
+      "oklch(0.68 0.15 15)",
+      "oklch(0.58 0.12 120)",
+    ],
+  },
+  "one-dark": {
+    labelKey: "theme.one-dark",
+    category: "dark",
+    previewColors: [
+      "oklch(0.16 0.015 230)",
+      "oklch(0.20 0.018 230)",
+      "oklch(0.92 0.01 230)",
+      "oklch(0.58 0.18 260)",
+      "oklch(0.60 0.12 150)",
+    ],
+  },
+  catppuccin: {
+    labelKey: "theme.catppuccin",
+    category: "dark",
+    previewColors: [
+      "oklch(0.14 0.015 350)",
+      "oklch(0.18 0.02 350)",
+      "oklch(0.93 0.01 350)",
+      "oklch(0.68 0.12 10)",
+      "oklch(0.58 0.10 150)",
+    ],
+  },
+  "tokyo-night": {
+    labelKey: "theme.tokyo-night",
+    category: "dark",
+    previewColors: [
+      "oklch(0.12 0.02 240)",
+      "oklch(0.17 0.025 240)",
+      "oklch(0.94 0.01 240)",
+      "oklch(0.70 0.15 280)",
+      "oklch(0.55 0.10 160)",
+    ],
+  },
+  "gruvbox-dark": {
+    labelKey: "theme.gruvbox-dark",
+    category: "dark",
+    previewColors: [
+      "oklch(0.18 0.02 40)",
+      "oklch(0.24 0.025 40)",
+      "oklch(0.92 0.02 40)",
+      "oklch(0.58 0.12 60)",
+      "oklch(0.55 0.08 140)",
+    ],
+  },
+  "gruvbox-light": {
+    labelKey: "theme.gruvbox-light",
+    category: "light",
+    previewColors: [
+      "oklch(0.93 0.02 40)",
+      "oklch(0.86 0.025 40)",
+      "oklch(0.21 0.025 40)",
+      "oklch(0.52 0.12 60)",
+      "oklch(0.48 0.08 140)",
+    ],
+  },
+  "rose-pine": {
+    labelKey: "theme.rose-pine",
+    category: "dark",
+    previewColors: [
+      "oklch(0.16 0.015 340)",
+      "oklch(0.20 0.02 340)",
+      "oklch(0.94 0.01 340)",
+      "oklch(0.72 0.10 360)",
+      "oklch(0.58 0.08 160)",
+    ],
+  },
+  everforest: {
+    labelKey: "theme.everforest",
+    category: "dark",
+    previewColors: [
+      "oklch(0.17 0.015 160)",
+      "oklch(0.21 0.018 160)",
+      "oklch(0.88 0.02 160)",
+      "oklch(0.58 0.10 50)",
+      "oklch(0.60 0.08 150)",
+    ],
+  },
+};
+
+/** All theme IDs in display order */
+export const ALL_THEMES: ThemeId[] = Object.keys(themeMetadata) as ThemeId[];
+
+/** Resolve a user preference ("system" delegates to OS) */
+export function resolvePreference(
+  pref: ThemePreference,
+  systemDark: boolean,
+): ThemeId {
+  if (pref === "system") return systemDark ? "claudinio" : "claudinio-light";
+  return pref;
+}
+
+// ── Singleton state ─────────────────────────────────────────────────
 const STORAGE_KEY = "claudinio_theme";
-const CYCLE_ORDER: ThemePreference[] = ["system", "dark", "light", "sepia"];
+
+// Legacy migration: old stored values "dark"/"light"/"sepia" map to new ids
+const LEGACY_MAP: Record<string, ThemePreference> = {
+  dark: "claudinio",
+  light: "claudinio-light",
+  sepia: "claudinio-sepia",
+};
+
+const CYCLE_ORDER: ThemePreference[] = [
+  "system",
+  "claudinio",
+  "claudinio-light",
+  "claudinio-sepia",
+];
 
 function createThemeState() {
-  // ── read persisted preference ────────────────────────────────────
+  // ── read persisted preference (with legacy migration) ────────────
   const stored =
     typeof localStorage !== "undefined"
       ? localStorage.getItem(STORAGE_KEY)
       : null;
+  const migrated = stored ? LEGACY_MAP[stored] ?? stored : null;
   const initial: ThemePreference =
-    stored === "dark" || stored === "light" || stored === "sepia"
-      ? stored
+    migrated === "system" ||
+    ALL_THEMES.includes(migrated as ThemeId)
+      ? (migrated as ThemePreference)
       : "system";
 
   const [preference, setPreference] = createSignal<ThemePreference>(initial);
@@ -36,8 +258,8 @@ function createThemeState() {
   // ── resolved theme (what HTML actually uses) ─────────────────────
   const resolvedTheme = createMemo<ResolvedTheme>(() => {
     const pref = preference();
-    if (pref === "system") return systemDark() ? "dark" : "light";
-    return pref; // "dark" | "light" | "sepia"
+    if (pref === "system") return systemDark() ? "claudinio" : "claudinio-light";
+    return pref;
   });
 
   // ── keep data-theme in sync with resolvedTheme ──────────────────

@@ -42,9 +42,12 @@ vi.mock("../lib/theme", async () => {
 
 vi.mock("../lib/monacoThemes", () => ({
   defineMonacoThemes: vi.fn(),
+  getMonacoTheme: vi.fn((t: string) => {
+    if (t.startsWith("claudinio-")) return t;
+    if (t === "claudinio") return "claudinio-dark";
+    return `claudinio-${t}`;
+  }),
 }));
-
-// ── Convenience aliases ────────────────────────────────────────────
 
 const { DiffViewer } = await import("./DiffViewer");
 

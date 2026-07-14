@@ -3,7 +3,7 @@ import * as monaco from "monaco-editor";
 import { Icon } from "./Icon";
 import { t } from "../lib/grill-me";
 import { readFile, writeFile } from "../lib/ipc";
-import { defineMonacoThemes } from "../lib/monacoThemes";
+import { defineMonacoThemes, getMonacoTheme } from "../lib/monacoThemes";
 import { theme } from "../lib/theme";
 
 interface FileEditorModalProps {
@@ -95,14 +95,7 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
     if (!mounted) return;
     setOriginalContent(content);
 
-    const monacoTheme = (() => {
-      switch (theme()) {
-        case "sepia": return "claudinio-sepia";
-        case "light": return "claudinio-light";
-        case "dark":
-        default:     return "claudinio-dark";
-      }
-    })();
+    const monacoTheme = getMonacoTheme(theme());
 
     editor = monaco.editor.create(editorContainer, {
       value: content,
@@ -131,6 +124,14 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
     const rp = props.rootPath;
     if (fp && rp) {
       initEditor(fp);
+    }
+  });
+
+  // Reactive theme switching: keep Monaco in sync when user changes theme
+  createEffect(() => {
+    const currentTheme = theme();
+    if (editor) {
+      monaco.editor.setTheme(getMonacoTheme(currentTheme));
     }
   });
 

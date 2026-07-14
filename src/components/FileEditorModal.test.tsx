@@ -48,6 +48,11 @@ vi.mock("../lib/ipc", () => ({
 
 vi.mock("../lib/monacoThemes", () => ({
   defineMonacoThemes: vi.fn(),
+  getMonacoTheme: vi.fn((t: string) => {
+    if (t.startsWith("claudinio-")) return t;
+    if (t === "claudinio") return "claudinio-dark";
+    return `claudinio-${t}`;
+  }),
 }));
 
 vi.mock("../lib/theme", () => ({
@@ -537,11 +542,11 @@ describe("FileEditorModal component", () => {
 
   // ────── Theme variants (lines 100-101) ─────────────────────
 
-  it("uses claudinio-sepia theme when theme() returns sepia", async () => {
+  it("uses claudinio-sepia theme when theme() returns claudinio-sepia", async () => {
     // Since the module is already mocked, updating the mockImplementation
     // overrides it for this test.
     const themeModule = await import("../lib/theme");
-    vi.mocked(themeModule.theme).mockReturnValue("sepia" as any);
+    vi.mocked(themeModule.theme).mockReturnValue("claudinio-sepia" as any);
 
     const { dispose } = await renderModal();
 
@@ -554,9 +559,9 @@ describe("FileEditorModal component", () => {
     dispose();
   });
 
-  it("uses claudinio-light theme when theme() returns light", async () => {
+  it("uses claudinio-light theme when theme() returns claudinio-light", async () => {
     const themeModule = await import("../lib/theme");
-    vi.mocked(themeModule.theme).mockReturnValue("light" as any);
+    vi.mocked(themeModule.theme).mockReturnValue("claudinio-light" as any);
 
     const { dispose } = await renderModal();
 
