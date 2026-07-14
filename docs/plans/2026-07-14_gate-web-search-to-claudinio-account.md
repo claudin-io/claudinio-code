@@ -173,3 +173,25 @@ To:
 5. **session-gate-websearch** — Add `retain` gate for web_search in `api_tools` in `src-tauri/src/agent/session.rs`.
 6. **subagent-thread-config** — Thread `&AgentConfig` through `subagent_defs` and `api_tools` in `src-tauri/src/agent/subagent.rs`, add web_search gate, update call site.
 7. **cargo-check-verify** — Run `cargo check` in `src-tauri/` to verify compilation.
+
+
+## Implementation Log — 2026-07-14 11:40
+**Summary:** Gate web_search to claudinio-account sessions and add system-prompt guidance
+**Changed files:** A  docs/plans/2026-07-14_gate-web-search-to-claudinio-account.md, M  src-tauri/src/agent/provider.rs, M  src-tauri/src/agent/session.rs, M  src-tauri/src/agent/subagent.rs
+**Commits:** _(git unavailable or none)_
+**Journal:** All 7 implementation tasks completed and verified with `cargo check` (zero errors, zero warnings).
+
+Key decisions and learnings:
+1. **`is_claudinio_account()` method**: Added to `AgentConfig` checking `override_api_key.is_none() && !api_key.is_empty()`. Note: `api_key` is a non-optional `String`, so the empty check is the only guard for unauthenticated sessions. `account_login` field also exists but wasn't used for this gate — the override_key pattern is the authoritative BYOK distinction.
+2. **Prompt placement**: The web_search bullet was added to three places — the base `SYSTEM_PROMPT` (affects all modes), the Brain "Investigation" block, and the Builder tool-hierarchy one-liner. All phrased as "if available" so BYOK sessions don't get a misleading prompt.
+3. **Subagent threading**: `subagent_defs` and `api_tools` in `subagent.rs` did NOT receive `&AgentConfig` before, but the call site (`run_subagent`) already had it. The mechanical plumbing was straightforward — no other callers to update.
+4. **Gate placement**: The retain gate runs before the mode-specific match blocks in both session and subagent paths, so it applies uniformly to Brain, Builder, Explore, and Code modes.
+
+**Task journal:**
+- Add is_claudinio_account() helper to AgentConfig: Added impl AgentConfig block with is_claudinio_account() method after the struct definition (line 121). Checks: override_api_key.is_none() && !api_key.is_empty().
+- Add web_search guidance to SYSTEM_PROMPT CODE TOOLS section: Added new bullet after 'Never use bash search tools...' in the SYSTEM_PROMPT raw string under '# 2. CODE TOOLS'.
+- Add web_search one-liner to Brain mode Investigation block: Added 'web_search (if available) for current/external information...' bullet after the grep line in the Brain Investigation block.
+- Add web_search mention to Builder mode tool-hierarchy line: Added 'For current/external information... use web_search if available' to the Builder mode tool-hierarchy sentence.
+- Add retain gate for web_search in session api_tools: Added retain gate after tools::get_defs() in api_tools, before the match block.
+- Thread &AgentConfig through subagent tool-list builders and add web_search gate: 1. Added 'config: &AgentConfig' to subagent_defs signature. 2. Added retain gate for web_search after the spawn_agents/ask_user filter. 3. Added config param to api_tools signature and passed it to subagent_defs. 4. Updated call site in run_subagent to pass config.
+- Run cargo check to verify compilation: cargo check passed — zero errors, zero warnings.

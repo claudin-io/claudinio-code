@@ -118,7 +118,7 @@ const dict: LocaleDict = {
   "commitPush.committing": "Comitando alterações...",
 
   // ── ChatPanel - Status ────────────────────────────────────────────
-  "chat.status.thinking": "Trabalhando",
+  "chat.status.thinking": "Pensando",
   "chat.status.awaitingApproval": "Aguardando aprovação",
   "chat.status.awaitingInput": "Aguardando sua resposta",
   "chat.status.done": "Pronto",
