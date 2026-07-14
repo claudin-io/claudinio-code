@@ -1268,11 +1268,12 @@ pub async fn run_workflow_with_profile(
         // Per-round context re-check: tool_results from the previous round may
         // have pushed the history over the compact threshold. Compact before
         // the next LLM call so we never feed an oversized context.
-        if estimate_tokens(history, &system, &tools) >= COMPACT_THRESHOLD {
+        let pre_tokens = estimate_tokens(history, &system, &tools);
+        if pre_tokens >= COMPACT_THRESHOLD {
             let _ = event_tx.send(AgentEvent::TextStep {
                 text: format!(
                     "__compact_start__:{}/{}",
-                    estimate_tokens(history, &system, &tools) / 1000,
+                    pre_tokens / 1000,
                     MAX_CONTEXT_TOKENS / 1000
                 ),
             });
@@ -1313,7 +1314,7 @@ pub async fn run_workflow_with_profile(
                     let _ = event_tx.send(AgentEvent::TextStep {
                         text: format!(
                             "__compact_done__:{}/{}",
-                            estimate_tokens(history, &system, &tools) / 1000,
+                            pre_tokens / 1000,
                             new_ctx / 1000
                         ),
                     });

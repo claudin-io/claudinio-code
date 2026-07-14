@@ -102,7 +102,7 @@ export function toolSummary(call: ToolCallData): string {
     case "read_file":
     case "edit_file":
     case "list_dir": {
-      const path = String(args.path ?? "");
+      const path = String(args.path ?? args.file_path ?? "");
       const start = args.start_line as number | undefined;
       const end = args.end_line as number | undefined;
       if (start != null) return `${path} L${start}${end != null ? `-${end}` : "+"}`;
