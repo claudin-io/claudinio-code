@@ -119,6 +119,7 @@ const dict: LocaleDict = {
 
   // ── ChatPanel - Status ────────────────────────────────────────────
   "chat.status.thinking": "Thinking",
+  "chat.status.working": "Working",
   "chat.status.awaitingApproval": "Awaiting approval",
   "chat.status.awaitingInput": "Awaiting your input",
   "chat.status.done": "Done",
