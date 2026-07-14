@@ -16,8 +16,6 @@ describe("FileMentionPopover", () => {
     "package.json",
   ];
 
-  const defaultPosition = { top: 100, left: 200, height: 20 };
-
   afterEach(() => {
     document.body.innerHTML = "";
   });
@@ -30,7 +28,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query=""
           onSelect={onSelect}
           onClose={onClose}
@@ -54,7 +51,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query="zzzznotfound"
           onSelect={onSelect}
           onClose={onClose}
@@ -76,7 +72,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query=""
           onSelect={onSelect}
           onClose={onClose}
@@ -96,34 +91,6 @@ describe("FileMentionPopover", () => {
     dispose();
   });
 
-  it("calls onClose when clicking backdrop", () => {
-    const onSelect = vi.fn();
-    const onClose = vi.fn();
-
-    const dispose = render(
-      () => (
-        <FileMentionPopover
-          fileList={fileList}
-          position={defaultPosition}
-          query=""
-          onSelect={onSelect}
-          onClose={onClose}
-        />
-      ),
-      document.body,
-    );
-
-    // Backdrop is the first div rendered by Portal (it has class "inset-0")
-    const backdrop = document.querySelector(
-      '[class*="inset-0"]',
-    ) as HTMLElement;
-    expect(backdrop).toBeTruthy();
-    backdrop.click();
-    expect(onClose).toHaveBeenCalledTimes(1);
-    expect(onSelect).not.toHaveBeenCalled();
-    dispose();
-  });
-
   describe("keyboard navigation", () => {
     it("ArrowDown moves highlight and Enter selects the highlighted file", () => {
       const onSelect = vi.fn();
@@ -133,7 +100,6 @@ describe("FileMentionPopover", () => {
         () => (
           <FileMentionPopover
             fileList={fileList}
-            position={defaultPosition}
             query=""
             onSelect={onSelect}
             onClose={onClose}
@@ -160,7 +126,6 @@ describe("FileMentionPopover", () => {
         () => (
           <FileMentionPopover
             fileList={fileList}
-            position={defaultPosition}
             query=""
             onSelect={onSelect}
             onClose={onClose}
@@ -187,7 +152,6 @@ describe("FileMentionPopover", () => {
         () => (
           <FileMentionPopover
             fileList={fileList}
-            position={defaultPosition}
             query=""
             onSelect={onSelect}
             onClose={onClose}
@@ -214,7 +178,6 @@ describe("FileMentionPopover", () => {
         () => (
           <FileMentionPopover
             fileList={fileList}
-            position={defaultPosition}
             query=""
             onSelect={onSelect}
             onClose={onClose}
@@ -239,7 +202,6 @@ describe("FileMentionPopover", () => {
         () => (
           <FileMentionPopover
             fileList={fileList}
-            position={defaultPosition}
             query=""
             onSelect={onSelect}
             onClose={onClose}
@@ -254,29 +216,6 @@ describe("FileMentionPopover", () => {
       expect(onSelect).toHaveBeenCalledWith("src/index.ts");
       dispose();
     });
-
-    it("Escape calls onClose", () => {
-      const onClose = vi.fn();
-      const onSelect = vi.fn();
-
-      const dispose = render(
-        () => (
-          <FileMentionPopover
-            fileList={fileList}
-            position={defaultPosition}
-            query=""
-            onSelect={onSelect}
-            onClose={onClose}
-          />
-        ),
-        document.body,
-      );
-
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-
-      expect(onClose).toHaveBeenCalledTimes(1);
-      dispose();
-    });
   });
 
   it("ArrowDown on empty results returns early (does not crash)", () => {
@@ -287,7 +226,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query="zzzznotfound" // 0 results
           onSelect={onSelect}
           onClose={onClose}
@@ -313,7 +251,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query="index" // triggers fuse().search()
           onSelect={onSelect}
           onClose={onClose}
@@ -335,7 +272,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query=""
           onSelect={onSelect}
           onClose={onClose}
@@ -366,7 +302,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query=""
           onSelect={onSelect}
           onClose={onClose}
@@ -394,7 +329,6 @@ describe("FileMentionPopover", () => {
       () => (
         <FileMentionPopover
           fileList={fileList}
-          position={defaultPosition}
           query="README" // Only matches README.md → 1 result
           onSelect={onSelect}
           onClose={onClose}

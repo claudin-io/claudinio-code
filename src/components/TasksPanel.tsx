@@ -1,5 +1,5 @@
 import { createSignal, For, Show, onMount, onCleanup, type Component } from "solid-js";
-import { Portal } from "solid-js/web";
+import { Popover } from "./Popover";
 import { getTasks, setTasks, dismissGoldenTasks, type TaskItem } from "../lib/ipc";
 import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
@@ -10,7 +10,7 @@ export const TasksPanel: Component<{
 }> = (props) => {
   const [tasks, setTasksState] = createSignal<TaskItem[]>([]);
   const [hoveredId, setHoveredId] = createSignal<string | null>(null);
-  const [hoveredTop, setHoveredTop] = createSignal(0);
+  const [hoveredElement, setHoveredElement] = createSignal<HTMLElement | null>(null);
   const [pollTimer, setPollTimer] = createSignal<ReturnType<typeof setInterval> | null>(null);
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -117,8 +117,7 @@ export const TasksPanel: Component<{
               onClick={() => cycleStatus(task.id)}
               onMouseEnter={(e) => {
                 cancelClose();
-                const rect = e.currentTarget.getBoundingClientRect();
-                setHoveredTop(rect.top);
+                setHoveredElement(e.currentTarget);
                 setHoveredId(task.id);
               }}
               onMouseLeave={scheduleClose}
@@ -147,17 +146,18 @@ export const TasksPanel: Component<{
         </div>
       </Show>
 
-      {/* Popover via Portal — floats above everything */}
-      <Portal>
+      {/* Popover — floats above everything */}
+      <Popover
+        open={hoveredTask() !== null}
+        onClose={() => {}}
+        triggerRef={() => hoveredElement()}
+        anchorPoint={{x:1,y:0}}
+        originPoint={{x:0,y:0}}
+        showBackdrop={false}
+      >
         <Show when={hoveredTask()} keyed>
           {(task) => (
             <div
-              style={{
-                position: "fixed",
-                right: "48px",
-                top: `${hoveredTop()}px`,
-                "z-index": 9999,
-              }}
               onMouseEnter={cancelClose}
               onMouseLeave={scheduleClose}
               class="w-64 rounded-lg bg-surface-1 p-3 max-h-[50vh] overflow-y-auto"
@@ -240,7 +240,7 @@ export const TasksPanel: Component<{
             </div>
           )}
         </Show>
-      </Portal>
+      </Popover>
     </div>
   );
 };

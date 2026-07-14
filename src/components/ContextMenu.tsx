@@ -1,5 +1,5 @@
-import { For, Show, onCleanup, onMount, type Component } from "solid-js";
-import { Portal } from "solid-js/web";
+import { For, Show, type Component } from "solid-js";
+import { Popover } from "./Popover";
 import { Icon, type IconName } from "./Icon";
 
 export interface ContextMenuItem {
@@ -15,34 +15,16 @@ export const ContextMenu: Component<{
   items: ContextMenuItem[];
   onClose: () => void;
 }> = (props) => {
-  // Close on Escape key
-  const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Escape") props.onClose();
-  };
-  onMount(() => document.addEventListener("keydown", onKeyDown));
-  onCleanup(() => document.removeEventListener("keydown", onKeyDown));
-
-  // Clamp position to stay within viewport
-  const clampX = () => Math.min(props.x, window.innerWidth - 200);
-  const clampY = () => Math.min(props.y, window.innerHeight - 40 * props.items.length);
-
   return (
-    <Portal>
-      {/* Backdrop — catches outside clicks */}
-      <div
-        class="fixed inset-0 z-50"
-        onClick={props.onClose}
-        onContextMenu={(e) => { e.preventDefault(); props.onClose(); }}
-      />
-      {/* Menu panel */}
-      <div
-        class="fixed z-50 min-w-[200px] overflow-hidden rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg"
-        style={{
-          left: `${clampX()}px`,
-          top: `${clampY()}px`,
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Popover
+      open={true}
+      onClose={props.onClose}
+      position={{ top: props.y, left: props.x, width: 0, height: 0 }}
+      anchorPoint={{ x: 0, y: 0 }}
+      originPoint={{ x: 0, y: 0 }}
+      class="min-w-[200px] overflow-hidden rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg"
+    >
+      <div onClick={(e) => e.stopPropagation()}>
         <For each={props.items}>
           {(item, i) => (
             <>
@@ -63,6 +45,6 @@ export const ContextMenu: Component<{
           )}
         </For>
       </div>
-    </Portal>
+    </Popover>
   );
 };

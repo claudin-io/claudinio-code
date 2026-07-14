@@ -63,6 +63,7 @@ import { GitIndicator } from "./GitIndicator";
 import { GitChangesModal } from "./GitChangesModal";
 import CommitPushModal from "./CommitPushModal";
 import ContentViewerModal from "./ContentViewerModal";
+import { Popover } from "./Popover";
 import { NewSessionPopover } from "./NewSessionPopover";
 import QuestionCard from "./QuestionCard";
 
@@ -498,7 +499,7 @@ export const ChatPanel: Component<{
   const [plans, setPlans] = createSignal<PlanEntry[]>([]);
   const [showPlans, setShowPlans] = createSignal(false);
   const [showNewPopover, setShowNewPopover] = createSignal(false);
-  const [buttonRect, setButtonRect] = createSignal<DOMRect | null>(null);
+  let newButtonRef: HTMLButtonElement | undefined;
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
   const [queuedSteering, setQueuedSteering] = createSignal<QueuedSteeringEntry[]>([]);
   const [retryableError, setRetryableError] = createSignal<string | null>(null);
@@ -787,18 +788,10 @@ export const ChatPanel: Component<{
       if (el) {
         el.focus();
         el.setSelectionRange(insertionEnd, insertionEnd);
-        // Compute caret pixel position for the skill popover
+        // Raw caret coordinates for skill popover — computePosition handles flip+clamp
         const pos = getCaretCoordinates(el, insertionEnd);
-        const POPOVER_WIDTH = 320;
-        const MARGIN = 8;
-        // Position above: compute bottom distance from viewport bottom
-        const bottom = window.innerHeight - pos.top + 4;
-        let left = pos.left;
-        const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
-        if (left > maxLeft) left = maxLeft;
-        if (left < MARGIN) left = MARGIN;
         setSkillQuery("");
-        setSkillPosition({ top: bottom, left, height: pos.height });
+        setSkillPosition({ top: pos.top, left: pos.left, height: pos.height });
       }
     }, 0);
   };
@@ -984,8 +977,8 @@ export const ChatPanel: Component<{
   let messagesEndRef: HTMLDivElement | undefined;
   let scrollContainerRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
-  let sessionsRef: HTMLDivElement | undefined;
-  let plansRef: HTMLDivElement | undefined;
+  let historyButtonRef: HTMLButtonElement | undefined;
+  let plansButtonRef: HTMLButtonElement | undefined;
   const [pendingMessage, setPendingMessage] = createSignal<string | null>(null);
   const [authSigningIn, setAuthSigningIn] = createSignal(false);
 
@@ -1696,36 +1689,6 @@ export const ChatPanel: Component<{
     onCleanup(() => document.removeEventListener("keydown", onKey));
   });
 
-  // Click-outside handler for the sessions/history dropdown
-  createEffect(() => {
-    if (showSessions()) {
-      const handler = (e: MouseEvent) => {
-        setTimeout(() => {
-          if (showSessions() && sessionsRef && !sessionsRef.contains(e.target as Node)) {
-            setShowSessions(false);
-          }
-        }, 0);
-      };
-      document.addEventListener("click", handler);
-      onCleanup(() => document.removeEventListener("click", handler));
-    }
-  });
-
-  // Click-outside handler for the plans dropdown
-  createEffect(() => {
-    if (showPlans()) {
-      const handler = (e: MouseEvent) => {
-        setTimeout(() => {
-          if (showPlans() && plansRef && !plansRef.contains(e.target as Node)) {
-            setShowPlans(false);
-          }
-        }, 0);
-      };
-      document.addEventListener("click", handler);
-      onCleanup(() => document.removeEventListener("click", handler));
-    }
-  });
-
   const statusLabel = () => {
     switch (status()) {
       case "thinking": return t("chat.status.thinking");
@@ -1766,9 +1729,9 @@ export const ChatPanel: Component<{
 
         <div class="flex items-center gap-1">
           <button
-            onClick={(e) => {
+            ref={newButtonRef}
+            onClick={() => {
               if (isBusy(status())) {
-                setButtonRect(e.currentTarget.getBoundingClientRect());
                 setShowNewPopover(true);
               } else {
                 startNewSession();
@@ -1782,6 +1745,7 @@ export const ChatPanel: Component<{
           </button>
           <ContextWarning workspace={props.workspace} />
           <button
+            ref={historyButtonRef}
             onClick={toggleSessions}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
             title={t("chat.header.savedSessions")}
@@ -1790,6 +1754,7 @@ export const ChatPanel: Component<{
             {t("chat.header.history")}
           </button>
           <button
+            ref={plansButtonRef}
             onClick={togglePlans}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
             title={t("chat.header.plans")}
@@ -1800,23 +1765,28 @@ export const ChatPanel: Component<{
           <GitIndicator workspace={props.workspace} onShowChanges={() => setShowGitModal(true)} />
         </div>
 
-        <Show when={showNewPopover() && buttonRect()}>
+        <Popover
+          open={showNewPopover()}
+          onClose={() => { setShowNewPopover(false); }}
+          triggerRef={newButtonRef}
+          anchorPoint={{x: 0, y: 1}}
+          originPoint={{x: 0, y: 0}}
+        >
           <NewSessionPopover
-            position={{
-              top: buttonRect()!.top,
-              left: buttonRect()!.left,
-              height: buttonRect()!.height,
-            }}
             onConfirm={handleConfirmNew}
-            onClose={() => {
-              setShowNewPopover(false);
-              setButtonRect(null);
-            }}
+            onClose={() => { setShowNewPopover(false); }}
           />
-        </Show>
+        </Popover>
 
-        <Show when={showSessions()}>
-          <div ref={sessionsRef} class="absolute right-4 top-9 z-20 max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
+        <Popover
+          open={showSessions()}
+          onClose={() => setShowSessions(false)}
+          triggerRef={historyButtonRef}
+          anchorPoint={{x:1,y:1}}
+          originPoint={{x:1,y:0}}
+          class="z-20"
+        >
+          <div class="max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
             <Show
               when={sessions().length > 0}
               fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{t("chat.header.noSessions")}</div>}
@@ -1836,10 +1806,17 @@ export const ChatPanel: Component<{
               </For>
             </Show>
           </div>
-        </Show>
+        </Popover>
 
-        <Show when={showPlans()}>
-          <div ref={plansRef} class="absolute right-4 top-9 z-20 max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
+        <Popover
+          open={showPlans()}
+          onClose={() => setShowPlans(false)}
+          triggerRef={plansButtonRef}
+          anchorPoint={{x:1,y:1}}
+          originPoint={{x:1,y:0}}
+          class="z-20"
+        >
+          <div class="max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
             <Show
               when={plans().length > 0}
               fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{t("chat.header.noPlans")}</div>}
@@ -1859,7 +1836,7 @@ export const ChatPanel: Component<{
               </For>
             </Show>
           </div>
-        </Show>
+        </Popover>
       </div>
 
       <div class="relative flex flex-1 flex-col overflow-hidden">
@@ -2235,30 +2212,11 @@ export const ChatPanel: Component<{
                 }
                 if (atIdx >= 0) {
                   const query = text.slice(atIdx + 1, caret);
-                  // Compute caret pixel position using mirror div
+                  // Raw caret coordinates — computePosition with anchorPoint/originPoint
+                  // handles the flip+clamp automatically.
                   const pos = getCaretCoordinates(textarea, caret);
-                  // Smart positioning: default above, flip below if not enough room
-                  const POPOVER_ESTIMATED_HEIGHT = 260; // max list + padding + shadow
-                  const POPOVER_WIDTH = 280; // min-width
-                  const MARGIN = 8;
-
-                  let top: number;
-                  if (pos.top - POPOVER_ESTIMATED_HEIGHT >= MARGIN) {
-                    // Room above — show above
-                    top = pos.top - POPOVER_ESTIMATED_HEIGHT;
-                  } else {
-                    // Not enough above — show below
-                    top = pos.top + pos.height + 4;
-                  }
-
-                  // Clamp left so popover doesn't overflow viewport edges
-                  let left = pos.left;
-                  const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
-                  if (left > maxLeft) left = maxLeft;
-                  if (left < MARGIN) left = MARGIN;
-
                   setMentionQuery(query);
-                  setMentionPosition({ top, left, height: pos.height });
+                  setMentionPosition({ top: pos.top, left: pos.left, height: pos.height });
                   // Clear tag/skill popovers while @-mention is active
                   if (tagFlowStep()) handlePopoverClose();
                 } else {
@@ -2278,19 +2236,11 @@ export const ChatPanel: Component<{
                 })();
                 if (ltIdx >= 0 && mentionPosition() === null) {
                   const query = text.slice(ltIdx + 1, caret);
-                  // Position popover right above the < character (ltIdx),
-                  // not at the caret — so the popover hugs the < symbol.
+                  // Raw caret coordinates right after the < — computePosition
+                  // with anchorPoint {x:0,y:1} handles flip+clamp automatically.
                   const pos = getCaretCoordinates(textarea, ltIdx + 1);
-                  const POPOVER_WIDTH = 220;
-                  const MARGIN = 8;
-                  // Use bottom positioning: popover grows upward from 4px above the < line
-                  const bottom = window.innerHeight - pos.top + 4;
-                  let left = pos.left;
-                  const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
-                  if (left > maxLeft) left = maxLeft;
-                  if (left < MARGIN) left = MARGIN;
                   setTagQuery(query);
-                  setTagPosition({ top: bottom, left, height: pos.height }); // reuse as { bottom, left }
+                  setTagPosition({ top: pos.top, left: pos.left, height: pos.height });
                   setTagFlowStep("tag");
                   // Clear skill popover if we're back to tag selection
                   setSkillQuery("");
@@ -2306,16 +2256,8 @@ export const ChatPanel: Component<{
                   if (skillClose >= 0) {
                     const skillQ = text.slice(skillClose, caret);
                     const pos = getCaretCoordinates(textarea, caret);
-                    const POPOVER_WIDTH = 340;
-                    const MARGIN = 8;
-                    // Position above: compute bottom distance from viewport bottom
-                    const bottom = window.innerHeight - pos.top + 4;
-                    let left = pos.left;
-                    const maxLeft = window.innerWidth - POPOVER_WIDTH - MARGIN;
-                    if (left > maxLeft) left = maxLeft;
-                    if (left < MARGIN) left = MARGIN;
                     setSkillQuery(skillQ);
-                    setSkillPosition({ top: bottom, left, height: pos.height });
+                    setSkillPosition({ top: pos.top, left: pos.left, height: pos.height });
                   } else {
                     // <skill> text no longer present — close everything
                     handlePopoverClose();
@@ -2375,36 +2317,46 @@ export const ChatPanel: Component<{
         </div>
       </div>
 
-      <Show when={mentionPosition() !== null && props.fileList.length > 0}>
+      <Popover
+        open={mentionPosition() !== null && props.fileList.length > 0}
+        onClose={() => setMentionPosition(null)}
+        position={mentionPosition()!}
+        anchorPoint={{x: 0, y: 1}}
+      >
         <FileMentionPopover
           fileList={props.fileList}
-          position={mentionPosition()!}
           query={mentionQuery()}
           onSelect={handleMentionSelect}
           onClose={() => setMentionPosition(null)}
         />
-      </Show>
+      </Popover>
 
-      <Show when={tagPosition() !== null && tagFlowStep() === "tag"}>
+      <Popover
+        open={tagPosition() !== null && tagFlowStep() === "tag"}
+        onClose={handlePopoverClose}
+        position={tagPosition()!}
+        anchorPoint={{x: 0, y: 1}}
+      >
         <TagMentionPopover
-          bottom={tagPosition()!.top}
-          left={tagPosition()!.left}
           query={tagQuery()}
           onSelect={handleTagSelect}
           onClose={handlePopoverClose}
         />
-      </Show>
+      </Popover>
 
-      <Show when={skillPosition() !== null && tagFlowStep() === "skill"}>
+      <Popover
+        open={skillPosition() !== null && tagFlowStep() === "skill"}
+        onClose={handlePopoverClose}
+        position={skillPosition()!}
+        anchorPoint={{x: 0, y: 1}}
+      >
         <SkillMentionPopover
           workspace={props.workspace}
-          bottom={skillPosition()!.top}
-          left={skillPosition()!.left}
           query={skillQuery()}
           onSelect={handleSkillSelect}
           onClose={handlePopoverClose}
         />
-      </Show>
+      </Popover>
 
       <ContextFooter
         contextTokens={contextStats().contextTokens}
