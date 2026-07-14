@@ -6,8 +6,12 @@
         var theme;
         try {
           var stored = localStorage.getItem("claudinio_theme");
-          if (stored === "dark" || stored === "light" || stored === "sepia") {
-            theme = stored;
+          if (stored) {
+            // Legacy migration: old "dark"/"light"/"sepia" keys → new theme ids
+            if (stored === "dark") theme = "claudinio";
+            else if (stored === "light") theme = "claudinio-light";
+            else if (stored === "sepia") theme = "claudinio-sepia";
+            else theme = stored;
           }
         } catch (_) {}
         if (!theme) {

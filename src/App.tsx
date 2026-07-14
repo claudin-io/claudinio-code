@@ -13,6 +13,7 @@ import { EmptyState } from "./components/EmptyState";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { TasksPanel } from "./components/TasksPanel";
 import { Icon } from "./components/Icon";
+import { resolvedTheme } from "./lib/theme";
 import FileEditorModal from "./components/FileEditorModal";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { openInTerminal, copyPath, gitBranch, checkGitAvailable } from "./lib/ipc";
@@ -242,6 +243,9 @@ function App() {
   // Load persisted auth state on startup so API-key-only users skip onboarding
   // on app restart.
   onMount(async () => {
+    // Initialize theme state — reads localStorage and applies correct data-theme
+    resolvedTheme();
+
     try {
       const cfg = await getConfig();
       setAccountLogin(cfg.accountLogin ?? null);
