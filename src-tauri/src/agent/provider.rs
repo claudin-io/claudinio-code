@@ -369,6 +369,13 @@ pub struct ImageSource {
     #[serde(rename = "media_type")]
     pub media_type: String,
     pub data: String,
+    /// Pixel dimensions (non-serialized, used by token estimator).
+    /// Populated after compress_image returns, so the estimator can use
+    /// w*h/750 instead of base64.len()/3 (which overestimates ~50x).
+    #[serde(skip)]
+    pub width: u32,
+    #[serde(skip)]
+    pub height: u32,
 }
 
 impl ContentBlock {
@@ -379,13 +386,15 @@ impl ContentBlock {
         }
     }
 
-    pub fn image(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+    pub fn image(media_type: impl Into<String>, data: impl Into<String>, width: u32, height: u32) -> Self {
         ContentBlock::Image {
             type_: "image".into(),
             source: ImageSource {
                 type_: "base64".into(),
                 media_type: media_type.into(),
                 data: data.into(),
+                width,
+                height,
             },
         }
     }
@@ -1052,6 +1061,25 @@ fn process_line(
             }
         }
         "ping" => {}
+        "error" => {
+            // Parse SSE error events like:
+            // {"type":"error","error":{"type":"...","message":"..."}}
+            // The API accepted the request (200) but failed mid-stream
+            // (e.g. context overflow, overloaded). Propagate as an Err so the
+            // retry loop and error bar in the UI handle it.
+            if let Some(err_obj) = value.get("error") {
+                let msg = err_obj
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error");
+                let err_type = err_obj
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown");
+                return Err(format!("API error: {err_type} — {msg}"));
+            }
+            return Err("API error: unknown".into());
+        }
         _ => {}
     }
 

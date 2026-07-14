@@ -553,10 +553,12 @@ pub async fn run_summary_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::provider::AgentConfig;
 
     #[test]
     fn test_subagent_defs_explore_excludes_spawn_and_ask() {
-        let defs = subagent_defs(SubagentMode::Explore, &[], MAX_PARALLEL_AGENTS);
+        let config = AgentConfig::default();
+        let defs = subagent_defs(SubagentMode::Explore, &[], MAX_PARALLEL_AGENTS, &config);
         for d in &defs {
             assert_ne!(d.name, "spawn_agents", "explore should not include spawn_agents");
             assert_ne!(d.name, "ask_user", "explore should not include ask_user");
@@ -565,7 +567,8 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_explore_excludes_edit_and_bash() {
-        let defs = subagent_defs(SubagentMode::Explore, &[], MAX_PARALLEL_AGENTS);
+        let config = AgentConfig::default();
+        let defs = subagent_defs(SubagentMode::Explore, &[], MAX_PARALLEL_AGENTS, &config);
         for d in &defs {
             assert_ne!(d.name, "edit_file", "explore should not include edit_file");
             assert_ne!(d.name, "bash", "explore should not include bash");
@@ -574,7 +577,8 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_code_excludes_spawn_and_ask() {
-        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS);
+        let config = AgentConfig::default();
+        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &config);
         for d in &defs {
             assert_ne!(d.name, "spawn_agents", "code should not include spawn_agents");
             assert_ne!(d.name, "ask_user", "code should not include ask_user");
@@ -583,7 +587,8 @@ mod tests {
 
     #[test]
     fn test_subagent_defs_code_includes_edit_and_bash() {
-        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS);
+        let config = AgentConfig::default();
+        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &config);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"edit_file"), "code should include edit_file");
         assert!(names.contains(&"bash"), "code should include bash");
