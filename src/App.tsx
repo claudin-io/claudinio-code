@@ -98,7 +98,7 @@ function App() {
   const [progressMap, setProgressMap] = createSignal<Record<string, IndexProgress | null>>({});
   const [showConfig, setShowConfig] = createSignal(false);
   const [configApiKey, setConfigApiKey] = createSignal("");
-  const [configBrainModel, setConfigBrainModel] = createSignal("claudinio");
+  const [configBrainModel, setConfigBrainModel] = createSignal("claudius");
   const [configBuilderModel, setConfigBuilderModel] = createSignal("claudinio");
   const [availableModels, setAvailableModels] = createSignal<string[]>(["claudinio", "claudius"]);
   const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
