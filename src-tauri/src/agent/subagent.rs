@@ -70,11 +70,12 @@ is missing, state your assumption and proceed, or report what is missing. \
 Work autonomously and efficiently: use the fewest tool calls that accomplish the goal.\
 ";
 
-pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef], max_parallel: usize) -> Vec<ToolDef> {
+pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef], max_parallel: usize, config: &AgentConfig) -> Vec<ToolDef> {
     let mut tools: Vec<ToolDef> = tools::get_defs(max_parallel)
         .into_iter()
         .filter(|t| t.name != "spawn_agents" && t.name != "ask_user")
         .collect();
+    tools.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     match mode {
         // Explore subagents are read-only by design (no edit_file/bash);
         // MCP tools have unknown, potentially non-read-only side effects, so
@@ -89,8 +90,8 @@ pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef], max_parallel: usi
     tools
 }
 
-fn api_tools(mode: SubagentMode, mcp_defs: &[ToolDef]) -> Vec<ToolDescription> {
-    subagent_defs(mode, mcp_defs, MAX_PARALLEL_AGENTS)
+fn api_tools(mode: SubagentMode, mcp_defs: &[ToolDef], config: &AgentConfig) -> Vec<ToolDescription> {
+    subagent_defs(mode, mcp_defs, MAX_PARALLEL_AGENTS, config)
         .iter()
         .map(|t| ToolDescription {
             name: t.name.clone(),
@@ -289,7 +290,7 @@ pub async fn run_subagent(
     steering: &Arc<SteeringCtl>,
 ) -> SubagentResult {
     let mcp_defs = ctx.mcp.as_ref().map(|m| m.cached_defs()).unwrap_or_default();
-    let tools = api_tools(spec.mode, &mcp_defs);
+    let tools = api_tools(spec.mode, &mcp_defs, config);
     let skill_mgr = crate::agent::skills::SkillManager::new(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
     );
