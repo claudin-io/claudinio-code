@@ -1691,7 +1691,7 @@ export const ChatPanel: Component<{
 
   const statusLabel = () => {
     switch (status()) {
-      case "thinking": return t("chat.status.thinking");
+      case "thinking": return t("chat.status.working");
       case "awaiting_approval": return t("chat.status.awaitingApproval");
       case "awaiting_input": return t("chat.status.awaitingInput");
       case "done": return t("chat.status.done");
