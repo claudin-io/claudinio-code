@@ -1,7 +1,7 @@
 import { onMount, onCleanup, createEffect, type Component } from "solid-js";
 import * as monaco from "monaco-editor";
 import { theme } from "../lib/theme";
-import { defineMonacoThemes } from "../lib/monacoThemes";
+import { defineMonacoThemes, getMonacoTheme } from "../lib/monacoThemes";
 
 export const DiffViewer: Component<{
   original: string;
@@ -33,7 +33,7 @@ export const DiffViewer: Component<{
     }
 
     editor = monaco.editor.createDiffEditor(containerRef!, {
-      theme: theme() === "dark" ? "claudinio-dark" : theme() === "sepia" ? "claudinio-sepia" : "claudinio-light",
+      theme: getMonacoTheme(theme()),
       fontSize: 13,
       fontFamily: "'JetBrains Mono', monospace",
       readOnly: true,
@@ -50,7 +50,7 @@ export const DiffViewer: Component<{
 
   createEffect(() => {
     const currentTheme = theme();
-    monaco.editor.setTheme(currentTheme === "dark" ? "claudinio-dark" : currentTheme === "sepia" ? "claudinio-sepia" : "claudinio-light");
+    monaco.editor.setTheme(getMonacoTheme(currentTheme));
   });
 
   onCleanup(() => {

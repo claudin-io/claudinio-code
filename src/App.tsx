@@ -6,8 +6,8 @@ import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, listMo
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
-import { preference, setThemePreference } from "./lib/theme";
 import { FileTree } from "./components/FileTree";
+import ThemePicker from "./components/ThemePicker";
 import { ChatPanel } from "./components/ChatPanel";
 import { EmptyState } from "./components/EmptyState";
 import { OnboardingWizard } from "./components/OnboardingWizard";
@@ -627,16 +627,9 @@ function App() {
 
             {/* Theme selector */}
             <label class="mb-1 block text-xs text-ink-muted">{t("app.config.theme")}</label>
-            <select
-              value={preference()}
-              onChange={(e) => setThemePreference(e.currentTarget.value as any)}
-              class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            >
-              <option value="system">🖥️ {t("theme.system")}</option>
-              <option value="dark">🌙 {t("theme.dark")}</option>
-              <option value="light">☀️ {t("theme.light")}</option>
-              <option value="sepia">📖 {t("theme.sepia")}</option>
-            </select>
+            <div class="mb-4">
+              <ThemePicker />
+            </div>
 
             <label class="mb-1 block text-xs text-ink-muted">{t("app.config.account")}</label>
             <Show

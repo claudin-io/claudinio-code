@@ -119,3 +119,50 @@ Substituir o `<select>` por uma grade de cards de tema:
 5. **Atualizar i18n** — en-US.ts e pt-BR.ts com nomes dos novos temas
 6. **Corrigir FileEditorModal** — Adicionar `createEffect` para tema reativo
 7. **Atualizar testes** — theme.test.ts, monacoThemes.test.ts, mocks nos componentes
+
+
+## Implementation Log — 2026-07-14 10:57
+**Summary:** Adicionados 12 novos temas pré-configurados (Dracula, Nord, Solarized, Monokai, One Dark, Catppuccin, Tokyo Night, Gruvbox, Rose Pine, Everforest) com seletor visual grid, CSS oklch, Monaco themes, i18n, e 645/645 testes passando.
+**Changed files:** A	docs/plans/2026-07-14_adicionar-temas.md, A	docs/plans/2026-07-14_thinking-bar-refactor.md, M	src-tauri/src/agent/session.rs, M	src-tauri/src/agent/tools/bash.rs, M	src-tauri/src/agent/tools/finalize_plan.rs, M	src-tauri/src/agent/tools/mod.rs, M	src-tauri/src/agent/tools/tasks.rs, M	src-tauri/src/agent/tools/write_plan.rs, M	src-tauri/src/commands/agent.rs, M	src/App.css, M	src/components/ChatPanel.tsx, M	src/test-setup.ts
+**Commits:** 88029b4 feat: add mandatory Low-Level Design step to Brain mode workflow, 4472016 feat: add theme support and thinking bar refactor documentation
+**Journal:** ## Key decisions and gotchas
+
+1. **Legacy theme migration**: Os valores antigos `"dark"`, `"light"`, `"sepia"` armazenados no localStorage são migrados automaticamente para `"claudinio"`, `"claudinio-light"`, `"claudinio-sepia"`. Isso garante que usuários existentes não percam a preferência de tema.
+
+2. **getMonacoTheme bug fix critical**: A função `getMonacoTheme` precisa tratar os temas já prefixados com `"claudinio-"` (ex: `claudinio-light`, `claudinio-sepia`) para não gerar duplo prefixo como `claudinio-claudinio-light`. A implementação verifica `t.startsWith("claudinio-")` primeiro.
+
+3. **Signal vs valor**: O ThemePicker usa `preference()` e `resolvedTheme()` diretamente no JSX (chamando como função) em vez de capturar numa variável. Isso porque `preference` e `resolvedTheme` exportados de `theme.ts` já são funções getter (não signals diretos), então precisam ser invocados com `()`.
+
+4. **Preview swatches**: As previewColors no themeMetadata foram calibradas manualmente com valores oklch representativos de cada tema. O card "System" usa um gradiente metade dark/metade light para representar que ele delega ao OS.
+
+5. **4 colunas no grid**: O usuário pediu grid de 4 cards por linha (mudou de 3 para 4 durante a implementação).
+
+6. **Mock de getMonacoTheme nos testes**: Todos os 3 arquivos de teste que mockam monacoThemes (DiffViewer, ContentViewerModal, FileEditorModal) precisaram da mesma adaptação — tratar `claudinio-` prefixados e `claudinio` (default dark) separadamente.
+
+## Files changed
+- src/lib/theme.ts — types, metadata, legacy migration, resolvePreference
+- src/App.css — 12 novos blocos [data-theme="..."]
+- src/lib/monacoThemes.ts — 12 temas Monaco + getMonacoTheme utility
+- src/lib/locales/en-US.ts — 15 novas chaves
+- src/lib/locales/pt-BR.ts — 15 novas chaves com traduções
+- src/components/ThemePicker.tsx — novo componente de grid visual
+- src/App.tsx — ThemePicker integrado no modal de settings
+- src/components/FileEditorModal.tsx — createEffect reativo + getMonacoTheme
+- src/components/DiffViewer.tsx — mapping atualizado para getMonacoTheme
+- src/components/ContentViewerModal.tsx — mapping atualizado para getMonacoTheme
+- src/lib/theme.test.ts — 21 testes (legacy migration + novos ThemeIds + metadata)
+- src/lib/monacoThemes.test.ts — 5 testes (15 temas + getMonacoTheme)
+- src/components/ThemePicker.test.tsx — 6 testes (render + click)
+- src/components/FileEditorModal.test.tsx — mock atualizado
+- src/components/DiffViewer.test.tsx — mock atualizado
+- src/components/ContentViewerModal.test.tsx — mock atualizado
+
+**Task journal:**
+- Expandir types e metadata em theme.ts: Types expandidos com ThemeId (15 variantes), themeMetadata com previewColors, legacy migration
+- Adicionar CSS variables para os 12 novos temas em App.css: 12 novos blocos adicionados
+- Adicionar Monaco editor themes em monacoThemes.ts: 15 temas total, getMonacoTheme() exportado
+- Adicionar i18n keys para nomes dos temas: 15 novas keys cada
+- Criar ThemePicker com grid visual de cards: ThemePicker com System card + 15 theme cards
+- Integrar ThemePicker no modal de configurações: select substituído
+- Tornar componentes Monaco reativos: getMonacoTheme() compartilhado
+- Atualizar testes: 645/645 tests passing

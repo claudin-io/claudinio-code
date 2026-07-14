@@ -4,7 +4,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icon";
 import { t } from "../lib/grill-me";
 import { readFile, openExternal } from "../lib/ipc";
-import { defineMonacoThemes } from "../lib/monacoThemes";
+import { defineMonacoThemes, getMonacoTheme } from "../lib/monacoThemes";
 import { detectLanguage } from "./FileEditorModal";
 import { theme } from "../lib/theme";
 
@@ -75,8 +75,7 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
 
     defineMonacoThemes();
     const currentTheme = theme();
-    const monacoTheme =
-      currentTheme === "sepia" ? "claudinio-sepia" : currentTheme === "dark" ? "claudinio-dark" : "claudinio-light";
+    const monacoTheme = getMonacoTheme(currentTheme);
 
     const lang = detectLanguage(props.filePath);
 

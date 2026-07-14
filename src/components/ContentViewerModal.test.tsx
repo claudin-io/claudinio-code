@@ -24,7 +24,14 @@ vi.mock("../lib/theme", () => ({ theme: vi.fn(() => "dark") }));
 
 vi.mock("./Icon", () => ({ Icon: () => null }));
 vi.mock("../lib/grill-me", () => ({ t: (k: string) => k }));
-vi.mock("../lib/monacoThemes", () => ({ defineMonacoThemes: vi.fn() }));
+vi.mock("../lib/monacoThemes", () => ({
+  defineMonacoThemes: vi.fn(),
+  getMonacoTheme: vi.fn((t: string) => {
+    if (t.startsWith("claudinio-")) return t;
+    if (t === "claudinio") return "claudinio-dark";
+    return `claudinio-${t}`;
+  }),
+}));
 vi.mock("./FileEditorModal", () => ({
   detectLanguage: vi.fn(() => "typescript"),
 }));
