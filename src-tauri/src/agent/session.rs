@@ -885,6 +885,7 @@ fn roll_cost(
     run_cost_input: Option<f64>,
     run_cost_output: Option<f64>,
     run_cost_cache: Option<f64>,
+    subagent_cost: f64,
     cumul_cost: &mut Option<f64>,
     cumul_cost_input: &mut Option<f64>,
     cumul_cost_output: &mut Option<f64>,
@@ -894,7 +895,7 @@ fn roll_cost(
         model, total_in, total_cache, total_out,
         run_cost_input, run_cost_output, run_cost_cache,
     );
-    *cumul_cost = Some(cumul_cost.unwrap_or(0.0) + ci + co + cc);
+    *cumul_cost = Some(cumul_cost.unwrap_or(0.0) + ci + co + cc + subagent_cost);
     *cumul_cost_input = Some(cumul_cost_input.unwrap_or(0.0) + ci);
     *cumul_cost_output = Some(cumul_cost_output.unwrap_or(0.0) + co);
     *cumul_cost_cache = Some(cumul_cost_cache.unwrap_or(0.0) + cc);
@@ -1142,6 +1143,7 @@ pub async fn run_workflow_with_profile(
     let mut run_cost_input: Option<f64> = None;
     let mut run_cost_output: Option<f64> = None;
     let mut run_cost_cache: Option<f64> = None;
+    let mut subagent_cost: f64 = 0.0;
     let mut last_text = String::new();
     // Size of the context for the next request: the real number reported by
     // the API when available, the char-based estimate otherwise.
@@ -1363,6 +1365,7 @@ pub async fn run_workflow_with_profile(
             roll_cost(
                 resolved_model, total_in, total_cache, total_out,
                 run_cost_input, run_cost_output, run_cost_cache,
+                subagent_cost,
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
@@ -1432,6 +1435,7 @@ pub async fn run_workflow_with_profile(
             roll_cost(
                 resolved_model, total_in, total_cache, total_out,
                 run_cost_input, run_cost_output, run_cost_cache,
+                subagent_cost,
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
@@ -1680,6 +1684,7 @@ pub async fn run_workflow_with_profile(
             roll_cost(
                 resolved_model, total_in, total_cache, total_out,
                 run_cost_input, run_cost_output, run_cost_cache,
+                subagent_cost,
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
@@ -1780,7 +1785,7 @@ pub async fn run_workflow_with_profile(
                 } else {
                     tool_input
                 };
-                let (block, sub_in, sub_out) = subagent::run_spawn_agents(
+                let (block, sub_in, sub_out, sub_cost) = subagent::run_spawn_agents(
                     config,
                     ctx,
                     &tool_use_id,
@@ -1794,6 +1799,7 @@ pub async fn run_workflow_with_profile(
                 .await;
                 total_in += sub_in;
                 total_out += sub_out;
+                subagent_cost += sub_cost;
                 block
             } else if in_brain && tool_name == "edit_file" {
                 deny_tool(
@@ -1929,6 +1935,7 @@ pub async fn run_workflow_with_profile(
             roll_cost(
                 resolved_model, total_in, total_cache, total_out,
                 run_cost_input, run_cost_output, run_cost_cache,
+                subagent_cost,
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
@@ -1963,6 +1970,7 @@ pub async fn run_workflow_with_profile(
     roll_cost(
         config.model_for_mode(cur_mode.as_str()), total_in, total_cache, total_out,
         run_cost_input, run_cost_output, run_cost_cache,
+        subagent_cost,
         &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
     );
     write_status(

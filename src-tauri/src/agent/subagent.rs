@@ -150,7 +150,7 @@ pub async fn run_spawn_agents(
     answers: &AnswerMap,
     session_id: &str,
     steering: &Arc<SteeringCtl>,
-) -> (ContentBlock, u32, u32) {
+) -> (ContentBlock, u32, u32, f64) {
     let tool_input = normalize_spawn_input(tool_input);
     let max = effective_max_parallel(config);
     let agents = match tool_input.get("agents").and_then(|v| v.as_array()) {
@@ -175,7 +175,7 @@ pub async fn run_spawn_agents(
                 output: msg.clone(),
                 error: Some("invalid_input".into()),
             });
-            return (ContentBlock::tool_result(parent_tool_use_id, &msg), 0, 0);
+            return (ContentBlock::tool_result(parent_tool_use_id, &msg), 0, 0, 0.0);
         }
     };
 
@@ -192,7 +192,7 @@ pub async fn run_spawn_agents(
             output: msg.clone(),
             error: Some("parse_error".into()),
         });
-        return (ContentBlock::tool_result(parent_tool_use_id, &msg), 0, 0);
+        return (ContentBlock::tool_result(parent_tool_use_id, &msg), 0, 0, 0.0);
     }
 
     let parent_tx = event_tx.clone();
@@ -228,6 +228,7 @@ pub async fn run_spawn_agents(
     let mut reports = Vec::new();
     let mut total_in = 0u32;
     let mut total_out = 0u32;
+    let mut total_cost = 0.0f64;
 
     for (i, handle) in handles.into_iter().enumerate() {
         let result = match handle.await {
@@ -255,6 +256,7 @@ pub async fn run_spawn_agents(
 
         total_in += result.in_tok;
         total_out += result.out_tok;
+        total_cost += result.cost;
 
         reports.push(format!(
             "## {} — {} ({} rounds)\n{}\n---",
@@ -270,6 +272,7 @@ pub async fn run_spawn_agents(
         ContentBlock::tool_result(parent_tool_use_id, &combined),
         total_in,
         total_out,
+        total_cost,
     )
 }
 
