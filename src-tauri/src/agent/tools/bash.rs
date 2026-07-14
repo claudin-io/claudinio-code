@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::agent::tools::ToolContext;
+use crate::commands::procutil::no_window_tokio;
 
 const MAX_OUTPUT_BYTES: u64 = 100 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -127,7 +128,8 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
     // which on macOS triggers repeated TCC permission prompts.
     let login_path = login_path();
 
-    let mut child = Command::new(shell)
+    let mut child = Command::new(shell);
+    child
         .arg(shell_flag)
         .arg(&args.command)
         .env("PATH", login_path)
@@ -135,7 +137,9 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    no_window_tokio(&mut child);
+    let mut child = child
         .spawn()
         .map_err(|e| format!("failed to spawn command: {e}"))?;
 
