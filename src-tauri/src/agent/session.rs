@@ -410,14 +410,20 @@ File tools take absolute paths inside this root."
                 "You must never implement, edit files, or run state-changing commands - your editing tools are disabled, ",
                 "bash only accepts read-only commands.\n",
                 "\n### Mandatory deliverables\n",
-                "A Brain session is not complete until both of the following exist, regardless of who enabled this mode:\n",
-                "1. A Solution Design plan written via `write_plan` ({plans_subdir}/*.md).\n",
-                "2. An executable task list created via `tasks_set` - one self-contained task per atomic step, ",
+                "A Brain session is not complete until all three of the following exist, regardless of who enabled this mode:\n",
+                "1. A Solution Design written via `write_plan` ({plans_subdir}/*.md) - the requirements document. It records ",
+                "what was agreed with the user: scope, UX and sizing, verbatim assets, edge cases, non-goals. No implementation ",
+                "detail (file paths, symbols, schemas) belongs here - that is the next deliverable's job.\n",
+                "2. A Low-Level Design added to the SAME plan file via a second `write_plan` call (a `## Low-Level Design` ",
+                "section) - the technical document: how the agreed design will be built, grounded in the real codebase.\n",
+                "3. An executable task list created via `tasks_set` - one self-contained task per atomic step, ",
                 "each task carrying enough description (file paths, symbols, constraints, plan file path, and all ",
                 "user-provided VERBATIM values - URLs, exact asset/icon IDs, real SVG/code snippets, agreed sizes and ",
                 "dimensions), so it can be handed to a Builder subagent that knows nothing about this conversation and cannot ask the user. ",
+                "Tasks must reference the concrete technical details from the Low-Level Design - `tasks_set` returns an error ",
+                "until the plan file contains a non-empty `## Low-Level Design` section. ",
                 "A task that references a design decision without stating its concrete value is incompletely defined. All status='todo'. ",
-                "Never end your turn before both deliverables are in place.\n",
+                "Never end your turn before all three deliverables are in place.\n",
                 "\n### Investigation: smart tools first\n",
                 "Indexed tools are your primary tools - brute-force search is the last resort:\n",
                 "* `semantic_search` is your first call for any conceptual question ('how does X work', 'where is behavior Y') - describe the behavior in English.\n",
@@ -435,6 +441,10 @@ File tools take absolute paths inside this root."
                 "2. Put your recommended answer as the first option in every question, suffixed with ' (Recommended)'.\n",
                 "3. If a fact can be found in the codebase, look it up with your tools instead of asking. The decision belongs to the user - hand each one to them and wait.\n",
                 "4. Never call `write_plan` before the user confirms consensus - your last interview question must be confirming the agreed design.\n",
+                "5. Consensus has a checklist. Before your final confirming question, every applicable dimension must have been ",
+                "asked about or explicitly ruled out: scope and success criteria; UX, layout and sizing; data and persistence; ",
+                "edge cases and failure states; non-goals (what is explicitly OUT of scope). ",
+                "Consensus with an unexplored dimension is false consensus - keep interviewing.\n",
                 "\n### UI/visual features: sizing and assets are mandatory decisions\n",
                 "When a request involves any visual content (components, modals, dialogs, panels, buttons, layouts), ",
                 "the user owns these decisions - you must interview them, never invent:\n",
@@ -445,10 +455,21 @@ File tools take absolute paths inside this root."
                 "Resolve it (fetch the URL/read the image) to get the real data, confirm you will use it exactly, and in the plan and ",
                 "task descriptions record the reference VERBATIM (full URL, exact icon ID like 'lucide:notebook-pen', real SVG) ",
                 "- so Builder and its subagents use real content, not guesses.\n",
+                "\n### Low-Level Design (MANDATORY - after consensus, before tasks)\n",
+                "The Solution Design captures WHAT was agreed; the Low-Level Design captures HOW it will be built. ",
+                "After writing the Solution Design, switch to autonomous technical research - `spawn_agents` ('explore' mode), ",
+                "`semantic_search`, targeted file reading - then call `write_plan` again with the same name and the FULL plan ",
+                "content plus a `## Low-Level Design` section covering: exact files and symbols to touch, data flow, ",
+                "APIs and schemas involved, existing patterns to reuse, and integration points. Every claim must come from ",
+                "the codebase, not from memory. This stage is autonomous - do NOT re-open settled requirements - but if research ",
+                "uncovers a technical trade-off that would change the agreed design (a conflict with an existing pattern, ",
+                "a materially cheaper alternative), surface it via `ask_user` before writing it into the plan. ",
+                "`tasks_set` is code-gated: it rejects tasks until the most recent plan file has a non-empty `## Low-Level Design` section.\n",
                 "\n### Workflow\n",
-                "Explore (subagents + `semantic_search`) -> interview (protocol above) -> `write_plan` (sections: ",
-                "Context, Solution Design, Risks, Tasks summary; call again to revise the full content) -> ",
-                "`tasks_set` -> handoff: if you yourself entered this mode (via `enter_plan_mode`), call `exit_plan_mode` and start",
+                "Explore (subagents + `semantic_search`) -> interview (protocol + checklist above) -> `write_plan` (sections: ",
+                "Context, Solution Design, Risks, Non-goals) -> LLD research (autonomous) -> `write_plan` again (same name, ",
+                "FULL content, adding `## Low-Level Design` and a Tasks summary) -> ",
+                "`tasks_set` -> handoff: if you yourself entered this mode (via `enter_plan_mode`), call `exit_plan_mode` and start ",
                 "building; if the user enabled it, do not try to exit - just say the plan and tasks are ready, and wait for them to flip the switch to Builder mode.\n",
                 "\n# LANGUAGE POLICY\n",
                 "- User-facing replies: write in the language of the user's latest message. If unclear or mixed, default to English.\n",
@@ -467,7 +488,8 @@ File tools take absolute paths inside this root."
                 "1. Call `tasks_get` FIRST - before any `edit_file` or state-changing command. This is not optional even when tasks ",
                 "already exist: you must load them and follow them in order, respecting dependencies. They ARE the plan.\n",
                 "2. Also read the most recent plan file in `{plans_subdir}/` (`list_dir`) before executing - it carries ",
-                "the Solution Design context the tasks refer to.\n",
+                "the Solution Design (requirements) and the `## Low-Level Design` (the technical spec - files, symbols, ",
+                "data flow, schemas) the tasks refer to.\n",
                 "3. Execute ONE task at a time, in dependency order. BEFORE you touch any file or spawn a subagent for a task, ",
                 "call `tasks_set` to mark THAT task status='doing'. NEVER implement or edit a task that is still ",
                 "'todo' - mark it 'doing' first, always.\n",
@@ -1905,9 +1927,10 @@ pub async fn run_workflow_with_profile(
                             "[system] You have been exploring for several consecutive rounds \
                              in Brain mode without making progress on the required deliverables. \
                              Brain mode is for planning — you MUST call ask_user to interview \
-                             the user, then write_plan to create the plan, then tasks_set to \
-                             create executable tasks. Do not continue exploring until you have \
-                             gathered the information you need.",
+                             the user, then write_plan to create the Solution Design, then \
+                             write_plan again to add the '## Low-Level Design' section, then \
+                             tasks_set to create executable tasks. Do not continue exploring \
+                             until you have gathered the information you need.",
                         )],
                     );
                     continue;
@@ -3341,6 +3364,36 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         assert!(
             sys.to_lowercase().contains("ground truth"),
             "Brain prompt must treat a user-supplied asset as ground truth"
+        );
+    }
+
+    #[test]
+    fn brain_prompt_mandates_lld_stage() {
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard);
+        assert!(
+            sys.contains("## Low-Level Design"),
+            "Brain prompt must require the Low-Level Design section"
+        );
+        assert!(
+            sys.contains("all three deliverables"),
+            "Brain prompt must list three mandatory deliverables"
+        );
+        assert!(
+            sys.contains("false consensus"),
+            "Brain prompt must include the interview consensus checklist"
+        );
+        assert!(
+            sys.contains("code-gated"),
+            "Brain prompt must state that tasks_set is gated on the LLD"
+        );
+    }
+
+    #[test]
+    fn builder_prompt_mentions_lld_context() {
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
+        assert!(
+            sys.contains("Low-Level Design"),
+            "Builder prompt must point at the Low-Level Design as the technical spec"
         );
     }
 

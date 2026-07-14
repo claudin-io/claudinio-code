@@ -54,6 +54,21 @@ pub struct ToolContext {
     /// before the agent loop starts so `mcp__` tool calls can dispatch
     /// synchronously through `tools::execute`.
     pub mcp: Option<Arc<crate::agent::mcp::McpManager>>,
+    /// Live handle to the session's mode state. Used by tasks_set to enforce
+    /// the Brain-mode Low-Level-Design gate. None in tests and one-off
+    /// workflows, which disables the gate.
+    pub mode_ctl: Option<Arc<crate::agent::session::ModeCtl>>,
+}
+
+impl ToolContext {
+    /// True when the session this context belongs to is currently in Brain
+    /// mode. False when no mode handle is attached (tests, aux workflows).
+    pub fn is_brain(&self) -> bool {
+        matches!(
+            self.mode_ctl.as_ref().map(|m| m.get().0),
+            Some(crate::agent::session::SessionMode::Brain)
+        )
+    }
 }
 
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
@@ -307,7 +322,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_set".into(),
-            description: "Fully replace the task list (stateless — pass ALL tasks with updated statuses). Each task has: id (unique string), title, description, journal (array of findings/memory entries), status (todo | doing | done). Always read current tasks first with tasks_get before modifying.".into(),
+            description: "Fully replace the task list (stateless — pass ALL tasks with updated statuses). Each task has: id (unique string), title, description, journal (array of findings/memory entries), status (todo | doing | done). Always read current tasks first with tasks_get before modifying. In Brain mode this is rejected until the current plan file contains a non-empty '## Low-Level Design' section.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -364,7 +379,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
 pub fn write_plan_def() -> ToolDef {
     ToolDef {
         name: "write_plan".into(),
-        description: "Write the Solution Design plan to <workspace>/.claudinio/plans/YYYY-MM-DD_<name>.md. Overwrites the file, so always pass the FULL plan content — call again with the same name and the complete updated text to revise. Structure: Context, Solution Design, Risks, Tasks summary.".into(),
+        description: "Write the plan to <workspace>/.claudinio/plans/YYYY-MM-DD_<name>.md. Overwrites the file, so always pass the FULL plan content — call again with the same name and the complete updated text to revise (this is how the '## Low-Level Design' section is added after the Solution Design). Expected sections: Context, Solution Design, Risks, Non-goals, Low-Level Design, Tasks summary.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -858,7 +873,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        }
+            mcp: None, mode_ctl: None,        }
     }
 
     /// Write a temp file with 20 numbered lines, return its path.
@@ -1102,7 +1117,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
         assert!(validate_path("/home/user/project/src", &ctx).is_ok());
@@ -1123,7 +1138,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
         assert!(validate_path("/", &ctx).is_err());
@@ -1144,7 +1159,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
     }
@@ -1163,7 +1178,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         let home = dirs::home_dir().unwrap();
         for dir_name in crate::agent::skills::SKILL_DIR_NAMES {
             let p = home.join(dir_name).join("skills/typeset/SKILL.md");
@@ -1209,7 +1224,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
         assert!(result.is_err());
@@ -1231,7 +1246,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
         assert!(result.is_err());
@@ -1253,7 +1268,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
         assert!(result.is_err(), "rg likely not installed in test env");
@@ -1274,7 +1289,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
         let output = result.expect("bash should succeed");
@@ -1298,7 +1313,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None,        };
+            mcp: None, mode_ctl: None,        };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
         assert!(result.is_err());
