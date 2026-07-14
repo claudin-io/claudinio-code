@@ -44,7 +44,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub model: String,
     /// Model used in Brain (planning) mode.
-    #[serde(default = "default_claudinio")]
+    #[serde(default = "default_claudius")]
     pub brain_model: String,
     /// Model used in Builder (execution) mode.
     #[serde(default = "default_claudinio")]
@@ -163,6 +163,10 @@ fn default_claudinio() -> String {
     "claudinio".into()
 }
 
+fn default_claudius() -> String {
+    "claudius".into()
+}
+
 fn default_services_url() -> String {
     "https://claudin.io".into()
 }
@@ -173,7 +177,7 @@ impl Default for AgentConfig {
             base_url: "https://api.claudin.io".into(),
             api_key: String::new(),
             model: "claudinio".into(),
-            brain_model: "claudinio".into(),
+            brain_model: "claudius".into(),
             builder_model: "claudinio".into(),
             max_rounds: None,
             sub_max_rounds: None,
