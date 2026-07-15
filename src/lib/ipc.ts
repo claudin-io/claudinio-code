@@ -1,6 +1,8 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 export interface DirEntry {
   name: string;
@@ -758,4 +760,41 @@ export function openExternal(path: string): void {
 /** Abre uma URL no navegador padrão (best-effort). */
 export function openExternalUrl(url: string): void {
   openUrl(url).catch(() => {});
+}
+
+// ── Auto-update (tauri-plugin-updater) ─────────────────────────────
+
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  body: string | null;
+  /** Baixa, instala e reinicia o app. Progresso em [0, 1] (ou -1 se tamanho desconhecido). */
+  install: (onProgress?: (fraction: number) => void) => Promise<void>;
+}
+
+/** Retorna a atualização disponível, ou null se já está na última versão. */
+export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  const update = await check();
+  if (!update) return null;
+  return {
+    version: update.version,
+    currentVersion: update.currentVersion,
+    body: update.body ?? null,
+    install: async (onProgress) => {
+      let total = 0;
+      let received = 0;
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+        } else if (event.event === "Progress") {
+          received += event.data.chunkLength;
+          onProgress?.(total > 0 ? Math.min(received / total, 1) : -1);
+        } else if (event.event === "Finished") {
+          onProgress?.(1);
+        }
+      });
+      // No Windows o instalador encerra o app sozinho; nos demais, relança.
+      await relaunch();
+    },
+  };
 }

@@ -65,6 +65,16 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockRejectedValue(new Error("open not mocked")),
 }));
 
+// ── @tauri-apps/plugin-updater ─────────────────────────────────────
+vi.mock("@tauri-apps/plugin-updater", () => ({
+  check: vi.fn().mockResolvedValue(null),
+}));
+
+// ── @tauri-apps/plugin-process ─────────────────────────────────────
+vi.mock("@tauri-apps/plugin-process", () => ({
+  relaunch: vi.fn().mockResolvedValue(undefined),
+}));
+
 // ── @tauri-apps/plugin-opener ──────────────────────────────────────
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
