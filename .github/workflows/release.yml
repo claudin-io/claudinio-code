@@ -32,6 +32,27 @@ jobs:
             bundle-args: ''
             artifact-name: Claudinio-Code-Linux-x64
 
+          # macOS Intel (x86_64) — via macos-13 (último runner Intel da GitHub)
+          - platform: macos-x64
+            target: x86_64-apple-darwin
+            os: macos-13
+            bundle-args: ''
+            artifact-name: Claudinio-Code-macOS-x64
+
+          # Windows ARM64 — cross-compilado do runner x64
+          - platform: windows-arm64
+            target: aarch64-pc-windows-msvc
+            os: windows-latest
+            bundle-args: '--bundles nsis'
+            artifact-name: Claudinio-Code-Windows-arm64
+
+          # Linux ARM64 — via runner nativo ARM64
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            bundle-args: ''
+            artifact-name: Claudinio-Code-Linux-arm64
+
     runs-on: ${{ matrix.os }}
     environment: RELEASE
 
@@ -80,6 +101,17 @@ jobs:
           TAG="${TAG#v}"
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up MSVC ARM64 cross-compilation tools
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64_arm64
+
+      - name: Add Rust ARM64 target
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: rustup target add aarch64-pc-windows-msvc
 
       - name: Set Windows linker flags
         if: runner.os == 'Windows'
@@ -150,7 +182,7 @@ jobs:
           fi
 
       - name: Build Tauri app
-        run: pnpm tauri build
+        run: pnpm tauri build ${{ matrix.bundle-args }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -239,8 +271,11 @@ jobs:
           }
 
           add_platform "darwin-aarch64" "$(asset '*macOS*.app.tar.gz')"
+          add_platform "darwin-x86_64"  "$(asset '*macOS-x64*.app.tar.gz')"
           add_platform "windows-x86_64" "$(asset '*Windows*-setup.exe')"
+          add_platform "windows-aarch64" "$(asset '*Windows-arm64*.exe')"
           add_platform "linux-x86_64"   "$(asset '*Linux*.AppImage')"
+          add_platform "linux-aarch64"  "$(asset '*Linux-arm64*.AppImage')"
 
           jq -n \
             --arg version "$VERSION" \
@@ -287,8 +322,11 @@ jobs:
             echo "| Platform | File |"
             echo "|----------|------|"
             echo "| Windows (x64) | \`Claudinio-Code-Windows-x64-*.msi\` / \`*.exe\` |"
+            echo "| Windows (ARM64) | \`Claudinio-Code-Windows-arm64-*.exe\` |"
+            echo "| macOS (Intel) | \`Claudinio-Code-macOS-x64-*.dmg\` |"
             echo "| macOS (Apple Silicon) | \`Claudinio-Code-macOS-arm64-*.dmg\` |"
             echo "| Linux (x64) | \`Claudinio-Code-Linux-x64-*.deb\` / \`*.AppImage\` |"
+            echo "| Linux (ARM64) | \`Claudinio-Code-Linux-arm64-*.deb\` / \`*.AppImage\` |"
             echo ""
             echo "---"
             echo ""
