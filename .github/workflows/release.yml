@@ -35,15 +35,6 @@ jobs:
             artifact-name: Claudinio-Code-Linux-x64
             bundle-path: src-tauri/target/release/bundle/
 
-          # macOS Intel (x86_64) — cross-compilado do runner ARM (macos-latest)
-          # para evitar filas e deprecação do runner macos-13
-          - platform: macos-x64
-            target: x86_64-apple-darwin
-            os: macos-latest
-            bundle-args: '--target x86_64-apple-darwin'
-            artifact-name: Claudinio-Code-macOS-x64
-            bundle-path: src-tauri/target/x86_64-apple-darwin/release/bundle/
-
           # Windows ARM64 — cross-compilado do runner x64
           - platform: windows-arm64
             target: aarch64-pc-windows-msvc
@@ -286,7 +277,6 @@ jobs:
           }
 
           add_platform "darwin-aarch64" "$(asset '*macOS*.app.tar.gz')"
-          add_platform "darwin-x86_64"  "$(asset '*macOS-x64*.app.tar.gz')"
           add_platform "windows-x86_64" "$(asset '*Windows*-setup.exe')"
           add_platform "windows-aarch64" "$(asset '*Windows-arm64*.exe')"
           add_platform "linux-x86_64"   "$(asset '*Linux*.AppImage')"
@@ -338,7 +328,6 @@ jobs:
             echo "|----------|------|"
             echo "| Windows (x64) | \`Claudinio-Code-Windows-x64-*.msi\` / \`*.exe\` |"
             echo "| Windows (ARM64) | \`Claudinio-Code-Windows-arm64-*.exe\` |"
-            echo "| macOS (Intel) | \`Claudinio-Code-macOS-x64-*.dmg\` |"
             echo "| macOS (Apple Silicon) | \`Claudinio-Code-macOS-arm64-*.dmg\` |"
             echo "| Linux (x64) | \`Claudinio-Code-Linux-x64-*.deb\` / \`*.AppImage\` |"
             echo "| Linux (ARM64) | \`Claudinio-Code-Linux-arm64-*.deb\` / \`*.AppImage\` |"
