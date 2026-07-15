@@ -133,3 +133,37 @@ Build passou sem erros (vite build).
 **Task journal:**
 - Adicionar ref e hover state ao ThinkingBar: Adicionado: tooltipRef (let), hovered signal, onMouseEnter/onMouseLeave no wrapper, ref={tooltipRef} no tooltip div.
 - Adicionar createEffect de auto-scroll no ThinkingBar: createEffect adicionado com sucesso. Lógica: observa props.text() e hovered(), scrolla tooltipRef.scrollTop = tooltipRef.scrollHeight quando hovered=true. Build passou sem erros.
+
+
+## Implementation Log — 2026-07-15 06:00
+**Summary:** Adiciona code signing Apple (Developer ID Application) + notarização automática no CI release do macOS
+**Changed files:** M .github/workflows/release.yml
+**Commits:** _(git unavailable or none)_
+**Journal:** Implementação de code signing Apple (Developer ID Application) e notarização no CI release do macOS.
+
+**Decisões tomadas:**
+- Tipo de certificado: Developer ID Application (distribuição via DMG fora da App Store)
+- Notarização ativada via envs APPLE_ID + APPLE_PASSWORD (suportada nativamente pelo tauri build CLI)
+- Apenas o job macOS foi modificado — Windows e Linux intactos
+- Usei env vars (APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID) em vez de tauri-action, para manter consistência com o `pnpm tauri build` atual
+
+**Três blocos adicionados no workflow:**
+1. **Import Apple Developer Certificate** — decodifica o .p12 do secret, cria keychain temporário, importa o certificado, configura permissões de codesign
+2. **Resolve Apple Signing Identity** — extrai o CN do certificado Developer ID Application importado e expõe como APPLE_SIGNING_IDENTITY no GITHUB_ENV. Tem fallback caso o nome exato não seja encontrado
+3. **Build Tauri app** — recebe os novos envs: APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID, APPLE_SIGNING_IDENTITY
+
+**Secrets necessários (já configurados pelo usuário):**
+- APPLE_ID — email da Apple ID
+- APPLE_PASSWORD — app-specific password
+- APPLE_CERTIFICATE — .p12 em base64
+- APPLE_CERTIFICATE_PASSWORD — senha do .p12
+- KEYCHAIN_PASSWORD — senha temporária do keychain no CI
+- APPLE_TEAM_ID — team ID de 10 caracteres
+
+**Verificação:**
+- YAML validado com python3 yaml.safe_load — sem erros sintáticos
+- Documentação oficial do Tauri v2 confirmada: os env vars são suportados nativamente pelo `tauri build` CLI
+
+**Task journal:**
+- Adicionar code signing Apple no release.yml: Adicionado step 'Import Apple Developer Certificate' (if: runner.os == 'macOS') que decodifica o .p12, cria keychain e importa o certificado; Adicionado step 'Resolve Apple Signing Identity' que extrai o CN do certificado Developer ID Application e expõe como APPLE_SIGNING_IDENTITY no GITHUB_ENV; Adicionados APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID e APPLE_SIGNING_IDENTITY como envs do 'Build Tauri app' step; Verificado com a documentação oficial do Tauri v2 que os env vars são suportados nativamente pelo tauri build CLI — nenhuma dependência extra necessária
+- Verificar integridade do workflow: YAML validado com python3 yaml.safe_load — sem erros; Estrutura de steps confirmada: 12 steps no total, sendo steps 8-10 os novos (import, resolve, build com signing)
