@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -726,6 +726,17 @@ function App() {
                 </button>
               </div>
             </Show>
+
+            {/* Support link */}
+            <div class="mb-3">
+              <button
+                onClick={() => openExternalUrl("https://claudin.io/dashboard#account")}
+                class="flex items-center gap-2 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink hover:bg-surface-2 hover:border-accent/40 transition-colors"
+              >
+                <Icon name="speech-balloon-alt" class="h-4 w-4 shrink-0" />
+                <span>{t("app.config.support")}</span>
+              </button>
+            </div>
 
             {/* Easter egg "iddqd" — override fields for LLM */}
             <Show when={easterEggActive()}>
