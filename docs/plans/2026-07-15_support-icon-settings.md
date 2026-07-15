@@ -77,3 +77,14 @@ The user wants to add a support link inside the settings modal. The link should 
 - Add speech-balloon-alt icon to Icon.tsx: Added speech-balloon-alt icon after the existing speech-balloon entry in PATHS. Uses Pixelarticons license (Gerrit Halfmann), default 24×24 viewBox, fill mode.
 - Add support translation keys (en-US / pt-BR): Added key after app.config.theme in both files
 - Add support button in settings modal at Account section: openExternalUrl estava ausente no import de App.tsx — adicionado à import list; Botão inserido entre o fechamento do <Show> da Account e o comentário do Easter egg; Build verificado: npx vite build → ✓ built in 15.43s
+
+
+## Implementation Log — 2026-07-15 19:58
+**Summary:** ✅ v0.1.9 deploy verified — already released on claudin-io/claudinio-code-releases
+**Changed files:** _(none detected)_
+**Commits:** _(git unavailable or none)_
+**Journal:** v0.1.9 release was already fully deployed and published. No action needed — the release exists with all 24 artifacts across 5 platform targets (macOS-arm64, Linux-x64, Linux-arm64, Windows-x64, Windows-arm64), is published (not draft), and the workflow completed successfully.
+
+**Task journal:**
+- deploy da versão v0.1.9, o goal é garantir que o deploy foi released no claudinio-code-releases: Tag v0.1.9 already exists locally and on remote origin; Release already published on claudin-io/claudinio-code-releases; 24 assets across all 5 platform targets: macOS-arm64, Linux-x64, Linux-arm64, Windows-x64, Windows-arm64; Published at 2026-07-15T12:46:09Z, not a draft, not a prerelease; GitHub Actions workflow completed successfully
+- deploy da versão v0.1.9, o goal é garantir que o deploy foi released no claudinio-code-releases: Verified via GitHub API: release exists and is published (not draft); All expected platform binaries exist in the release assets; Workflow completed successfully
