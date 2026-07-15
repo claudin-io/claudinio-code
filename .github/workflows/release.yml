@@ -124,19 +124,30 @@ jobs:
 
       - name: Resolve Apple Signing Identity
         if: runner.os == 'macOS'
+        shell: bash
         run: |
+          # List all identities for debugging
+          echo "=== Available signing identities ==="
+          security find-identity -v -p codesigning build.keychain
+
+          # Try to find a Developer ID Application certificate first
           CERT_INFO=$(security find-identity -v -p codesigning build.keychain \
-            | grep "Developer ID Application" | head -n 1)
+            | grep "Developer ID Application" | head -n 1 || true)
           CERT_ID=$(echo "$CERT_INFO" | awk -F'"' '{print $2}')
 
           if [ -z "$CERT_ID" ]; then
             echo "⚠️  Developer ID Application not found — falling back to first identity"
-            CERT_INFO=$(security find-identity -v -p codesigning build.keychain | head -n 1)
+            CERT_INFO=$(security find-identity -v -p codesigning build.keychain \
+              | grep -E '^[[:space:]]*[0-9]+\)' | head -n 1 || true)
             CERT_ID=$(echo "$CERT_INFO" | awk -F'"' '{print $2}')
           fi
 
-          echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
-          echo "✅ Using signing identity: $CERT_INFO"
+          if [ -z "$CERT_ID" ]; then
+            echo "❌ No signing identities found in keychain. Will attempt to build without signing."
+          else
+            echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
+            echo "✅ Using signing identity: $CERT_INFO"
+          fi
         shell: bash
 
       - name: Build Tauri app
