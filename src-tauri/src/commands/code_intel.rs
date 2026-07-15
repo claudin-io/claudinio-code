@@ -75,6 +75,42 @@ pub async fn open_workspace(
     let db_path = Path::new(&path).join(".claudinio/index.db");
     let db = Arc::new(IndexDb::open(&db_path)?);
 
+    // ── Build workspace state EARLY so send_message works during indexing ──
+    let root = std::path::PathBuf::from(&path);
+    let index_progress: Arc<std::sync::Mutex<Option<indexer::IndexProgress>>> =
+        Arc::new(std::sync::Mutex::new(Some(indexer::IndexProgress {
+            status: "indexing".into(),
+            files_indexed: 0,
+            symbols_indexed: 0,
+            total_files: 0,
+            workspace: path.clone(),
+        })));
+    let lsp_manager = Arc::new(tokio::sync::Mutex::new(crate::lsp::manager::LspManager::new()));
+    let early_workspace = Arc::new(WorkspaceState {
+        root: root.clone(),
+        index_db: db.clone(),
+        skills_manager: Arc::new(tokio::sync::Mutex::new(
+            crate::agent::skills::SkillManager::new(Some(root.clone())),
+        )),
+        lsp_manager: lsp_manager.clone(),
+        _watcher: tokio::sync::Mutex::new(None),
+        watcher_warning: tokio::sync::Mutex::new(None),
+        active_session: tokio::sync::Mutex::new(None),
+        mcp: tokio::sync::Mutex::new(None),
+        mcp_fingerprint: tokio::sync::Mutex::new(None),
+        index_progress: index_progress.clone(),
+    });
+    {
+        let mut map = state.workspaces.lock().await;
+        map.insert(root.clone(), early_workspace);
+    }
+    // Get a handle back to update fields later (lsp, watcher, index_progress)
+    let ws = state.workspace(&path).await.map_err(|e| {
+        // Clean up: if we somehow can't get it back, clear progress
+        let _ = index_progress.lock().map(|mut p| *p = None);
+        e
+    })?;
+
     let _ = app_handle.emit("index-progress", indexer::IndexProgress {
         status: "loading_model".into(),
         files_indexed: 0,
@@ -106,6 +142,7 @@ pub async fn open_workspace(
         let path = path.clone();
         let app_handle = app_handle.clone();
         let progress_channel = progress_channel.clone();
+        let shared_progress = index_progress.clone();
         move || {
             indexer::scan_workspace(
                 db.as_ref(),
@@ -113,6 +150,7 @@ pub async fn open_workspace(
                 Some(&app_handle),
                 None, // no embedder yet
                 Some(&progress_channel),
+                Some(&shared_progress),
             )
         }
     });
@@ -152,6 +190,12 @@ pub async fn open_workspace(
         .await
         .map_err(|e| format!("scan task panicked: {e}"))?
         .map_err(|e| e)?;
+
+    // Index scan is done — clear the shared progress so tools know the index is ready
+    {
+        let mut p = index_progress.lock().map_err(|e| format!("index_progress lock: {e}"))?;
+        *p = None;
+    }
 
     // Query persisted embeddings count from a prior session (embedding phase
     // runs async after this and will be reflected on re-open).
@@ -232,30 +276,20 @@ pub async fn open_workspace(
             }
         };
 
-    let root = std::path::PathBuf::from(&path);
-    let lsp_manager = Arc::new(tokio::sync::Mutex::new(crate::lsp::manager::LspManager::new()));
+    // Update watcher and watcher_warning on the already-inserted workspace
     {
-        let mut lsp = lsp_manager.lock().await;
-        let _ = lsp.start_for_workspace(&path);
+        let mut w = ws._watcher.lock().await;
+        *w = watcher;
+    }
+    {
+        let mut w = ws.watcher_warning.lock().await;
+        *w = watcher_warning;
     }
 
-    let workspace = Arc::new(WorkspaceState {
-        root: root.clone(),
-        index_db: db,
-        skills_manager: Arc::new(tokio::sync::Mutex::new(
-            crate::agent::skills::SkillManager::new(Some(root.clone())),
-        )),
-        lsp_manager,
-        _watcher: tokio::sync::Mutex::new(watcher),
-        watcher_warning: tokio::sync::Mutex::new(watcher_warning),
-        active_session: tokio::sync::Mutex::new(None),
-        mcp: tokio::sync::Mutex::new(None),
-        mcp_fingerprint: tokio::sync::Mutex::new(None),
-    });
-
+    // Start LSP for the workspace
     {
-        let mut map = state.workspaces.lock().await;
-        map.insert(root, workspace);
+        let mut lsp = ws.lsp_manager.lock().await;
+        let _ = lsp.start_for_workspace(&path);
     }
 
     Ok(IndexStatus {

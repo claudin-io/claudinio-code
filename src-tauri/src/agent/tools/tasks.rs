@@ -230,6 +230,7 @@ mod lld_gate_tests {
             auto_approve_git: false,
             mcp: None,
             mode_ctl: mode.map(|m| Arc::new(ModeCtl::new(m, ModeOrigin::Human))),
+            index_progress: None,
         };
         (ctx, root)
     }

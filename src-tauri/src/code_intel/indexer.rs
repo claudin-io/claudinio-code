@@ -339,6 +339,7 @@ pub fn scan_workspace(
     app_handle: Option<&tauri::AppHandle>,
     mut embedder: Option<&mut CodeEmbedder>,
     progress_channel: Option<&Channel<IndexProgress>>,
+    shared_progress: Option<&std::sync::Mutex<Option<IndexProgress>>>,
 ) -> Result<(i64, i64), String> {
     let mut total_files = 0i64;
     let mut total_symbols = 0i64;
@@ -380,7 +381,10 @@ pub fn scan_workspace(
         let _ = handle.emit("index-progress", initial_progress.clone());
     }
     if let Some(ch) = progress_channel {
-        let _ = ch.send(initial_progress);
+        let _ = ch.send(initial_progress.clone());
+    }
+    if let Some(sp) = shared_progress {
+        let _ = sp.lock().map(|mut guard| *guard = Some(initial_progress));
     }
 
     for path_str in &all_paths {
@@ -432,7 +436,10 @@ pub fn scan_workspace(
                 let _ = handle.emit("index-progress", prog.clone());
             }
             if let Some(ch) = progress_channel {
-                let _ = ch.send(prog);
+                let _ = ch.send(prog.clone());
+            }
+            if let Some(sp) = shared_progress {
+                let _ = sp.lock().map(|mut guard| *guard = Some(prog));
             }
         }
     }
@@ -466,7 +473,10 @@ pub fn scan_workspace(
         workspace: root.to_string(),
     };
     if let Some(handle) = app_handle.as_ref() {
-        let _ = handle.emit("index-progress", grand_progress);
+        let _ = handle.emit("index-progress", grand_progress.clone());
+    }
+    if let Some(sp) = shared_progress {
+        let _ = sp.lock().map(|mut guard| *guard = Some(grand_progress));
     }
 
     for path_str in &doc_paths {
@@ -507,7 +517,10 @@ pub fn scan_workspace(
         let _ = handle.emit("index-progress", done_progress.clone());
     }
     if let Some(ch) = progress_channel {
-        let _ = ch.send(done_progress);
+        let _ = ch.send(done_progress.clone());
+    }
+    if let Some(sp) = shared_progress {
+        let _ = sp.lock().map(|mut guard| *guard = Some(done_progress));
     }
 
     Ok((total_files, total_symbols))
