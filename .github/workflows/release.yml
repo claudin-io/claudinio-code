@@ -148,7 +148,6 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
             echo "✅ Using signing identity: $CERT_INFO"
           fi
-        shell: bash
 
       - name: Build Tauri app
         run: pnpm tauri build
