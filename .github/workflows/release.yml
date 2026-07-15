@@ -77,7 +77,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             libxdo-dev \
-            libssl-dev
+            libssl-dev \
+            xdg-utils
           # libappindicator3-dev foi removido do Ubuntu 24.04 (Noble);
           # libayatana-appindicator3-dev é o sucessor. O crate Rust
           # libappindicator-sys ainda procura por 'libappindicator3' no
