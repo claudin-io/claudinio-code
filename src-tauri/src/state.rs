@@ -3,6 +3,7 @@ use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, Session
 use crate::agent::skills::SkillManager;
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
+use crate::code_intel::indexer::IndexProgress;
 use crate::lsp::manager::LspManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +39,10 @@ pub struct WorkspaceState {
     /// Fingerprint of the `mcp_servers` config used for the current `mcp`
     /// connection, so a config change triggers a reconnect.
     pub mcp_fingerprint: Mutex<Option<String>>,
+    /// Tracks indexing progress so tools can report status during the initial
+    /// scan. `Some(progress)` = indexing in progress; `None` = indexing
+    /// complete (or never started).
+    pub index_progress: Arc<std::sync::Mutex<Option<IndexProgress>>>,
 }
 
 impl WorkspaceState {

@@ -278,6 +278,7 @@ pub async fn send_message(
         auto_approve_git: false,
         mcp: Some(mcp),
         mode_ctl: Some(mode_ctl.clone()),
+        index_progress: Some(ws.index_progress.clone()),
     };
 
     let residual = steering.drain();
@@ -753,6 +754,7 @@ pub async fn compact_session(
         // Compaction only summarizes history; it never dispatches tool calls.
         mcp: None,
         mode_ctl: None,
+        index_progress: Some(ws.index_progress.clone()),
     };
 
     let summary = session::compact_history(
@@ -1038,6 +1040,7 @@ pub async fn commit_and_push(
         auto_approve_git: true,
         mcp: Some(mcp),
         mode_ctl: None,
+        index_progress: Some(ws.index_progress.clone()),
     };
 
     // Register the steering controller so interrupt_session can find it

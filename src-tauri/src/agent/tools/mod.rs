@@ -12,6 +12,7 @@ pub use finalize_plan::git_head;
 
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
+use crate::code_intel::indexer::IndexProgress;
 use crate::lsp::manager::LspManager;
 use serde::Serialize;
 use serde_json::Value;
@@ -58,6 +59,11 @@ pub struct ToolContext {
     /// the Brain-mode Low-Level-Design gate. None in tests and one-off
     /// workflows, which disables the gate.
     pub mode_ctl: Option<Arc<crate::agent::session::ModeCtl>>,
+    /// Tracks indexing progress for this workspace. `Some(progress)` means
+    /// the index is still being built; `None` means the index is ready.
+    /// Index-dependent tools check this and return a user-friendly message
+    /// instead of empty results when the index isn't ready yet.
+    pub index_progress: Option<Arc<std::sync::Mutex<Option<IndexProgress>>>>,
 }
 
 impl ToolContext {
@@ -503,6 +509,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::EditProposal { path: diff.path, old_string: diff.old_string, new_string: diff.new_string, unified_diff: diff.unified_diff })
         }
         "code_search" => {
+            check_index_ready(ctx)?;
             let db = open_db(&ctx.db_path)?;
             let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
@@ -510,12 +517,14 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }
         "symbol_lookup" => {
+            check_index_ready(ctx)?;
             let db = open_db(&ctx.db_path)?;
             let name = args.get("name").and_then(|v| v.as_str()).ok_or("missing name")?;
             let results = db.search_symbols(name, 20)?;
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }
         "file_outline" => {
+            check_index_ready(ctx)?;
             let db = open_db(&ctx.db_path)?;
             let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
             validate_read_path(file_path, ctx)?;
@@ -559,6 +568,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             heuristically_find_references(file_path, line, character, &ctx.db_path)
         }
         "semantic_search" => {
+            check_index_ready(ctx)?;
             let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(15);
             let db = open_db(&ctx.db_path)?;
@@ -703,6 +713,25 @@ fn attach_snippets(results: &mut [crate::code_intel::db::SemanticSearchResult]) 
 fn open_db(db_path: &Option<String>) -> Result<IndexDb, String> {
     let path = db_path.as_ref().ok_or("index not available — open a workspace first")?;
     IndexDb::open(Path::new(path))
+}
+
+/// Check whether the workspace index is ready for queries. Returns an error
+/// with a human-readable progress message if indexing is still in progress.
+fn check_index_ready(ctx: &ToolContext) -> Result<(), String> {
+    if let Some(ref progress) = ctx.index_progress {
+        let guard = progress.lock().map_err(|e| format!("index progress lock: {e}"))?;
+        if let Some(ref prog) = *guard {
+            if prog.status == "indexing" && prog.total_files > 0 {
+                return Err(format!(
+                    "Workspace index is still being built: {}/{} files indexed ({} symbols). \
+                     This tool requires the index to be complete. Please wait a moment and try again, \
+                     or use tools that don't depend on the index (read_file, list_dir, grep, bash).",
+                    prog.files_indexed, prog.total_files, prog.symbols_indexed
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn heuristically_find_definition(
@@ -887,7 +916,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        }
+            mcp: None, mode_ctl: None, index_progress: None,        }
     }
 
     /// Write a temp file with 20 numbered lines, return its path.
@@ -1131,7 +1160,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
         assert!(validate_path("/home/user/project/src", &ctx).is_ok());
@@ -1152,7 +1181,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
         assert!(validate_path("/", &ctx).is_err());
@@ -1173,7 +1202,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
     }
@@ -1192,7 +1221,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         let home = dirs::home_dir().unwrap();
         for dir_name in crate::agent::skills::SKILL_DIR_NAMES {
             let p = home.join(dir_name).join("skills/typeset/SKILL.md");
@@ -1236,6 +1265,7 @@ mod tests {
             auto_approve_git: false,
             mcp: None,
             mode_ctl: None,
+            index_progress: None,
         };
 
         // Relative path within workspace — should be allowed
@@ -1267,6 +1297,7 @@ mod tests {
             auto_approve_git: false,
             mcp: None,
             mode_ctl: None,
+            index_progress: None,
         };
 
         // ".." traversal from root should escape the workspace
@@ -1300,7 +1331,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
         assert!(result.is_err());
@@ -1322,7 +1353,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
         assert!(result.is_err());
@@ -1344,7 +1375,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
         assert!(result.is_err(), "rg likely not installed in test env");
@@ -1365,7 +1396,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
         let output = result.expect("bash should succeed");
@@ -1389,7 +1420,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
         assert!(result.is_err());

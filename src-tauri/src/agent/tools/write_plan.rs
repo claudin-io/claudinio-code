@@ -283,6 +283,7 @@ mod tests {
             auto_approve_git: false,
             mcp: None,
             mode_ctl: None,
+            index_progress: None,
         }
     }
 
