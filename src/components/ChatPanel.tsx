@@ -3079,8 +3079,23 @@ const thinkingSvgSpinner = (
 const ThinkingBar: Component<{
   text: () => string;
 }> = (props) => {
+  let tooltipRef: HTMLDivElement | undefined;
+  const [hovered, setHovered] = createSignal(false);
+
+  createEffect(() => {
+    const _text = props.text();
+    const _hovered = hovered();
+    if (_hovered && tooltipRef) {
+      tooltipRef.scrollTop = tooltipRef.scrollHeight;
+    }
+  });
+
   return (
-    <div class="thinking-bar-wrapper">
+    <div
+      class="thinking-bar-wrapper"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       <div class="thinking-bar">
         <span class="thinking-bar-spinner">
           {thinkingSvgSpinner}
@@ -3089,7 +3104,7 @@ const ThinkingBar: Component<{
           {t("chat.status.thinking")}
         </span>
       </div>
-      <div class="thinking-bar-tooltip">
+      <div ref={tooltipRef} class="thinking-bar-tooltip">
         {props.text() || ""}
       </div>
     </div>
