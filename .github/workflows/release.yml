@@ -18,6 +18,7 @@ jobs:
             os: windows-latest
             bundle-args: ''
             artifact-name: Claudinio-Code-Windows-x64
+            bundle-path: src-tauri/target/release/bundle/
 
           # macOS Apple Silicon only (Intel macOS dropped due to runner availability)
           - platform: macos-arm64
@@ -25,26 +26,31 @@ jobs:
             os: macos-latest
             bundle-args: ''
             artifact-name: Claudinio-Code-macOS-arm64
+            bundle-path: src-tauri/target/release/bundle/
 
           - platform: linux-x64
             target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
             bundle-args: ''
             artifact-name: Claudinio-Code-Linux-x64
+            bundle-path: src-tauri/target/release/bundle/
 
-          # macOS Intel (x86_64) — via macos-13 (último runner Intel da GitHub)
+          # macOS Intel (x86_64) — cross-compilado do runner ARM (macos-latest)
+          # para evitar filas e deprecação do runner macos-13
           - platform: macos-x64
             target: x86_64-apple-darwin
-            os: macos-13
-            bundle-args: ''
+            os: macos-latest
+            bundle-args: '--target x86_64-apple-darwin'
             artifact-name: Claudinio-Code-macOS-x64
+            bundle-path: src-tauri/target/x86_64-apple-darwin/release/bundle/
 
           # Windows ARM64 — cross-compilado do runner x64
           - platform: windows-arm64
             target: aarch64-pc-windows-msvc
             os: windows-latest
-            bundle-args: '--bundles nsis'
+            bundle-args: '--target aarch64-pc-windows-msvc --bundles nsis'
             artifact-name: Claudinio-Code-Windows-arm64
+            bundle-path: src-tauri/target/aarch64-pc-windows-msvc/release/bundle/
 
           # Linux ARM64 — via runner nativo ARM64
           - platform: linux-arm64
@@ -52,6 +58,7 @@ jobs:
             os: ubuntu-24.04-arm
             bundle-args: ''
             artifact-name: Claudinio-Code-Linux-arm64
+            bundle-path: src-tauri/target/release/bundle/
 
     runs-on: ${{ matrix.os }}
     environment: RELEASE
@@ -75,11 +82,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
             libxdo-dev \
             libssl-dev
+          # libappindicator3-dev foi removido do Ubuntu 24.04 (Noble);
+          # libayatana-appindicator3-dev é o sucessor. O crate Rust
+          # libappindicator-sys ainda procura por 'libappindicator3' no
+          # pkg-config, então criamos um symlink de compatibilidade.
+          if [ -f /usr/lib/$(uname -m)-linux-gnu/pkgconfig/ayatana-appindicator3-0.1.pc ]; then
+            sudo ln -sf \
+              /usr/lib/$(uname -m)-linux-gnu/pkgconfig/ayatana-appindicator3-0.1.pc \
+              /usr/lib/$(uname -m)-linux-gnu/pkgconfig/appindicator3-0.1.pc 2>/dev/null || true
+          fi
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -195,8 +211,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact-name }}-${{ steps.version.outputs.version }}
-          path: |
-            src-tauri/target/release/bundle/**/*
+          path: ${{ matrix.bundle-path }}
 
   create-release:
     name: Create GitHub Release
