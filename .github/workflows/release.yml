@@ -91,11 +91,62 @@ jobs:
           # dropping tokenizers' esaxx_fast feature (see src-tauri/Cargo.toml).
           echo "RUSTFLAGS=-Ctarget-feature=-crt-static" >> "$GITHUB_ENV"
 
+      - name: Import Apple Developer Certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+
+          # Create and configure the keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+
+          # Import the certificate
+          security import certificate.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild
+
+          # Grant permission for codesign to use this identity
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+          # Verify the import
+          security find-identity -v -p codesigning build.keychain
+        shell: bash
+
+      - name: Resolve Apple Signing Identity
+        if: runner.os == 'macOS'
+        run: |
+          CERT_INFO=$(security find-identity -v -p codesigning build.keychain \
+            | grep "Developer ID Application" | head -n 1)
+          CERT_ID=$(echo "$CERT_INFO" | awk -F'"' '{print $2}')
+
+          if [ -z "$CERT_ID" ]; then
+            echo "⚠️  Developer ID Application not found — falling back to first identity"
+            CERT_INFO=$(security find-identity -v -p codesigning build.keychain | head -n 1)
+            CERT_ID=$(echo "$CERT_INFO" | awk -F'"' '{print $2}')
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
+          echo "✅ Using signing identity: $CERT_INFO"
+        shell: bash
+
       - name: Build Tauri app
         run: pnpm tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
