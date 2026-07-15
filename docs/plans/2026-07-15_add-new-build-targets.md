@@ -226,3 +226,20 @@ A crate `tokenizers` (Rust puro com feature `onig`) compila sem problemas em tod
 - Modificar comando tauri build para usar bundle-args: Comando atualizado para usar ${{ matrix.bundle-args }}, que é vazio para a maioria e '--bundles nsis' para windows-arm64
 - Atualizar latest.json com 3 novas plataformas: 3 novas entradas no latest.json: darwin-x86_64, windows-aarch64, linux-aarch64 — totalizando 6 plataformas no updater
 - Atualizar tabela de downloads nas release notes: Tabela de downloads expandida de 3 para 6 linhas, cobrindo todas as plataformas
+
+
+## Implementation Log — 2026-07-15 12:37
+**Summary:** Corrige macOS x64 (cross-compile do ARM) e Linux (libappindicator3 → libayatana) para builds v0.1.9
+**Changed files:** M	.github/workflows/release.yml, M	docs/plans/2026-07-15_2026-07-15-release-v0-1-8.md, A	docs/plans/2026-07-15_add-new-build-targets.md, M	package.json, M	src-tauri/Cargo.toml, M	src-tauri/tauri.conf.json
+**Commits:** 0baf071 fix: cross-compile macOS x64 from ARM runner, swap libappindicator3 for libayatana on Linux, e5aa2c4 chore: bump version to 0.1.9, a965535 chore: stage release workflow and docs changes for v0.1.8
+**Journal:** Two issues found and fixed:
+
+1. **macOS x64 fila infinita**: Runner `macos-13` (Intel) é escasso — filas de 5-30 min, e será deprecado. Solução: cross-compilar x86_64 do runner `macos-latest` (ARM) usando `--target x86_64-apple-darwin`. Code signing continua funcionando pois o runner ARM também tem macOS SDK + codesign + notarization.
+
+2. **Linux ARM falhou**: `libappindicator3-dev` não existe no Ubuntu 24.04 (Noble) — removido dos repositórios. Isto afeta TANTO x86_64 quanto ARM64 no Ubuntu 24.04. Solução: substituir por `libayatana-appindicator3-dev` + symlink pkg-config (`ayatana-appindicator3-0.1.pc` → `appindicator3-0.1.pc`) para compatibilidade com o crate Rust `libappindicator-sys`.
+
+Melhoria adicional: Adicionei `bundle-path` à matrix de CI porque builds com `--target` colocam os bundles em `target/<triple>/release/bundle/` em vez de `target/release/bundle/`. Windows ARM64 e macOS x64 usam target-triple path; os demais ficam no path original.
+
+**Task journal:**
+- Corrigir build macOS x64 — cross-compilar do ARM: macos-13 runners são escassos e serão deprecados. Agora macOS x64 é cross-compilado do macos-latest (ARM) com --target x86_64-apple-darwin. O bundle sai em target/x86_64-apple-darwin/release/bundle/ — bundle-path adicionado à matrix.
+- Corrigir Linux — substituir libappindicator3-dev por libayatana: libappindicator3-dev removido no Noble (24.04). Substituído por libayatana-appindicator3-dev. Symlink pkg-config adicionado para compatibilidade com o crate libappindicator-sys que busca appindicator3-0.1.pc. Válido para x86_64 e ARM64.
