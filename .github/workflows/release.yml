@@ -33,6 +33,7 @@ jobs:
             artifact-name: Claudinio-Code-Linux-x64
 
     runs-on: ${{ matrix.os }}
+    environment: RELEASE
 
     env:
       CARGO_INCREMENTAL: 0
@@ -159,6 +160,7 @@ jobs:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-22.04
+    environment: RELEASE
     permissions:
       contents: write
 
@@ -190,13 +192,55 @@ jobs:
           mkdir -p release-files
           find . -type d -name 'Claudinio-Code-*' | while read dir; do
             name=$(basename "$dir")
-            find "$dir" -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.tar.xz' \) | while read file; do
-              base=$(basename "$file")
+            find "$dir" -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.tar.xz' -o -name '*.sig' \) | while read file; do
+              # Spaces break updater URLs and GitHub renames assets anyway;
+              # sanitize here so latest.json can predict the final asset name.
+              base=$(basename "$file" | tr ' ' '.')
               cp "$file" "release-files/${name}-${base}"
             done
           done
           echo "=== Collected release files ==="
           ls -lh release-files/
+
+      - name: Generate updater manifest (latest.json)
+        shell: bash
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          BASE_URL="https://github.com/claudin-io/claudinio-code-releases/releases/download/${TAG}"
+
+          asset() {
+            find release-files -type f -name "$1" ! -name '*.sig' | head -n1
+          }
+
+          platforms='{}'
+          add_platform() {
+            local key="$1" file="$2"
+            if [ -z "$file" ] || [ ! -f "${file}.sig" ]; then
+              echo "⚠️  Missing updater artifact or .sig for $key — skipping"
+              return
+            fi
+            local name sig
+            name=$(basename "$file")
+            sig=$(cat "${file}.sig")
+            platforms=$(echo "$platforms" | jq \
+              --arg k "$key" --arg url "$BASE_URL/$name" --arg sig "$sig" \
+              '.[$k] = {url: $url, signature: $sig}')
+          }
+
+          add_platform "darwin-aarch64" "$(asset '*macOS*.app.tar.gz')"
+          add_platform "windows-x86_64" "$(asset '*Windows*-setup.exe')"
+          add_platform "linux-x86_64"   "$(asset '*Linux*.AppImage')"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson platforms "$platforms" \
+            '{version: $version, pub_date: $pub_date, platforms: $platforms}' \
+            > release-files/latest.json
+
+          echo "=== latest.json ==="
+          jq '.platforms |= with_entries(.value.signature = "<sig>")' release-files/latest.json
 
       - name: Generate release notes
         id: notes
@@ -242,9 +286,13 @@ jobs:
           } > "$NOTES_FILE"
           echo "notes_path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
+      # Published on the public releases repo so the in-app updater can fetch
+      # latest.json and installers without auth (this source repo is private).
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          repository: claudin-io/claudinio-code-releases
+          token: ${{ secrets.RELEASES_REPO_TOKEN }}
           tag_name: ${{ steps.version.outputs.tag }}
           name: Claudinio Code v${{ steps.version.outputs.version }}
           body_path: ${{ steps.notes.outputs.notes_path }}

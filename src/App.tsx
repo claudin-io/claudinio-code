@@ -17,6 +17,7 @@ import { resolvedTheme } from "./lib/theme";
 import FileEditorModal from "./components/FileEditorModal";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { openInTerminal, copyPath, gitBranch, checkGitAvailable } from "./lib/ipc";
+import { checkForUpdate, type UpdateInfo } from "./lib/ipc";
 import { platform } from "./lib/platform";
 import { ContextMenu } from "./components/ContextMenu";
 
@@ -128,6 +129,12 @@ function App() {
   const [keystrokeBuf, setKeystrokeBuf] = createSignal("");
   const [configOverrideBaseUrl, setConfigOverrideBaseUrl] = createSignal("");
   const [configOverrideApiKey, setConfigOverrideApiKey] = createSignal("");
+  const [updateInfo, setUpdateInfo] = createSignal<UpdateInfo | null>(null);
+  const [updateBannerDismissed, setUpdateBannerDismissed] = createSignal(false);
+  const [updateCheckState, setUpdateCheckState] = createSignal<"idle" | "checking" | "upToDate" | "error">("idle");
+  const [updateCheckError, setUpdateCheckError] = createSignal<string | null>(null);
+  const [updateProgress, setUpdateProgress] = createSignal<number | null>(null);
+  const [updateInstallError, setUpdateInstallError] = createSignal<string | null>(null);
 
   // Prevent the system from sleeping while any workspace session is actively
   // thinking. Waiting on user input/approval does not hold the wake lock.
@@ -254,6 +261,47 @@ function App() {
     } catch {
       // Config file may not exist yet — silently assume no auth.
     }
+  });
+
+  const checkUpdates = async (manual: boolean) => {
+    setUpdateCheckState("checking");
+    setUpdateCheckError(null);
+    try {
+      const update = await checkForUpdate();
+      if (update) {
+        setUpdateInfo(update);
+        setUpdateBannerDismissed(false);
+        setUpdateCheckState("idle");
+      } else {
+        setUpdateCheckState(manual ? "upToDate" : "idle");
+      }
+    } catch (e) {
+      // Silencioso na checagem automática (ex.: offline); só o clique manual
+      // mostra o erro.
+      if (manual) {
+        setUpdateCheckError(String(e));
+        setUpdateCheckState("error");
+      } else {
+        setUpdateCheckState("idle");
+      }
+    }
+  };
+
+  const installUpdate = async () => {
+    const info = updateInfo();
+    if (!info || updateProgress() !== null) return;
+    setUpdateInstallError(null);
+    setUpdateProgress(0);
+    try {
+      await info.install((fraction) => setUpdateProgress(fraction));
+    } catch (e) {
+      setUpdateProgress(null);
+      setUpdateInstallError(String(e));
+    }
+  };
+
+  onMount(() => {
+    void checkUpdates(false);
   });
 
   const openConfig = async () => {
@@ -1051,6 +1099,27 @@ function App() {
               </div>
             </Show>
 
+            {/* Updates */}
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.updates")}</label>
+            <div class="mb-4 flex items-center gap-2 rounded-md border border-border-subtle bg-surface-0 p-2">
+              <button
+                onClick={() => void checkUpdates(true)}
+                disabled={updateCheckState() === "checking"}
+                class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
+              >
+                {updateCheckState() === "checking" ? t("app.config.updatesChecking") : t("app.config.updatesCheck")}
+              </button>
+              <span class="truncate text-xs text-ink-muted">
+                <Switch>
+                  <Match when={updateInfo()}>{t("update.available", updateInfo()!.version)}</Match>
+                  <Match when={updateCheckState() === "upToDate"}>{t("app.config.updatesUpToDate")}</Match>
+                  <Match when={updateCheckState() === "error"}>
+                    <span class="text-red-400">{t("app.config.updatesError", updateCheckError() ?? "")}</span>
+                  </Match>
+                </Switch>
+              </span>
+            </div>
+
             <div class="flex justify-end gap-2">
               <button
                 onClick={() => setShowConfig(false)}
@@ -1066,6 +1135,44 @@ function App() {
               </button>
             </div>
           </div>
+        </div>
+      </Show>
+
+      {/* Update-available prompt (auto-check on startup) */}
+      <Show when={updateInfo() && !updateBannerDismissed()}>
+        <div class="fixed bottom-4 right-4 z-50 w-80 rounded-lg border border-border-subtle bg-surface-1 p-4 shadow-modal">
+          <div class="mb-2 text-sm font-semibold text-ink">{t("update.available", updateInfo()!.version)}</div>
+          <Show when={updateInstallError()}>
+            <div class="mb-2 text-xs text-red-400">{t("update.error", updateInstallError() ?? "")}</div>
+          </Show>
+          <Show
+            when={updateProgress() !== null}
+            fallback={
+              <div class="flex justify-end gap-2">
+                <button
+                  onClick={() => setUpdateBannerDismissed(true)}
+                  class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-ink hover:bg-surface-3"
+                >
+                  {t("update.later")}
+                </button>
+                <button
+                  onClick={() => void installUpdate()}
+                  class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-ink hover:bg-accent-hover"
+                >
+                  {t("update.installNow")}
+                </button>
+              </div>
+            }
+          >
+            <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+              <div
+                class="h-full rounded-full bg-accent transition-[width]"
+                classList={{ "animate-pulse w-full": updateProgress()! < 0 }}
+                style={updateProgress()! >= 0 ? { width: `${Math.round(updateProgress()! * 100)}%` } : undefined}
+              />
+            </div>
+            <div class="mt-1.5 text-xs text-ink-muted">{t("update.downloading")}</div>
+          </Show>
         </div>
       </Show>
 
