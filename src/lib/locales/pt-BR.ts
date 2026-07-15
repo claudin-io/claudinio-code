@@ -78,6 +78,7 @@ const dict: LocaleDict = {
   "app.config.sourceWorkspace": "Workspace",
   "app.config.sourceLocal": "Local",
   "app.config.theme": "Tema",
+  "app.config.support": "Suporte",
   "app.config.overrideBaseUrl": "URL Anthropic (Override)",
   "app.config.overrideBaseUrlHint": "Substitui o endpoint da API apenas para chamadas ao LLM. Deixe vazio para usar o padrão.",
   "app.config.overrideApiKey": "Chave API (Override)",
