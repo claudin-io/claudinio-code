@@ -1,3 +1,5 @@
+> ⚠️ **REVERTED** — This approach (TanStack Virtual with estimateSize, no measureElement) caused message overlap/gaps. The virtualization and workspaceBuffer were fully reverted in a follow-up stabilization. See plan `algo-que-trabalhei-hoje-nested-rossum.md` for details. If virtualization is attempted again, use `measureElement` for real dynamic measurement.
+
 # Fix Virtual Scroll Breaking Chat Rendering
 
 ## Context
@@ -86,3 +88,34 @@ Gotcha: The TanStack wrapper's `createComputed` sets up an `onChange` handler th
 **Task journal:**
 - Add createEffect to sync virtualizer count with messages: Added createEffect(() => { virtualizer.setOptions({ count: messages().length }); }) right after the virtualizer creation block. This bridges the gap between SolidJS reactive signals and TanStack Virtual's non-reactive count option — without it, count stayed frozen at 0 and no messages ever rendered.
 - Run tests and build to verify nothing broke: pnpm test: 35 test files, 639 tests all passed. pnpm run build: vitest 639 passed, vite build successful (5.1MB main bundle). No regressions.
+
+
+## Implementation Log — 2026-07-16 19:51
+**Summary:** Fix TanStack Virtual count non-reactivity: add createEffect to sync with SolidJS messages signal, fixing all three chat rendering bugs.
+**Changed files:** A	docs/plans/2026-07-16_fix-virtual-scroll-chat-rendering.md, M	src/components/ChatPanel.tsx
+**Commits:** 80ad7c2 fix: sync TanStack Virtual count with SolidJS reactive messages signal
+**Journal:** Key learnings from this fix:
+1. TanStack Virtual's `count` option is **not reactive** — it captures its value at creation time and never re-evaluates. This is a classic footgun when used inside SolidJS or any reactive framework.
+2. SolidJS signals evaluated at component initialization are snapshots; `messages()` evaluated inside the `createVirtualizer` options object gives `0` once, even as data streams in later.
+3. The bridge is minimal: one `createEffect` that calls `virtualizer.setOptions({ count: messages().length })`. This syncs every reactive update to the signal with the virtualizer's internal state.
+4. All three reported bugs (input text invisible, pause clearing content, history sessions not opening) traced back to this single root cause.
+5. Both `pnpm test` (639 tests) and `pnpm run build` (vitest + vite build) pass cleanly — no regressions.
+
+**Task journal:**
+- Add createEffect to sync virtualizer count with messages: Added createEffect(() => { virtualizer.setOptions({ count: messages().length }); }) right after the virtualizer creation block. This bridges the gap between SolidJS reactive signals and TanStack Virtual's non-reactive count option — without it, count stayed frozen at 0 and no messages ever rendered.
+- Run tests and build to verify nothing broke: pnpm test: 35 test files, 639 tests all passed. pnpm run build: vitest 639 passed, vite build successful (5.1MB main bundle). No regressions.
+
+
+## Implementation Log — 2026-07-16 20:24
+**Summary:** Revert ChatPanel virtualization and workspace unmount — restore stable v0.1.10 rendering/mounting behavior
+**Changed files:** M docs/plans/2026-07-16_fix-virtual-scroll-chat-rendering.md, M package.json, M pnpm-lock.yaml, M src/App.tsx, M src/components/ChatPanel.tsx, D src/lib/workspaceBuffer.ts
+**Commits:** _(git unavailable or none)_
+**Journal:** Reverted virtualization and workspace-buffer changes cleanly. The root cause of the broken rendering was TanStack Virtual's estimateSize (80-500px heuristic) without measureElement — variable-height messages overlapped or left gaps. The unmount via Show caused chat history loss on workspace switch because buffer had no reload mechanism. Reverted both: ChatPanel now uses simple For each={messages()} with scrollIntoView, and App.tsx keeps panels mounted via display:none. All 639 tests pass, build is clean (0 solid-virtual references). The @tanstack/solid-virtual dependency and workspaceBuffer.ts module are fully removed.
+
+**Task journal:**
+- ChatPanel.tsx — remove virtualization & buffer: Removed createVirtualizer import (line 2); Removed pushEvent/drainBuffer import (line 63); Removed drainBuffer replay block in onMount (lines 907-914); Replaced scrollToBottom with original simple scrollIntoView version; Removed virtualizer + createEffect block (lines 1032-1060); Removed early-return pushEvent guard in handleEvent; Replaced virtualizer JSX with simple For each={messages()} loop; grep verified: zero remaining references to createVirtualizer|pushEvent|drainBuffer|workspacesBuffer|_willUpdate
+- App.tsx — keep panels mounted via display:none: Replaced inner Show wrapper with div style={{display: block|none}}; Restored original comment about panels staying mounted; ChatPanel instances no longer unmount on workspace switch
+- Delete workspaceBuffer.ts: Deleted src/lib/workspaceBuffer.ts; grep confirms 0 code-level imports remaining; Only residual references in comments and docs/plans
+- Remove @tanstack/solid-virtual from package.json: Removed @tanstack/solid-virtual from package.json line 17; pnpm install ran clean: -2 packages, dependency removed from lockfile
+- Annotate plan doc as reverted: Prepended REVERTED notice to the plan doc, original content preserved
+- Verify — build, tests, manual checks: pnpm test: 35 test files, 639 tests — all passed; pnpm build: clean, 1469 modules transformed, zero solid-virtual references; grep: zero source-code references to solid-virtual or workspaceBuffer; Manual checks pending: run pnpm tauri dev and verify messages render, workspace switching preserves history, pause/resume intact
