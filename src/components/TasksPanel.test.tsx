@@ -411,7 +411,7 @@ describe("TasksPanel", () => {
     dispose();
   });
 
-  it("hoveredTask falls back to null via ?? when hovered task disappears from list", async () => {
+  it("keeps popover visible even when task list changes (snapshot frozen on hover)", async () => {
     vi.useFakeTimers();
 
     // First call returns sampleTasks (includes "task-1"), second call returns empty
@@ -422,7 +422,7 @@ describe("TasksPanel", () => {
     const dispose = render(() => <TasksPanel workspace="/test" />, document.body);
     await flush();
 
-    // Hover over task-1 → sets hoveredId to "task-1"
+    // Hover over task-1 → snapshot is frozen
     const buttons = document.body.querySelectorAll("button");
     buttons[0].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     expect(document.body.textContent).toContain("tasks.panel.cycleStatus");
@@ -431,9 +431,19 @@ describe("TasksPanel", () => {
     vi.advanceTimersByTime(3000);
     await flush();
 
-    // hoveredId is still "task-1" but tasks are now empty.
-    // hoveredTask() → id = "task-1" (truthy) → find() returns undefined → ?? null → null
-    // Show when={null} → popover disappears without any mouseleave
+    // hoveredTaskSnapshot is still the frozen task from mouseenter.
+    // The popover stays visible despite the task list being empty now.
+    // This is the fix: no more flicker on poll updates.
+    expect(document.body.textContent).toContain("tasks.panel.cycleStatus");
+    expect(document.body.textContent).toContain("First Task");
+
+    // Manually clear to prove it CAN be dismissed (e.g. via the backdrop or
+    // a mouseleave on the popover card itself, but in this edge case where
+    // trigger elements are gone, user would move mouse or click elsewhere)
+    // In practice tasks don't just disappear — the test proves the freeze works.
+    const popoverCard = document.body.querySelector('[class*="rounded-lg"]') as HTMLElement;
+    popoverCard.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+    vi.advanceTimersByTime(200);
     expect(document.body.textContent).not.toContain("tasks.panel.cycleStatus");
 
     vi.useRealTimers();

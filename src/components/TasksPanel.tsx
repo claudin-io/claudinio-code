@@ -10,6 +10,7 @@ export const TasksPanel: Component<{
 }> = (props) => {
   const [tasks, setTasksState] = createSignal<TaskItem[]>([]);
   const [hoveredId, setHoveredId] = createSignal<string | null>(null);
+  const [hoveredTaskSnapshot, setHoveredTaskSnapshot] = createSignal<TaskItem | null>(null);
   const [hoveredElement, setHoveredElement] = createSignal<HTMLElement | null>(null);
   const [pollTimer, setPollTimer] = createSignal<ReturnType<typeof setInterval> | null>(null);
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -54,6 +55,7 @@ export const TasksPanel: Component<{
 
   const dismissGolden = async (id: string) => {
     setHoveredId(null);
+    setHoveredTaskSnapshot(null);
     try {
       const remaining = await dismissGoldenTasks(props.workspace, id);
       setTasksState(remaining);
@@ -92,6 +94,7 @@ export const TasksPanel: Component<{
     if (closeTimer) clearTimeout(closeTimer);
     closeTimer = setTimeout(() => {
       setHoveredId(null);
+      setHoveredTaskSnapshot(null);
     }, 150);
   };
 
@@ -119,6 +122,7 @@ export const TasksPanel: Component<{
                 cancelClose();
                 setHoveredElement(e.currentTarget);
                 setHoveredId(task.id);
+                setHoveredTaskSnapshot(task);
               }}
               onMouseLeave={scheduleClose}
               class="shrink-0 rounded-full hover:ring-2 hover:ring-accent/40"
@@ -148,14 +152,15 @@ export const TasksPanel: Component<{
 
       {/* Popover — floats above everything */}
       <Popover
-        open={hoveredTask() !== null}
+        open={hoveredTaskSnapshot() !== null}
         onClose={() => {}}
         triggerRef={() => hoveredElement()}
         anchorPoint={{x:1,y:0}}
         originPoint={{x:0,y:0}}
         showBackdrop={false}
+        gap={{x:8}}
       >
-        <Show when={hoveredTask()} keyed>
+        <Show when={hoveredTaskSnapshot()} keyed>
           {(task) => (
             <div
               onMouseEnter={cancelClose}
