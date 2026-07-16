@@ -212,6 +212,7 @@ jobs:
     environment: RELEASE
     permissions:
       contents: write
+      actions: write    # needed for gh cache delete
 
     steps:
       - name: Checkout repository
@@ -352,3 +353,9 @@ jobs:
           files: release-files/*
           draft: false
           prerelease: false
+
+      - name: Clear GitHub Actions caches
+        shell: bash
+        run: gh cache delete --all
+        env:
+          GH_TOKEN: ${{ github.token }}
