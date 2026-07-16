@@ -1,5 +1,4 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
-import { createVirtualizer } from '@tanstack/solid-virtual';
 import {
   sendMessage,
   approveTool,
@@ -60,7 +59,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../lib/grill-me";
 import { setWorkspaceStatus, isBusy } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
-import { pushEvent, drainBuffer } from "../lib/workspaceBuffer";
 import { GitIndicator } from "./GitIndicator";
 import { GitChangesModal } from "./GitChangesModal";
 import CommitPushModal from "./CommitPushModal";
@@ -903,15 +901,6 @@ export const ChatPanel: Component<{
       })
       .catch(() => {});
 
-    // Replay buffered events from when this panel was unmounted
-    const buffered = drainBuffer(props.workspace);
-    if (buffered.length > 0) {
-      for (const evt of buffered) {
-        handleEvent(evt);
-      }
-      scrollToBottom(true);
-    }
-
     // Listen for native file drop events via Tauri window API. Every mounted
     // panel receives these, so only the visible one may react.
     const unlistenDrop = getCurrentWindow().onDragDropEvent(async (event) => {
@@ -1017,47 +1006,8 @@ export const ChatPanel: Component<{
     if (!force && !isAtBottom()) return;
     autoScrolling = true;
     setIsAtBottom(true);
-    const idx = messages().length - 1;
-    if (idx >= 0) {
-      try {
-        virtualizer.scrollToIndex(idx, { align: "end" });
-      } catch {
-        messagesEndRef?.scrollIntoView({ behavior: "instant" });
-      }
-    } else {
-      messagesEndRef?.scrollIntoView({ behavior: "instant" });
-    }
+    messagesEndRef?.scrollIntoView({ behavior: "instant" });
   };
-
-  // Virtual scroll: only render messages in/near the viewport
-  const virtualizer = createVirtualizer({
-    count: messages().length,
-    getScrollElement: () => scrollContainerRef ?? null,
-    estimateSize: (i: number) => {
-      const msg = messages()[i];
-      if (!msg) return 80;
-      if (msg.role === "archived") return 60;
-      const textLen = msg.text?.length ?? 0;
-      const stepsLen = msg.steps?.length ?? 0;
-      return Math.max(80, Math.min(500, 60 + textLen * 0.14 + stepsLen * 35));
-    },
-    overscan: 5,
-  });
-
-  // Keep the virtualizer's count in sync with the messages signal so
-  // every mutation (new message, reopen session, flush pending Done,
-  // etc.) causes a re-render. Without this reactive bridge, count stays
-  // frozen at the initial snapshot (typically 0) and nothing appears.
-  createEffect(() => {
-    virtualizer.setOptions({ count: messages().length });
-    // setOptions updates this.options.count but does NOT recalculate the
-    // visible range. _willUpdate() calls calculateRange() → maybeNotify()
-    // → notify() → onChange, which finally syncs the Solid store so the
-    // <For> renders the new items. Without this, a reopenSession that
-    // replaces the full messages array with setMessages() would update
-    // count but never trigger a re-render.
-    virtualizer._willUpdate();
-  });
 
   const addOrUpdateToolIn = (steps: TimelineItem[], item: TimelineItem): TimelineItem[] => {
     const idx = steps.findIndex(
@@ -1131,10 +1081,6 @@ export const ChatPanel: Component<{
   };
 
   const handleEvent = (event: AgentEvent) => {
-    if (!props.isActive()) {
-      pushEvent(props.workspace, event);
-      return;
-    }
     if (event.event === "TextDelta") {
       const text = event.data.text;
       // Compaction markers only ever arrive as a complete TextStep; this is
@@ -1904,17 +1850,10 @@ export const ChatPanel: Component<{
           onScroll={handleScroll}
           class="flex flex-1 flex-col overflow-y-auto"
         >
-          <div class="w-full px-6 py-4" style={{ position: "relative", "min-height": `${virtualizer.getTotalSize()}px` }}>
-          <For each={virtualizer.getVirtualItems()}>
-            {(vItem) => {
-              const msg = messages()[vItem.index];
-              return (<div class="mb-6" style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "100%",
-                transform: `translateY(${vItem.start}px)`,
-              }}>
+          <div class="w-full px-6 py-4">
+          <For each={messages()}>
+            {(msg) => {
+              return (<div class="mb-6">
                 <Show when={msg.role === "user"}>
                   <div class="mb-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wider text-accent">

@@ -1591,16 +1591,13 @@ function App() {
               openFolder={openFolder}
             />
           }>
-            {/* One ChatPanel per open workspace; inactive ones unmount fully.
-                Events for inactive workspaces are buffered via workspaceBuffer.ts
-                and replayed when the panel re-mounts. */}
+            {/* All panels kept mounted: hidden panels keep receiving their run's
+                Channel events so streaming stays live when switching workspaces. */}
             <For each={openWorkspaces()}>
               {(ws) => (
-                <Show when={activeWorkspace() === ws}>
-                  <div class="h-full">
-                    <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} />
-                  </div>
-                </Show>
+                <div class="h-full" style={{ display: activeWorkspace() === ws ? "block" : "none" }}>
+                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} />
+                </div>
               )}
             </For>
           </Show>
