@@ -334,7 +334,7 @@ const REMOTE_INDEX_URL: &str = "https://raw.githubusercontent.com/vercel-labs/sk
 
 /// Find skills from the remote registry by querying the centralized index.
 pub async fn find_remote_skills(query: Option<&str>) -> Result<Vec<RemoteSkill>, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http::default_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
@@ -465,7 +465,7 @@ fn infer_source_from_url(url: &str) -> Option<SkillSource> {
 
 /// Download a remote SKILL.md and return its parsed metadata + body.
 pub async fn fetch_remote_skill_meta(url: &str) -> Result<(SkillMeta, String), String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http::default_client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client: {e}"))?;

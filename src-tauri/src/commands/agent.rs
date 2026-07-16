@@ -631,7 +631,7 @@ pub async fn list_models(
     drop(cfg);
 
     let url = format!("{base_url}/v1/models");
-    let client = reqwest::Client::new();
+    let client = crate::http::default_client();
     let response = match client
         .get(&url)
         .header("x-api-key", &api_key)

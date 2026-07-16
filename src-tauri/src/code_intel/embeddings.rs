@@ -460,7 +460,7 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
             continue;
         }
 
-        let client = reqwest::Client::new();
+        let client = crate::http::default_client();
         let response = client
             .get(&url)
             .send()
