@@ -343,7 +343,7 @@ jobs:
       # Published on the public releases repo so the in-app updater can fetch
       # latest.json and installers without auth (this source repo is private).
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           repository: claudin-io/claudinio-code-releases
           token: ${{ secrets.RELEASES_REPO_TOKEN }}
@@ -353,6 +353,7 @@ jobs:
           files: release-files/*
           draft: false
           prerelease: false
+          fail_on_unmatched_files: true
 
       - name: Clear GitHub Actions caches
         shell: bash
