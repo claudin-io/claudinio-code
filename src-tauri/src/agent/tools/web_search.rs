@@ -47,7 +47,7 @@ pub async fn execute(args: WebSearchArgs, config: &AgentConfig) -> Result<String
 
     let signature_headers = app_sign::sign("POST", path, &body_bytes);
 
-    let client = reqwest::Client::new();
+    let client = crate::http::default_client();
     let mut req = client
         .post(&url)
         .header("Content-Type", "application/json")

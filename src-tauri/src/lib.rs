@@ -1,6 +1,7 @@
 mod agent;
 pub mod code_intel;
 mod commands;
+pub(crate) mod http;
 mod lsp;
 mod state;
 

@@ -180,7 +180,7 @@ pub async fn login_with_claudinio(
     let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode exchange request: {e}"))?;
     let signature_headers = app_sign::sign("POST", exchange_path, &body_bytes);
 
-    let client = reqwest::Client::new();
+    let client = crate::http::default_client();
     let mut req = client
         .post(&exchange_url)
         .header("Content-Type", "application/json")
@@ -250,7 +250,7 @@ pub async fn validate_api_key(
     };
 
     let url = format!("{base_url}/v1/models");
-    let client = reqwest::Client::new();
+    let client = crate::http::default_client();
     let response = client
         .get(&url)
         .header("x-api-key", &api_key)

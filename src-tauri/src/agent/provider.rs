@@ -550,7 +550,7 @@ pub async fn classify_turn_completion(
     model: &str,
     assistant_text: &str,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(45))
         .build()
@@ -623,7 +623,7 @@ pub async fn one_shot(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(90))
         .build()
@@ -711,7 +711,7 @@ pub async fn stream_message(
     interrupt: &AtomicBool,
     emit_text_deltas: bool,
 ) -> Result<StreamOutput, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
