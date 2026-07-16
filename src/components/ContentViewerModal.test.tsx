@@ -5,6 +5,7 @@ import { render } from "solid-js/web";
 
 const mockEditorInstance = vi.hoisted(() => ({
   dispose: vi.fn(),
+  onDidChangeCursorPosition: vi.fn(() => ({ dispose: vi.fn() })),
 }));
 
 // ── Module mocks ─────────────────────────────────────────────

@@ -74,6 +74,8 @@ pub fn run() {
             commands::mcp::mcp_reconnect,
             commands::shell::open_in_terminal,
             commands::power::set_keep_awake,
+            commands::ide::detect_ides,
+            commands::ide::open_in_ide,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

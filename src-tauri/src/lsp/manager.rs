@@ -24,8 +24,18 @@ impl LspManager {
         &mut self,
         workspace_root: &str,
     ) -> Result<(), String> {
-        self.start_tsserver(workspace_root)?;
-        self.start_rust_analyzer(workspace_root)?;
+        let root = Path::new(workspace_root);
+        // TypeScript server: only if a JS/TS project marker exists at root
+        if root.join("package.json").exists()
+            || root.join("tsconfig.json").exists()
+            || root.join("jsconfig.json").exists()
+        {
+            self.start_tsserver(workspace_root)?;
+        }
+        // Rust analyzer: only if Cargo.toml exists at root
+        if root.join("Cargo.toml").exists() {
+            self.start_rust_analyzer(workspace_root)?;
+        }
         Ok(())
     }
 

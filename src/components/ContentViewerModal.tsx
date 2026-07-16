@@ -16,6 +16,7 @@ interface ContentViewerModalProps {
   title: string;
   workspace: string;
   onClose: () => void;
+  onCursorLineChange?: (line: number) => void;
 }
 
 function resolvePath(filePath: string, workspace: string): string {
@@ -91,6 +92,12 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
       scrollBeyondLastLine: false,
       automaticLayout: true,
     });
+
+    // Report cursor position changes (for --goto support)
+    const cursorDisposable = editor.onDidChangeCursorPosition((e) => {
+      props.onCursorLineChange?.(e.position.lineNumber);
+    });
+    onCleanup(() => cursorDisposable.dispose());
 
     onCleanup(() => editor?.dispose());
   });

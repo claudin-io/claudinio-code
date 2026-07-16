@@ -10,6 +10,7 @@ interface FileEditorModalProps {
   filePath: string;
   rootPath: string;
   onClose: () => void;
+  onCursorLineChange?: (line: number) => void;
 }
 
 export function detectLanguage(filePath: string): string {
@@ -115,6 +116,12 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
       setIsDirty(editor!.getValue() !== originalContent());
     });
     activeDisposables.push(disposable);
+
+    // Report cursor position changes to parent (for --goto support)
+    const cursorDisposable = editor.onDidChangeCursorPosition((e) => {
+      props.onCursorLineChange?.(e.position.lineNumber);
+    });
+    activeDisposables.push(cursorDisposable);
 
     setLoading(false);
   };

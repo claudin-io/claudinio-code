@@ -1,3 +1,4 @@
+use crate::commands::procutil;
 use serde::Deserialize;
 use serde::Serialize;
 use std::process::Command;
@@ -33,6 +34,8 @@ pub fn execute(args: GrepArgs) -> Result<Vec<GrepMatch>, String> {
     if let Some(ref path) = args.path {
         cmd.arg(path);
     }
+
+    procutil::no_window(&mut cmd);
 
     let output = cmd.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

@@ -6,6 +6,7 @@ pub mod context;
 pub mod enhance;
 pub mod fs;
 pub mod git;
+pub mod ide;
 pub mod lsp;
 pub mod mcp;
 pub mod power;

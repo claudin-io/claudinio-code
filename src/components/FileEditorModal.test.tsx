@@ -11,6 +11,7 @@ const mockEditor = vi.hoisted(() => ({
   focus: vi.fn(),
   dispose: vi.fn(),
   onDidChangeModelContent: vi.fn(),
+  onDidChangeCursorPosition: vi.fn(() => ({ dispose: vi.fn() })),
   /** Stores the content-change callback passed to onDidChangeModelContent. */
   _contentChangeCb: null as (() => void) | null,
 }));

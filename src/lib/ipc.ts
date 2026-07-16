@@ -33,6 +33,14 @@ export function openInTerminal(path: string): Promise<void> {
   return invoke<void>("open_in_terminal", { path });
 }
 
+export function detectIdes(): Promise<string[]> {
+  return invoke<string[]>("detect_ides");
+}
+
+export function openInIde(path: string, ide: string, gotoLine?: number): Promise<void> {
+  return invoke<void>("open_in_ide", { path, ide, gotoLine });
+}
+
 export async function copyPath(path: string): Promise<void> {
   await navigator.clipboard.writeText(path);
 }
@@ -99,6 +107,8 @@ export interface AgentConfig {
   overrideBaseUrl?: string | null;
   overrideApiKey?: string | null;
   mcp?: McpServerMap;
+  codeIntelEnabled?: boolean;
+  preferredIde?: string | null;
   workspaceConfig?: Record<string, unknown> | null;
 }
 
@@ -119,6 +129,8 @@ export interface SetConfigArgs {
   overrideBaseUrl?: string;
   overrideApiKey?: string;
   mcp?: McpServerMap;
+  codeIntelEnabled?: boolean;
+  preferredIde?: string;
 }
 
 export interface ApproveArgs {

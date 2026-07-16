@@ -111,6 +111,19 @@ pub async fn open_workspace(
         e
     })?;
 
+    let code_intel_enabled = state.config.lock().await.code_intel_enabled;
+
+    // ── When code intel is disabled, skip indexing, embeddings, watcher, LSP ──
+    if !code_intel_enabled {
+        return Ok(IndexStatus {
+            status: "ok".into(),
+            files_count: 0,
+            symbols_count: 0,
+            embeddings_count: 0,
+            watcher_warning: None,
+        });
+    }
+
     let _ = app_handle.emit("index-progress", indexer::IndexProgress {
         status: "loading_model".into(),
         files_indexed: 0,
@@ -138,7 +151,7 @@ pub async fn open_workspace(
 
     // Phase 1: Start scanning WITHOUT embeddings immediately
     let scan_handle = spawn_blocking({
-        let db = Arc::clone(&db);
+        let db = db.clone();
         let path = path.clone();
         let app_handle = app_handle.clone();
         let progress_channel = progress_channel.clone();
@@ -223,15 +236,15 @@ pub async fn open_workspace(
 
     // Phase 5: If model loaded, generate embeddings for all indexed symbols
     if let Some(ref shared) = embedder {
-        let shared = std::sync::Arc::clone(shared);
-        let db2 = Arc::clone(&db);
+        let shared = Arc::clone(shared);
+        let db2 = db.clone();
         let emit_handle = app_handle.clone();
         let ws_path = path.clone();
         let join = spawn_blocking(move || {
             indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle), &ws_path)
         });
         let emit_handle = app_handle.clone();
-        let db3 = Arc::clone(&db);
+        let db3 = db.clone();
         let ws_path = path.clone();
         tokio::spawn(async move {
             let result = join.await;

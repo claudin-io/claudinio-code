@@ -118,6 +118,14 @@ pub struct AgentConfig {
     /// running (display can still turn off). See commands::power.
     #[serde(default = "default_true")]
     pub keep_awake: bool,
+    /// Whether the code-intelligence subsystem (FTS5 index, semantic search,
+    /// LSP integration) is enabled. Set false to disable when not needed.
+    #[serde(default = "default_true")]
+    pub code_intel_enabled: bool,
+    /// Preferred IDE for code-related actions. When set, used for operations
+    /// like "open file in editor". None = auto-detect.
+    #[serde(default)]
+    pub preferred_ide: Option<String>,
 }
 
 impl AgentConfig {
@@ -196,6 +204,8 @@ impl Default for AgentConfig {
             override_api_key: None,
             mcp: std::collections::HashMap::new(),
             keep_awake: true,
+            code_intel_enabled: true,
+            preferred_ide: None,
         }
     }
 }
