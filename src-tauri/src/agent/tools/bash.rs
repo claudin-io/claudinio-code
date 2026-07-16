@@ -2,12 +2,16 @@ use serde::Deserialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::num::NonZeroUsize;
+
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 
 use crate::agent::tools::ToolContext;
 use crate::commands::procutil::no_window_tokio;
+use lru::LruCache;
 
 const MAX_OUTPUT_BYTES: u64 = 100 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -285,7 +289,7 @@ mod tests {
                 base_commit: None,
                 auto_approve_git: false,
                 mcp: None, mode_ctl: None,
-            index_progress: None,            },
+            index_progress: None,            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),            },
         ))
     }
 
@@ -312,7 +316,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let out = rt.block_on(execute(
             BashArgs {
                 command: "cat".to_string(),
@@ -351,7 +355,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let out = rt.block_on(execute(
             BashArgs {
                 command: "pwd".to_string(),
@@ -389,7 +393,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let result = rt.block_on(execute(
             BashArgs {
                 command: "sleep 60".to_string(),

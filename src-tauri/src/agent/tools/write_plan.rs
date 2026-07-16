@@ -284,6 +284,7 @@ mod tests {
             mcp: None,
             mode_ctl: None,
             index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
         }
     }
 

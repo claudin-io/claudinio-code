@@ -10,10 +10,12 @@
 //! unknown kinds are simply skipped on load.
 
 use crate::agent::provider::Message;
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentMeta {
@@ -544,6 +546,29 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
     }
     summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(summaries)
+}
+
+pub fn load_records_cached(
+    path: &Path,
+    cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>
+) -> Result<Vec<SessionRecord>, String> {
+    let mut cache = cache.lock().unwrap();
+    if let Some((records, cached_at)) = cache.get(path) {
+        if cached_at.elapsed() < std::time::Duration::from_millis(800) {
+            return Ok(records.clone());
+        }
+    }
+    let records = load_records(path)?;
+    cache.put(path.to_path_buf(), (records.clone(), Instant::now()));
+    Ok(records)
+}
+
+pub fn invalidate_cache(
+    path: &Path,
+    cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>
+) {
+    let mut cache = cache.lock().unwrap();
+    cache.pop(path);
 }
 
 #[cfg(test)]

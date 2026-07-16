@@ -1,3 +1,4 @@
+use lru::LruCache;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -231,6 +232,7 @@ mod lld_gate_tests {
             mcp: None,
             mode_ctl: mode.map(|m| Arc::new(ModeCtl::new(m, ModeOrigin::Human))),
             index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
         };
         (ctx, root)
     }

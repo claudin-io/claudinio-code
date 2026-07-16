@@ -14,11 +14,13 @@ use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
 use crate::code_intel::indexer::IndexProgress;
 use crate::lsp::manager::LspManager;
+use lru::LruCache;
 use serde::Serialize;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -64,6 +66,9 @@ pub struct ToolContext {
     /// Index-dependent tools check this and return a user-friendly message
     /// instead of empty results when the index isn't ready yet.
     pub index_progress: Option<Arc<std::sync::Mutex<Option<IndexProgress>>>>,
+    /// LRU cache for the session's persisted records, so load_records in the
+    /// hot loop skips the filesystem when the file hasn't changed (800 ms TTL).
+    pub records_cache: std::sync::Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<crate::agent::persist::SessionRecord>, Instant)>>>,
 }
 
 impl ToolContext {
@@ -900,6 +905,7 @@ impl ReadTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroUsize;
 
     /// Helper: a ToolContext with a fresh ReadTracker and no workspace root
     /// (so any path is valid).
@@ -916,7 +922,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        }
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        }
     }
 
     /// Write a temp file with 20 numbered lines, return its path.
@@ -1160,7 +1166,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
         assert!(validate_path("/home/user/project/src", &ctx).is_ok());
@@ -1181,7 +1187,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
         assert!(validate_path("/", &ctx).is_err());
@@ -1202,7 +1208,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
     }
@@ -1221,7 +1227,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let home = dirs::home_dir().unwrap();
         for dir_name in crate::agent::skills::SKILL_DIR_NAMES {
             let p = home.join(dir_name).join("skills/typeset/SKILL.md");
@@ -1266,6 +1272,7 @@ mod tests {
             mcp: None,
             mode_ctl: None,
             index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
         };
 
         // Relative path within workspace — should be allowed
@@ -1298,6 +1305,7 @@ mod tests {
             mcp: None,
             mode_ctl: None,
             index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
         };
 
         // ".." traversal from root should escape the workspace
@@ -1331,7 +1339,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
         assert!(result.is_err());
@@ -1353,7 +1361,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
         assert!(result.is_err());
@@ -1375,7 +1383,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
         assert!(result.is_err(), "rg likely not installed in test env");
@@ -1396,7 +1404,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
         let output = result.expect("bash should succeed");
@@ -1420,7 +1428,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        };
+            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
         assert!(result.is_err());
