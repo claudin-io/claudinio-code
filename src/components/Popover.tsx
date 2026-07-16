@@ -4,6 +4,7 @@ import {
   onCleanup,
   onMount,
   Show,
+  untrack,
   type Component,
   type JSX,
 } from "solid-js";
@@ -35,6 +36,11 @@ export interface PopoverProps {
   originPoint?: AnchorPoint;
   /** Minimum distance from viewport edges in px (default: 8) */
   margin?: number;
+  /** Gap between the anchor point and the popover, in the direction of the
+   * origin point (default: 0). Applied after flipping and before clamping.
+   * Example: with anchorPoint={x:1,y:0} originPoint={x:0,y:0}, gap={x:8}
+   * pushes the popover 8px to the right of the trigger's right edge. */
+  gap?: { x?: number; y?: number };
   /** Show a full-screen backdrop that catches outside clicks (default: true) */
   showBackdrop?: boolean;
   /**
@@ -57,6 +63,7 @@ export function computePosition(
   anchorPoint: AnchorPoint,
   originPoint: AnchorPoint,
   margin: number,
+  gap?: { x?: number; y?: number },
 ): { top: number; left: number } {
   // 1. Global anchor point on the trigger
   const anchorX = trigger.left + trigger.width * anchorPoint.x;
@@ -83,6 +90,26 @@ export function computePosition(
     top = anchorY - popover.height * (1 - originPoint.y);
   }
 
+  // Gap — push the popover further away from the trigger, in the direction
+  // determined by which side of the popover connects to the anchor.
+  const gapX = gap?.x ?? 0;
+  const gapY = gap?.y ?? 0;
+  if (gapX !== 0) {
+    if (overflowRight || overflowLeft) {
+      // Flipped: (1 - origin) side now faces the anchor
+      left += gapX * (originPoint.x === 0 ? -1 : 1);
+    } else {
+      left += gapX * (originPoint.x === 0 ? 1 : -1);
+    }
+  }
+  if (gapY !== 0) {
+    if (overflowBottom || overflowTop) {
+      top += gapY * (originPoint.y === 0 ? -1 : 1);
+    } else {
+      top += gapY * (originPoint.y === 0 ? 1 : -1);
+    }
+  }
+
   // 5. Clamp as final fallback so the popover stays within the viewport
   left = Math.max(margin, Math.min(left, vw - popover.width - margin));
   top = Math.max(margin, Math.min(top, vh - popover.height - margin));
@@ -96,6 +123,7 @@ export const Popover: Component<PopoverProps> = (props) => {
   const anchorPt = () => props.anchorPoint ?? { x: 0, y: 1 };
   const originPt = () => props.originPoint ?? { x: 0, y: 0 };
   const margin = () => props.margin ?? 8;
+  const gap = () => props.gap;
 
   const [popoverWidth, setPopoverWidth] = createSignal(0);
   const [popoverHeight, setPopoverHeight] = createSignal(0);
@@ -104,6 +132,7 @@ export const Popover: Component<PopoverProps> = (props) => {
   const [popoverEl, setPopoverEl] = createSignal<HTMLDivElement | undefined>();
 
   // ── ResizeObserver: measure popover dimensions ─────────────────
+  // Only touches ready/width/height — does NOT trigger re-position.
   // Must use a signal-based ref (setPopoverEl) so the createEffect
   // reactively triggers when the DOM element appears. A plain `let`
   // popoverRef would NOT re-run the effect — the ref callback in JSX
@@ -129,19 +158,29 @@ export const Popover: Component<PopoverProps> = (props) => {
     });
   });
 
-  // ── Window resize trigger ─────────────────────────────────────
-  const [resizeVersion, setResizeVersion] = createSignal(0);
+  // ── Versions: what triggers a re-position ──────────────────────
+  // Incremented on window resize, causing the popover to re-snap to
+  // its trigger. Initial positioning is handled by the `ready()` signal.
+  const [posVersion, setPosVersion] = createSignal(0);
+
   onMount(() => {
-    const onResize = () => setResizeVersion((v) => v + 1);
+    const onResize = () => setPosVersion((v) => v + 1);
     window.addEventListener("resize", onResize);
     onCleanup(() => window.removeEventListener("resize", onResize));
   });
 
   // ── Recalculate position ──────────────────────────────────────
+  // Reactive triggers: ready() (first dimension measurement arrives)
+  // and posVersion (window resize). Reads dimensions via untrack() so
+  // ResizeObserver firings from chat streaming (minor layout shifts)
+  // NEVER cause a re-position — the card stays where it was placed
+  // when the user hovered.
   createEffect(() => {
-    resizeVersion(); // track resize changes
-    const pw = popoverWidth();
-    const ph = popoverHeight();
+    // Track both triggers — ready for initial position, posVersion for resize
+    void ready();
+    void posVersion();
+    const pw = untrack(() => popoverWidth());
+    const ph = untrack(() => popoverHeight());
 
     if (!props.open || pw === 0 || ph === 0) return;
 
@@ -169,7 +208,7 @@ export const Popover: Component<PopoverProps> = (props) => {
 
     if (!triggerRect) return;
 
-    const pos = computePosition(triggerRect, { width: pw, height: ph }, anchorPt(), originPt(), margin());
+    const pos = computePosition(triggerRect, { width: pw, height: ph }, anchorPt(), originPt(), margin(), gap());
 
     // Only update if the position actually changed — prevents infinite loops
     setPosition((prev) => {
