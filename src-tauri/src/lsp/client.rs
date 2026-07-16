@@ -1,3 +1,4 @@
+use crate::commands::procutil;
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, Read, Write};
@@ -33,11 +34,12 @@ pub struct HoverResult {
 
 impl LspClient {
     pub fn spawn(server_path: &str, workspace_uri: &str) -> Result<Self, String> {
-        let mut process = Command::new(server_path)
-            .stdin(Stdio::piped())
+        let mut cmd = Command::new(server_path);
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::null());
+        procutil::no_window(&mut cmd);
+        let mut process = cmd.spawn()
             .map_err(|e| format!("spawn {server_path}: {e}"))?;
 
         let stdin = process.stdin.take().ok_or("no stdin")?;

@@ -4,6 +4,7 @@
 
 use crate::agent::provider::{McpServerEntry, McpTransportConfig};
 use crate::agent::tools::ToolDef;
+use crate::commands::procutil;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -182,6 +183,7 @@ async fn connect_one(
                 if let Some(dir) = &workdir {
                     c.current_dir(dir);
                 }
+                procutil::no_window_tokio(c);
             });
             let transport = TokioChildProcess::new(cmd)
                 .map_err(|e| format!("failed to spawn '{command}': {e}"))?;

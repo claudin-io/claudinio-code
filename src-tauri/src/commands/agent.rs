@@ -498,6 +498,8 @@ pub struct SetConfigArgs {
     pub override_base_url: Option<String>,
     pub override_api_key: Option<String>,
     pub mcp: Option<std::collections::HashMap<String, crate::agent::provider::McpServerEntry>>,
+    pub code_intel_enabled: Option<bool>,
+    pub preferred_ide: Option<String>,
 }
 
 #[tauri::command]
@@ -558,6 +560,16 @@ pub async fn set_config(
     if let Some(mcp) = args.mcp {
         cfg.mcp = mcp;
     }
+    if let Some(code_intel_enabled) = args.code_intel_enabled {
+        cfg.code_intel_enabled = code_intel_enabled;
+    }
+    if let Some(preferred_ide) = args.preferred_ide {
+        cfg.preferred_ide = if preferred_ide.is_empty() {
+            None
+        } else {
+            Some(preferred_ide)
+        };
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -600,6 +612,8 @@ pub async fn get_config(
         "overrideBaseUrl": cfg.override_base_url,
         "overrideApiKey": cfg.override_api_key,
         "mcp": cfg.mcp,
+        "codeIntelEnabled": cfg.code_intel_enabled,
+        "preferredIde": cfg.preferred_ide,
         "workspaceConfig": workspace_config,
     }))
 }

@@ -1,5 +1,5 @@
 import { createResource, createSignal, For, Show, type Component } from "solid-js";
-import { listDir, openInTerminal, copyPath, type DirEntry } from "../lib/ipc";
+import { listDir, openInTerminal, copyPath, openInIde, type DirEntry } from "../lib/ipc";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { platform } from "../lib/platform";
@@ -71,6 +71,8 @@ export const FileTree: Component<{
   onDblClickFile: (path: string) => void;
   onOpenExternal: (path: string) => void;
   selectedPath: () => string | null;
+  availableIdes: string[];
+  activeEditorCursor: () => { path: string; line: number } | null;
 }> = (props) => {
   const [entries] = createResource(() => props.root, listDir);
   const [contextPos, setContextPos] = createSignal<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
@@ -111,8 +113,28 @@ export const FileTree: Component<{
               {
                 label: 'Copy Path',
                 icon: 'file-text',
+                separatorAfter: true,
                 action: () => copyPath(pos().path),
               },
+              // Only add IDE items if IDEs are detected
+              ...(props.availableIdes.length > 0
+                ? props.availableIdes.map((ide) => {
+                    // Use --goto if the active editor cursor points to this same file
+                    const cursor = props.activeEditorCursor();
+                    const gotoLine =
+                      cursor && cursor.path === pos().path
+                        ? cursor.line
+                        : undefined;
+                    return {
+                      label:
+                        ide === "vscode" ?
+                          (gotoLine ? `Open in VS Code (line ${gotoLine})` : `Open in VS Code`) :
+                          (gotoLine ? `Open in Cursor (line ${gotoLine})` : `Open in Cursor`),
+                      icon: "external-link" as const,
+                      action: () => openInIde(pos().path, ide, gotoLine).catch(console.error),
+                    };
+                  })
+                : []),
             ];
           };
           return (

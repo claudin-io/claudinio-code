@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -110,6 +110,9 @@ function App() {
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [configKeepAwake, setConfigKeepAwake] = createSignal(true);
+  const [configCodeIntelEnabled, setConfigCodeIntelEnabled] = createSignal(true);
+  const [configPreferredIde, setConfigPreferredIde] = createSignal("");
+  const [availableIdes, setAvailableIdes] = createSignal<string[]>([]);
   const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
   const [workspaceConfigFields, setWorkspaceConfigFields] = createSignal<Set<string>>(new Set());
   const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
@@ -135,6 +138,7 @@ function App() {
   const [updateCheckError, setUpdateCheckError] = createSignal<string | null>(null);
   const [updateProgress, setUpdateProgress] = createSignal<number | null>(null);
   const [updateInstallError, setUpdateInstallError] = createSignal<string | null>(null);
+  const [activeEditorCursor, setActiveEditorCursor] = createSignal<{ path: string; line: number } | null>(null);
 
   // Prevent the system from sleeping while any workspace session is actively
   // thinking. Waiting on user input/approval does not hold the wake lock.
@@ -318,6 +322,8 @@ function App() {
         setConfigYoloMode(cfg.yoloMode ?? false);
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
         setConfigKeepAwake(cfg.keepAwake ?? true);
+        setConfigCodeIntelEnabled(cfg.codeIntelEnabled ?? true);
+        setConfigPreferredIde(cfg.preferredIde ?? "");
         setConfigPlanSavePath(cfg.planSavePath ?? "");
         setConfigOverrideBaseUrl(cfg.overrideBaseUrl ?? "");
         setConfigOverrideApiKey(cfg.overrideApiKey ?? "");
@@ -347,6 +353,17 @@ function App() {
       setMcpStatuses(Object.fromEntries(statuses.map((s) => [s.name, s])));
     } catch {
       setMcpStatuses({});
+    }
+    // Detect available IDEs on this machine
+    try {
+      const ides = await detectIdes();
+      setAvailableIdes(ides);
+      // If no preferred IDE is set yet, auto-select the first available one
+      if (!configPreferredIde() && ides.length > 0) {
+        setConfigPreferredIde(ides[0]);
+      }
+    } catch {
+      setAvailableIdes([]);
     }
   };
 
@@ -384,6 +401,8 @@ function App() {
         maxParallelAgents: configMaxParallelAgents(),
         yoloMode: configYoloMode(),
         keepAwake: configKeepAwake(),
+        codeIntelEnabled: configCodeIntelEnabled(),
+        preferredIde: configPreferredIde() || undefined,
         planSavePath: configPlanSavePath() || undefined,
         yoloBlacklist: configYoloBlacklist()
           .split(",")
@@ -659,6 +678,19 @@ function App() {
               </span>
             </Show>
           </div>
+          <Show when={availableIdes().length > 0}>
+            <button
+              onClick={() => {
+                const ws = activeWorkspace();
+                const ide = configPreferredIde() || availableIdes()[0];
+                if (ws && ide) openInIde(ws, ide).catch(console.error);
+              }}
+              class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
+              title={t("app.config.openInIde")}
+            >
+              <Icon name="external-link" />
+            </button>
+          </Show>
           <button
             onClick={openConfig}
             class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
@@ -693,6 +725,7 @@ function App() {
               <ThemePicker />
             </div>
 
+
             <label class="mb-1 block text-xs text-ink-muted">{t("app.config.account")}</label>
             <Show
               when={accountLogin() || hasApiKey()}
@@ -717,6 +750,7 @@ function App() {
                     <div class="text-sm text-red-400">{settingsApiKeyError()}</div>
                   </Show>
                 </div>
+
               }
             >
               <div class="mb-2 flex items-center justify-between rounded-md border border-border-subtle bg-surface-0 p-2 text-sm">
@@ -725,6 +759,7 @@ function App() {
                   {t("app.config.signOut")}
                 </button>
               </div>
+
             </Show>
 
             {/* Support link */}
@@ -737,6 +772,7 @@ function App() {
                 <span>{t("app.config.support")}</span>
               </button>
             </div>
+
 
             {/* Easter egg "iddqd" — override fields for LLM */}
             <Show when={easterEggActive()}>
@@ -760,6 +796,7 @@ function App() {
                 />
                 <p class="mt-1 text-[11px] text-ink-faint">{t("app.config.overrideApiKeyHint")}</p>
               </div>
+
             </Show>
 
             <hr class="mb-4 border-border-subtle" />
@@ -785,6 +822,7 @@ function App() {
                   </button>
                 </Show>
               </div>
+
               <button
                 onClick={pickPlanPath}
                 class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle text-ink-muted hover:bg-surface-2 hover:text-ink"
@@ -793,12 +831,14 @@ function App() {
                 <Icon name="folder" class="h-4 w-4" />
               </button>
             </div>
+
             <div class="mb-4 flex items-center gap-2">
               <Show when={!configPlanSavePath()}>
                 <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.default")}</span>
               </Show>
               <p class="text-[11px] text-ink-faint">{t("app.config.planSavePathHint")}</p>
             </div>
+
 
             <div class="grid grid-cols-2 gap-x-4 mb-4">
             {/* Brain model selector */}
@@ -812,6 +852,7 @@ function App() {
                 <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
               </Show>
             </div>
+
             <Show
               when={easterEggActive()}
               fallback={
@@ -841,6 +882,7 @@ function App() {
             </Show>
             </div>
 
+
             {/* Builder model selector */}
             <div>
             <div class="flex items-center gap-2 mb-1">
@@ -852,6 +894,7 @@ function App() {
                 <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
               </Show>
             </div>
+
             <Show
               when={easterEggActive()}
               fallback={
@@ -880,7 +923,9 @@ function App() {
               />
             </Show>
             </div>
+
             </div>
+
 
             {/* Max Parallel Agents slider — full width */}
             <div class="mb-4">
@@ -893,6 +938,7 @@ function App() {
                   <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
                 </Show>
               </div>
+
               <div class="flex items-center gap-2">
                 <span class="text-[10px] text-ink-faint w-10 text-right">{t("app.config.slower")}</span>
                 <input
@@ -910,8 +956,10 @@ function App() {
                 />
                 <span class="text-[10px] text-ink-faint w-10">{t("app.config.faster")}</span>
               </div>
+
               <p class="mt-1 mb-0 text-[11px] text-ink-faint">{t("app.config.maxParallelAgentsHint")}</p>
             </div>
+
 
             <hr class="mb-4 border-border-subtle" />
 
@@ -926,6 +974,7 @@ function App() {
                 <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
               </Show>
             </div>
+
             <input
               type="number"
               min="0"
@@ -945,6 +994,7 @@ function App() {
             <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.maxRoundsHint")}</p>
             </div>
 
+
             <div>
             <div class="flex items-center gap-2 mb-1">
               <label class="block text-xs text-ink-muted">{t("app.config.subMaxRounds")}</label>
@@ -955,6 +1005,7 @@ function App() {
                 <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
               </Show>
             </div>
+
             <input
               type="number"
               min="0"
@@ -974,6 +1025,7 @@ function App() {
             <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
             </div>
 
+
             <div>
             <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenCycles")}</label>
             <input
@@ -990,6 +1042,7 @@ function App() {
             <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenCyclesHint")}</p>
             </div>
 
+
             <div>
             <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenStalls")}</label>
             <input
@@ -1005,7 +1058,9 @@ function App() {
             />
             <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenStallsHint")}</p>
             </div>
+
             </div>
+
 
             <hr class="mb-4 border-border-subtle" />
 
@@ -1054,6 +1109,42 @@ function App() {
               <span class="text-[11px] text-ink-faint">{t("app.config.keepAwakeHint")}</span>
             </label>
 
+            <label class="mb-4 flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={configCodeIntelEnabled()}
+                onChange={(e) => setConfigCodeIntelEnabled(e.currentTarget.checked)}
+                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+              />
+              <span class="text-sm font-medium text-ink">{t("app.config.codeIntel")}</span>
+              <span class="text-[11px] text-ink-faint">{t("app.config.codeIntelHint")}</span>
+            </label>
+
+            <label class="mb-3 block flex cursor-pointer items-center gap-2">
+              <span class="text-sm font-medium text-ink">{t("app.config.preferredIde")}</span>
+            </label>
+            <Show
+              when={availableIdes().length > 0}
+              fallback={
+                <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.noIdesDetected")}</p>
+              }
+            >
+              <select
+                value={configPreferredIde()}
+                onChange={(e) => setConfigPreferredIde(e.currentTarget.value)}
+                class="mb-3 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              >
+                <For each={availableIdes()}>
+                  {(ide) => (
+                    <option value={ide} selected={configPreferredIde() === ide}>
+                      {ide === "vscode" ? "VS Code" : "Cursor"}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </Show>
+            <p class="-mt-2 mb-3 text-[11px] text-ink-faint">{t("app.config.preferredIdeHint")}</p>
+
             <hr class="mb-4 border-border-subtle" />
 
             <div class="mb-2 flex items-center justify-between">
@@ -1073,7 +1164,9 @@ function App() {
                   {mcpTesting() ? t("app.config.mcpTesting") : t("app.config.mcpTest")}
                 </button>
               </div>
+
             </div>
+
 
             <textarea
               value={configMcpJson()}
@@ -1105,9 +1198,11 @@ function App() {
                         {status.connected ? t("app.config.mcpToolCount", String(status.toolCount)) : (status.error ?? t("app.config.mcpNotConnected"))}
                       </span>
                     </div>
+
                   )}
                 </For>
               </div>
+
             </Show>
 
             {/* Updates */}
@@ -1131,6 +1226,7 @@ function App() {
               </span>
             </div>
 
+
             <div class="flex justify-end gap-2">
               <button
                 onClick={() => setShowConfig(false)}
@@ -1145,7 +1241,9 @@ function App() {
                 {t("app.config.save")}
               </button>
             </div>
+
           </div>
+
         </div>
       </Show>
 
@@ -1173,6 +1271,7 @@ function App() {
                   {t("update.installNow")}
                 </button>
               </div>
+
             }
           >
             <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
@@ -1182,6 +1281,7 @@ function App() {
                 style={updateProgress()! >= 0 ? { width: `${Math.round(updateProgress()! * 100)}%` } : undefined}
               />
             </div>
+
             <div class="mt-1.5 text-xs text-ink-muted">{t("update.downloading")}</div>
           </Show>
         </div>
@@ -1208,6 +1308,7 @@ function App() {
                     {t("app.sidebar.projects")}
                   </span>
                 </div>
+
 
                 <div class="flex-1 overflow-y-auto">
                   {/* Open workspaces — clicking switches the visible chat; each
@@ -1251,6 +1352,7 @@ function App() {
                             <div class="truncate text-[13px] text-ink">
                               {proj.split("/").pop()}
                             </div>
+
                             <div class="truncate text-[11px] text-ink-faint">
                               {workspaceStatus[proj] === "thinking"
                                 ? t("chat.status.thinking")
@@ -1260,7 +1362,9 @@ function App() {
                                     ? t("chat.status.awaitingInput")
                                     : proj}
                             </div>
+
                           </div>
+
                         </button>
                         <button
                           class="hidden shrink-0 rounded p-0.5 text-ink-faint hover:bg-surface-3 hover:text-ink group-hover:block"
@@ -1273,6 +1377,7 @@ function App() {
                           <Icon name="x" class="h-3 w-3" />
                         </button>
                       </div>
+
                     )}
                   </For>
 
@@ -1294,10 +1399,13 @@ function App() {
                             <div class="truncate text-[13px] text-ink">
                               {proj.split("/").pop()}
                             </div>
+
                             <div class="truncate text-[11px] text-ink-faint">
                               {proj}
                             </div>
+
                           </div>
+
                         </button>
                         <button
                           class="hidden shrink-0 rounded p-0.5 text-ink-faint hover:bg-surface-3 hover:text-ink group-hover:block"
@@ -1310,6 +1418,7 @@ function App() {
                           <Icon name="x" class="h-3 w-3" />
                         </button>
                       </div>
+
                     )}
                   </For>
 
@@ -1317,8 +1426,10 @@ function App() {
                     <div class="px-3 py-8 text-center text-xs text-ink-faint">
                       {t("app.sidebar.noRecent")}
                     </div>
+
                   </Show>
                 </div>
+
 
                 <div class="border-t border-border-subtle p-2">
                   <button
@@ -1338,6 +1449,7 @@ function App() {
                     </button>
                   </Show>
                 </div>
+
               </>
             }
           >
@@ -1353,6 +1465,7 @@ function App() {
                 {activeWorkspace()?.split("/").pop()}
               </span>
             </div>
+
             <div class="flex-1 overflow-hidden">
               <FileTree
                 root={activeWorkspace()!}
@@ -1360,8 +1473,11 @@ function App() {
                 onDblClickFile={setEditorFilePath}
                 onOpenExternal={openExternal}
                 selectedPath={selectedFile}
+                availableIdes={availableIdes()}
+                activeEditorCursor={activeEditorCursor}
               />
             </div>
+
           </Show>
 
           <Show when={activeWorkspace() && !showTree() && (progress() || indexStatus())}>
@@ -1375,26 +1491,32 @@ function App() {
                           <Icon name="file" class="w-3 h-3" />
                           <span>{t("app.index.filesLabel", (indexStatus() as IndexStatus).filesCount)}</span>
                         </div>
+
                         <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
                           <Icon name="layers" class="w-3 h-3" />
                           <span>{t("app.index.symbolsLabel", (indexStatus() as IndexStatus).symbolsCount)}</span>
                         </div>
+
                         <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
                           <Icon name="brain" class="w-3 h-3" />
                           <span>{t("app.index.embeddingsLabel", (indexStatus() as IndexStatus).embeddingsCount)}</span>
                         </div>
+
                         <Show when={(indexStatus() as IndexStatus).watcherWarning}>
                           <div class="flex items-center gap-1 font-mono text-[10px] text-yellow-400">
                             <Icon name="alert-triangle" class="w-3 h-3" />
                             <span>{(indexStatus() as IndexStatus).watcherWarning}</span>
                           </div>
+
                         </Show>
                       </div>
+
                     }
                   >
                     <div class="font-mono text-[10px] text-ink-faint">
                       {indexStatus() as string}
                     </div>
+
                   </Show>
                 }
               >
@@ -1403,11 +1525,13 @@ function App() {
                     <div class="font-mono text-[10px] text-ink-faint">
                       {t("app.index.loadingModel")}
                     </div>
+
                   </Match>
                   <Match when={progress()!.status === "embeddings_done"}>
                     <div class="font-mono text-[10px] text-ink-faint">
                       {t("app.index.embeddingsReady")} · {progress()!.symbolsIndexed} {t("app.index.symbols")}
                     </div>
+
                   </Match>
                   <Match
                     when={
@@ -1418,6 +1542,7 @@ function App() {
                     <div class="font-mono text-[10px] text-red-400">
                       {t("app.index.embeddingFailed")}
                     </div>
+
                   </Match>
                   <Match when={progress()!.totalFiles > 0}>
                     <div class="flex flex-col gap-1">
@@ -1431,6 +1556,7 @@ function App() {
                           {progress()!.filesIndexed}/{progress()!.totalFiles}
                         </span>
                       </div>
+
                       <div class="h-1 w-full overflow-hidden rounded-full bg-surface-0">
                         <div
                           class="h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
@@ -1442,14 +1568,18 @@ function App() {
                           }}
                         />
                       </div>
+
                       <div class="font-mono text-[9px] text-ink-faint">
                         {progress()!.symbolsIndexed} {t("app.index.symbols")}
                       </div>
+
                     </div>
+
                   </Match>
                 </Switch>
               </Show>
             </div>
+
           </Show>
         </aside>
 
@@ -1472,6 +1602,7 @@ function App() {
                 >
                   <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} />
                 </div>
+
               )}
             </For>
           </Show>
@@ -1493,6 +1624,7 @@ function App() {
                     onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
                   />
                 </div>
+
               )}
             </For>
           </aside>
@@ -1503,6 +1635,7 @@ function App() {
           filePath={editorFilePath()!}
           rootPath={activeWorkspace()!}
           onClose={() => setEditorFilePath(null)}
+          onCursorLineChange={(line) => setActiveEditorCursor({ path: editorFilePath()!, line })}
         />
       </Show>
       <Show when={contextPos()}>
@@ -1524,8 +1657,26 @@ function App() {
               {
                 label: 'Copy Path',
                 icon: 'file-text',
+                separatorAfter: true,
                 action: () => copyPath(pos().path),
               },
+              ...(availableIdes().length > 0
+                ? availableIdes().map((ide) => {
+                    const cursor = activeEditorCursor();
+                    const gotoLine =
+                      cursor && cursor.path === pos().path
+                        ? cursor.line
+                        : undefined;
+                    return {
+                      label:
+                        ide === "vscode"
+                          ? (gotoLine ? `Open in VS Code (line ${gotoLine})` : `Open in VS Code`)
+                          : (gotoLine ? `Open in Cursor (line ${gotoLine})` : `Open in Cursor`),
+                      icon: 'external-link' as const,
+                      action: () => openInIde(pos().path, ide, gotoLine).catch(console.error),
+                    };
+                  })
+                : []),
             ]}
             onClose={() => setContextPos(null)}
           />

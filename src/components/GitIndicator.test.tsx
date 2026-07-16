@@ -5,7 +5,6 @@ import { render } from "solid-js/web";
 
 vi.mock("../lib/ipc", () => ({
   gitStatus: vi.fn(),
-  gitBranch: vi.fn(),
   checkGitAvailable: vi.fn(),
 }));
 
@@ -22,7 +21,7 @@ vi.mock("./Icon", () => ({
 // ── Imports (after mocks) ──────────────────────────────────────────
 
 import { GitIndicator } from "./GitIndicator";
-import { gitStatus, gitBranch, checkGitAvailable } from "../lib/ipc";
+import { gitStatus, checkGitAvailable } from "../lib/ipc";
 import type { Mock } from "vitest";
 import type { GitStatus } from "../lib/ipc";
 
@@ -71,7 +70,6 @@ describe("GitIndicator", () => {
     vi.useFakeTimers();
     (checkGitAvailable as Mock).mockResolvedValue(true);
     (gitStatus as Mock).mockResolvedValue(makeStatus());
-    (gitBranch as Mock).mockResolvedValue("main");
   });
 
   afterEach(() => {
@@ -121,41 +119,7 @@ describe("GitIndicator", () => {
     expect(btn!.className).not.toContain("opacity-50");
   });
 
-  // ── shows branch name ────────────────────────────────────────────────
-
-  it("shows branch name in tooltip when git has changes", async () => {
-    (gitBranch as Mock).mockResolvedValue("feature/new-ui");
-    (gitStatus as Mock).mockResolvedValue(
-      makeStatus({
-        hasChanges: true,
-        files: [{ path: "a.ts", status: "M", additions: 1, deletions: 0 }],
-        totalAdditions: 1,
-        totalDeletions: 0,
-      }),
-    );
-
-    mount();
-    await drainMicrotasks();
-
-    const btn = document.body.querySelector("button")!;
-    // tooltip = `${branch} · ${files > 0 ? t("git.filesChanged", ...) : t("git.noChanges")}`
-    expect(btn.title).toContain("feature/new-ui");
-    expect(btn.title).toContain("·");
-  });
-
-  it("shows branch name in tooltip when git has no changes", async () => {
-    (gitBranch as Mock).mockResolvedValue("main");
-    (gitStatus as Mock).mockResolvedValue(makeStatus());
-
-    mount();
-    await drainMicrotasks();
-
-    const btn = document.body.querySelector("button")!;
-    expect(btn.title).toContain("main");
-    expect(btn.title).toContain("git.noChanges");
-  });
-
-  // ── changes count ────────────────────────────────────────────────────
+  // ── shows changes count ──────────────────────────────────────────────
 
   it("shows changes label when git has changes", async () => {
     (gitStatus as Mock).mockResolvedValue(
@@ -219,7 +183,7 @@ describe("GitIndicator", () => {
 
   // ── polling behavior ─────────────────────────────────────────────────
 
-  it("polls gitStatus every 10 seconds and gitBranch every 30 seconds", async () => {
+  it("polls gitStatus every 10 seconds", async () => {
     mount();
     await drainMicrotasks();
 
@@ -231,19 +195,11 @@ describe("GitIndicator", () => {
     // Drain microtasks so the resolved promise's .then() resets statusInFlight
     await drainMicrotasks();
     expect(gitStatus).toHaveBeenCalledTimes(1);
-    expect(gitBranch).toHaveBeenCalledTimes(0);
 
     // Advance another 10s (total 20s) → gitStatus fires again
     vi.advanceTimersByTime(10000);
     await drainMicrotasks();
     expect(gitStatus).toHaveBeenCalledTimes(2);
-    expect(gitBranch).toHaveBeenCalledTimes(0);
-
-    // Advance another 10s (total 30s) → gitStatus fires, AND gitBranch fires
-    vi.advanceTimersByTime(10000);
-    await drainMicrotasks();
-    expect(gitStatus).toHaveBeenCalledTimes(3);
-    expect(gitBranch).toHaveBeenCalledTimes(1);
   });
 
   it("skips a gitStatus poll tick when the previous request is still in-flight", async () => {
@@ -259,18 +215,6 @@ describe("GitIndicator", () => {
     expect(gitStatus).toHaveBeenCalledTimes(0);
   });
 
-  it("skips a gitBranch poll tick when the previous request is still in-flight", async () => {
-    (gitBranch as Mock).mockImplementation(() => new Promise(() => {}));
-    mount();
-    await drainMicrotasks();
-
-    vi.clearAllMocks();
-
-    // Advance 30s — branch interval fires but is skipped by the guard
-    vi.advanceTimersByTime(30000);
-    expect(gitBranch).toHaveBeenCalledTimes(0);
-  });
-
   it("does not start polling when git is not available", async () => {
     (checkGitAvailable as Mock).mockResolvedValue(false);
     mount();
@@ -282,73 +226,20 @@ describe("GitIndicator", () => {
     // so no intervals were created → no calls should happen
     vi.advanceTimersByTime(30000);
     expect(gitStatus).toHaveBeenCalledTimes(0);
-    expect(gitBranch).toHaveBeenCalledTimes(0);
   });
 
   // ── error handling ───────────────────────────────────────────────────
 
   it("handles gitStatus rejection gracefully — shows no-changes label", async () => {
     (gitStatus as Mock).mockRejectedValue(new Error("git error"));
-
     mount();
     await drainMicrotasks();
 
-    // After rejection: status = null, loading = false
-    // hasChanges = false → shows git.noChanges
     const btn = document.body.querySelector("button")!;
     expect(btn.textContent).toContain("git.noChanges");
-    // loading is false, so the opacity-30 class must NOT be present
-    expect(btn.className).not.toContain("opacity-30");
-    // No changes → text-ink-faint opacity-50
     expect(btn.className).toContain("text-ink-faint");
     expect(btn.className).toContain("opacity-50");
   });
-
-  it("handles gitBranch rejection gracefully — branch stays empty string", async () => {
-    (gitBranch as Mock).mockRejectedValue(new Error("branch error"));
-
-    mount();
-    await drainMicrotasks();
-
-    const btn = document.body.querySelector("button")!;
-    // When branch is empty, tooltip falls back to label()
-    expect(btn.title).toBe("git.noChanges");
-  });
-
-  // ── tooltip edge cases ──────────────────────────────────────────────
-
-  it("uses label as tooltip when branch is empty and no files changed", async () => {
-    (gitBranch as Mock).mockResolvedValue("");
-    (gitStatus as Mock).mockResolvedValue(makeStatus());
-
-    mount();
-    await drainMicrotasks();
-
-    const btn = document.body.querySelector("button")!;
-    // branch is falsy → tooltip = label() = "git.noChanges"
-    expect(btn.title).toBe("git.noChanges");
-  });
-
-  it("uses label as tooltip when branch is empty and files changed", async () => {
-    (gitBranch as Mock).mockResolvedValue("");
-    (gitStatus as Mock).mockResolvedValue(
-      makeStatus({
-        hasChanges: true,
-        files: [{ path: "a.ts", status: "M", additions: 2, deletions: 1 }],
-        totalAdditions: 2,
-        totalDeletions: 1,
-      }),
-    );
-
-    mount();
-    await drainMicrotasks();
-
-    const btn = document.body.querySelector("button")!;
-    // branch is falsy → tooltip = label() = "git.changes"
-    expect(btn.title).toBe("git.changes");
-  });
-
-  // ── button class edge cases ──────────────────────────────────────────
 
   it("applies has-changes button classes when git has changes", async () => {
     (gitStatus as Mock).mockResolvedValue(
@@ -408,7 +299,6 @@ describe("GitIndicator", () => {
     // Advance 30s — no intervals should fire because they were cleared
     vi.advanceTimersByTime(30000);
     expect(gitStatus).toHaveBeenCalledTimes(0);
-    expect(gitBranch).toHaveBeenCalledTimes(0);
   });
 
   // ── guard reset after completion ─────────────────────────────────────
@@ -433,11 +323,10 @@ describe("GitIndicator", () => {
 
   // ── workspace propagation ────────────────────────────────────────────
 
-  it("calls gitStatus and gitBranch with the provided workspace", async () => {
+  it("calls gitStatus with the provided workspace", async () => {
     mount();
     await drainMicrotasks();
 
     expect(gitStatus).toHaveBeenCalledWith("/test/workspace");
-    expect(gitBranch).toHaveBeenCalledWith("/test/workspace");
   });
 });

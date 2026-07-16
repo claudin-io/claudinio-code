@@ -1,5 +1,5 @@
 import { createSignal, createMemo, createEffect, onCleanup, Show, type Component } from "solid-js";
-import { gitStatus, gitBranch, checkGitAvailable, type GitStatus } from "../lib/ipc";
+import { gitStatus, checkGitAvailable, type GitStatus } from "../lib/ipc";
 import { Icon } from "./Icon";
 import { t } from "../lib/grill-me";
 
@@ -8,7 +8,6 @@ export const GitIndicator: Component<{
   onShowChanges: () => void;
 }> = (props) => {
   const [status, setStatus] = createSignal<GitStatus | null>(null);
-  const [branch, setBranch] = createSignal<string>("");
   const [loading, setLoading] = createSignal(true);
   const [gitAvailable, setGitAvailable] = createSignal<boolean | null>(null);
 
@@ -16,7 +15,6 @@ export const GitIndicator: Component<{
   // antivirus scanning on Windows, etc.), the next poll tick skips instead of
   // queuing another invoke on top of the one still in flight.
   let statusInFlight = false;
-  let branchInFlight = false;
 
   const refreshStatus = async () => {
     if (statusInFlight) return;
@@ -33,19 +31,6 @@ export const GitIndicator: Component<{
     }
   };
 
-  const refreshBranch = async () => {
-    if (branchInFlight) return;
-    branchInFlight = true;
-    try {
-      const b = await gitBranch(props.workspace);
-      setBranch(b);
-    } catch (e) {
-      setBranch("");
-    } finally {
-      branchInFlight = false;
-    }
-  };
-
   // Check git availability once on mount
   checkGitAvailable().then(setGitAvailable);
 
@@ -54,20 +39,16 @@ export const GitIndicator: Component<{
     if (gitAvailable() !== true) return;
 
     refreshStatus();
-    refreshBranch();
 
     const intervalId = setInterval(refreshStatus, 10000);
-    const branchIntervalId = setInterval(refreshBranch, 30000);
 
     onCleanup(() => {
       clearInterval(intervalId);
-      clearInterval(branchIntervalId);
     });
   });
 
   const s = status;
   const loading_ = loading;
-  const branch_ = branch;
 
   const hasChanges = createMemo(() => {
     const v = s();
@@ -87,12 +68,8 @@ export const GitIndicator: Component<{
   });
 
   const tooltip = createMemo(() => {
-    const b = branch_();
     const fc = fileCount();
-    if (b) {
-      return `${b} · ${fc > 0 ? t("git.filesChanged", String(fc)) : t("git.noChanges")}`;
-    }
-    return label();
+    return fc > 0 ? t("git.filesChanged", String(fc)) : t("git.noChanges");
   });
 
   const btnClass = createMemo(() => {
