@@ -279,6 +279,7 @@ pub async fn send_message(
         mcp: Some(mcp),
         mode_ctl: Some(mode_ctl.clone()),
         index_progress: Some(ws.index_progress.clone()),
+        records_cache: state.records_cache.clone(),
     };
 
     let residual = steering.drain();
@@ -769,6 +770,7 @@ pub async fn compact_session(
         mcp: None,
         mode_ctl: None,
         index_progress: Some(ws.index_progress.clone()),
+        records_cache: state.records_cache.clone(),
     };
 
     let summary = session::compact_history(
@@ -1055,6 +1057,7 @@ pub async fn commit_and_push(
         mcp: Some(mcp),
         mode_ctl: None,
         index_progress: Some(ws.index_progress.clone()),
+        records_cache: state.records_cache.clone(),
     };
 
     // Register the steering controller so interrupt_session can find it

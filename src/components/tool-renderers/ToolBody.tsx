@@ -1,6 +1,25 @@
 import { createMemo, For, Match, Show, Switch, type Component } from "solid-js";
 import { marked } from "marked";
-import hljs from "highlight.js";
+import hljs from "highlight.js/lib/core";
+import langTypescript from "highlight.js/lib/languages/typescript";
+import langJavascript from "highlight.js/lib/languages/javascript";
+import langRust from "highlight.js/lib/languages/rust";
+import langPython from "highlight.js/lib/languages/python";
+import langJson from "highlight.js/lib/languages/json";
+import langBash from "highlight.js/lib/languages/bash";
+import langXml from "highlight.js/lib/languages/xml";
+import langCss from "highlight.js/lib/languages/css";
+import langMarkdown from "highlight.js/lib/languages/markdown";
+
+hljs.registerLanguage("typescript", langTypescript);
+hljs.registerLanguage("javascript", langJavascript);
+hljs.registerLanguage("rust", langRust);
+hljs.registerLanguage("python", langPython);
+hljs.registerLanguage("json", langJson);
+hljs.registerLanguage("bash", langBash);
+hljs.registerLanguage("xml", langXml);
+hljs.registerLanguage("css", langCss);
+hljs.registerLanguage("markdown", langMarkdown);
 import type { ToolCallData, ToolResultData } from "../../lib/ipc";
 import { Icon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
@@ -9,7 +28,7 @@ import { detectLanguageFromPath } from "./toolPresentation";
 
 function highlight(code: string, lang: string): string {
   try {
-    return hljs.getLanguage(lang) ? hljs.highlight(code, { language: lang }).value : hljs.highlightAuto(code).value;
+    return hljs.getLanguage(lang) ? hljs.highlight(code, { language: lang }).value : code;
   } catch {
     return code;
   }

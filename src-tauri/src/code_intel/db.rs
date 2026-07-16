@@ -84,6 +84,9 @@ const TEST_FILE_PENALTY: f32 = 0.10;
 /// large file (many symbols) can't dominate the whole ranking.
 const MAX_RESULTS_PER_FILE: usize = 3;
 
+/// Number of embedding rows loaded per page in the paginated semantic scan.
+const EMBEDDING_PAGE_SIZE: i64 = 2000;
+
 const STOPWORDS: &[&str] = &["the", "and", "for", "with"];
 
 /// Lowercase, alphanumeric tokens of at least 3 chars, minus trivial stopwords.
@@ -623,6 +626,56 @@ impl IndexDb {
         Ok(results)
     }
 
+    /// Load a single page of embedding rows, ordered deterministically.
+    pub fn load_embeddings_page(
+        &self,
+        page_size: i64,
+        offset: i64,
+    ) -> Result<Vec<(SymbolRecord, i64, i64, Vec<f32>)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.file_id, s.name, s.kind, s.signature,
+                        s.start_line, s.start_col, s.end_line, s.end_col, f.path,
+                        e.start_line, e.end_line, e.embedding
+                 FROM symbols s
+                 JOIN files f ON f.id = s.file_id
+                 JOIN symbol_embeddings e ON e.symbol_id = s.id
+                 ORDER BY s.id, e.start_line
+                 LIMIT ? OFFSET ?",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let results = stmt
+            .query_map(params![page_size, offset], |row| {
+                let blob: Vec<u8> = row.get(12)?;
+                let embedding: Vec<f32> = blob
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap_or([0; 4])))
+                    .collect();
+                Ok((
+                    SymbolRecord {
+                        id: row.get(0)?,
+                        file_id: row.get(1)?,
+                        name: row.get(2)?,
+                        kind: row.get(3)?,
+                        signature: row.get(4)?,
+                        start_line: row.get(5)?,
+                        start_col: row.get(6)?,
+                        end_line: row.get(7)?,
+                        end_col: row.get(8)?,
+                        file_path: row.get(9)?,
+                    },
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    embedding,
+                ))
+            })
+            .map_err(|e| format!("query: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
     pub fn search_by_embedding(
         &self,
         query_text: &str,
@@ -630,53 +683,67 @@ impl IndexDb {
         limit: usize,
     ) -> Result<Vec<SemanticSearchResult>, String> {
         let tokens = tokenize_query(query_text);
-        let all = self.load_all_embeddings()?;
-        // Score every chunk, then keep only the best chunk per symbol so a
-        // long function split into many chunks still yields one result —
-        // pointed at the chunk's line range, not the whole symbol.
+        // Score every chunk via a paginated scan, then keep only the best
+        // chunk per symbol so a long function split into many chunks still
+        // yields one result — pointed at the chunk's line range, not the
+        // whole symbol.
         let mut best_per_symbol: std::collections::HashMap<i64, SemanticSearchResult> =
             std::collections::HashMap::new();
-        for (sym, chunk_start, chunk_end, emb) in all {
-            if emb.len() != query_vec.len() {
-                continue;
+        let mut offset: i64 = 0;
+        loop {
+            let page = self.load_embeddings_page(EMBEDDING_PAGE_SIZE, offset)?;
+            let page_len = page.len();
+            if page.is_empty() {
+                break;
             }
-            let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
-            let cosine = dot.max(0.0).min(1.0);
-            let file_path = sym.file_path.unwrap_or_default();
-            let boost = lexical_boost(&tokens, &sym.name, &file_path);
-            let mut penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
-            if is_test_file(&file_path) || is_test_symbol(&sym.name) {
-                penalty += TEST_FILE_PENALTY;
-            }
-            let score = (cosine + boost - penalty).clamp(0.0, 1.0);
-            if score < MIN_SEMANTIC_SCORE {
-                continue;
-            }
-            let (start_line, end_line) = if chunk_start > 0 {
-                (chunk_start, chunk_end)
-            } else {
-                (sym.start_line, sym.end_line)
-            };
-            let candidate = SemanticSearchResult {
-                symbol_id: sym.id,
-                name: sym.name,
-                kind: sym.kind,
-                file_path,
-                start_line,
-                end_line,
-                signature: sym.signature,
-                score,
-                snippet: None,
-            };
-            match best_per_symbol.entry(sym.id) {
-                std::collections::hash_map::Entry::Occupied(mut e) => {
-                    if candidate.score > e.get().score {
+            for (sym, chunk_start, chunk_end, emb) in page {
+                if emb.len() != query_vec.len() {
+                    continue;
+                }
+                let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
+                let cosine = dot.max(0.0).min(1.0);
+                let file_path = sym.file_path.unwrap_or_default();
+                let boost = lexical_boost(&tokens, &sym.name, &file_path);
+                let mut penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
+                if is_test_file(&file_path) || is_test_symbol(&sym.name) {
+                    penalty += TEST_FILE_PENALTY;
+                }
+                let score = (cosine + boost - penalty).clamp(0.0, 1.0);
+                if score < MIN_SEMANTIC_SCORE {
+                    continue;
+                }
+                let (start_line, end_line) = if chunk_start > 0 {
+                    (chunk_start, chunk_end)
+                } else {
+                    (sym.start_line, sym.end_line)
+                };
+                let candidate = SemanticSearchResult {
+                    symbol_id: sym.id,
+                    name: sym.name,
+                    kind: sym.kind,
+                    file_path,
+                    start_line,
+                    end_line,
+                    signature: sym.signature,
+                    score,
+                    snippet: None,
+                };
+                match best_per_symbol.entry(sym.id) {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        if candidate.score > e.get().score {
+                            e.insert(candidate);
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
                         e.insert(candidate);
                     }
                 }
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(candidate);
-                }
+            }
+            // Advance the cursor by the actual number of rows read.
+            offset += page_len as i64;
+            // If the page was smaller than the page size, there are no more rows.
+            if (page_len as i64) < EMBEDDING_PAGE_SIZE {
+                break;
             }
         }
         let mut scored: Vec<SemanticSearchResult> = best_per_symbol.into_values().collect();

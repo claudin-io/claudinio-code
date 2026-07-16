@@ -135,7 +135,7 @@ pub async fn compact_history(
     steering: &Arc<SteeringCtl>,
 ) -> Result<String, String> {
     let jsonl_path = store.path.to_string_lossy().to_string();
-    let records = crate::agent::persist::load_records(&store.path).unwrap_or_default();
+    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
     let tail_turns = compute_tail_turns(&records);
 
     let summary = subagent::run_summary_agent(
@@ -159,15 +159,16 @@ pub async fn compact_history(
         tail_turns,
         ts: now_ms(),
     })?;
+    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
 
     // Record the post-compaction context size so the UI meter drops even for
     // manual compaction (no run in flight). The estimate excludes the system
     // prompt/tools; the next run's Status corrects it with the real number.
-    let new_recs = crate::agent::persist::load_records(&store.path).unwrap_or_default();
+    let new_recs = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
     let new_history = crate::agent::persist::history_from_records(&new_recs);
     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(&new_recs);
     let new_context = estimate_tokens(&new_history, "", &[]);
-    write_status(store, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
+    write_status(store, ctx, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
 
     Ok(summary)
 }
@@ -744,11 +745,12 @@ fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolD
 }
 
 /// Push a message onto history and persist it as a Turn record.
-fn push_turn(history: &mut Vec<Message>, store: &SessionStore, message: Message) {
+fn push_turn(history: &mut Vec<Message>, store: &SessionStore, ctx: &ToolContext, message: Message) {
     store.try_append(&SessionRecord::Turn {
         message: message.clone(),
         ts: now_ms(),
     });
+    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
     history.push(message);
 }
 
@@ -757,7 +759,7 @@ fn push_turn(history: &mut Vec<Message>, store: &SessionStore, message: Message)
 /// prevents two consecutive user turns (which can happen when the model returns
 /// nothing). Merges are intentionally not persisted as a new Turn record,
 /// keeping the JSONL history alternating on reopen as well.
-fn push_user_blocks(history: &mut Vec<Message>, store: &SessionStore, blocks: Vec<ContentBlock>) {
+fn push_user_blocks(history: &mut Vec<Message>, store: &SessionStore, ctx: &ToolContext, blocks: Vec<ContentBlock>) {
     if let Some(last) = history.last_mut() {
         if last.role == "user" {
             last.content.extend(blocks);
@@ -767,6 +769,7 @@ fn push_user_blocks(history: &mut Vec<Message>, store: &SessionStore, blocks: Ve
     push_turn(
         history,
         store,
+        ctx,
         Message {
             role: "user".into(),
             content: blocks,
@@ -780,6 +783,7 @@ fn push_user_blocks(history: &mut Vec<Message>, store: &SessionStore, blocks: Ve
 fn inject_steering(
     history: &mut Vec<Message>,
     store: &SessionStore,
+    ctx: &ToolContext,
     steering: &SteeringCtl,
     event_tx: &Channel<AgentEvent>,
 ) -> bool {
@@ -800,7 +804,8 @@ fn inject_steering(
             attachments: Some(attachment_metas.clone()),
             ts: now_ms(),
         });
-        push_user_blocks(history, store, blocks);
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        push_user_blocks(history, store, ctx, blocks);
         let _ = event_tx.send(AgentEvent::SteeringInjected {
             text: entry.text.clone(),
             attachments: Some(attachment_metas),
@@ -839,6 +844,7 @@ fn reject_non_english(msg: &str) -> Result<(), String> {
 #[allow(clippy::too_many_arguments)]
 fn write_status(
     store: &SessionStore,
+    ctx: &ToolContext,
     session_id: &str,
     cumul_in: u64,
     cumul_out: u64,
@@ -859,6 +865,7 @@ fn write_status(
         context_tokens,
         ts: now_ms(),
     });
+    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
 }
 
 /// Per-million-token rates for a model (claudin.io official pricing).
@@ -1103,9 +1110,10 @@ pub async fn run_workflow_with_profile(
         text: user_message.clone(),
         ts: now_ms(),
     });
+    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
     let mut blocks = vec![ContentBlock::text(&user_message)];
     blocks.extend(attachment_blocks);
-    push_user_blocks(history, store, blocks);
+    push_user_blocks(history, store, ctx, blocks);
 
     let skill_mgr = crate::agent::skills::SkillManager::new(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
@@ -1122,7 +1130,7 @@ pub async fn run_workflow_with_profile(
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
     // estimate is the fallback (take the max of the two for safety).
-    let records = crate::agent::persist::load_records(&store.path).unwrap_or_default();
+    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
     let estimated = estimate_tokens(history, &system, &tools)
         .max(crate::agent::persist::last_context_tokens(&records).unwrap_or(0));
     if estimated >= COMPACT_THRESHOLD {
@@ -1139,13 +1147,13 @@ pub async fn run_workflow_with_profile(
                 // summary + kept-verbatim tail (which already contains the
                 // just-persisted user message) + nothing else.
                 *history = crate::agent::persist::history_from_records(
-                    &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
                 );
                 let new_context = estimate_tokens(history, &system, &tools);
                 let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
-                    &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
                 );
-                write_status(store, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
+                write_status(store, ctx, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
                 let _ = event_tx.send(AgentEvent::SessionStats {
                     input_tokens: ci as u32,
                     output_tokens: co as u32,
@@ -1179,7 +1187,7 @@ pub async fn run_workflow_with_profile(
     {
         let post_compact = estimate_tokens(history, &system, &tools)
             .max(crate::agent::persist::last_context_tokens(
-                &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
             ).unwrap_or(0));
         if post_compact >= MAX_CONTEXT_TOKENS {
             return Err(
@@ -1192,7 +1200,7 @@ pub async fn run_workflow_with_profile(
 
     // Load cumulative totals from the last Status record
     let cumul = crate::agent::persist::cumulative_stats(
-        &crate::agent::persist::load_records(&store.path).unwrap_or_default()
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default()
     );
     let mut cumul_in: u64 = cumul.0;
     let mut cumul_out: u64 = cumul.1;
@@ -1236,7 +1244,7 @@ pub async fn run_workflow_with_profile(
     // Golden-goals loop state. The cycle counter resumes from the session's
     // records so a restart doesn't reset the cap mid-loop.
     let mut golden_cycle: u32 = crate::agent::persist::golden_cycle_count(
-        &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
     );
     let mut golden_last_pending: Vec<String> = Vec::new();
     let mut golden_stalls: usize = 0;
@@ -1259,13 +1267,14 @@ pub async fn run_workflow_with_profile(
     // changed file / commit since planning began, even across resumed runs.
     if let Some(sha) = ctx.base_commit.as_deref() {
         let already = crate::agent::persist::has_base_commit(
-            &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+            &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
         );
         if !already {
             store.try_append(&SessionRecord::BaseCommit {
                 sha: sha.to_string(),
                 ts: now_ms(),
             });
+            crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
         }
     }
 
@@ -1296,7 +1305,7 @@ pub async fn run_workflow_with_profile(
             match compact_history(config, store, ctx, event_tx, approvals, answers, session_id, steering).await {
                 Ok(_) => {
                     *history = crate::agent::persist::history_from_records(
-                        &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
                     );
                     // Mode/system/tools may have changed mid-compact, refresh.
                     let (mode_now2, _) = mode_ctl.get();
@@ -1313,9 +1322,9 @@ pub async fn run_workflow_with_profile(
                     }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
-                        &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
                     );
-                    write_status(store, session_id, ci, co, cc, cci, cco, ccc, Some(new_ctx));
+                    write_status(store, ctx, session_id, ci, co, cc, cci, cco, ccc, Some(new_ctx));
                     let _ = event_tx.send(AgentEvent::SessionStats {
                         input_tokens: ci as u32,
                         output_tokens: co as u32,
@@ -1348,7 +1357,7 @@ pub async fn run_workflow_with_profile(
         {
             let cur_ctx = estimate_tokens(history, &system, &tools)
                 .max(crate::agent::persist::last_context_tokens(
-                    &crate::agent::persist::load_records(&store.path).unwrap_or_default(),
+                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
                 ).unwrap_or(0));
             if cur_ctx >= MAX_CONTEXT_TOKENS {
                 return Err(
@@ -1439,6 +1448,7 @@ pub async fn run_workflow_with_profile(
                 push_turn(
                     history,
                     store,
+                    ctx,
                     Message {
                         role: "assistant".into(),
                         content: vec![ContentBlock::text(&text_output)],
@@ -1447,7 +1457,7 @@ pub async fn run_workflow_with_profile(
                 last_text = text_output;
             }
             steering.interrupt.store(false, Ordering::SeqCst);
-            if inject_steering(history, store, steering, event_tx) {
+            if inject_steering(history, store, ctx, steering, event_tx) {
                 continue;
             }
             if last_text.is_empty() {
@@ -1458,6 +1468,7 @@ pub async fn run_workflow_with_profile(
                 output_tokens: total_out,
                 ts: now_ms(),
             });
+            crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
@@ -1467,7 +1478,7 @@ pub async fn run_workflow_with_profile(
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
-                store, session_id, cumul_in, cumul_out, cumul_cost,
+                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
             emit_final_stats(cumul_in, cumul_out, cumul_cost,
@@ -1494,6 +1505,7 @@ pub async fn run_workflow_with_profile(
                 push_turn(
                     history,
                     store,
+                    ctx,
                     Message {
                         role: "assistant".into(),
                         content: vec![ContentBlock::text(&text_output)],
@@ -1505,6 +1517,7 @@ pub async fn run_workflow_with_profile(
                 push_user_blocks(
                     history,
                     store,
+                    ctx,
                     vec![ContentBlock::text(
                         "[system] Your previous response was cut off at the output token \
                          limit before completing a tool call or final answer. Continue from \
@@ -1530,6 +1543,7 @@ pub async fn run_workflow_with_profile(
                 output_tokens: total_out,
                 ts: now_ms(),
             });
+            crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
@@ -1539,7 +1553,7 @@ pub async fn run_workflow_with_profile(
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
-                store, session_id, cumul_in, cumul_out, cumul_cost,
+                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
             emit_final_stats(cumul_in, cumul_out, cumul_cost,
@@ -1566,6 +1580,7 @@ pub async fn run_workflow_with_profile(
                 push_user_blocks(
                     history,
                     store,
+                    ctx,
                     vec![ContentBlock::text(
                         "[system] Your previous response was empty (no text and no \
                          tool calls). If the task is not finished, continue from \
@@ -1585,6 +1600,7 @@ pub async fn run_workflow_with_profile(
                 push_turn(
                     history,
                     store,
+                    ctx,
                     Message {
                         role: "assistant".into(),
                         content: vec![ContentBlock::text(&text_output)],
@@ -1593,7 +1609,7 @@ pub async fn run_workflow_with_profile(
                 last_text = text_output;
             }
             // B — Antes de encerrar, verificar steering. Se houver, continuar.
-            if inject_steering(history, store, steering, event_tx) {
+            if inject_steering(history, store, ctx, steering, event_tx) {
                 continue;
             }
             // A terminal end_turn whose text only *announces* a next step
@@ -1621,11 +1637,13 @@ pub async fn run_workflow_with_profile(
                     streak: unfinished_streak + if will_nudge { 1 } else { 0 },
                     ts: now_ms(),
                 });
+                crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                 if will_nudge {
                     unfinished_streak += 1;
                     push_user_blocks(
                         history,
                         store,
+                        ctx,
                         vec![ContentBlock::text(
                             "[system] Your previous message announced a next step \
                              but ended without taking it — no tool call followed. \
@@ -1672,6 +1690,7 @@ pub async fn run_workflow_with_profile(
                         origin: ModeOrigin::Agent.as_str().into(),
                         ts: now_ms(),
                     });
+                    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                     let _ = event_tx.send(AgentEvent::ModeChanged {
                         mode: next.as_str().into(),
                         origin: ModeOrigin::Agent.as_str().into(),
@@ -1683,6 +1702,7 @@ pub async fn run_workflow_with_profile(
                         goals: golden_pending.clone(),
                         ts: now_ms(),
                     });
+                    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                     let _ = event_tx.send(AgentEvent::GoldenLoop {
                         cycle: golden_cycle,
                         max_cycles: max_cycles as u32,
@@ -1692,6 +1712,7 @@ pub async fn run_workflow_with_profile(
                     push_user_blocks(
                         history,
                         store,
+                        ctx,
                         vec![ContentBlock::text(format!(
                             "[system] Golden tasks are still pending: {}. The session \
                              switched to {} mode (golden cycle {golden_cycle}/{max_cycles}). \
@@ -1747,6 +1768,7 @@ pub async fn run_workflow_with_profile(
                         push_user_blocks(
                             history,
                             store,
+                            ctx,
                             vec![ContentBlock::text(
                                 "[system] All goals are met. Before finishing, call \
                                  finalize_plan with a journal of your findings — it records the \
@@ -1781,6 +1803,7 @@ pub async fn run_workflow_with_profile(
                 output_tokens: total_out,
                 ts: now_ms(),
             });
+            crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
@@ -1790,7 +1813,7 @@ pub async fn run_workflow_with_profile(
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
-                store, session_id, cumul_in, cumul_out, cumul_cost,
+                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
             emit_final_stats(cumul_in, cumul_out, cumul_cost,
@@ -1879,6 +1902,7 @@ pub async fn run_workflow_with_profile(
                     &tool_input,
                     mode_ctl,
                     store,
+                    ctx,
                     event_tx,
                     session_id,
                 )
@@ -1964,6 +1988,7 @@ pub async fn run_workflow_with_profile(
         push_turn(
             history,
             store,
+            ctx,
             Message {
                 role: "assistant".into(),
                 content: tool_assistant_blocks,
@@ -1972,6 +1997,7 @@ pub async fn run_workflow_with_profile(
         push_turn(
             history,
             store,
+            ctx,
             Message {
                 role: "user".into(),
                 content: tool_result_blocks,
@@ -2005,6 +2031,7 @@ pub async fn run_workflow_with_profile(
                     push_user_blocks(
                         history,
                         store,
+                        ctx,
                         vec![ContentBlock::text(
                             "[system] You have been exploring for several consecutive rounds \
                              in Brain mode without making progress on the required deliverables. \
@@ -2024,7 +2051,7 @@ pub async fn run_workflow_with_profile(
 
         // Interrupt check after tool results.
         if steering.interrupt.swap(false, Ordering::SeqCst) {
-            if inject_steering(history, store, steering, event_tx) {
+            if inject_steering(history, store, ctx, steering, event_tx) {
                 continue;
             }
             if last_text.is_empty() {
@@ -2035,6 +2062,7 @@ pub async fn run_workflow_with_profile(
                 output_tokens: total_out,
                 ts: now_ms(),
             });
+            crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
@@ -2044,7 +2072,7 @@ pub async fn run_workflow_with_profile(
                 &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
             );
             write_status(
-                store, session_id, cumul_in, cumul_out, cumul_cost,
+                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
                 cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
             );
             emit_final_stats(cumul_in, cumul_out, cumul_cost,
@@ -2057,7 +2085,7 @@ pub async fn run_workflow_with_profile(
             });
             return Ok(());
         }
-        inject_steering(history, store, steering, event_tx);
+        inject_steering(history, store, ctx, steering, event_tx);
     }
 
     // Safety cap hit: stop looping and report what we have so far rather than
@@ -2072,6 +2100,7 @@ pub async fn run_workflow_with_profile(
         output_tokens: total_out,
         ts: now_ms(),
     });
+    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
     cumul_in += total_in as u64;
     cumul_out += total_out as u64;
     roll_cost(
@@ -2081,7 +2110,7 @@ pub async fn run_workflow_with_profile(
         &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
     );
     write_status(
-        store, session_id, cumul_in, cumul_out, cumul_cost,
+        store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
         cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
     );
     emit_final_stats(cumul_in, cumul_out, cumul_cost,
@@ -2564,6 +2593,7 @@ fn handle_mode_switch(
     tool_input: &Value,
     mode_ctl: &Arc<ModeCtl>,
     store: &SessionStore,
+    ctx: &ToolContext,
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
 ) -> ContentBlock {
@@ -2592,6 +2622,7 @@ fn handle_mode_switch(
                     origin: ModeOrigin::Agent.as_str().into(),
                     ts: now_ms(),
                 });
+                crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                 let _ = event_tx.send(AgentEvent::ModeChanged {
                     mode: SessionMode::Brain.as_str().into(),
                     origin: ModeOrigin::Agent.as_str().into(),
@@ -2624,6 +2655,7 @@ fn handle_mode_switch(
                     origin: ModeOrigin::Agent.as_str().into(),
                     ts: now_ms(),
                 });
+                crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                 let _ = event_tx.send(AgentEvent::ModeChanged {
                     mode: SessionMode::Builder.as_str().into(),
                     origin: ModeOrigin::Agent.as_str().into(),
@@ -2768,11 +2800,35 @@ fn tool_result_block(tool_use_id: &str, content: &str) -> ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lru::LruCache;
     use serde_json::json;
+    use std::num::NonZeroUsize;
 
     fn tmp_store() -> SessionStore {
         SessionStore {
             path: std::env::temp_dir().join(format!("claudinio_test_{}.jsonl", now_ms())),
+        }
+    }
+
+    fn dummy_ctx() -> ToolContext {
+        ToolContext {
+            records_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                LruCache::new(NonZeroUsize::new(8).unwrap()),
+            )),
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: Default::default(),
+            session_store_path: None,
+            read_tracker: Default::default(),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
         }
     }
 
@@ -2816,7 +2872,7 @@ mod tests {
             role: "user".into(),
             content: vec![ContentBlock::text("a")],
         }];
-        push_user_blocks(&mut history, &store, vec![ContentBlock::text("b")]);
+        push_user_blocks(&mut history, &store, &dummy_ctx(), vec![ContentBlock::text("b")]);
         assert_eq!(history.len(), 1, "second user turn must merge, not append");
         assert_eq!(history[0].content.len(), 2);
         let _ = std::fs::remove_file(&store.path);
@@ -2829,7 +2885,7 @@ mod tests {
             role: "assistant".into(),
             content: vec![ContentBlock::text("a")],
         }];
-        push_user_blocks(&mut history, &store, vec![ContentBlock::text("b")]);
+        push_user_blocks(&mut history, &store, &dummy_ctx(), vec![ContentBlock::text("b")]);
         assert_eq!(history.len(), 2, "user turn after assistant must append");
         assert_eq!(history[1].role, "user");
         let _ = std::fs::remove_file(&store.path);
@@ -2839,7 +2895,7 @@ mod tests {
     fn user_turn_carries_only_the_raw_message_no_injected_directive() {
         let store = tmp_store();
         let mut history: Vec<Message> = Vec::new();
-        push_user_blocks(&mut history, &store, vec![ContentBlock::text("O que este projeto faz?")]);
+        push_user_blocks(&mut history, &store, &dummy_ctx(), vec![ContentBlock::text("O que este projeto faz?")]);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content.len(), 1, "no phase directive should be folded in");
         let _ = std::fs::remove_file(&store.path);

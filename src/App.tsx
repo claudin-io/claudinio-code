@@ -1591,18 +1591,16 @@ function App() {
               openFolder={openFolder}
             />
           }>
-            {/* One ChatPanel per open workspace, all kept mounted: hidden
-                panels keep receiving their run's Channel events, so agents in
-                background workspaces stream in parallel without losing state. */}
+            {/* One ChatPanel per open workspace; inactive ones unmount fully.
+                Events for inactive workspaces are buffered via workspaceBuffer.ts
+                and replayed when the panel re-mounts. */}
             <For each={openWorkspaces()}>
               {(ws) => (
-                <div
-                  class="h-full"
-                  style={{ display: activeWorkspace() === ws ? "block" : "none" }}
-                >
-                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} />
-                </div>
-
+                <Show when={activeWorkspace() === ws}>
+                  <div class="h-full">
+                    <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} />
+                  </div>
+                </Show>
               )}
             </For>
           </Show>
@@ -1615,16 +1613,14 @@ function App() {
           >
             <For each={openWorkspaces()}>
               {(ws) => (
-                <div
-                  class="h-full"
-                  style={{ display: activeWorkspace() === ws ? "block" : "none" }}
-                >
-                  <TasksPanel
-                    workspace={ws}
-                    onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
-                  />
-                </div>
-
+                <Show when={activeWorkspace() === ws}>
+                  <div class="h-full">
+                    <TasksPanel
+                      workspace={ws}
+                      onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
+                    />
+                  </div>
+                </Show>
               )}
             </For>
           </aside>

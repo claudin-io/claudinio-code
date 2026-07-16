@@ -12,6 +12,7 @@
 //!   when the model finished without calling the tool (journal is composed from
 //!   the done-task journals) so the plan is *always* fed.
 
+use lru::LruCache;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -329,7 +330,7 @@ mod tests {
             base_commit: None,
             auto_approve_git: false,
             mcp: None, mode_ctl: None,
-            index_progress: None,        }
+            index_progress: None,            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        }
     }
 
     fn tmp_workspace(name: &str) -> PathBuf {
