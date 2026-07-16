@@ -318,7 +318,7 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 - There is NO 'agent', 'task', or per-agent tool — never emit one call per agent.
 - Core strategy: aggressively use subagents for search and verification. Keeping the main context lean saves significant tokens and boosts your reasoning intelligence (the fuller the main context, the harder it is to reason).
 - When delegating, provide clear hints about where to look or what to do, letting subagents filter and distill key results for you.
-- Use for broad/parallel tasks. Max 4 per call. Modes: 'explore' or 'code'.
+- Use for broad/parallel tasks. Max {max_parallel} per call. Modes: 'explore' or 'code'.
 - Scope must never overlap. Avoid using for trivial or dependent tasks.
 - Goals MUST be 100% independent instructions: exact paths, verbatim values/URLs/dimensions.
 - You MUST resolve resources/URLs before delegating. Subagents must never guess or ask the user.
@@ -392,6 +392,7 @@ fn system_prompt(
     plan_save_path: Option<&str>,
     mode: SessionMode,
     profile: PromptProfile,
+    max_parallel: usize,
 ) -> String {
     if profile == PromptProfile::GitSync {
         return match workspace_root {
@@ -421,6 +422,7 @@ File tools take absolute paths inside this root."
         Some(path) if !path.is_empty() => format!(".claudinio.json (plan_save_path=\"{path}\")"),
         _ => ".claudinio/plans".to_string(),
     };
+    let base = base.replace("{max_parallel}", &max_parallel.to_string());
 
     match mode {
         SessionMode::Brain => {
@@ -1120,7 +1122,7 @@ pub async fn run_workflow_with_profile(
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let (mut cur_mode, _) = mode_ctl.get();
-    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile);
+    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile, subagent::effective_max_parallel(config));
     // MCP tool discovery already happened before `run_workflow` was called
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
     // snapshot read, not a fresh connection attempt.
@@ -1286,12 +1288,11 @@ pub async fn run_workflow_with_profile(
         let (mode_now, _) = mode_ctl.get();
         if mode_now != cur_mode {
             cur_mode = mode_now;
-            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile);
+            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile, subagent::effective_max_parallel(config));
             tools = api_tools(cur_mode, profile, &mcp_defs, config);
         }
 
         // Per-round context re-check: tool_results from the previous round may
-        // have pushed the history over the compact threshold. Compact before
         // the next LLM call so we never feed an oversized context.
         let pre_tokens = estimate_tokens(history, &system, &tools);
         if pre_tokens >= COMPACT_THRESHOLD {
@@ -1317,6 +1318,7 @@ pub async fn run_workflow_with_profile(
                             ctx.plan_save_path.as_deref(),
                             cur_mode,
                             profile,
+                            subagent::effective_max_parallel(config),
                         );
                         tools = api_tools(cur_mode, profile, &mcp_defs, config);
                     }
@@ -3519,7 +3521,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn brain_prompt_mandates_size_and_verbatim_assets() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
         // Size/dimensions must be a mandatory interview item.
         assert!(
             sys.contains("Sizing and layout"),
@@ -3538,7 +3540,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn brain_prompt_mandates_lld_stage() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
         assert!(
             sys.contains("## Low-Level Design"),
             "Brain prompt must require the Low-Level Design section"
@@ -3559,7 +3561,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn builder_prompt_mentions_lld_context() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
         assert!(
             sys.contains("Low-Level Design"),
             "Builder prompt must point at the Low-Level Design as the technical spec"
@@ -3568,7 +3570,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn builder_prompt_requires_complete_subagent_spec() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
         assert!(
             sys.contains("COMPLETE technical spec"),
             "Builder prompt must require complete subagent specs"
@@ -3581,7 +3583,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn system_prompt_warns_against_similar_to_guessing() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
         assert!(
             sys.contains("similar to"),
             "subagent guidance must call out the 'similar to X' anti-pattern"
@@ -3594,7 +3596,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn git_sync_prompt_has_no_task_system_or_modes() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::GitSync);
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::GitSync, subagent::MAX_PARALLEL_AGENTS);
         assert!(
             !sys.contains("tasks_get") && !sys.contains("tasks_set"),
             "GitSync prompt must not mention the task system"
@@ -3644,7 +3646,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             eprintln!("skipping: CLAUDINIO_API_KEY not set");
             return;
         };
-        let system = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard);
+        let system = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
         let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
         let user = format!(
             "{SESSION_REQUEST}\n\n---\nDo NOT call any tool and do NOT write a plan. Instead, output \
@@ -3677,7 +3679,7 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
             eprintln!("skipping: CLAUDINIO_API_KEY not set");
             return;
         };
-        let system = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard);
+        let system = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
         let model = cfg.model_for_mode(SessionMode::Builder.as_str()).to_string();
         let user = "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
 specified the EXACT icon to use with this reference: \
