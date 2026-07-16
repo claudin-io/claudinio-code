@@ -2649,6 +2649,47 @@ fn handle_mode_switch(
     ContentBlock::tool_result(tool_use_id, &result)
 }
 
+/// Aguarda resposta do usuário com proteção contra drop prematuro do oneshot.
+/// Se o sender for dropado (task abortada, lifecycle), recria o canal até
+/// o limite de tentativas — o gating deve ser quebrado apenas por uma
+/// resposta real do usuário ou por exaustão de retries.
+async fn await_user_answer(
+    answers: &AnswerMap,
+    session_id: &str,
+    tool_use_id: &str,
+) -> String {
+    let key = format!("{session_id}:{tool_use_id}");
+    let mut retries = 10usize;
+    loop {
+        let (answer_tx, answer_rx) = oneshot::channel::<Vec<UserAnswer>>();
+        {
+            let mut map = answers.lock().await;
+            map.insert(key.clone(), answer_tx);
+        }
+
+        match answer_rx.await {
+            Ok(answers) => {
+                return answers
+                    .iter()
+                    .map(|a| format!("Pergunta: {}\nResposta: {}", a.question, a.answer))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+            }
+            Err(_recv_err) => {
+                eprintln!(
+                    "[ask_user] oneshot dropped for {}:{} — retries left: {}",
+                    session_id, tool_use_id, retries
+                );
+                if retries == 0 {
+                    return "O usuário não respondeu.".to_string();
+                }
+                retries -= 1;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
 /// Handle the ask_user tool: surface the questions in the UI, wait for the
 /// user's answers and return them to the model as compiled question/answer
 /// pairs. The ToolCall/ToolResult events keep the step visible in the timeline
@@ -2682,27 +2723,13 @@ async fn ask_user(
         return ContentBlock::tool_result(tool_use_id, &format!("Error: {msg}"));
     }
 
-    let approval_key = format!("{session_id}:{tool_use_id}");
-    let (answer_tx, answer_rx) = oneshot::channel::<Vec<UserAnswer>>();
-    {
-        let mut map = answers.lock().await;
-        map.insert(approval_key, answer_tx);
-    }
-
     let _ = event_tx.send(AgentEvent::AskUser {
         session_id: session_id.to_string(),
         tool_id: tool_use_id.to_string(),
         questions,
     });
 
-    let compiled = match answer_rx.await {
-        Ok(user_answers) => user_answers
-            .iter()
-            .map(|a| format!("Pergunta: {}\nResposta: {}", a.question, a.answer))
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        Err(_) => "O usuário não respondeu.".to_string(),
-    };
+    let compiled = await_user_answer(answers, session_id, tool_use_id).await;
 
     let _ = event_tx.send(AgentEvent::ToolResult {
         tool_id: tool_use_id.to_string(),
