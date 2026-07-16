@@ -1141,6 +1141,10 @@ export const ChatPanel: Component<{
       const data = event.data as ToolResultData;
       setCurrentSteps((prev) => applyToolResultIn(prev, data));
       if (data.toolName === "write_plan") setHasPlanBeenWritten(true);
+      if (data.toolName === "ask_user") {
+        setCurrentAskUser(null);
+        setStatus("thinking");
+      }
       scrollToBottom();
     } else if (event.event === "AskUser") {
       setCurrentAskUser(event.data as AskUserData);
@@ -1240,6 +1244,7 @@ export const ChatPanel: Component<{
       setLiveText(data.textOutput);
       setLiveFinished(true);
       setPendingDone({ data, final });
+      setCurrentAskUser(null);
       setQueuedSteering([]);
       setSubagentState({});
       setPendingApprovals([]);
