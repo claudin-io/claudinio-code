@@ -1044,6 +1044,21 @@ export const ChatPanel: Component<{
     overscan: 5,
   });
 
+  // Keep the virtualizer's count in sync with the messages signal so
+  // every mutation (new message, reopen session, flush pending Done,
+  // etc.) causes a re-render. Without this reactive bridge, count stays
+  // frozen at the initial snapshot (typically 0) and nothing appears.
+  createEffect(() => {
+    virtualizer.setOptions({ count: messages().length });
+    // setOptions updates this.options.count but does NOT recalculate the
+    // visible range. _willUpdate() calls calculateRange() → maybeNotify()
+    // → notify() → onChange, which finally syncs the Solid store so the
+    // <For> renders the new items. Without this, a reopenSession that
+    // replaces the full messages array with setMessages() would update
+    // count but never trigger a re-render.
+    virtualizer._willUpdate();
+  });
+
   const addOrUpdateToolIn = (steps: TimelineItem[], item: TimelineItem): TimelineItem[] => {
     const idx = steps.findIndex(
       (s) => s.type === "tool" && s.tool?.call.toolId === item.tool?.call.toolId,
