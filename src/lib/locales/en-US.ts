@@ -141,6 +141,13 @@ const dict: LocaleDict = {
   "net.why.web_search": "The agent is running a web search.",
   "net.source.mcp": "MCP server",
   "net.why.mcp": "Connecting to a remote MCP server.",
+
+  // ── Askpass (git/ssh credential prompts) ──────────────────────────
+  "askpass.title": "Credential required",
+  "askpass.hint": "A command the agent is running (e.g. git push) needs this credential. It is passed directly to git/ssh and never stored.",
+  "askpass.placeholder": "Password / passphrase",
+  "askpass.submit": "Unlock",
+  "askpass.cancel": "Cancel",
   "git.modalTitle": "Changes",
   "git.refresh": "Refresh",
   "git.commitPush": "Commit & Push",

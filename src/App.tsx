@@ -22,6 +22,8 @@ import { platform } from "./lib/platform";
 import { ContextMenu } from "./components/ContextMenu";
 import { createVisibilityAwareInterval } from "./lib/visibility";
 import { startNetworkActivityListener } from "./lib/networkActivity";
+import { AskpassModal } from "./components/AskpassModal";
+import { type AskpassRequest } from "./lib/ipc";
 
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
@@ -209,6 +211,15 @@ function App() {
   // generation, watcher re-indexing). Events carry the workspace root so each
   // one lands on the right workspace's progress slot.
   onMount(() => startNetworkActivityListener());
+
+  // git/ssh credential prompts from the backend askpass bridge.
+  const [askpassRequest, setAskpassRequest] = createSignal<AskpassRequest | null>(null);
+  onMount(() => {
+    const unlisten = listen<AskpassRequest>("askpass-request", (event) => {
+      setAskpassRequest(event.payload);
+    });
+    return () => { unlisten.then((f) => f()); };
+  });
 
   onMount(() => {
     const unlisten = listen<IndexProgress>("index-progress", (event) => {
@@ -1682,6 +1693,7 @@ function App() {
         )}
       </Show>
       </Show>
+      <AskpassModal request={askpassRequest()} onDone={() => setAskpassRequest(null)} />
     </div>
   );
 }

@@ -814,3 +814,16 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
     },
   };
 }
+
+// ── Askpass bridge ─────────────────────────────────────────────────────
+// A git/ssh credential prompt intercepted by the backend (askpass.rs) and
+// surfaced as an `askpass-request` event; answer resolves the waiting command.
+export interface AskpassRequest {
+  id: number;
+  prompt: string;
+}
+
+/** Reply to a pending askpass prompt. `secret: null` cancels it. */
+export function answerAskpass(id: number, secret: string | null): Promise<void> {
+  return invoke("answer_askpass", { id, secret });
+}
