@@ -60,6 +60,7 @@ import { t } from "../lib/grill-me";
 import { setWorkspaceStatus, isBusy } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
 import { GitIndicator } from "./GitIndicator";
+import { NetworkIndicator } from "./NetworkIndicator";
 import { GitChangesModal } from "./GitChangesModal";
 import CommitPushModal from "./CommitPushModal";
 import ContentViewerModal from "./ContentViewerModal";
@@ -1767,7 +1768,8 @@ export const ChatPanel: Component<{
             <Icon name="archive-drawer" class="h-3.5 w-3.5" />
             {t("chat.header.plans")}
           </button>
-          <GitIndicator workspace={props.workspace} onShowChanges={() => setShowGitModal(true)} />
+          <GitIndicator workspace={props.workspace} active={props.isActive()} onShowChanges={() => setShowGitModal(true)} />
+          <NetworkIndicator />
         </div>
 
         <Popover

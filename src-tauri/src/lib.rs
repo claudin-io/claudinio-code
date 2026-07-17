@@ -3,6 +3,7 @@ pub mod code_intel;
 mod commands;
 pub(crate) mod http;
 mod lsp;
+pub(crate) mod net_activity;
 mod state;
 
 use state::AppState;
@@ -16,12 +17,17 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(AppState::new())
         .manage(commands::power::KeepAwakeState::default())
+        .setup(|app| {
+            net_activity::set_app_handle(tauri::AppHandle::clone(app.handle()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::fs::list_dir,
             commands::fs::read_file,
             commands::fs::write_file,
             commands::fs::read_attachment,
             commands::fs::walk_dir,
+            commands::locale::get_os_locale,
             commands::agent::send_message,
             commands::agent::new_session,
             commands::agent::list_sessions,

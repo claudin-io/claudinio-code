@@ -1043,6 +1043,7 @@ async fn stream_message_with_retry(
     session_id: &str,
     assistant_text: &mut String,
     interrupt: &AtomicBool,
+    net_detail: &str,
 ) -> Result<provider::StreamOutput, String> {
     const BACKOFFS_MS: [u64; 8] = [2_000, 5_000, 15_000, 30_000, 60_000, 120_000, 180_000, 300_000];
     let mut attempt = 0usize;
@@ -1050,7 +1051,7 @@ async fn stream_message_with_retry(
         assistant_text.clear();
         let result = provider::stream_message(
             config, model, messages, tools, system, event_tx, session_id, assistant_text, interrupt,
-            true,
+            true, net_detail,
         )
         .await;
         match result {
@@ -1372,6 +1373,7 @@ pub async fn run_workflow_with_profile(
 
         let mut assistant_text = String::new();
         let resolved_model = config.model_for_mode(cur_mode.as_str());
+        let net_detail = format!("{resolved_model} · {}", cur_mode.as_str());
         let stream_output = stream_message_with_retry(
             config,
             resolved_model,
@@ -1382,6 +1384,7 @@ pub async fn run_workflow_with_profile(
             session_id,
             &mut assistant_text,
             &steering.interrupt,
+            &net_detail,
         )
         .await?;
 

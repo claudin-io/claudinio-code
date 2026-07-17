@@ -1,10 +1,14 @@
-import { createSignal, createMemo, createEffect, onCleanup, Show, type Component } from "solid-js";
+import { createSignal, createMemo, Show, type Component } from "solid-js";
 import { gitStatus, checkGitAvailable, type GitStatus } from "../lib/ipc";
 import { Icon } from "./Icon";
 import { t } from "../lib/grill-me";
+import { createVisibilityAwareInterval } from "../lib/visibility";
 
 export const GitIndicator: Component<{
   workspace: string;
+  /** Only the active (visible) workspace panel polls git — inactive panels
+      stay mounted but must not keep spawning git processes. */
+  active: boolean;
   onShowChanges: () => void;
 }> = (props) => {
   const [status, setStatus] = createSignal<GitStatus | null>(null);
@@ -34,18 +38,14 @@ export const GitIndicator: Component<{
   // Check git availability once on mount
   checkGitAvailable().then(setGitAvailable);
 
-  // Start polling only when git is confirmed available; cleanup on unmount
-  createEffect(() => {
-    if (gitAvailable() !== true) return;
-
-    refreshStatus();
-
-    const intervalId = setInterval(refreshStatus, 10000);
-
-    onCleanup(() => {
-      clearInterval(intervalId);
-    });
-  });
+  // Poll only while git is confirmed available, this panel is the active
+  // workspace, and the window is visible. Pausing in background stops the
+  // constant git.exe spawning that showed up as CPU churn on Windows.
+  createVisibilityAwareInterval(
+    refreshStatus,
+    10000,
+    () => gitAvailable() === true && props.active,
+  );
 
   const s = status;
   const loading_ = loading;

@@ -448,6 +448,15 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
         return Ok(());
     }
 
+    // A repeated hit here means the cache path is not persisting between runs
+    // (suspected on some Windows setups) — every index would re-download the
+    // model from HuggingFace.
+    eprintln!(
+        "[embeddings] model not in cache, downloading {} to {}",
+        ACTIVE_MODEL.repo,
+        cache_dir.display()
+    );
+
     std::fs::create_dir_all(cache_dir)
         .map_err(|e| format!("create model dir: {e}"))?;
 
@@ -460,6 +469,10 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
             continue;
         }
 
+        let net_guard = crate::net_activity::NetGuard::begin(
+            crate::net_activity::NetSource::EmbeddingModelDownload,
+            *local_filename,
+        );
         let client = crate::http::default_client();
         let response = client
             .get(&url)
@@ -476,6 +489,7 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
             .bytes()
             .await
             .map_err(|e| format!("read {local_filename}: {e}"))?;
+        net_guard.add_bytes(bytes.len() as u64);
 
         std::fs::write(&dest, &bytes).map_err(|e| format!("write {local_filename}: {e}"))?;
     }

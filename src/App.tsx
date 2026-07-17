@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
-import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
+import { t, locale, setLocale, type LocaleId, SUPPORTED_LOCALES, FLAGS, LOCALE_LABELS } from "./lib/grill-me";
 import { FileTree } from "./components/FileTree";
 import ThemePicker from "./components/ThemePicker";
 import { ChatPanel } from "./components/ChatPanel";
@@ -20,6 +20,8 @@ import { openInTerminal, copyPath, gitBranch, checkGitAvailable } from "./lib/ip
 import { checkForUpdate, type UpdateInfo } from "./lib/ipc";
 import { platform } from "./lib/platform";
 import { ContextMenu } from "./components/ContextMenu";
+import { createVisibilityAwareInterval } from "./lib/visibility";
+import { startNetworkActivityListener } from "./lib/networkActivity";
 
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
@@ -171,9 +173,8 @@ function App() {
         inFlight = false;
       }
     };
-    refresh();
-    const intervalId = setInterval(refresh, 30000);
-    onCleanup(() => clearInterval(intervalId));
+    // Pauses while the window is hidden so no git processes spawn in background.
+    createVisibilityAwareInterval(refresh, 30000);
   });
 
   // MCP server settings: edited as raw JSON text (`{ "name": { type, ... } }`),
@@ -207,6 +208,8 @@ function App() {
   // Listen for global index-progress events (model loading, embedding
   // generation, watcher re-indexing). Events carry the workspace root so each
   // one lands on the right workspace's progress slot.
+  onMount(() => startNetworkActivityListener());
+
   onMount(() => {
     const unlisten = listen<IndexProgress>("index-progress", (event) => {
       const ws = event.payload.workspace;
@@ -709,14 +712,17 @@ function App() {
             <h2 class="mb-4 text-sm font-semibold text-ink">{t("app.config.title")}</h2>
 
             {/* Lang selector */}
-            <label class="mb-1 block text-xs text-ink-muted">Idioma / Language</label>
+            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.language")}</label>
             <select
               value={locale()}
               onChange={(e) => setLocale(e.currentTarget.value as LocaleId)}
               class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             >
-              <option value="pt-BR">🇧🇷 Português</option>
-              <option value="en-US">🇺🇸 English</option>
+              <For each={SUPPORTED_LOCALES}>
+                {(loc) => (
+                  <option value={loc}>{FLAGS[loc]} {LOCALE_LABELS[loc]}</option>
+                )}
+              </For>
             </select>
 
             {/* Theme selector */}

@@ -84,3 +84,25 @@ The step uses the built-in `gh` CLI (pre-installed on GitHub Actions runners) wi
 - Add `actions: write` permission to create-release job: Perm added: actions: write after contents: write
 - Add cache cleanup step to create-release job: Step added after Create Release with gh cache delete --all
 - Merge to main and push: Branch merged directly to main per user request; commit cc15dbe pushado para main
+
+
+## Implementation Log — 2026-07-17 01:07
+**Changed files:** M	.github/workflows/release.yml, M	package.json, M	src-tauri/Cargo.lock, M	src-tauri/Cargo.toml, M	src-tauri/tauri.conf.json
+**Commits:** ef0c738 fix: upgrade action-gh-release to v3 (Node 24 compat) for v0.1.11 release, b171781 chore: bump version to 0.1.11
+**Journal:** ## Implementation Journal
+
+**Release v0.1.11 — Key Findings & Decisions:**
+
+1. **Root Cause of First Run Failure:** The `softprops/action-gh-release@v2` action uses Node.js 20, which GitHub Actions deprecated and began force-migrating to Node.js 24 starting June 2, 2026. This caused the "Create Release" step to fail with a Node runtime error. The builds themselves completed successfully — the failure was isolated to the release creation step.
+
+2. **Fix Applied:** Upgraded `softprops/action-gh-release` from `@v2` to `@v3` (which uses Node.js 24 natively) in the release workflow. Also added `fail_on_unmatched_files: true` for better error reporting.
+
+3. **Tag Recreation:** Deleted the old `v0.1.11` tag (which pointed to the pre-fix commit) and recreated it on the commit that includes the workflow fix. The old tag's build artifacts were discarded; the second run produced fresh builds.
+
+4. **Release Verification:** Confirmed the release is live at `claudin-io/claudinio-code-releases` with all 5 platform assets (macOS ARM64, Windows x64/ARM64, Linux x64/ARM64) plus the `latest.json` auto-updater manifest.
+
+5. **Gotcha / Learning:** Any future Node-based GitHub Actions in this repo should be audited for Node.js 20 usage before September 16, 2026 when Node 20 support will be entirely removed.
+
+**Task journal:**
+- Gere a versão v0.1.11, garanta que ela foi deployed no claudinio-code-releases as release: Version bumped in package.json, Cargo.toml, tauri.conf.json
+- Gere a versão v0.1.11, garanta que ela foi deployed no claudinio-code-releases as release: First attempt: softprops/action-gh-release@v2 uses Node 20 (deprecated June 2026) — GitHub Actions forced Node 24, breaking the release step.; Fix: upgraded to @v3 in release.yml, deleted old tag, recriated on fixed commit.; Second run succeeded. Release published on claudinio-code-releases with all 5 platform assets (macOS ARM64, Windows x64/ARM64, Linux x64/ARM64).; latest.json updater manifest confirmed at https://github.com/claudin-io/claudinio-code-releases/releases/latest/download/latest.json.

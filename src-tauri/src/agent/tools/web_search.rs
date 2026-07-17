@@ -47,6 +47,10 @@ pub async fn execute(args: WebSearchArgs, config: &AgentConfig) -> Result<String
 
     let signature_headers = app_sign::sign("POST", path, &body_bytes);
 
+    let _net_guard = crate::net_activity::NetGuard::begin(
+        crate::net_activity::NetSource::WebSearch,
+        args.query.chars().take(60).collect::<String>(),
+    );
     let client = crate::http::default_client();
     let mut req = client
         .post(&url)

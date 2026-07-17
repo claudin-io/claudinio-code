@@ -45,6 +45,10 @@ export async function copyPath(path: string): Promise<void> {
   await navigator.clipboard.writeText(path);
 }
 
+export function getOsLocale(): Promise<string> {
+  return invoke<string>("get_os_locale");
+}
+
 export interface SessionStarted {
   sessionId: string;
 }

@@ -631,6 +631,10 @@ pub async fn list_models(
     drop(cfg);
 
     let url = format!("{base_url}/v1/models");
+    let _net_guard = crate::net_activity::NetGuard::begin(
+        crate::net_activity::NetSource::ListModels,
+        "/v1/models",
+    );
     let client = crate::http::default_client();
     let response = match client
         .get(&url)

@@ -1,6 +1,29 @@
 import { createSignal, createRoot, createEffect } from "solid-js";
 
-export type LocaleId = "pt-BR" | "en-US";
+export type LocaleId =
+  | "en-US" | "pt-BR" | "pt-PT" | "es-ES" | "fr-FR" | "de-DE"
+  | "it-IT" | "ru-RU" | "tr-TR" | "ar-SA" | "hi-IN" | "bn-BD"
+  | "ur-PK" | "zh-CN" | "ja-JP" | "ko-KR" | "vi-VN" | "id-ID";
+
+export const SUPPORTED_LOCALES: LocaleId[] = [
+  "en-US", "pt-BR", "pt-PT", "es-ES", "fr-FR", "de-DE",
+  "it-IT", "ru-RU", "tr-TR", "ar-SA", "hi-IN", "bn-BD",
+  "ur-PK", "zh-CN", "ja-JP", "ko-KR", "vi-VN", "id-ID",
+];
+
+/** Resolve a raw locale string (from browser or OS) to a supported LocaleId.
+ *  Exact match wins, then language-prefix match ("pt" → "pt-BR"), then "en-US". */
+export function resolveLocale(raw: string): LocaleId {
+  // Exact match
+  if ((SUPPORTED_LOCALES as readonly string[]).includes(raw)) return raw as LocaleId;
+  // Language prefix match (e.g. "pt" matches "pt-BR")
+  const prefix = raw.split("-")[0].toLowerCase();
+  for (const loc of SUPPORTED_LOCALES) {
+    if (loc.toLowerCase().startsWith(prefix)) return loc;
+  }
+  // Fallback
+  return "en-US";
+}
 
 export interface LocaleDict {
   [key: string]: string | ((...args: (string | number)[]) => string);
@@ -13,8 +36,30 @@ function createLocaleState() {
   const stored = (typeof localStorage !== "undefined"
     ? localStorage.getItem(STORAGE_KEY)
     : null) as LocaleId | null;
-  const initial: LocaleId = stored ?? "pt-BR";
+  const initial: LocaleId = stored ?? "en-US";
   const [locale, _setLocale] = createSignal<LocaleId>(initial);
+
+  // If no stored preference, detect from system
+  if (!stored) {
+    void (async () => {
+      try {
+        // 1. Browser/WebView locale (reflects OS in Tauri)
+        if (typeof navigator !== "undefined" && navigator.language) {
+          const resolved = resolveLocale(navigator.language);
+          if (resolved !== "en-US") { _setLocale(resolved); return; }
+        }
+        // 2. Tauri OS locale
+        const { getOsLocale } = await import("../lib/ipc");
+        const osLocale = await getOsLocale();
+        if (osLocale) {
+          const resolved = resolveLocale(osLocale);
+          if (resolved !== "en-US") { _setLocale(resolved); return; }
+        }
+      } catch {
+        // Fall through — stay on en-US
+      }
+    })();
+  }
 
   const setLocale = (id: LocaleId) => {
     _setLocale(id);
@@ -77,10 +122,25 @@ const dictCache = new Map<LocaleId, LocaleDict>();
 export async function loadDict(id: LocaleId): Promise<LocaleDict> {
   if (dictCache.has(id)) return dictCache.get(id)!;
   let mod: { default: LocaleDict };
-  if (id === "pt-BR") {
-    mod = await import("./locales/pt-BR");
-  } else {
-    mod = await import("./locales/en-US");
+  switch (id) {
+    case "pt-BR":   mod = await import("./locales/pt-BR"); break;
+    case "en-US":   mod = await import("./locales/en-US"); break;
+    case "pt-PT":   mod = await import("./locales/pt-PT"); break;
+    case "es-ES":   mod = await import("./locales/es-ES"); break;
+    case "fr-FR":   mod = await import("./locales/fr-FR"); break;
+    case "de-DE":   mod = await import("./locales/de-DE"); break;
+    case "it-IT":   mod = await import("./locales/it-IT"); break;
+    case "ru-RU":   mod = await import("./locales/ru-RU"); break;
+    case "tr-TR":   mod = await import("./locales/tr-TR"); break;
+    case "ar-SA":   mod = await import("./locales/ar-SA"); break;
+    case "hi-IN":   mod = await import("./locales/hi-IN"); break;
+    case "bn-BD":   mod = await import("./locales/bn-BD"); break;
+    case "ur-PK":   mod = await import("./locales/ur-PK"); break;
+    case "zh-CN":   mod = await import("./locales/zh-CN"); break;
+    case "ja-JP":   mod = await import("./locales/ja-JP"); break;
+    case "ko-KR":   mod = await import("./locales/ko-KR"); break;
+    case "vi-VN":   mod = await import("./locales/vi-VN"); break;
+    case "id-ID":   mod = await import("./locales/id-ID"); break;
   }
   dictCache.set(id, mod.default);
   return mod.default;
@@ -115,10 +175,26 @@ export function ensureDictWatcher() {
 }
 ensureDictWatcher();
 
+// Preload en-US so the t() fallback chain works synchronously for
+// locales whose dictionaries haven't been translated yet.
+loadDict("en-US");
+
+// Keep <html lang> in sync with the current locale
+createRoot(() => {
+  createEffect(() => {
+    document.documentElement.lang = getLocaleState().locale();
+  });
+});
+
 // ── t() translation function ────────────────────────────────────────
 export function t(key: string, ...args: (string | number)[]): string {
   const dict = currentDict();
   let val = dict[key];
+  if (val === undefined) {
+    // Fallback chain: try en-US
+    const enDict = dictCache.get("en-US");
+    if (enDict) val = enDict[key];
+  }
   if (val === undefined) return key;
   if (typeof val === "function") return val(...args);
   let result = val;
@@ -130,11 +206,19 @@ export function t(key: string, ...args: (string | number)[]): string {
 
 // ── flags ───────────────────────────────────────────────────────────
 export const FLAGS: Record<LocaleId, string> = {
-  "pt-BR": "🇧🇷",
-  "en-US": "🇺🇸",
+  "en-US": "🇺🇸", "pt-BR": "🇧🇷", "pt-PT": "🇵🇹",
+  "es-ES": "🇪🇸", "fr-FR": "🇫🇷", "de-DE": "🇩🇪",
+  "it-IT": "🇮🇹", "ru-RU": "🇷🇺", "tr-TR": "🇹🇷",
+  "ar-SA": "🇸🇦", "hi-IN": "🇮🇳", "bn-BD": "🇧🇩",
+  "ur-PK": "🇵🇰", "zh-CN": "🇨🇳", "ja-JP": "🇯🇵",
+  "ko-KR": "🇰🇷", "vi-VN": "🇻🇳", "id-ID": "🇮🇩",
 };
 
 export const LOCALE_LABELS: Record<LocaleId, string> = {
-  "pt-BR": "PT",
-  "en-US": "EN",
+  "en-US": "EN", "pt-BR": "PT", "pt-PT": "PT",
+  "es-ES": "ES", "fr-FR": "FR", "de-DE": "DE",
+  "it-IT": "IT", "ru-RU": "RU", "tr-TR": "TR",
+  "ar-SA": "العربية", "hi-IN": "हिन्दी", "bn-BD": "বাংলা",
+  "ur-PK": "اردو", "zh-CN": "中文", "ja-JP": "日本語",
+  "ko-KR": "한국어", "vi-VN": "VI", "id-ID": "ID",
 };
