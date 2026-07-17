@@ -1,8 +1,9 @@
-import { createSignal, For, Show, onMount, onCleanup, type Component } from "solid-js";
+import { createSignal, For, Show, onCleanup, type Component } from "solid-js";
 import { Popover } from "./Popover";
 import { getTasks, setTasks, dismissGoldenTasks, type TaskItem } from "../lib/ipc";
 import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
+import { createVisibilityAwareInterval } from "../lib/visibility";
 
 export const TasksPanel: Component<{
   workspace: string;
@@ -12,7 +13,6 @@ export const TasksPanel: Component<{
   const [hoveredId, setHoveredId] = createSignal<string | null>(null);
   const [hoveredTaskSnapshot, setHoveredTaskSnapshot] = createSignal<TaskItem | null>(null);
   const [hoveredElement, setHoveredElement] = createSignal<HTMLElement | null>(null);
-  const [pollTimer, setPollTimer] = createSignal<ReturnType<typeof setInterval> | null>(null);
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
 
   const load = async () => {
@@ -25,14 +25,10 @@ export const TasksPanel: Component<{
     }
   };
 
-  onMount(() => {
-    load();
-    const id = setInterval(load, 3000);
-    setPollTimer(id);
-  });
+  // Pauses while the window is hidden — no reason to poll tasks in background.
+  createVisibilityAwareInterval(load, 3000);
 
   onCleanup(() => {
-    if (pollTimer()) clearInterval(pollTimer()!);
     if (closeTimer) clearTimeout(closeTimer);
   });
 

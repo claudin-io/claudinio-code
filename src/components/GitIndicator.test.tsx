@@ -58,6 +58,7 @@ function makeStatus(overrides: Partial<GitStatus> = {}): GitStatus {
 
 const defaultProps = {
   workspace: "/test/workspace",
+  active: true,
   onShowChanges: vi.fn(),
 };
 

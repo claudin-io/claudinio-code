@@ -113,6 +113,7 @@ notify = "8"
 notify-debouncer-mini = "0.5"
 dirs = "6"
 keepawake = "0.6"
+sys-locale = "0.3"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 # default drops "esaxx_fast": it pulls esaxx-rs, a C++ lib that force-builds
 # with the static CRT (/MT), which clashes on Windows with ort's prebuilt

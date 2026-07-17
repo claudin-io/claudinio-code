@@ -43,6 +43,23 @@ vi.mock("./locales/en-US", () => ({
   },
 }));
 
+vi.mock("./locales/es-ES", () => ({ default: {} }));
+vi.mock("./locales/fr-FR", () => ({ default: {} }));
+vi.mock("./locales/de-DE", () => ({ default: {} }));
+vi.mock("./locales/it-IT", () => ({ default: {} }));
+vi.mock("./locales/ru-RU", () => ({ default: {} }));
+vi.mock("./locales/tr-TR", () => ({ default: {} }));
+vi.mock("./locales/ar-SA", () => ({ default: {} }));
+vi.mock("./locales/hi-IN", () => ({ default: {} }));
+vi.mock("./locales/bn-BD", () => ({ default: {} }));
+vi.mock("./locales/ur-PK", () => ({ default: {} }));
+vi.mock("./locales/zh-CN", () => ({ default: {} }));
+vi.mock("./locales/ja-JP", () => ({ default: {} }));
+vi.mock("./locales/ko-KR", () => ({ default: {} }));
+vi.mock("./locales/vi-VN", () => ({ default: {} }));
+vi.mock("./locales/id-ID", () => ({ default: {} }));
+vi.mock("./locales/pt-PT", () => ({ default: {} }));
+
 // Solid 1.9 schedules effects via MessageChannel, whose callbacks fire in the
 // Node "Check" phase — the same phase as setImmediate, and AFTER timers. So we
 // flush with setImmediate (not setTimeout/vi.waitFor, which polls in the Timer
@@ -63,18 +80,16 @@ async function flushUntil(cond: () => boolean, maxCycles = 500) {
 describe("grill-me", () => {
   it("exports FLAGS with correct emoji for each locale", async () => {
     const { FLAGS } = await import("./grill-me");
-    expect(FLAGS).toEqual({
-      "pt-BR": "🇧🇷",
-      "en-US": "🇺🇸",
-    });
+    expect(Object.keys(FLAGS).length).toBe(18);
+    expect(FLAGS["pt-BR"]).toBe("🇧🇷");
+    expect(FLAGS["en-US"]).toBe("🇺🇸");
   });
 
   it("exports LOCALE_LABELS with correct labels for each locale", async () => {
     const { LOCALE_LABELS } = await import("./grill-me");
-    expect(LOCALE_LABELS).toEqual({
-      "pt-BR": "PT",
-      "en-US": "EN",
-    });
+    expect(Object.keys(LOCALE_LABELS).length).toBe(18);
+    expect(LOCALE_LABELS["pt-BR"]).toBe("PT");
+    expect(LOCALE_LABELS["en-US"]).toBe("EN");
   });
 
   it("t() returns the key when dict is empty for that key", async () => {
@@ -83,18 +98,24 @@ describe("grill-me", () => {
   });
 
   it("t() returns the string value when key exists", async () => {
-    const { t } = await import("./grill-me");
+    const { t, setLocale } = await import("./grill-me");
+    setLocale("pt-BR");
+    await flushUntil(() => t("greeting") === "Olá");
     expect(t("greeting")).toBe("Olá");
   });
 
   it("t() interpolates positional args {0}, {1} etc", async () => {
-    const { t } = await import("./grill-me");
+    const { t, setLocale } = await import("./grill-me");
+    setLocale("pt-BR");
+    await flushUntil(() => t("greeting") === "Olá");
     expect(t("hello.name", "Mundo")).toBe("Olá, Mundo!");
     expect(t("items.count", "3", "10")).toBe("Itens: 3 de 10");
   });
 
   it("t() returns function result when val is a function", async () => {
-    const { t } = await import("./grill-me");
+    const { t, setLocale } = await import("./grill-me");
+    setLocale("pt-BR");
+    await flushUntil(() => t("greeting") === "Olá");
     expect(t("farewell", "João")).toBe("Tchau, João!");
   });
 
@@ -249,8 +270,8 @@ describe("grill-me coverage gaps", () => {
     // Use vi.importActual so the top-level code runs fresh with localStorage=undefined
     const mod = await vi.importActual<typeof import("./grill-me")>("./grill-me");
 
-    // Default locale should still be pt-BR (stored ?? "pt-BR" → stored is null)
-    expect(mod.locale()).toBe("pt-BR");
+    // Default locale should be en-US (stored ?? "en-US" → stored is null)
+    expect(mod.locale()).toBe("en-US");
 
     // setLocale must not throw even though localStorage is undefined (line 21 guard)
     expect(() => mod.setLocale("en-US")).not.toThrow();
@@ -260,11 +281,11 @@ describe("grill-me coverage gaps", () => {
     expect(mod.locale()).toBe("pt-BR");
   });
 
-  // ── stored ?? "pt-BR" default when localStorage is present but empty ──
-  it("defaults to pt-BR when localStorage has no stored locale", async () => {
-    // localStorage mock has no "claudinio_locale" key → stored is null → "pt-BR"
+  // ── stored ?? "en-US" default when localStorage is present but empty ──
+  it("defaults to en-US when localStorage has no stored locale", async () => {
+    // localStorage mock has no "claudinio_locale" key → stored is null → "en-US"
     const mod = await import("./grill-me");
-    expect(mod.locale()).toBe("pt-BR");
+    expect(mod.locale()).toBe("en-US");
   });
 
   // ── initial-load stale guard (line 78) ──────────────────────────────
@@ -277,16 +298,16 @@ describe("grill-me coverage gaps", () => {
   it("prevents stale initial-load dict from overwriting a newer locale", async () => {
     const mod = await import("./grill-me");
 
-    // Module init: initialLocale = "pt-BR", loadDict("pt-BR") is pending.
+    // Module init: initialLocale = "en-US", loadDict("en-US") is pending.
     // Change locale before .then fires so guard evaluates to false.
-    mod.setLocale("en-US");
+    mod.setLocale("pt-BR");
 
-    // Flush so the init .then fires with locale() === "en-US" !== "pt-BR"
-    // → setCurrentDict is NOT called with pt-BR dict (line 78 false branch).
-    await flushUntil(() => mod.t("greeting") === "Hello");
+    // Flush so the init .then fires with locale() === "pt-BR" !== "en-US"
+    // → setCurrentDict is NOT called with en-US dict (line 78 false branch).
+    await flushUntil(() => mod.t("greeting") === "Olá");
 
-    // en-US dict came from effect (init load was blocked)
-    expect(mod.t("greeting")).toBe("Hello");
+    // pt-BR dict came from effect (init load was blocked)
+    expect(mod.t("greeting")).toBe("Olá");
   });
 
   // ── effect-load stale guard (line 94) ────────────────────────────────
@@ -300,6 +321,7 @@ describe("grill-me coverage gaps", () => {
 
     // Bring pt-BR into cache
     const ptDict = await mod.loadDict("pt-BR");
+    mod.setLocale("pt-BR");
 
     // Apply pt-BR as the current dict (synchronously, bypassing the effect)
     mod.__applyDictIfCurrent("pt-BR", ptDict);

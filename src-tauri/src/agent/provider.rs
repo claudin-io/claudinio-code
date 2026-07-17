@@ -550,6 +550,10 @@ pub async fn classify_turn_completion(
     model: &str,
     assistant_text: &str,
 ) -> Result<String, String> {
+    let _net_guard = crate::net_activity::NetGuard::begin(
+        crate::net_activity::NetSource::LlmClassify,
+        model,
+    );
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(45))
@@ -623,6 +627,10 @@ pub async fn one_shot(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
+    let _net_guard = crate::net_activity::NetGuard::begin(
+        crate::net_activity::NetSource::LlmOneShot,
+        model,
+    );
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(90))
@@ -710,6 +718,9 @@ pub async fn stream_message(
     assistant_text: &mut String,
     interrupt: &AtomicBool,
     emit_text_deltas: bool,
+    // Shown in the network indicator: who opened this stream (model + mode,
+    // subagent goal, …). Not sent to the API.
+    net_detail: &str,
 ) -> Result<StreamOutput, String> {
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -753,6 +764,14 @@ pub async fn stream_message(
         };
         return Err(err_msg);
     }
+
+    // Registered only after a successful response: from here the SSE stream
+    // stays open for the whole turn, which is exactly what the network
+    // indicator must surface. Dropped on every exit path (RAII).
+    let net_guard = crate::net_activity::NetGuard::begin(
+        crate::net_activity::NetSource::LlmStream,
+        net_detail,
+    );
 
     let mut dump = if std::env::var("CLAUDINIO_DEBUG_DUMP").is_ok() {
         let dump_path = std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));
@@ -804,6 +823,7 @@ pub async fn stream_message(
         };
 
         let chunk = chunk_result.map_err(|e| format!("stream error: {e}"))?;
+        net_guard.add_bytes(chunk.len() as u64);
         let chunk_str = String::from_utf8_lossy(&chunk);
         if let Some(ref mut f) = dump {
             use std::io::Write;

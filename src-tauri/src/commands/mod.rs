@@ -7,6 +7,7 @@ pub mod enhance;
 pub mod fs;
 pub mod git;
 pub mod ide;
+pub mod locale;
 pub mod lsp;
 pub mod mcp;
 pub mod power;

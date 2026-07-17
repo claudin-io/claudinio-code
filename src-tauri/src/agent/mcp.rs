@@ -192,6 +192,10 @@ async fn connect_one(
                 .map_err(|e| format!("MCP initialize failed for '{name}': {e}"))?
         }
         McpTransportConfig::Remote { url, headers } => {
+            let _net_guard = crate::net_activity::NetGuard::begin(
+                crate::net_activity::NetSource::Mcp,
+                format!("{name} ({url})"),
+            );
             let mut header_map = HashMap::new();
             for (k, v) in headers {
                 if let (Ok(hname), Ok(value)) = (

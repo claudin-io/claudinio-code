@@ -321,6 +321,16 @@ pub async fn run_subagent(
     let mut rounds: u32 = 0;
     let interrupt = &steering.interrupt;
 
+    // Network-indicator label: the subagent's goal, truncated for the tooltip.
+    let net_detail = {
+        let goal: String = spec.goal.chars().take(60).collect();
+        if goal.len() < spec.goal.len() {
+            format!("subagent · {goal}…")
+        } else {
+            format!("subagent · {goal}")
+        }
+    };
+
     let sub_max = config.sub_max_rounds.unwrap_or(usize::MAX);
     for _ in 0..sub_max {
         let mut assistant_text = String::new();
@@ -335,6 +345,7 @@ pub async fn run_subagent(
             &mut assistant_text,
             interrupt,
             false,
+            &net_detail,
         )
         .await
         {

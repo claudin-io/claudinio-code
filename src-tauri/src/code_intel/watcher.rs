@@ -167,9 +167,18 @@ impl FileWatcher {
         )
         .map_err(|e| format!("watcher create: {e}"))?;
 
+        // The native backends (FSEvents/inotify/ReadDirectoryChangesW) ignore
+        // poll_interval, but if notify ever falls back to PollWatcher this is
+        // how often the whole workspace tree gets rescanned. 2s here caused
+        // sustained background CPU on Windows machines where the native watch
+        // failed silently — keep the fallback lazy.
         watcher
-            .configure(Config::default().with_poll_interval(Duration::from_secs(2)))
+            .configure(Config::default().with_poll_interval(Duration::from_secs(60)))
             .map_err(|e| format!("watcher config: {e}"))?;
+        eprintln!(
+            "[watcher] started for {root_owned} (backend: {})",
+            std::any::type_name::<RecommendedWatcher>()
+        );
 
         watcher
             .watch(Path::new(root), RecursiveMode::Recursive)
