@@ -1,4 +1,5 @@
 mod agent;
+pub(crate) mod askpass;
 pub mod code_intel;
 mod commands;
 pub(crate) mod http;
@@ -19,6 +20,8 @@ pub fn run() {
         .manage(commands::power::KeepAwakeState::default())
         .setup(|app| {
             net_activity::set_app_handle(tauri::AppHandle::clone(app.handle()));
+            askpass::set_app_handle(tauri::AppHandle::clone(app.handle()));
+            askpass::start();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -83,6 +86,7 @@ pub fn run() {
             commands::power::set_keep_awake,
             commands::ide::detect_ides,
             commands::ide::open_in_ide,
+            askpass::answer_askpass,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

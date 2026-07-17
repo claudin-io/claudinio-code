@@ -137,6 +137,10 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         .arg(shell_flag)
         .arg(&args.command)
         .env("PATH", login_path)
+        // Route git/ssh credential prompts to the app UI (askpass bridge)
+        // instead of a TTY the child doesn't have — a bare `git push` over
+        // SSH used to hang until the timeout killed it.
+        .envs(crate::askpass::env_for_child())
         .current_dir(args.workdir.as_deref().unwrap_or("."))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -173,8 +177,19 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
                 break status.map_err(|e| format!("command failed: {e}"));
             }
             _ = &mut timeout_sleep => {
+                // The user is typing a credential in the askpass modal — give
+                // them a fresh window instead of killing the command mid-prompt.
+                if crate::askpass::pending_count() > 0 {
+                    timeout_sleep.as_mut().reset(
+                        tokio::time::Instant::now() + Duration::from_secs(timeout_secs),
+                    );
+                    continue;
+                }
                 return Err(format!(
-                    "command timed out after {timeout_secs}s and was killed"
+                    "command timed out after {timeout_secs}s and was killed \
+                     (note: commands cannot receive interactive terminal input — \
+                     if this command may prompt for a password/passphrase or \
+                     confirmation, that is likely why it hung, not a network issue)"
                 ));
             }
             _ = poll_interrupt(interrupt) => {
