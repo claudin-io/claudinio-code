@@ -3031,6 +3031,39 @@ fn handle_mode_switch(
                     golden_stalls: 0,
                     golden_last_pending: vec![],
                 });
+                // Auto-commit the latest plan when exiting Brain mode
+                let auto_commit = ctx.agent_config.as_ref()
+                    .map(|c| c.auto_commit_plan)
+                    .unwrap_or(true);
+                if auto_commit {
+                    if let Some(root) = &ctx.workspace_root {
+                        let plan_save_path = ctx.plan_save_path.as_deref();
+                        if let Some(plan_path) = crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path) {
+                            let fname = plan_path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("plan");
+                            // filename format: YYYY-MM-DD_slug.md — strip date prefix
+                            let slug = if fname.len() > 11 && &fname[4..5] == "-" {
+                                &fname[11..] // after "YYYY-MM-DD_"
+                            } else {
+                                fname
+                            };
+                            let commit_msg = format!("docs(plan): {}", slug);
+                            let add = std::process::Command::new("git")
+                                .arg("-C").arg(root)
+                                .arg("add")
+                                .arg(plan_path.to_string_lossy().as_ref())
+                                .output();
+                            if add.is_ok() {
+                                let _ = std::process::Command::new("git")
+                                    .arg("-C").arg(root)
+                                    .arg("commit")
+                                    .arg("-m").arg(&commit_msg)
+                                    .output();
+                            }
+                        }
+                    }
+                }
                 (
                     "Plan approved. Switching to Builder mode via new session... End your turn."
                         .into(),

@@ -117,6 +117,7 @@ function App() {
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [configKeepAwake, setConfigKeepAwake] = createSignal(true);
   const [configCodeIntelEnabled, setConfigCodeIntelEnabled] = createSignal(true);
+  const [configAutoCommitPlan, setConfigAutoCommitPlan] = createSignal(true);
   const [configPreferredIde, setConfigPreferredIde] = createSignal("");
   const [availableIdes, setAvailableIdes] = createSignal<string[]>([]);
   const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
@@ -343,6 +344,7 @@ function App() {
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
         setConfigKeepAwake(cfg.keepAwake ?? true);
         setConfigCodeIntelEnabled(cfg.codeIntelEnabled ?? true);
+        setConfigAutoCommitPlan(cfg.autoCommitPlan ?? true);
         setConfigPreferredIde(cfg.preferredIde ?? "");
         setConfigPlanSavePath(cfg.planSavePath ?? "");
         setConfigOverrideBaseUrl(cfg.overrideBaseUrl ?? "");
@@ -423,6 +425,7 @@ function App() {
         yoloMode: configYoloMode(),
         keepAwake: configKeepAwake(),
         codeIntelEnabled: configCodeIntelEnabled(),
+        autoCommitPlan: configAutoCommitPlan(),
         preferredIde: configPreferredIde() || undefined,
         planSavePath: configPlanSavePath() || undefined,
         yoloBlacklist: configYoloBlacklist()
@@ -1204,6 +1207,17 @@ function App() {
               />
               <span class="text-sm font-medium text-ink">{t("app.config.codeIntel")}</span>
               <span class="text-[11px] text-ink-faint">{t("app.config.codeIntelHint")}</span>
+            </label>
+
+            <label class="mb-4 flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={configAutoCommitPlan()}
+                onChange={(e) => setConfigAutoCommitPlan(e.currentTarget.checked)}
+                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+              />
+              <span class="text-sm font-medium text-ink">{t("app.config.autoCommitPlan")}</span>
+              <span class="text-[11px] text-ink-faint">{t("app.config.autoCommitPlanHint")}</span>
             </label>
 
             <label class="mb-3 block flex cursor-pointer items-center gap-2">

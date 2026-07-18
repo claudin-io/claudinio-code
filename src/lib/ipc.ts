@@ -114,6 +114,7 @@ export interface AgentConfig {
   codeIntelEnabled?: boolean;
   preferredIde?: string | null;
   handoffContextTokens?: number | null;
+  autoCommitPlan?: boolean;
   workspaceConfig?: Record<string, unknown> | null;
 }
 
@@ -137,6 +138,7 @@ export interface SetConfigArgs {
   codeIntelEnabled?: boolean;
   preferredIde?: string;
   handoffContextTokens?: number | null;
+  autoCommitPlan?: boolean;
 }
 
 export interface ApproveArgs {
