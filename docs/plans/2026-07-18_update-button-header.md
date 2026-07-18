@@ -131,3 +131,16 @@ Already defined in `src/components/Icon.tsx` (line ~72). Animated with `animate-
 2. Add `update.updateTo` and `update.installing` locale keys to `pt-BR.ts`
 3. Insert the update button `<Show>` block in App.tsx header, after the logo pill closing tag
 4. Build and verify compilation
+
+
+## Implementation Log — 2026-07-18 12:44
+**Summary:** Added update button in header next to logo pill — 3 files changed, 1 commit
+**Changed files:** A	docs/plans/2026-07-18_update-button-header.md, M	src/App.tsx, M	src/lib/locales/en-US.ts, M	src/lib/locales/pt-BR.ts
+**Commits:** 328322b feat: add update button in header next to logo
+**Journal:** All four tasks completed successfully in one pass. The locale subagents inserted keys at exactly the right positions with correct trailing commas and indentation. The App.tsx subagent inserted the update button block between the logo pill closing tag and the ml-auto controls div, preserving all surrounding code. The build passed cleanly: all 643 existing tests green, Vite production build succeeded with zero new warnings. No TypeScript or JSX compilation errors. The unrelated semantic_eval_queries.json change was intentionally left out of the commit. Single atomic commit (328322b) on main branch.
+
+**Task journal:**
+- Add English locale keys for update button: Inserted at lines 63-64, right after 'update.error'. Both keys have trailing commas, correct 2-space indentation matching existing style.
+- Add Portuguese locale keys for update button: Inserted at lines 63-64, right after 'update.error'. Both keys have trailing commas, correct 2-space indentation.
+- Insert update button in App.tsx header: Inserted at lines 691-708, right after logo pill </span> and before <div class='ml-auto...'>. Nested Show structure: outer Show gates on updateInfo(), inner Show switches between idle (clickable, shows "Update to v{version}") and installing (spinner + "Installing…", disabled).
+- Build and verify compilation: Build: 643 tests passed (35 test files), vite build succeeded with 1491 modules transformed, no TypeScript errors. Commit: 328322b on main.
