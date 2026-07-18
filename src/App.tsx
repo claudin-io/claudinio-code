@@ -687,6 +687,23 @@ function App() {
           Claudinio <span class="text-accent">Code</span>
           <span class="ml-0.5 text-[9px] font-extralight text-ink-faint">· v{APP_VERSION}</span>
         </span>
+        <Show when={updateInfo()}>
+          <button
+            onClick={() => void installUpdate()}
+            disabled={updateProgress() !== null}
+            class="rounded-md bg-warning px-2.5 py-1 text-xs font-medium text-black transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-80"
+          >
+            <Show
+              when={updateProgress() !== null}
+              fallback={<>{t("update.updateTo", updateInfo()!.version)}</>}
+            >
+              <span class="flex items-center gap-1.5">
+                <Icon name="loader" class="h-3 w-3 animate-spin" />
+                {t("update.installing")}
+              </span>
+            </Show>
+          </button>
+        </Show>
         <div class="ml-auto flex items-center gap-3">
           <div class="flex flex-col items-end">
             <span class="max-w-[280px] truncate font-mono text-[12px] text-ink-faint" data-tauri-drag-region>
