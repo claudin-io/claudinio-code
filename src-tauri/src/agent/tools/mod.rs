@@ -616,7 +616,30 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             .map_err(|e| format!("encode task panicked: {e}"))??;
             let mut results = db.search_by_embedding(query, &query_vec, limit as usize)?;
             attach_snippets(&mut results);
-            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
+            if !results.is_empty() {
+                return Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() });
+            }
+
+            // Nothing cleared the semantic threshold. That can mean the query
+            // genuinely has no match — but also that the background embedding
+            // pass hasn't caught up yet, so fall back to lexical search and
+            // say which situation we're in instead of a bare [].
+            let pending = db.embedding_pending_files().unwrap_or(0);
+            let lexical = db.search_symbols(query, limit)?;
+            let note = if pending > 0 {
+                format!(
+                    "semantic index still embedding ({pending} files pending); \
+                     results below are from lexical symbol search — retry later for semantic results"
+                )
+            } else {
+                "no semantic matches above the relevance threshold; results below are from lexical symbol search".to_string()
+            };
+            let envelope = serde_json::json!({
+                "fallback": "lexical",
+                "note": note,
+                "results": lexical,
+            });
+            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&envelope).unwrap_or_default() })
         }
         "bash" => {
             let mut a: bash::BashArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;

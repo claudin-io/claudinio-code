@@ -288,7 +288,13 @@ export function parseJsonList(output: string): { list: unknown[]; truncated: boo
   const text = output.trim();
   try {
     const v = JSON.parse(text);
-    return Array.isArray(v) ? { list: v, truncated: false } : null;
+    if (Array.isArray(v)) return { list: v, truncated: false };
+    // Fallback envelopes ({ fallback, note, results: [...] }) from
+    // semantic_search wrap the list — render the inner results.
+    if (v && Array.isArray((v as Record<string, unknown>).results)) {
+      return { list: (v as Record<string, unknown>).results as unknown[], truncated: false };
+    }
+    return null;
   } catch {
     /* fall through to salvage */
   }
