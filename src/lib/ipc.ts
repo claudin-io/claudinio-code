@@ -844,6 +844,22 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   };
 }
 
+// ── Network Log ────────────────────────────────────────────────────────
+
+export interface LogEntry {
+  workspace: string;
+  timestamp: string;
+  source: string;
+  detail: string;
+  durationMs: number;
+  bytes: number;
+  statusCode?: number;
+}
+
+export function getNetworkLog(workspace: string): Promise<LogEntry[]> {
+  return invoke<LogEntry[]>("get_network_log", { workspace });
+}
+
 // ── Askpass bridge ─────────────────────────────────────────────────────
 // A git/ssh credential prompt intercepted by the backend (askpass.rs) and
 // surfaced as an `askpass-request` event; answer resolves the waiting command.

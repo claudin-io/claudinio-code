@@ -16,3 +16,4 @@ pub mod system_stats;
 pub mod shell;
 pub mod skills;
 pub mod tasks;
+pub mod network_log;

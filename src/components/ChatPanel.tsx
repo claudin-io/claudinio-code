@@ -64,6 +64,7 @@ import { setWorkspaceStatus, isBusy } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
 import { GitIndicator } from "./GitIndicator";
 import { NetworkIndicator } from "./NetworkIndicator";
+import NetworkActivityModal from "./NetworkActivityModal";
 import { cpuPercent, memoryRssBytes, formatMemory } from "../lib/systemStats";
 import { GitChangesModal } from "./GitChangesModal";
 import CommitPushModal from "./CommitPushModal";
@@ -593,6 +594,7 @@ export const ChatPanel: Component<{
   const [showEditor, setShowEditor] = createSignal(false);
   const [, setIsEnhancing] = createSignal(false);
   const [showGitModal, setShowGitModal] = createSignal(false);
+  const [showNetModal, setShowNetModal] = createSignal(false);
   const [showCommitPushModal, setShowCommitPushModal] = createSignal(false);
   const [isDragging, setIsDragging] = createSignal(false);
   // @-mention autocomplete state
@@ -1862,7 +1864,7 @@ export const ChatPanel: Component<{
             {t("chat.header.plans")}
           </button>
           <GitIndicator workspace={props.workspace} active={props.isActive()} onShowChanges={() => setShowGitModal(true)} />
-          <NetworkIndicator />
+          <NetworkIndicator workspace={props.workspace} onClick={() => setShowNetModal(true)} />
           <span class="font-mono text-[11px] text-ink-faint whitespace-nowrap">
             CPU {cpuPercent().toFixed(0)}% · MEM {formatMemory(memoryRssBytes())}
           </span>
@@ -2542,6 +2544,9 @@ export const ChatPanel: Component<{
           workspace={props.workspace}
           onClose={() => setViewerFile(null)}
         />
+      </Show>
+      <Show when={showNetModal()}>
+        <NetworkActivityModal workspace={props.workspace} onClose={() => setShowNetModal(false)} />
       </Show>
       <ToastPill message={toastMessage()} onDismiss={dismissToast} />
     </div>

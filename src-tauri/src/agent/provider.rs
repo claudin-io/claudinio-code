@@ -612,6 +612,7 @@ pub async fn classify_turn_completion(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
+    _net_guard.set_status(response.status().as_u16());
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -683,6 +684,7 @@ pub async fn one_shot(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
+    _net_guard.set_status(response.status().as_u16());
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -796,6 +798,7 @@ pub async fn stream_message(
         crate::net_activity::NetSource::LlmStream,
         net_detail,
     );
+    net_guard.set_status(response.status().as_u16());
 
     let mut dump = if std::env::var("CLAUDINIO_DEBUG_DUMP").is_ok() {
         let dump_path = std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));

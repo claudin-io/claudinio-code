@@ -81,6 +81,7 @@ pub fn run() {
             commands::tasks::get_tasks,
             commands::tasks::set_tasks,
             commands::tasks::dismiss_golden_tasks,
+            commands::network_log::get_network_log,
             commands::mcp::mcp_list_servers,
             commands::mcp::mcp_test_server,
             commands::mcp::mcp_reconnect,

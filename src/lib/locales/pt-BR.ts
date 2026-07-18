@@ -142,6 +142,9 @@ const dict: LocaleDict = {
   "net.source.mcp": "Servidor MCP",
   "net.why.mcp": "Conectando a um servidor MCP remoto.",
 
+  "net.modal.title": "Registro de Rede",
+  "net.modal.empty": "Nenhum request registrado para este projeto.",
+
   // ── Askpass (credenciais git/ssh) ─────────────────────────────────
   "askpass.title": "Credencial necessária",
   "askpass.hint": "Um comando executado pelo agente (ex.: git push) precisa desta credencial. Ela é passada diretamente ao git/ssh e nunca é armazenada.",

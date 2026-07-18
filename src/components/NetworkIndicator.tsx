@@ -18,7 +18,11 @@ const sourceWhy = (op: NetOp) => t(`net.why.${op.source}`);
  * connection. Hovering shows which subsystem is using the network and why —
  * so a forgotten agent run streaming in the background is visible at a glance.
  */
-export const NetworkIndicator: Component<{ placement?: 'top' | 'bottom' }> = (props) => {
+export const NetworkIndicator: Component<{
+  placement?: 'top' | 'bottom';
+  workspace?: string;
+  onClick?: () => void;
+}> = (props) => {
   const placement = () => props.placement ?? 'bottom';
   const [hovered, setHovered] = createSignal(false);
   const ops = activeOps;
@@ -32,6 +36,7 @@ export const NetworkIndicator: Component<{ placement?: 'top' | 'bottom' }> = (pr
     >
       <button
         class="flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-surface-2"
+        onClick={() => props.onClick?.()}
         classList={{
           "text-accent": active(),
           "text-ink-faint": !active(),
