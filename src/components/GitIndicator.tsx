@@ -43,7 +43,9 @@ export const GitIndicator: Component<{
   // constant git.exe spawning that showed up as CPU churn on Windows.
   createVisibilityAwareInterval(
     refreshStatus,
-    10000,
+    // 30s: each poll walks the whole working tree; on network-drive
+    // workspaces (SMB) that was a steady stream of remote I/O.
+    30000,
     () => gitAvailable() === true && props.active,
   );
 

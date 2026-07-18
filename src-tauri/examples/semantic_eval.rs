@@ -49,7 +49,7 @@ fn main() {
 
     eprintln!("indexing {root} ...");
     let t = std::time::Instant::now();
-    let (files, symbols) =
+    let (files, symbols, _content) =
         indexer::scan_workspace(&db, root, None, Some(&mut embedder), None, None).expect("scan");
     eprintln!("indexed {files} files, {symbols} symbols in {:.1}s", t.elapsed().as_secs_f32());
 
