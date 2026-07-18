@@ -60,6 +60,8 @@ const dict: LocaleDict = {
   "update.later": "Later",
   "update.downloading": "Downloading and installing…",
   "update.error": "Update failed: {0}",
+  "update.updateTo": "Update to v{0}",
+  "update.installing": "Installing…",
   "app.config.yoloMode": "⚡ YOLO Mode (auto-approve all)",
   "app.config.yoloModeHint": "Auto-approves tool calls except those in the blacklist below.",
   "app.config.yoloBlacklist": "YOLO Blacklist (comma-separated tool names)",
