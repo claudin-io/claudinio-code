@@ -59,6 +59,49 @@ const BASH_BLACKLIST: &[&str] = &[
     "cp /",
 ];
 
+/// Heuristic: does this bash command WRITE file contents? Used to keep the
+/// main Builder session from editing files through bash (all modifications
+/// must go through code-mode subagents). Deliberately targets content
+/// editing — redirections, tee, in-place sed/perl, patch, and inline
+/// interpreter scripts that write — not general filesystem ops (rm/mv/cp
+/// stay governed by the normal approval flow).
+pub fn bash_writes_files(command: &str) -> bool {
+    // Strip redirections that don't produce file content before checking '>'.
+    let stripped = command
+        .replace("2>&1", "")
+        .replace("&>/dev/null", "")
+        .replace("&> /dev/null", "")
+        .replace("2>/dev/null", "")
+        .replace("2> /dev/null", "")
+        .replace(">/dev/null", "")
+        .replace("> /dev/null", "");
+    if stripped.contains('>') {
+        return true;
+    }
+    let lower = command.to_lowercase();
+    if lower.starts_with("tee ") || lower.contains("| tee ") || lower.contains("|tee ") {
+        return true;
+    }
+    for pat in ["sed -i", "gsed -i", "perl -i", "git apply", "patch "] {
+        if lower.contains(pat) {
+            return true;
+        }
+    }
+    // Inline interpreter scripts that write files (python3 -c "...open(...,'w')...").
+    let inline_script = ["python", "node", "ruby"].iter().any(|i| lower.contains(i))
+        && [" -c ", " -e ", " <<"].iter().any(|f| lower.contains(f));
+    if inline_script {
+        for pat in [
+            "open(", "write(", "json.dump", "writefile", "write_text", "file.write",
+        ] {
+            if lower.contains(pat) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel {
     let trimmed = command.trim();
 
@@ -285,6 +328,43 @@ mod tests {
             bash_permission("  git push  ", true),
             PermissionLevel::Auto
         ));
+    }
+
+    // ── bash_writes_files tests ──
+
+    #[test]
+    fn writes_files_detects_redirection() {
+        assert!(bash_writes_files("echo hi > file.txt"));
+        assert!(bash_writes_files("cat a.json | python3 -m json.tool >> out.json"));
+        assert!(!bash_writes_files("cargo test 2>&1"));
+        assert!(!bash_writes_files("ls > /dev/null"));
+        assert!(!bash_writes_files("cargo build 2>/dev/null"));
+    }
+
+    #[test]
+    fn writes_files_detects_tee_and_inplace_editors() {
+        assert!(bash_writes_files("echo x | tee config.json"));
+        assert!(bash_writes_files("sed -i '' 's/a/b/' src/main.rs"));
+        assert!(bash_writes_files("perl -i -pe 's/a/b/' file"));
+        assert!(bash_writes_files("git apply fix.patch"));
+    }
+
+    #[test]
+    fn writes_files_detects_inline_interpreter_writes() {
+        assert!(bash_writes_files(
+            "python3 -c \"import json; d=json.load(open('c.json')); json.dump(d, open('c.json','w'))\""
+        ));
+        assert!(bash_writes_files("node -e \"require('fs').writeFile('a', 'b', ()=>{})\""));
+        // Read-only inline scripts pass.
+        assert!(!bash_writes_files("python3 -c \"import json,sys; print(len(json.load(sys.stdin)))\""));
+    }
+
+    #[test]
+    fn writes_files_allows_builds_tests_and_reads() {
+        assert!(!bash_writes_files("cargo build --release"));
+        assert!(!bash_writes_files("npm test"));
+        assert!(!bash_writes_files("git status --short"));
+        assert!(!bash_writes_files("wc -l config/models.json"));
     }
 
     #[test]

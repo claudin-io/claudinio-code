@@ -22,6 +22,7 @@ import { platform } from "./lib/platform";
 import { ContextMenu } from "./components/ContextMenu";
 import { createVisibilityAwareInterval } from "./lib/visibility";
 import { startNetworkActivityListener } from "./lib/networkActivity";
+import { startSystemStatsListener } from "./lib/systemStats";
 import { AskpassModal } from "./components/AskpassModal";
 import { type AskpassRequest } from "./lib/ipc";
 
@@ -109,6 +110,7 @@ function App() {
   const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
   const [configMaxGoldenCycles, setConfigMaxGoldenCycles] = createSignal<number | null>(null);
+  const [configHandoffTokens, setConfigHandoffTokens] = createSignal<number>(120_000);
   const [configMaxGoldenStalls, setConfigMaxGoldenStalls] = createSignal<number | null>(null);
   const [configMaxParallelAgents, setConfigMaxParallelAgents] = createSignal<number>(4);
   const [configYoloMode, setConfigYoloMode] = createSignal(false);
@@ -210,7 +212,10 @@ function App() {
   // Listen for global index-progress events (model loading, embedding
   // generation, watcher re-indexing). Events carry the workspace root so each
   // one lands on the right workspace's progress slot.
-  onMount(() => startNetworkActivityListener());
+  onMount(() => {
+    startNetworkActivityListener();
+    startSystemStatsListener();
+  });
 
   // git/ssh credential prompts from the backend askpass bridge.
   const [askpassRequest, setAskpassRequest] = createSignal<AskpassRequest | null>(null);
@@ -331,6 +336,7 @@ function App() {
         setConfigMaxRounds(cfg.maxRounds ?? null);
         setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
         setConfigMaxGoldenCycles(cfg.maxGoldenCycles ?? null);
+        setConfigHandoffTokens(cfg.handoffContextTokens ?? 120_000);
         setConfigMaxGoldenStalls(cfg.maxGoldenStalls ?? null);
         setConfigMaxParallelAgents(cfg.maxParallelAgents ?? 4);
         setConfigYoloMode(cfg.yoloMode ?? false);
@@ -411,6 +417,7 @@ function App() {
         maxRounds: configMaxRounds(),
         subMaxRounds: configSubMaxRounds(),
         maxGoldenCycles: configMaxGoldenCycles(),
+        handoffContextTokens: configHandoffTokens(),
         maxGoldenStalls: configMaxGoldenStalls(),
         maxParallelAgents: configMaxParallelAgents(),
         yoloMode: configYoloMode(),
@@ -1074,6 +1081,24 @@ function App() {
               class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
             <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenStallsHint")}</p>
+            </div>
+
+
+            <div>
+            <label class="mb-1 block text-xs text-ink-muted">
+              {t("settings.handoffThreshold")}
+              <span class="ml-2 font-mono text-[11px] text-ink-faint">{Math.round(configHandoffTokens() / 1000)}k tokens</span>
+            </label>
+            <input
+              type="range"
+              min="120000"
+              max="256000"
+              step="8000"
+              value={configHandoffTokens()}
+              onInput={(e) => setConfigHandoffTokens(parseInt(e.currentTarget.value, 10))}
+              class="mb-1 w-full accent-accent"
+            />
+            <p class="mb-0 text-[11px] text-ink-faint">{t("settings.handoffThresholdHint")}</p>
             </div>
 
             </div>

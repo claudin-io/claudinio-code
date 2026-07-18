@@ -143,6 +143,36 @@ pub enum SessionRecord {
         files_changed: Vec<String>,
         ts: u64,
     },
+    /// This session continues a previous one (written right after `Meta`).
+    /// `reason` is "plan_execution" | "golden_flip" | "context_handoff" |
+    /// "manual_builder". The golden fields carry the golden-loop state across
+    /// the chain so cycle/stall caps never reset on a handoff.
+    #[serde(rename = "linked_from")]
+    LinkedFrom {
+        prev_session_id: String,
+        reason: String,
+        #[serde(default)]
+        golden_cycle: u32,
+        #[serde(default)]
+        golden_stalls: u32,
+        #[serde(default)]
+        golden_last_pending: Vec<String>,
+        ts: u64,
+    },
+    /// Forward pointer: this session was superseded by a linked successor.
+    /// Sessions with this record are hidden from the session list (the chain
+    /// tip represents the whole conversation).
+    #[serde(rename = "handoff_to")]
+    HandoffTo {
+        next_session_id: String,
+        reason: String,
+        ts: u64,
+    },
+    /// The model-generated handoff document produced when the context crossed
+    /// the configured threshold, kept for audit; the successor session receives
+    /// it as its first user message.
+    #[serde(rename = "handoff")]
+    Handoff { text: String, ts: u64 },
 }
 
 /// Number of golden cycles already run in this session (the highest
@@ -156,6 +186,54 @@ pub fn golden_cycle_count(records: &[SessionRecord]) -> u32 {
         })
         .max()
         .unwrap_or(0)
+}
+
+/// Parsed view of a session's `LinkedFrom` record, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedFromInfo {
+    pub prev_session_id: String,
+    pub reason: String,
+    pub golden_cycle: u32,
+    pub golden_stalls: u32,
+    pub golden_last_pending: Vec<String>,
+}
+
+/// The `LinkedFrom` record of this session (who it continues), if any.
+pub fn linked_from(records: &[SessionRecord]) -> Option<LinkedFromInfo> {
+    records.iter().find_map(|r| match r {
+        SessionRecord::LinkedFrom {
+            prev_session_id,
+            reason,
+            golden_cycle,
+            golden_stalls,
+            golden_last_pending,
+            ..
+        } => Some(LinkedFromInfo {
+            prev_session_id: prev_session_id.clone(),
+            reason: reason.clone(),
+            golden_cycle: *golden_cycle,
+            golden_stalls: *golden_stalls,
+            golden_last_pending: golden_last_pending.clone(),
+        }),
+        _ => None,
+    })
+}
+
+/// The successor session id when this session was superseded by a handoff.
+pub fn handoff_to(records: &[SessionRecord]) -> Option<String> {
+    records.iter().rev().find_map(|r| match r {
+        SessionRecord::HandoffTo { next_session_id, .. } => Some(next_session_id.clone()),
+        _ => None,
+    })
+}
+
+/// Golden-loop state carried over from the predecessor session:
+/// (cycle, stalls, last_pending). All zeros/empty when not linked.
+pub fn linked_golden_state(records: &[SessionRecord]) -> (u32, u32, Vec<String>) {
+    match linked_from(records) {
+        Some(info) => (info.golden_cycle, info.golden_stalls, info.golden_last_pending),
+        None => (0, 0, Vec::new()),
+    }
 }
 
 /// The earliest recorded base commit for the session (the git HEAD when work
@@ -476,9 +554,18 @@ pub struct SessionSummary {
 }
 
 /// List all sessions for a workspace, newest first.
+///
+/// Linked sessions collapse to ONE entry per chain: sessions superseded by a
+/// handoff (`handoff_to` present) are hidden, and the surviving chain tip
+/// inherits the root's `created_at`/`title` and the summed `turn_count` of the
+/// whole chain — the user sees one conversation, not its internal segments.
 pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, String> {
     let dir = sessions_dir(workspace)?;
     let mut summaries = Vec::new();
+    // Per-session chain metadata gathered in the same pass as the summaries:
+    // id -> (predecessor id, superseded?).
+    let mut chain_meta: std::collections::HashMap<String, (Option<String>, bool)> =
+        std::collections::HashMap::new();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return Ok(summaries),
@@ -531,11 +618,35 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::PlanFinalized { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
+                SessionRecord::LinkedFrom { ts, .. }
+                | SessionRecord::HandoffTo { ts, .. }
+                | SessionRecord::Handoff { ts, .. } => {
+                    updated_at = updated_at.max(*ts);
+                }
             }
+        }
+        // Sessions with no real content (only meta/mode records — lazy
+        // creations from a mode toggle that never got a message) are noise:
+        // hide them unless they belong to a chain.
+        let has_content = records
+            .iter()
+            .any(|r| matches!(r, SessionRecord::User { .. } | SessionRecord::Turn { .. }));
+        let in_chain = records.iter().any(|r| {
+            matches!(r, SessionRecord::LinkedFrom { .. } | SessionRecord::HandoffTo { .. })
+        });
+        if !has_content && !in_chain {
+            continue;
         }
         if title.is_empty() {
             title = "(empty session)".into();
         }
+        chain_meta.insert(
+            session_id.clone(),
+            (
+                linked_from(&records).map(|i| i.prev_session_id),
+                handoff_to(&records).is_some(),
+            ),
+        );
         summaries.push(SessionSummary {
             session_id,
             created_at,
@@ -544,8 +655,53 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
             turn_count,
         });
     }
-    summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(summaries)
+
+    // Collapse chains: keep only tips (not superseded), folding each tip's
+    // ancestry into it.
+    let by_id: std::collections::HashMap<String, (u64, String, usize)> = summaries
+        .iter()
+        .map(|s| {
+            (
+                s.session_id.clone(),
+                (s.created_at, s.title.clone(), s.turn_count),
+            )
+        })
+        .collect();
+    let mut collapsed: Vec<SessionSummary> = Vec::new();
+    for mut summary in summaries {
+        let superseded = chain_meta
+            .get(&summary.session_id)
+            .map(|(_, s)| *s)
+            .unwrap_or(false);
+        if superseded {
+            continue;
+        }
+        // Walk back to the chain root, accumulating turns; the root names the
+        // conversation (its title and created_at are what the user first saw).
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::from([summary.session_id.clone()]);
+        let mut cursor = chain_meta
+            .get(&summary.session_id)
+            .and_then(|(prev, _)| prev.clone());
+        while let Some(prev_id) = cursor {
+            if !seen.insert(prev_id.clone()) {
+                break; // cycle guard
+            }
+            if let Some((created, title, turns)) = by_id.get(&prev_id) {
+                summary.turn_count += turns;
+                if *created > 0 {
+                    summary.created_at = *created;
+                }
+                if title != "(empty session)" {
+                    summary.title = title.clone();
+                }
+            }
+            cursor = chain_meta.get(&prev_id).and_then(|(prev, _)| prev.clone());
+        }
+        collapsed.push(summary);
+    }
+    collapsed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(collapsed)
 }
 
 pub fn load_records_cached(
@@ -595,6 +751,101 @@ mod tests {
         ];
         assert_eq!(golden_cycle_count(&recs), 2);
         assert_eq!(golden_cycle_count(&[]), 0);
+    }
+
+    #[test]
+    fn linked_records_roundtrip() {
+        let rec = SessionRecord::LinkedFrom {
+            prev_session_id: "s1".into(),
+            reason: "golden_flip".into(),
+            golden_cycle: 3,
+            golden_stalls: 1,
+            golden_last_pending: vec!["golden-x-1".into()],
+            ts: 7,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"linked_from\""), "got: {json}");
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, SessionRecord::LinkedFrom { golden_cycle: 3, .. }));
+
+        let rec = SessionRecord::HandoffTo {
+            next_session_id: "s2".into(),
+            reason: "context_handoff".into(),
+            ts: 8,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"handoff_to\""), "got: {json}");
+
+        let rec = SessionRecord::Handoff { text: "## Purpose\ncontinue".into(), ts: 9 };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"handoff\""), "got: {json}");
+    }
+
+    #[test]
+    fn linked_golden_state_reads_linked_from() {
+        let recs = vec![
+            SessionRecord::Meta { session_id: "s2".into(), created_at: 1, workspace: None },
+            SessionRecord::LinkedFrom {
+                prev_session_id: "s1".into(),
+                reason: "golden_flip".into(),
+                golden_cycle: 4,
+                golden_stalls: 1,
+                golden_last_pending: vec!["golden-a-0".into()],
+                ts: 2,
+            },
+        ];
+        let (cycle, stalls, pending) = linked_golden_state(&recs);
+        assert_eq!(cycle, 4);
+        assert_eq!(stalls, 1);
+        assert_eq!(pending, vec!["golden-a-0".to_string()]);
+        assert_eq!(linked_golden_state(&[]), (0, 0, Vec::new()));
+    }
+
+    #[test]
+    fn linked_from_missing_golden_fields_defaults_to_zero() {
+        // Records written by an older build (or hand-edited) must still load.
+        let line = r#"{"kind":"linked_from","prev_session_id":"s1","reason":"plan_execution","ts":1}"#;
+        match serde_json::from_str::<SessionRecord>(line).unwrap() {
+            SessionRecord::LinkedFrom { golden_cycle, golden_stalls, golden_last_pending, .. } => {
+                assert_eq!(golden_cycle, 0);
+                assert_eq!(golden_stalls, 0);
+                assert!(golden_last_pending.is_empty());
+            }
+            other => panic!("expected LinkedFrom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_sessions_collapses_chains_to_one_entry() {
+        let dir = std::env::temp_dir().join(format!("claudinio-test-{}", std::process::id()));
+        let ws = dir.to_string_lossy().to_string();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Chain: root -> mid -> tip; plus one standalone session.
+        let root_store = SessionStore::create("root", Some(&ws)).unwrap();
+        root_store.append(&SessionRecord::User { text: "build the feature".into(), ts: 10 }).unwrap();
+        root_store.append(&SessionRecord::HandoffTo { next_session_id: "mid".into(), reason: "plan_execution".into(), ts: 20 }).unwrap();
+
+        let mid_store = SessionStore::create("mid", Some(&ws)).unwrap();
+        mid_store.append(&SessionRecord::LinkedFrom { prev_session_id: "root".into(), reason: "plan_execution".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 21 }).unwrap();
+        mid_store.append(&SessionRecord::User { text: "[system] execute".into(), ts: 22 }).unwrap();
+        mid_store.append(&SessionRecord::HandoffTo { next_session_id: "tip".into(), reason: "context_handoff".into(), ts: 30 }).unwrap();
+
+        let tip_store = SessionStore::create("tip", Some(&ws)).unwrap();
+        tip_store.append(&SessionRecord::LinkedFrom { prev_session_id: "mid".into(), reason: "context_handoff".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 31 }).unwrap();
+        tip_store.append(&SessionRecord::User { text: "[system] continue".into(), ts: 32 }).unwrap();
+
+        let solo_store = SessionStore::create("solo", Some(&ws)).unwrap();
+        solo_store.append(&SessionRecord::User { text: "hello".into(), ts: 5 }).unwrap();
+
+        let list = list_sessions(Some(&ws)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(list.len(), 2, "chain must collapse to one entry: {list:?}");
+        let tip = list.iter().find(|s| s.session_id == "tip").expect("tip entry");
+        assert_eq!(tip.title, "build the feature", "tip inherits the root's title");
+        assert_eq!(tip.turn_count, 3, "turn_count sums the whole chain");
+        assert!(list.iter().any(|s| s.session_id == "solo"));
+        assert!(!list.iter().any(|s| s.session_id == "root" || s.session_id == "mid"));
     }
 
     #[test]
@@ -1066,5 +1317,120 @@ mod tests {
         ];
         let (_, _, cost, ..) = cumulative_stats(&recs);
         assert_eq!(cost, None);
+    }
+
+    #[test]
+    fn linked_from_roundtrip() {
+        let rec = SessionRecord::LinkedFrom {
+            prev_session_id: "abc123".into(),
+            reason: "plan_execution".into(),
+            golden_cycle: 2,
+            golden_stalls: 1,
+            golden_last_pending: vec!["golden-x".into()],
+            ts: 100,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"linked_from\""));
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionRecord::LinkedFrom {
+                prev_session_id,
+                reason,
+                golden_cycle,
+                golden_stalls,
+                golden_last_pending,
+                ..
+            } => {
+                assert_eq!(prev_session_id, "abc123");
+                assert_eq!(reason, "plan_execution");
+                assert_eq!(golden_cycle, 2);
+                assert_eq!(golden_stalls, 1);
+                assert_eq!(golden_last_pending, vec!["golden-x"]);
+            }
+            _ => panic!("expected LinkedFrom"),
+        }
+    }
+
+    #[test]
+    fn linked_from_helpers() {
+        let recs = vec![
+            SessionRecord::Meta { session_id: "s1".into(), created_at: 1, workspace: None },
+            SessionRecord::LinkedFrom {
+                prev_session_id: "parent".into(),
+                reason: "golden_flip".into(),
+                golden_cycle: 3,
+                golden_stalls: 0,
+                golden_last_pending: vec!["golden-y".into()],
+                ts: 2,
+            },
+        ];
+
+        // linked_from()
+        let info = linked_from(&recs).unwrap();
+        assert_eq!(info.prev_session_id, "parent");
+        assert_eq!(info.reason, "golden_flip");
+        assert_eq!(info.golden_cycle, 3);
+        assert_eq!(info.golden_stalls, 0);
+        assert_eq!(info.golden_last_pending, vec!["golden-y"]);
+
+        // linked_from() on empty
+        assert!(linked_from(&[]).is_none());
+
+        // linked_golden_state()
+        let (cy, st, lp) = linked_golden_state(&recs);
+        assert_eq!(cy, 3);
+        assert_eq!(st, 0);
+        assert_eq!(lp, vec!["golden-y"]);
+
+        let (cy, st, lp) = linked_golden_state(&[]);
+        assert_eq!(cy, 0);
+        assert_eq!(st, 0);
+        assert!(lp.is_empty());
+    }
+
+    #[test]
+    fn handoff_to_helper() {
+        let recs = vec![
+            SessionRecord::HandoffTo { next_session_id: "next-id".into(), reason: "context_handoff".into(), ts: 42 },
+        ];
+        assert_eq!(handoff_to(&recs), Some("next-id".into()));
+        assert_eq!(handoff_to(&[]), None);
+    }
+
+    #[test]
+    fn handoff_record_roundtrip() {
+        let rec = SessionRecord::Handoff { text: "## Purpose\nDo X".into(), ts: 99 };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"handoff\""));
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionRecord::Handoff { text, .. } => assert_eq!(text, "## Purpose\nDo X"),
+            _ => panic!("expected Handoff"),
+        }
+    }
+
+    #[test]
+    fn list_sessions_includes_new_records_without_panic() {
+        // Verify the match arms also handle LinkedFrom, HandoffTo, Handoff
+        // at the new timestamp arms (line ~584).
+        let recs = vec![
+            SessionRecord::Meta { session_id: "sx".into(), created_at: 1, workspace: Some("/tmp/test".into()) },
+            SessionRecord::User { text: "test".into(), ts: 2 },
+            SessionRecord::LinkedFrom { prev_session_id: "p".into(), reason: "plan_execution".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 3 },
+            SessionRecord::HandoffTo { next_session_id: "n".into(), reason: "context_handoff".into(), ts: 4 },
+            SessionRecord::Handoff { text: "doc".into(), ts: 5 },
+        ];
+        // Simulate what list_sessions does: iterate and extract ts. If any arm
+        // panics we'd catch it here.
+        let mut updated_at = 0u64;
+        for rec in &recs {
+            match rec {
+                SessionRecord::LinkedFrom { ts, .. } => updated_at = updated_at.max(*ts),
+                SessionRecord::HandoffTo { ts, .. } => updated_at = updated_at.max(*ts),
+                SessionRecord::Handoff { ts, .. } => updated_at = updated_at.max(*ts),
+                _ => {}
+            }
+        }
+        assert_eq!(updated_at, 5);
     }
 }

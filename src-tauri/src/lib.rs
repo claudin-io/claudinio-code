@@ -22,6 +22,7 @@ pub fn run() {
             net_activity::set_app_handle(tauri::AppHandle::clone(app.handle()));
             askpass::set_app_handle(tauri::AppHandle::clone(app.handle()));
             askpass::start();
+            commands::system_stats::start_poller(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -63,6 +64,7 @@ pub fn run() {
             commands::agent::compact_session,
             commands::agent::commit_and_push,
             commands::agent::set_session_mode,
+            commands::agent::continue_with_builder,
             commands::agent::get_session_mode,
             commands::agent::check_plan_exists,
             commands::agent::list_plans,

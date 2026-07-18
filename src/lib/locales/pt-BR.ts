@@ -267,6 +267,13 @@ const dict: LocaleDict = {
   "chat.compact.start": "Contexto em ~{0}k/{1}k tokens — compactando…",
   "chat.compact.done": "Contexto compactado: ~{0}k → ~{1}k tokens.",
   "chat.compact.fail": "Falha na compactação: {0} — continuando com contexto cheio.",
+  "chat.handoff.start": "Contexto em ~{0}k/{1}k tokens — escrevendo handoff para uma nova sessão…",
+  "chat.handoff.fail": "Falha no handoff: {0} — usando compactação como fallback.",
+  "chat.linked.planExecution": "Plano aprovado — continuando em uma nova sessão Builder",
+  "chat.linked.goldenFlip": "Golden loop — continuando em uma nova sessão",
+  "chat.linked.contextHandoff": "Limite de contexto atingido — continuando em uma nova sessão",
+  "chat.linked.manualBuilder": "Continuando com o Builder em uma nova sessão",
+  "chat.linked.handoffDoc": "Documento de handoff",
 
   // ── ChatPanel - Archived ──────────────────────────────────────────
   "chat.archived.title": "Histórico compactado",
@@ -348,6 +355,8 @@ const dict: LocaleDict = {
   "golden.task.dismiss": "Descartar esse goal",
   "settings.maxGoldenCycles": "Máx. ciclos golden",
   "settings.maxGoldenCyclesHint": "Quantos ciclos automáticos Brain↔Builder rodar enquanto golden goals (tags <goal>) estiverem pendentes. Vazio = 5.",
+  "settings.handoffThreshold": "Limite de handoff da sessão",
+  "settings.handoffThresholdHint": "Tamanho de contexto em que a sessão escreve um documento de handoff e continua em uma nova sessão encadeada.",
   "settings.maxGoldenStalls": "Máx. estagnações golden",
   "settings.maxGoldenStallsHint": "Para o golden loop após este número de ciclos sem progresso. Vazio = 2.",
 
