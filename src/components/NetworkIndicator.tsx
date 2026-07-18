@@ -39,9 +39,6 @@ export const NetworkIndicator: Component<{ placement?: 'top' | 'bottom' }> = (pr
         aria-label={t("net.title")}
       >
         <Icon name="globe" class={"h-3.5 w-3.5" + (active() ? " animate-pulse" : "")} />
-        <Show when={active()}>
-          <span>{ops().length}</span>
-        </Show>
       </button>
 
       {/* Hover tooltip: one row per active connection (origin + why). */}
