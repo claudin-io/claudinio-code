@@ -267,6 +267,13 @@ const dict: LocaleDict = {
   "chat.compact.start": "Context at {0}k / {1}k — compacting…",
   "chat.compact.done": "Context compacted: ~{0}k → ~{1}k tokens.",
   "chat.compact.fail": "Compaction failed: {0} — continuing with full context.",
+  "chat.handoff.start": "Context at {0}k / {1}k — writing handoff for a fresh session…",
+  "chat.handoff.fail": "Handoff failed: {0} — falling back to compaction.",
+  "chat.linked.planExecution": "Plan approved — continuing in a new Builder session",
+  "chat.linked.goldenFlip": "Golden loop — continuing in a fresh session",
+  "chat.linked.contextHandoff": "Context limit reached — continued in a fresh session",
+  "chat.linked.manualBuilder": "Continuing with Builder in a new session",
+  "chat.linked.handoffDoc": "Handoff document",
 
   // ── ChatPanel - Archived ──────────────────────────────────────────
   "chat.archived.title": "Compacted history",
@@ -348,6 +355,8 @@ const dict: LocaleDict = {
   "golden.task.dismiss": "Dismiss this goal",
   "settings.maxGoldenCycles": "Max golden cycles",
   "settings.maxGoldenCyclesHint": "How many automatic Brain↔Builder cycles to run while golden goals (<goal> tags) are pending. Empty = 5.",
+  "settings.handoffThreshold": "Session handoff threshold",
+  "settings.handoffThresholdHint": "Context size at which the session writes a handoff document and continues in a fresh linked session.",
   "settings.maxGoldenStalls": "Max golden stalls",
   "settings.maxGoldenStallsHint": "Stop the golden loop after this many cycles without progress. Empty = 2.",
 

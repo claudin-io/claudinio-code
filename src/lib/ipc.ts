@@ -113,6 +113,7 @@ export interface AgentConfig {
   mcp?: McpServerMap;
   codeIntelEnabled?: boolean;
   preferredIde?: string | null;
+  handoffContextTokens?: number | null;
   workspaceConfig?: Record<string, unknown> | null;
 }
 
@@ -135,6 +136,7 @@ export interface SetConfigArgs {
   mcp?: McpServerMap;
   codeIntelEnabled?: boolean;
   preferredIde?: string;
+  handoffContextTokens?: number | null;
 }
 
 export interface ApproveArgs {
@@ -186,11 +188,27 @@ export interface GoldenLoopData {
   mode: SessionMode;
 }
 
+/// Why a session handed off to a linked successor.
+export type HandoffReason =
+  | "plan_execution"
+  | "golden_flip"
+  | "context_handoff"
+  | "manual_builder";
+
+export interface SessionLinkedData {
+  prevSessionId: string;
+  sessionId: string;
+  reason: HandoffReason;
+  mode: SessionMode;
+  firstMessage: string;
+}
+
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
   | { event: "TextDelta"; data: { text: string } }
   | { event: "ModeChanged"; data: ModeChangedData }
   | { event: "GoldenLoop"; data: GoldenLoopData }
+  | { event: "SessionLinked"; data: SessionLinkedData }
   | { event: "Thinking"; data: string }
   | { event: "ToolCall"; data: ToolCallData }
   | { event: "ToolResult"; data: ToolResultData }
@@ -332,6 +350,17 @@ export function setSessionMode(workspace: string, mode: SessionMode): Promise<Se
   return invoke<SessionStarted>("set_session_mode", { workspace, mode });
 }
 
+/// Approve the Brain's plan: creates a NEW linked Builder session whose first
+/// prompt carries the plan, and starts executing it. Returns the new session id.
+export function continueWithBuilderSession(
+  workspace: string,
+  onEvent: (event: AgentEvent) => void,
+): Promise<SessionStarted> {
+  const channel = new Channel<AgentEvent>();
+  channel.onmessage = onEvent;
+  return invoke<SessionStarted>("continue_with_builder", { workspace, eventChannel: channel });
+}
+
 export function getSessionMode(workspace: string): Promise<{ mode: SessionMode; origin: ModeOrigin }> {
   return invoke<{ mode: SessionMode; origin: ModeOrigin }>("get_session_mode", { workspace });
 }
@@ -369,7 +398,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks" | "golden_cycle";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff";
   [key: string]: unknown;
 };
 

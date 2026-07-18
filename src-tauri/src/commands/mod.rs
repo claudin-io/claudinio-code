@@ -12,6 +12,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod power;
 pub mod procutil;
+pub mod system_stats;
 pub mod shell;
 pub mod skills;
 pub mod tasks;

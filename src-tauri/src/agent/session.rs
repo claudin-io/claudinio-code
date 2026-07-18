@@ -292,6 +292,48 @@ impl SteeringCtl {
     }
 }
 
+/// Why this session is handing off to a new linked session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HandoffReason {
+    #[serde(rename = "plan_execution")]
+    PlanExecution,
+    #[serde(rename = "golden_flip")]
+    GoldenFlip,
+    #[serde(rename = "context_handoff")]
+    ContextHandoff,
+    #[serde(rename = "manual_builder")]
+    ManualBuilder,
+}
+
+impl HandoffReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HandoffReason::PlanExecution => "plan_execution",
+            HandoffReason::GoldenFlip => "golden_flip",
+            HandoffReason::ContextHandoff => "context_handoff",
+            HandoffReason::ManualBuilder => "manual_builder",
+        }
+    }
+}
+
+/// Data needed to create a linked successor session and resume work.
+pub struct HandoffSpec {
+    pub reason: HandoffReason,
+    pub next_mode: SessionMode,
+    pub next_origin: ModeOrigin,
+    pub first_message: String,
+    pub golden_cycle: u32,
+    pub golden_stalls: u32,
+    pub golden_last_pending: Vec<String>,
+}
+
+/// What a workflow run produced: either it finished normally, or it requests a
+/// handoff to a new linked session.
+pub enum RunOutcome {
+    Completed,
+    Handoff(Box<HandoffSpec>),
+}
+
 /// Cache-stable system prompt. This is the byte-identical prefix of every
 /// request in a session — keep it constant so the provider's prefix cache stays
 /// warm.
@@ -512,7 +554,7 @@ File tools take absolute paths inside this root."
                 "You are in Builder mode: you execute the plan Brain prepared. The task list (normally created in Brain mode) ",
                 "IS your worklist - every edit MUST be driven through it, exactly as the base ## TASK SYSTEM requires. ",
                 "Working without updating the tasks in real time is a defect, not a shortcut.\n",
-                "1. Call `tasks_get` FIRST - before any `edit_file` or state-changing command. This is not optional even when tasks ",
+                "1. Call `tasks_get` FIRST - before any state-changing command. This is not optional even when tasks ",
                 "already exist: you must load them and follow them in order, respecting dependencies. They ARE the plan.\n",
                 "2. Also read the most recent plan file in `{plans_subdir}/` (`list_dir`) before executing - it carries ",
                 "the Solution Design (requirements) and the `## Low-Level Design` (the technical spec - files, symbols, ",
@@ -522,7 +564,9 @@ File tools take absolute paths inside this root."
                 "'todo' - mark it 'doing' first, always.\n",
                 "4. Delegate: implement each task through `spawn_agents` in 'code' mode - one subagent per task, ",
                 "in ONE call when tasks are independent (parallel), in sequential waves when they depend on each other. ",
-                "This keeps your main context clean. Only implement directly yourself when a task is trivial (a single small edit) or needs mid-task user decisions.\n",
+                "This keeps your main context clean. You CANNOT edit files yourself: there is no edit_file in this session ",
+                "and bash commands that write files (redirections, tee, sed -i, inline scripts) are blocked. ",
+                "ALL file modifications go through code-mode subagents; your bash is for builds, tests and read-only inspection.\n",
                 "   Each subagent goal must be a COMPLETE technical spec: it must repeat every concrete value from the plan/task VERBATIM ",
                 "(exact file paths and symbols, agreed sizes/dimensions, and any user-supplied asset - the real URL, exact icon id, real SVG). ",
                 "The subagent has empty context and cannot ask the user, so if a value is missing it WILL guess and be wrong. ",
@@ -661,6 +705,19 @@ pub enum AgentEvent {
         pending: Vec<String>,
         mode: String,
     },
+    /// The session was linked to a new successor via handoff. The old session
+    /// ends here; the UI stitches the successor's events into the same thread.
+    #[serde(rename = "SessionLinked")]
+    SessionLinked {
+        #[serde(rename = "prevSessionId")]
+        prev_session_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        reason: String,
+        mode: String,
+        #[serde(rename = "firstMessage")]
+        first_message: String,
+    },
     #[serde(rename = "SessionStats")]
     SessionStats {
         #[serde(rename = "inputTokens")]
@@ -725,13 +782,16 @@ fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolD
     }
     let mut defs = tools::get_defs(maxp);
     defs.retain(|t| t.name != "web_search" || config.is_claudinio_account());
+    // The main session never edits files directly: Brain is read-only and
+    // Builder delegates ALL file modifications to code-mode subagents (which
+    // keep edit_file through their own toolset in subagent.rs).
+    defs.retain(|t| t.name != "edit_file");
     match mode {
         SessionMode::Builder => {
             defs.push(tools::enter_plan_mode_def());
             defs.push(tools::finalize_plan_def());
         }
         SessionMode::Brain => {
-            defs.retain(|t| t.name != "edit_file");
             defs.push(tools::write_plan_def());
             defs.push(tools::exit_plan_mode_def());
         }
@@ -1068,6 +1128,205 @@ async fn stream_message_with_retry(
     }
 }
 
+/// Compaction threshold adjusted so it never fires BEFORE the context-handoff
+/// threshold in Standard sessions: compaction is the fallback, not the first
+/// responder. GitSync (and any non-Standard profile) keeps the plain constant.
+fn effective_compact_threshold(config: &AgentConfig, profile: PromptProfile) -> u64 {
+    if profile == PromptProfile::Standard {
+        COMPACT_THRESHOLD.max(config.effective_handoff_threshold() + 10_000)
+    } else {
+        COMPACT_THRESHOLD
+    }
+}
+
+/// When the context crosses the configured handoff threshold, ask the model to
+/// compress its own context into a handoff document (Matt Pocock style) and
+/// request a linked-session handoff carrying it as the successor's first
+/// message. Returns `None` when the threshold isn't crossed, the profile is
+/// not Standard, generation was interrupted, or generation failed — callers
+/// fall through to the compaction safety net.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_context_handoff(
+    config: &AgentConfig,
+    profile: PromptProfile,
+    estimated: u64,
+    history: &mut Vec<Message>,
+    system: &str,
+    store: &SessionStore,
+    ctx: &ToolContext,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+    steering: &Arc<SteeringCtl>,
+    mode_ctl: &Arc<ModeCtl>,
+    run_in: u32,
+    run_out: u32,
+) -> Option<RunOutcome> {
+    if profile != PromptProfile::Standard {
+        return None;
+    }
+    if estimated < config.effective_handoff_threshold() {
+        return None;
+    }
+    let _ = event_tx.send(AgentEvent::TextStep {
+        text: format!(
+            "__handoff_start__:{}/{}",
+            estimated / 1000,
+            MAX_CONTEXT_TOKENS / 1000
+        ),
+    });
+    push_user_blocks(
+        history,
+        store,
+        ctx,
+        vec![ContentBlock::text(
+            "[system] This session's context reached its limit. Your next reply must be \
+             ONLY a handoff document for a successor session that will continue this \
+             exact work with a fresh context. Structure it with these markdown sections: \
+             ## Purpose of next session / ## Current state (what is done, and how it was \
+             verified) / ## Key decisions (and why) / ## Pointers (plan file path, key \
+             file paths, task ids - references only, never duplicate file contents) / \
+             ## In-flight work (the task mid-execution and its exact next step) / \
+             ## Next actions. Rules: no secrets, API keys, tokens or personal data; be \
+             concise; do not call tools; do not address the user.",
+        )],
+    );
+
+    let (cur_mode, cur_origin) = mode_ctl.get();
+    let resolved_model = config.model_for_mode(cur_mode.as_str());
+    let net_detail = format!("{resolved_model} · handoff");
+    let mut gen_in: u32 = 0;
+    let mut gen_out: u32 = 0;
+    let mut handoff_text = String::new();
+    for attempt in 0..2 {
+        let mut assistant_text = String::new();
+        let out = match stream_message_with_retry(
+            config,
+            resolved_model,
+            history,
+            &[], // no tools: text is the only possible output
+            Some(system),
+            event_tx,
+            session_id,
+            &mut assistant_text,
+            &steering.interrupt,
+            &net_detail,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = event_tx.send(AgentEvent::TextStep {
+                    text: format!("__handoff_fail__:{e}"),
+                });
+                return None;
+            }
+        };
+        if out.interrupted {
+            // The user interrupted mid-generation: abandon the handoff and let
+            // the main loop take its normal interrupted path.
+            return None;
+        }
+        if let Some(u) = &out.usage {
+            gen_in += u.input_tokens;
+            gen_out += u.output_tokens;
+        }
+        let trimmed = assistant_text.trim();
+        // Sanity check: a usable handoff has real substance and the requested
+        // section structure — a rambling or empty reply silently degrades the
+        // successor session, so re-ask once and then give up to compaction.
+        if trimmed.len() >= 200 && trimmed.contains("##") {
+            handoff_text = trimmed.to_string();
+            push_turn(
+                history,
+                store,
+                ctx,
+                Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text(trimmed)],
+                },
+            );
+            break;
+        }
+        if attempt == 0 {
+            push_user_blocks(
+                history,
+                store,
+                ctx,
+                vec![ContentBlock::text(
+                    "[system] That reply was not a valid handoff document. Reply with \
+                     ONLY the handoff document, using the exact markdown sections \
+                     requested above.",
+                )],
+            );
+        }
+    }
+    if handoff_text.is_empty() {
+        let _ = event_tx.send(AgentEvent::TextStep {
+            text: "__handoff_fail__:empty or malformed handoff document".into(),
+        });
+        return None;
+    }
+
+    // Close this session's books: audit record, Done, cumulative Status.
+    store.try_append(&SessionRecord::Handoff {
+        text: handoff_text.clone(),
+        ts: now_ms(),
+    });
+    store.try_append(&SessionRecord::Done {
+        input_tokens: run_in + gen_in,
+        output_tokens: run_out + gen_out,
+        ts: now_ms(),
+    });
+    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+    let records =
+        crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
+    let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(&records);
+    write_status(
+        store,
+        ctx,
+        session_id,
+        ci + (run_in + gen_in) as u64,
+        co + (run_out + gen_out) as u64,
+        cc,
+        cci,
+        cco,
+        ccc,
+        Some(estimated),
+    );
+    let _ = event_tx.send(AgentEvent::TextStep {
+        text: format!(
+            "__handoff_done__:{}/{}",
+            estimated / 1000,
+            MAX_CONTEXT_TOKENS / 1000
+        ),
+    });
+
+    // Golden state carries over so the loop caps never reset. During rounds
+    // the live counters equal what the records say (they only change on the
+    // terminal branch, which returns immediately), so recomputing is exact.
+    let (linked_cycle, linked_stalls, linked_pending) =
+        crate::agent::persist::linked_golden_state(&records);
+    let golden_cycle = crate::agent::persist::golden_cycle_count(&records).max(linked_cycle);
+
+    let plan_path = ctx.workspace_root.as_deref().and_then(|root| {
+        crate::agent::tools::write_plan::latest_plan_path(root, ctx.plan_save_path.as_deref())
+    });
+    let first_message = crate::agent::transition::compose_context_handoff_message(
+        &handoff_text,
+        plan_path.as_deref().map(|p| p.to_str().unwrap_or_default()),
+    );
+
+    Some(RunOutcome::Handoff(Box::new(HandoffSpec {
+        reason: HandoffReason::ContextHandoff,
+        next_mode: cur_mode,
+        next_origin: cur_origin,
+        first_message,
+        golden_cycle,
+        golden_stalls: linked_stalls,
+        golden_last_pending: linked_pending,
+    })))
+}
+
 pub async fn run_workflow(
     config: &AgentConfig,
     history: &mut Vec<Message>,
@@ -1081,7 +1340,7 @@ pub async fn run_workflow(
     store: &SessionStore,
     steering: &Arc<SteeringCtl>,
     mode_ctl: &Arc<ModeCtl>,
-) -> Result<(), String> {
+) -> Result<RunOutcome, String> {
     run_workflow_with_profile(
         config, history, user_message, attachment_blocks, event_tx, approvals, answers,
         session_id, ctx, store, steering, mode_ctl, PromptProfile::Standard,
@@ -1107,7 +1366,7 @@ pub async fn run_workflow_with_profile(
     steering: &Arc<SteeringCtl>,
     mode_ctl: &Arc<ModeCtl>,
     profile: PromptProfile,
-) -> Result<(), String> {
+) -> Result<RunOutcome, String> {
     reject_non_english(&user_message)?;
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
@@ -1136,7 +1395,18 @@ pub async fn run_workflow_with_profile(
     let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
     let estimated = estimate_tokens(history, &system, &tools)
         .max(crate::agent::persist::last_context_tokens(&records).unwrap_or(0));
-    if estimated >= COMPACT_THRESHOLD {
+    // Context-handoff first (Standard sessions): the model compresses its own
+    // context and the run continues in a fresh linked session. Compaction
+    // below stays as the safety net when generation fails or doesn't apply.
+    if let Some(outcome) = maybe_context_handoff(
+        config, profile, estimated, history, &system, store, ctx, event_tx, session_id,
+        steering, mode_ctl, 0, 0,
+    )
+    .await
+    {
+        return Ok(outcome);
+    }
+    if estimated >= effective_compact_threshold(config, profile) {
         let _ = event_tx.send(AgentEvent::TextStep {
             text: format!(
                 "__compact_start__:{}/{}",
@@ -1245,12 +1515,19 @@ pub async fn run_workflow_with_profile(
     let mut unfinished_streak: u32 = 0;
 
     // Golden-goals loop state. The cycle counter resumes from the session's
-    // records so a restart doesn't reset the cap mid-loop.
-    let mut golden_cycle: u32 = crate::agent::persist::golden_cycle_count(
+    // records so a restart doesn't reset the cap mid-loop; a linked session
+    // additionally inherits the predecessor's counters (LinkedFrom record) so
+    // the cycle/stall caps never reset across handoffs — without this every
+    // golden flip would mint a fresh budget and the loop could run forever.
+    let (linked_cycle, linked_stalls, linked_pending) = crate::agent::persist::linked_golden_state(
         &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
     );
-    let mut golden_last_pending: Vec<String> = Vec::new();
-    let mut golden_stalls: usize = 0;
+    let mut golden_cycle: u32 = crate::agent::persist::golden_cycle_count(
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+    )
+    .max(linked_cycle);
+    let mut golden_last_pending: Vec<String> = linked_pending;
+    let mut golden_stalls: usize = linked_stalls as usize;
 
     // Plan-finalization state. `plan_finalized` flips when the agent calls the
     // finalize_plan tool this run; `finalize_nudged` bounds the enforcement to a
@@ -1296,7 +1573,15 @@ pub async fn run_workflow_with_profile(
         // Per-round context re-check: tool_results from the previous round may
         // the next LLM call so we never feed an oversized context.
         let pre_tokens = estimate_tokens(history, &system, &tools);
-        if pre_tokens >= COMPACT_THRESHOLD {
+        if let Some(outcome) = maybe_context_handoff(
+            config, profile, pre_tokens, history, &system, store, ctx, event_tx, session_id,
+            steering, mode_ctl, total_in, total_out,
+        )
+        .await
+        {
+            return Ok(outcome);
+        }
+        if pre_tokens >= effective_compact_threshold(config, profile) {
             let _ = event_tx.send(AgentEvent::TextStep {
                 text: format!(
                     "__compact_start__:{}/{}",
@@ -1494,7 +1779,7 @@ pub async fn run_workflow_with_profile(
                 input_tokens: total_in,
                 output_tokens: total_out,
             });
-            return Ok(());
+            return Ok(RunOutcome::Completed);
         }
 
         // Truncated at the output-token cap (stop_reason "max_tokens"): the
@@ -1569,7 +1854,7 @@ pub async fn run_workflow_with_profile(
                 input_tokens: total_in,
                 output_tokens: total_out,
             });
-            return Ok(());
+            return Ok(RunOutcome::Completed);
         }
         if !truncated {
             truncation_streak = 0;
@@ -1689,46 +1974,53 @@ pub async fn run_workflow_with_profile(
                         SessionMode::Brain => SessionMode::Builder,
                         SessionMode::Builder => SessionMode::Brain,
                     };
-                    mode_ctl.set(next, ModeOrigin::Agent);
-                    store.try_append(&SessionRecord::Mode {
-                        mode: next.as_str().into(),
-                        origin: ModeOrigin::Agent.as_str().into(),
-                        ts: now_ms(),
-                    });
-                    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-                    let _ = event_tx.send(AgentEvent::ModeChanged {
-                        mode: next.as_str().into(),
-                        origin: ModeOrigin::Agent.as_str().into(),
-                        reason: Some(format!("golden cycle {golden_cycle}")),
-                    });
+                    // The Mode record for `next` belongs to the successor
+                    // session (link_session writes it); this session only logs
+                    // the cycle for audit and closes its books.
                     store.try_append(&SessionRecord::GoldenCycle {
                         cycle: golden_cycle,
                         mode: next.as_str().into(),
                         goals: golden_pending.clone(),
                         ts: now_ms(),
                     });
+                    store.try_append(&SessionRecord::Done {
+                        input_tokens: total_in,
+                        output_tokens: total_out,
+                        ts: now_ms(),
+                    });
                     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+                    cumul_in += total_in as u64;
+                    cumul_out += total_out as u64;
+                    roll_cost(
+                        resolved_model, total_in, total_cache, total_out,
+                        run_cost_input, run_cost_output, run_cost_cache,
+                        subagent_cost,
+                        &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+                    );
+                    write_status(
+                        store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
+                        cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+                    );
                     let _ = event_tx.send(AgentEvent::GoldenLoop {
                         cycle: golden_cycle,
                         max_cycles: max_cycles as u32,
                         pending: golden_pending.clone(),
                         mode: next.as_str().into(),
                     });
-                    push_user_blocks(
-                        history,
-                        store,
-                        ctx,
-                        vec![ContentBlock::text(format!(
-                            "[system] Golden tasks are still pending: {}. The session \
-                             switched to {} mode (golden cycle {golden_cycle}/{max_cycles}). \
-                             Resume work on the pending goals — plan or execute what is \
-                             missing, and only mark a golden task 'done' after verifying \
-                             the goal is truly met.",
+                    let handoff_spec = HandoffSpec {
+                        reason: HandoffReason::GoldenFlip,
+                        next_mode: next,
+                        next_origin: ModeOrigin::Agent,
+                        first_message: format!(
+                            "[system] Golden tasks are still pending: {}. You are now in {} mode (golden cycle {golden_cycle}/{max_cycles}). Read the linked session's plan file and tasks, then resume work on the pending goals — plan or execute what is missing, and only mark a golden task 'done' after verifying the goal is truly met.",
                             golden_pending.join(", "),
                             next.as_str(),
-                        ))],
-                    );
-                    continue;
+                        ),
+                        golden_cycle,
+                        golden_stalls: golden_stalls as u32,
+                        golden_last_pending: golden_pending.clone(),
+                    };
+                    return Ok(RunOutcome::Handoff(Box::new(handoff_spec)));
                 }
                 // Cap hit: stop honestly with a specific reason so the user
                 // sees WHY the loop gave up with goals unmet.
@@ -1829,7 +2121,7 @@ pub async fn run_workflow_with_profile(
                 input_tokens: total_in,
                 output_tokens: total_out,
             });
-            return Ok(());
+            return Ok(RunOutcome::Completed);
         }
 
         // The model recovered and is taking an action — reset the dangling-promise
@@ -1848,6 +2140,7 @@ pub async fn run_workflow_with_profile(
             });
         }
         let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
+        let mut pending_handoff: Option<HandoffSpec> = None;
 
         for (ti, tool_use) in tool_uses.iter().enumerate() {
             // C — Entre tools: checar interrupt. Se setado, sintetizar
@@ -1910,6 +2203,7 @@ pub async fn run_workflow_with_profile(
                     ctx,
                     event_tx,
                     session_id,
+                    &mut pending_handoff,
                 )
             } else if tool_name == "spawn_agents" {
                 // Brain may only spawn read-only subagents.
@@ -1934,13 +2228,37 @@ pub async fn run_workflow_with_profile(
                 total_out += sub_out;
                 subagent_cost += sub_cost;
                 block
-            } else if in_brain && tool_name == "edit_file" {
+            } else if tool_name == "edit_file" {
+                // Not offered to the main session in any mode; deny defensively
+                // in case the model hallucinates the tool.
                 deny_tool(
                     &tool_name,
                     &tool_use_id,
                     &tool_input,
-                    "edit_file is not available in Brain mode — it is read-only. \
-                     Record the intended change in the plan (write_plan) instead.",
+                    if in_brain {
+                        "edit_file is not available in Brain mode — it is read-only. \
+                         Record the intended change in the plan (write_plan) instead."
+                    } else {
+                        "edit_file is not available to the Builder session — delegate \
+                         the file modification to a code-mode subagent via spawn_agents."
+                    },
+                    event_tx,
+                    session_id,
+                )
+            } else if !in_brain
+                && tool_name == "bash"
+                && permissions::bash_writes_files(
+                    tool_input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            {
+                deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    "This bash command writes files. The Builder session never edits \
+                     files itself — delegate the modification to a code-mode subagent \
+                     via spawn_agents. Bash here is for builds, tests and read-only \
+                     inspection only.",
                     event_tx,
                     session_id,
                 )
@@ -2008,6 +2326,34 @@ pub async fn run_workflow_with_profile(
                 content: tool_result_blocks,
             },
         );
+
+        // If exit_plan_mode requested a handoff, persist and return it now.
+        if let Some(handoff) = pending_handoff.take() {
+            store.try_append(&SessionRecord::Done {
+                input_tokens: total_in,
+                output_tokens: total_out,
+                ts: now_ms(),
+            });
+            crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+            cumul_in += total_in as u64;
+            cumul_out += total_out as u64;
+            roll_cost(
+                resolved_model, total_in, total_cache, total_out,
+                run_cost_input, run_cost_output, run_cost_cache,
+                subagent_cost,
+                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+            );
+            write_status(
+                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+            );
+            emit_final_stats(cumul_in, cumul_out, cumul_cost,
+                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
+            // No AgentEvent::Done: the conversation continues in the linked
+            // successor session — SessionLinked (emitted by link_session) is
+            // what the UI reacts to.
+            return Ok(RunOutcome::Handoff(Box::new(handoff)));
+        }
 
         // Brain progress guard: if the agent is in Brain mode and only using
         // explore tools without interviewing/planning/tasking, redirect it.
@@ -2088,7 +2434,7 @@ pub async fn run_workflow_with_profile(
                 input_tokens: total_in,
                 output_tokens: total_out,
             });
-            return Ok(());
+            return Ok(RunOutcome::Completed);
         }
         inject_steering(history, store, ctx, steering, event_tx);
     }
@@ -2126,7 +2472,7 @@ pub async fn run_workflow_with_profile(
         input_tokens: total_in,
         output_tokens: total_out,
     });
-    Ok(())
+    Ok(RunOutcome::Completed)
 }
 
 /// Execute one tool call (honoring its permission level) and return the
@@ -2601,6 +2947,7 @@ fn handle_mode_switch(
     ctx: &ToolContext,
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
+    pending_handoff: &mut Option<HandoffSpec>,
 ) -> ContentBlock {
     let _ = event_tx.send(AgentEvent::ToolCall {
         session_id: session_id.to_string(),
@@ -2654,21 +3001,23 @@ fn handle_mode_switch(
                     Some("denied".into()),
                 )
             } else {
-                mode_ctl.set(SessionMode::Builder, ModeOrigin::Agent);
                 store.try_append(&SessionRecord::Mode {
                     mode: SessionMode::Builder.as_str().into(),
                     origin: ModeOrigin::Agent.as_str().into(),
                     ts: now_ms(),
                 });
                 crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-                let _ = event_tx.send(AgentEvent::ModeChanged {
-                    mode: SessionMode::Builder.as_str().into(),
-                    origin: ModeOrigin::Agent.as_str().into(),
-                    reason: None,
+                *pending_handoff = Some(HandoffSpec {
+                    reason: HandoffReason::PlanExecution,
+                    next_mode: SessionMode::Builder,
+                    next_origin: ModeOrigin::Agent,
+                    first_message: "Plan approved. Read the plan and execute the tasks.".into(),
+                    golden_cycle: 0,
+                    golden_stalls: 0,
+                    golden_last_pending: vec![],
                 });
                 (
-                    "Back in Builder mode. Read the plan and execute the tasks \
-                     (one code-mode subagent per task where possible)."
+                    "Plan approved. Switching to Builder mode via new session... End your turn."
                         .into(),
                     None,
                 )

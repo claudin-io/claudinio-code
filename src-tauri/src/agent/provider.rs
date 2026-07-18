@@ -126,6 +126,11 @@ pub struct AgentConfig {
     /// like "open file in editor". None = auto-detect.
     #[serde(default)]
     pub preferred_ide: Option<String>,
+    /// Context size (tokens) at which a running session hands off to a fresh
+    /// linked session via a model-written handoff document. None = default
+    /// (120k). Clamped to 120k-256k (the Settings slider range).
+    #[serde(default)]
+    pub handoff_context_tokens: Option<u64>,
 }
 
 impl AgentConfig {
@@ -133,6 +138,21 @@ impl AgentConfig {
     /// and that key is present. This gates subscriber-only features like web_search.
     pub fn is_claudinio_account(&self) -> bool {
         self.override_api_key.is_none() && !self.api_key.is_empty()
+    }
+
+    /// The effective context-handoff threshold in tokens. The
+    /// `CLAUDINIO_HANDOFF_TOKENS` env var overrides everything UNCLAMPED —
+    /// the slider floor (120k) would otherwise make the mechanism untestable
+    /// end-to-end.
+    pub fn effective_handoff_threshold(&self) -> u64 {
+        if let Ok(v) = std::env::var("CLAUDINIO_HANDOFF_TOKENS") {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                return n;
+            }
+        }
+        self.handoff_context_tokens
+            .unwrap_or(120_000)
+            .clamp(120_000, 256_000)
     }
 }
 
@@ -206,6 +226,7 @@ impl Default for AgentConfig {
             keep_awake: true,
             code_intel_enabled: true,
             preferred_ide: None,
+            handoff_context_tokens: None,
         }
     }
 }
@@ -339,6 +360,9 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
                 cfg.mcp.insert(name, entry);
             }
         }
+    }
+    if let Some(v) = obj.get("handoff_context_tokens") {
+        cfg.handoff_context_tokens = v.as_u64();
     }
 }
 

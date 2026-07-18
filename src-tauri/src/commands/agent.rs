@@ -3,6 +3,7 @@ use crate::agent::persist::{
 };
 use crate::agent::provider::{save_config, ContentBlock};
 use crate::agent::session::{self, AgentEvent, SteeringEntry};
+use crate::agent::transition;
 use crate::agent::tools::{ReadTracker, ToolContext};
 use crate::commands::tasks as tasks_cmd;
 use crate::state::{AppState, SessionHandle};
@@ -223,7 +224,7 @@ pub async fn send_message(
 
     // The JSONL file is the source of truth: rebuild history from it so the
     // conversation continues across turns and restarts.
-    let mut history = load_records(&handle.store_path)
+    let history = load_records(&handle.store_path)
         .map(|recs| persist::history_from_records(&recs))
         .unwrap_or_default();
 
@@ -336,34 +337,150 @@ pub async fn send_message(
         }
     }
 
-    let cfg = config;
-    let sid = handle.id.clone();
-    let chan = event_channel;
-    let appr = state.approvals.clone();
-    let answ = state.answers.clone();
-    let steering_map = state.steering_map();
+    let session_id = handle.id.clone();
+    spawn_run_loop(RunLoopArgs {
+        config,
+        ws,
+        maps: transition_maps(&state),
+        approvals: state.approvals.clone(),
+        answers: state.answers.clone(),
+        chan: event_channel,
+        handle,
+        store,
+        ctx,
+        mode_ctl,
+        steering,
+        history,
+        message,
+        attachment_blocks,
+    });
+
+    Ok(SessionStarted { session_id })
+}
+
+/// The `AppState` maps a session transition needs, cloned so the spawned run
+/// loop can link sessions after the Tauri state borrow ends.
+fn transition_maps(state: &State<'_, AppState>) -> transition::TransitionMaps {
+    transition::TransitionMaps {
+        steering: state.steering.clone(),
+        modes: state.modes.clone(),
+        records_cache: state.records_cache.clone(),
+    }
+}
+
+struct RunLoopArgs {
+    config: crate::agent::provider::AgentConfig,
+    ws: Arc<crate::state::WorkspaceState>,
+    maps: transition::TransitionMaps,
+    approvals: session::ApprovalMap,
+    answers: session::AnswerMap,
+    chan: Channel<AgentEvent>,
+    handle: SessionHandle,
+    store: SessionStore,
+    ctx: ToolContext,
+    mode_ctl: Arc<session::ModeCtl>,
+    steering: Arc<session::SteeringCtl>,
+    history: Vec<crate::agent::provider::Message>,
+    message: String,
+    attachment_blocks: Vec<ContentBlock>,
+}
+
+/// Drive a session run to completion, following handoffs across linked
+/// sessions: whenever `run_workflow` returns `RunOutcome::Handoff`, a new
+/// linked session is created and the loop continues there with a fresh
+/// history — same event channel, so the frontend streams one continuous
+/// conversation.
+fn spawn_run_loop(args: RunLoopArgs) {
+    let RunLoopArgs {
+        config: cfg,
+        ws,
+        maps,
+        approvals: appr,
+        answers: answ,
+        chan,
+        mut handle,
+        mut store,
+        mut ctx,
+        mut mode_ctl,
+        steering,
+        mut history,
+        mut message,
+        mut attachment_blocks,
+    } = args;
 
     tokio::spawn(async move {
-        if let Err(e) = session::run_workflow(
-            &cfg, &mut history, message, attachment_blocks, &chan, &appr, &answ, &sid, &ctx, &store, &steering, &mode_ctl,
-        )
-        .await
-        {
-            store.try_append(&SessionRecord::Error {
-                message: e.clone(),
-                ts: now_ms(),
-            });
-            let _ = chan.send(AgentEvent::Error(e));
+        loop {
+            let msg = std::mem::take(&mut message);
+            let atts = std::mem::take(&mut attachment_blocks);
+            match session::run_workflow(
+                &cfg, &mut history, msg, atts, &chan, &appr, &answ, &handle.id, &ctx, &store,
+                &steering, &mode_ctl,
+            )
+            .await
+            {
+                Ok(session::RunOutcome::Completed) => break,
+                Ok(session::RunOutcome::Handoff(spec)) => {
+                    let mut spec = *spec;
+                    spec.first_message = transition::resolve_first_message(
+                        &spec,
+                        ctx.workspace_root.as_deref(),
+                        ctx.plan_save_path.as_deref(),
+                    );
+                    match transition::link_session(&maps, &ws, &handle, &spec, &chan).await {
+                        Ok(new_handle) => {
+                            let new_mode_ctl = maps
+                                .modes
+                                .lock()
+                                .await
+                                .get(&new_handle.id)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    Arc::new(session::ModeCtl::new(
+                                        spec.next_mode,
+                                        spec.next_origin,
+                                    ))
+                                });
+                            ctx = transition::rebuild_tool_context(
+                                &ctx,
+                                &new_handle.store_path,
+                                new_mode_ctl.clone(),
+                                cfg.clone(),
+                            );
+                            mode_ctl = new_mode_ctl;
+                            store = SessionStore {
+                                path: new_handle.store_path.clone(),
+                            };
+                            history = Vec::new();
+                            message = spec.first_message;
+                            handle = new_handle;
+                        }
+                        Err(e) => {
+                            store.try_append(&SessionRecord::Error {
+                                message: e.clone(),
+                                ts: now_ms(),
+                            });
+                            let _ = chan.send(AgentEvent::Error(e));
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    store.try_append(&SessionRecord::Error {
+                        message: e.clone(),
+                        ts: now_ms(),
+                    });
+                    let _ = chan.send(AgentEvent::Error(e));
+                    break;
+                }
+            }
         }
         // Run finished (success, error or panic-free return): drop the
         // steering entry so interrupt/steer report "session not running".
-        let mut map = steering_map.lock().await;
-        map.remove(&sid);
+        // `handle.id` tracks the FINAL session of the chain — link_session
+        // moved the steering entry along with each handoff.
+        let mut map = maps.steering.lock().await;
+        map.remove(&handle.id);
     });
-
-    Ok(SessionStarted {
-        session_id: handle.id,
-    })
 }
 
 /// Start a new conversation in a workspace: the next `send_message` opens a
@@ -378,6 +495,20 @@ pub async fn new_session(
     if let Some(h) = guard.as_ref() {
         state.remove_steering(&h.id).await;
         state.modes.lock().await.remove(&h.id);
+        // A session abandoned before any real content (only meta/mode records,
+        // e.g. created lazily by a mode toggle) is noise on disk — delete it
+        // instead of leaving an "(empty session)" orphan in the list.
+        let is_empty = persist::load_records(&h.store_path)
+            .map(|recs| {
+                !recs.iter().any(|r| {
+                    matches!(r, SessionRecord::User { .. } | SessionRecord::Turn { .. })
+                })
+            })
+            .unwrap_or(false);
+        if is_empty {
+            let _ = std::fs::remove_file(&h.store_path);
+            persist::invalidate_cache(&h.store_path, &state.records_cache);
+        }
     }
     *guard = None;
     Ok(())
@@ -396,6 +527,13 @@ pub async fn list_sessions(
 
 /// Reopen a saved session: makes it the workspace's active conversation and
 /// returns its full record stream so the frontend can replay the transcript.
+///
+/// Linked sessions are resolved as one conversation: the requested id is first
+/// followed FORWARD (`handoff_to`) to the chain tip — reopening a superseded
+/// link must never resume a stale session — then the tip's ancestry is walked
+/// BACKWARD (`linked_from`) and every predecessor's records are prepended, with
+/// the `linked_from` markers left in place as chain dividers. The chain tip
+/// becomes the active session.
 #[tauri::command]
 pub async fn load_session(
     workspace: String,
@@ -405,16 +543,52 @@ pub async fn load_session(
     let ws = state.workspace(&workspace).await?;
     let root = ws.root.to_string_lossy().to_string();
     let dir = persist::sessions_dir(Some(&root))?;
-    let path = dir.join(format!("{session_id}.jsonl"));
-    if !path.exists() {
-        return Err(format!("session '{session_id}' not found"));
+
+    let load_one = |id: &str| -> Result<Vec<SessionRecord>, String> {
+        let path = dir.join(format!("{id}.jsonl"));
+        if !path.exists() {
+            return Err(format!("session '{id}' not found"));
+        }
+        load_records(&path)
+    };
+
+    const MAX_CHAIN_HOPS: usize = 64;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Forward to the chain tip.
+    let mut tip_id = session_id;
+    let mut tip_records = load_one(&tip_id)?;
+    seen.insert(tip_id.clone());
+    for _ in 0..MAX_CHAIN_HOPS {
+        let Some(next) = persist::handoff_to(&tip_records) else { break };
+        if !seen.insert(next.clone()) {
+            break; // cycle guard
+        }
+        let Ok(next_records) = load_one(&next) else { break };
+        tip_id = next;
+        tip_records = next_records;
     }
-    let records = load_records(&path)?;
+
+    // Backward through the ancestry, prepending each predecessor.
+    let mut chain: Vec<Vec<SessionRecord>> = vec![tip_records];
+    for _ in 0..MAX_CHAIN_HOPS {
+        let earliest = chain.first().map(|v| v.as_slice()).unwrap_or(&[]);
+        let Some(info) = persist::linked_from(earliest) else { break };
+        if !seen.insert(info.prev_session_id.clone()) {
+            break; // cycle guard
+        }
+        let Ok(prev_records) = load_one(&info.prev_session_id) else { break };
+        chain.insert(0, prev_records);
+    }
+
+    let records: Vec<SessionRecord> = chain.into_iter().flatten().collect();
+
+    let tip_path = dir.join(format!("{tip_id}.jsonl"));
     {
         let mut guard = ws.active_session.lock().await;
         *guard = Some(SessionHandle {
-            id: session_id,
-            store_path: path,
+            id: tip_id,
+            store_path: tip_path,
         });
     }
     Ok(records)
@@ -501,6 +675,7 @@ pub struct SetConfigArgs {
     pub mcp: Option<std::collections::HashMap<String, crate::agent::provider::McpServerEntry>>,
     pub code_intel_enabled: Option<bool>,
     pub preferred_ide: Option<String>,
+    pub handoff_context_tokens: Option<Option<u64>>,
 }
 
 #[tauri::command]
@@ -571,6 +746,9 @@ pub async fn set_config(
             Some(preferred_ide)
         };
     }
+    if let Some(handoff_context_tokens) = args.handoff_context_tokens {
+        cfg.handoff_context_tokens = handoff_context_tokens.map(|n| n.clamp(120_000, 256_000));
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -615,6 +793,7 @@ pub async fn get_config(
         "mcp": cfg.mcp,
         "codeIntelEnabled": cfg.code_intel_enabled,
         "preferredIde": cfg.preferred_ide,
+        "handoffContextTokens": cfg.handoff_context_tokens,
         "workspaceConfig": workspace_config,
     }))
 }
@@ -832,6 +1011,127 @@ pub async fn set_session_mode(
         });
     }
     Ok(SessionStarted { session_id: handle.id })
+}
+
+/// Approve the Brain's plan and continue in a NEW linked Builder session whose
+/// first prompt carries the plan. Replaces the old in-session mode flip: the
+/// planning context stays behind, the Builder starts fresh with just the plan
+/// and the carried-over task list.
+#[tauri::command]
+pub async fn continue_with_builder(
+    workspace: String,
+    event_channel: Channel<AgentEvent>,
+    state: State<'_, AppState>,
+) -> Result<SessionStarted, String> {
+    let config = {
+        let cfg = state.config.lock().await;
+        if cfg.api_key.is_empty() {
+            return Err("API key not configured. Use set_config first.".into());
+        }
+        cfg.clone()
+    };
+
+    let ws = state.workspace(&workspace).await?;
+    let workspace_root = Some(ws.root.to_string_lossy().to_string());
+
+    let mut config = config;
+    if let Some(ref root) = workspace_root {
+        if let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root) {
+            crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
+        }
+    }
+
+    let old_handle = ws
+        .active_session
+        .lock()
+        .await
+        .clone()
+        .ok_or("no active session to hand off from")?;
+    let old_mode = state
+        .mode_for(&old_handle.id, &old_handle.store_path)
+        .await
+        .get()
+        .0;
+    if old_mode != session::SessionMode::Brain {
+        return Err("active session is not in Brain mode".into());
+    }
+
+    // Compose the kickoff (plan inline) before linking so the SessionLinked
+    // event already carries the real first message.
+    let mut spec = session::HandoffSpec {
+        reason: session::HandoffReason::ManualBuilder,
+        next_mode: session::SessionMode::Builder,
+        next_origin: session::ModeOrigin::Human,
+        first_message: String::new(),
+        golden_cycle: 0,
+        golden_stalls: 0,
+        golden_last_pending: Vec::new(),
+    };
+    spec.first_message = transition::resolve_first_message(
+        &spec,
+        workspace_root.as_deref(),
+        config.plan_save_path.as_deref(),
+    );
+
+    let maps = transition_maps(&state);
+    let new_handle =
+        transition::link_session(&maps, &ws, &old_handle, &spec, &event_channel).await?;
+
+    // Fresh run on the new session: build its ToolContext from scratch (no old
+    // running context exists — this command fires from an idle Brain session).
+    let steering = state.steering_for(&new_handle.id).await;
+    steering.clear();
+    let mode_ctl = state.mode_for(&new_handle.id, &new_handle.store_path).await;
+
+    let db_path: Option<String> = workspace_root
+        .as_ref()
+        .map(|p| format!("{p}/.claudinio/index.db"));
+    let base_commit: Option<String> = workspace_root
+        .as_ref()
+        .and_then(|root| crate::agent::tools::git_head(root));
+    let mcp = ws.ensure_mcp_connected(&config).await;
+
+    let ctx = ToolContext {
+        db_path,
+        lsp_manager: Some(ws.lsp_manager.clone()),
+        workspace_root,
+        embedding_model: state.embedding_model.clone(),
+        session_store_path: Some(new_handle.store_path.to_string_lossy().to_string()),
+        read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        interrupt: Some(steering.interrupt.clone()),
+        agent_config: Some(config.clone()),
+        plan_save_path: config.plan_save_path.clone(),
+        base_commit,
+        auto_approve_git: false,
+        mcp: Some(mcp),
+        mode_ctl: Some(mode_ctl.clone()),
+        index_progress: Some(ws.index_progress.clone()),
+        records_cache: state.records_cache.clone(),
+    };
+
+    let store = SessionStore {
+        path: new_handle.store_path.clone(),
+    };
+    let session_id = new_handle.id.clone();
+    let message = spec.first_message;
+    spawn_run_loop(RunLoopArgs {
+        config,
+        ws,
+        maps,
+        approvals: state.approvals.clone(),
+        answers: state.answers.clone(),
+        chan: event_channel,
+        handle: new_handle,
+        store,
+        ctx,
+        mode_ctl,
+        steering,
+        history: Vec::new(),
+        message,
+        attachment_blocks: Vec::new(),
+    });
+
+    Ok(SessionStarted { session_id })
 }
 
 /// The current mode of the workspace's active session (for UI init).
