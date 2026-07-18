@@ -676,6 +676,7 @@ pub struct SetConfigArgs {
     pub code_intel_enabled: Option<bool>,
     pub preferred_ide: Option<String>,
     pub handoff_context_tokens: Option<Option<u64>>,
+    pub auto_commit_plan: Option<bool>,
 }
 
 #[tauri::command]
@@ -749,6 +750,9 @@ pub async fn set_config(
     if let Some(handoff_context_tokens) = args.handoff_context_tokens {
         cfg.handoff_context_tokens = handoff_context_tokens.map(|n| n.clamp(120_000, 256_000));
     }
+    if let Some(auto_commit_plan) = args.auto_commit_plan {
+        cfg.auto_commit_plan = auto_commit_plan;
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -784,6 +788,7 @@ pub async fn get_config(
         "keepAwake": cfg.keep_awake,
         "accountLogin": cfg.account_login,
         "accountTier": cfg.account_tier,
+        "autoCommitPlan": cfg.auto_commit_plan,
         "maxGoldenCycles": cfg.max_golden_cycles,
         "maxGoldenStalls": cfg.max_golden_stalls,
         "maxParallelAgents": cfg.max_parallel_agents,

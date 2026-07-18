@@ -70,6 +70,8 @@ const dict: LocaleDict = {
   "app.config.keepAwakeHint": "Impede que o sistema durma enquanto uma sessão está rodando (a tela ainda pode apagar).",
   "app.config.codeIntel": "🧠 Inteligência de código",
   "app.config.codeIntelHint": "Ativa LSP, índice FTS5 e busca semântica. Desligue para economizar CPU e memória quando não estiver programando.",
+  "app.config.autoCommitPlan": "📋 Auto-commitar plano ao finalizar",
+  "app.config.autoCommitPlanHint": "Faz commit automático do arquivo do plano (git add + commit) ao escrever a versão final ou ao sair do Brain mode.",
   "app.config.preferredIde": "IDE preferido",
   "app.config.preferredIdeHint": "Selecione qual IDE usar ao abrir arquivos. IDEs detectados aparecem aqui.",
   "app.config.noIdesDetected": "Nenhum IDE suportado detectado (VS Code / Cursor).",

@@ -131,6 +131,10 @@ pub struct AgentConfig {
     /// (120k). Clamped to 120k-256k (the Settings slider range).
     #[serde(default)]
     pub handoff_context_tokens: Option<u64>,
+    /// When true, automatically `git add` + `git commit` the plan file after the
+    /// final write_plan call (with Low-Level Design) or when exiting Brain mode.
+    #[serde(default = "default_true")]
+    pub auto_commit_plan: bool,
 }
 
 impl AgentConfig {
@@ -237,6 +241,7 @@ impl Default for AgentConfig {
             code_intel_enabled: true,
             preferred_ide: None,
             handoff_context_tokens: None,
+            auto_commit_plan: true,
         }
     }
 }

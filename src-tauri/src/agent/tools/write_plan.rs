@@ -74,7 +74,7 @@ pub fn latest_plan_path(workspace_root: &str, plan_save_path: Option<&str>) -> O
 }
 
 /// Turn a free-form plan name into a filesystem-safe slug.
-fn slugify(name: &str) -> String {
+pub fn slugify(name: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = true; // suppress a leading dash
     for c in name.chars() {
@@ -146,6 +146,43 @@ pub fn execute(args: WritePlanArgs, ctx: &crate::agent::tools::ToolContext) -> R
             " Note: the plan has no '## Low-Level Design' section yet - tasks_set will reject \
              tasks until you call write_plan again with the full content including it.",
         );
+    }
+    // Auto-commit the plan file if configured and this is the final version (has LLD)
+    let has_lld = has_nonempty_section(&args.content, LLD_HEADING);
+    let auto_commit = ctx.agent_config.as_ref()
+        .map(|c| c.auto_commit_plan)
+        .unwrap_or(true); // default true when config is absent
+
+    if has_lld && auto_commit {
+        if let Some(root) = &ctx.workspace_root {
+            let slug = slugify(&args.name);
+            let commit_msg = format!("docs(plan): {slug}");
+            // git add only the plan file (NOT -A)
+            let add = std::process::Command::new("git")
+                .arg("-C").arg(root)
+                .arg("add")
+                .arg(path.to_string_lossy().as_ref())
+                .output();
+            if add.is_ok() {
+                let commit = std::process::Command::new("git")
+                    .arg("-C").arg(root)
+                    .arg("commit")
+                    .arg("-m").arg(&commit_msg)
+                    .output();
+                match commit {
+                    Ok(out) if out.status.success() => {
+                        msg.push_str(&format!("\nPlan auto-committed: \"{commit_msg}\""));
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        eprintln!("[write_plan] git commit plan (non-zero): {stderr}");
+                    }
+                    Err(e) => {
+                        eprintln!("[write_plan] git commit plan failed: {e}");
+                    }
+                }
+            }
+        }
     }
     Ok(msg)
 }
