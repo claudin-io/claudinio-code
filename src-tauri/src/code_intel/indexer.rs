@@ -340,10 +340,14 @@ pub fn scan_workspace(
     mut embedder: Option<&mut CodeEmbedder>,
     progress_channel: Option<&Channel<IndexProgress>>,
     shared_progress: Option<&std::sync::Mutex<Option<IndexProgress>>>,
-) -> Result<(i64, i64), String> {
+) -> Result<(i64, i64, std::collections::HashMap<String, String>), String> {
     let mut total_files = 0i64;
     let mut total_symbols = 0i64;
     let mut counted = 0i64;
+    // Content of files (re)parsed this scan, handed to the embedding phase so
+    // it doesn't read every file a second time (expensive on network drives).
+    let mut scanned_content: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // Resolved once per scan; empty when the project has no locale resources,
     // in which case chunk texts are unchanged.
@@ -422,6 +426,7 @@ pub fn scan_workspace(
                 total_files += 1;
             }
         }
+        scanned_content.insert(path_str.clone(), content);
 
         counted += 1;
         if counted % 10 == 0 {
@@ -494,6 +499,7 @@ pub fn scan_workspace(
                 total_files += 1;
             }
         }
+        scanned_content.insert(path_str.clone(), content);
     }
 
     // Drop rows for files no longer in the scan set (deleted files, or junk
@@ -523,7 +529,7 @@ pub fn scan_workspace(
         let _ = sp.lock().map(|mut guard| *guard = Some(done_progress));
     }
 
-    Ok((total_files, total_symbols))
+    Ok((total_files, total_symbols, scanned_content))
 }
 
 pub fn generate_all_embeddings(
@@ -531,6 +537,7 @@ pub fn generate_all_embeddings(
     embedder: &SharedEmbedder,
     app_handle: Option<&tauri::AppHandle>,
     workspace: &str,
+    content_cache: &std::collections::HashMap<String, String>,
 ) -> Result<(i64, i64), String> {
     let files = db.all_files()?;
     let total = files.len() as i64;
@@ -550,9 +557,14 @@ pub fn generate_all_embeddings(
             continue;
         }
 
-        let content = match std::fs::read_to_string(&file.path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        // Prefer content already read during the scan — re-reading every file
+        // here doubled the I/O, which is brutal on network-drive workspaces.
+        let content = match content_cache.get(&file.path) {
+            Some(c) => c.clone(),
+            None => match std::fs::read_to_string(&file.path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            },
         };
 
         // Delete old embeddings for this file so stale symbols don't linger

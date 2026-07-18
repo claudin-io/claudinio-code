@@ -43,17 +43,30 @@ fn resolve_model_dir(app_handle: &tauri::AppHandle, workspace_root: &Path) -> Op
             return Some(p);
         }
     }
-    let cache = cache_model_dir(workspace_root);
+    let cache = cache_model_dir(app_handle);
     if cache.join(model_file).exists() {
         return Some(cache);
+    }
+    // Legacy per-workspace cache (pre-0.1.13). Kept read-only so existing
+    // installs don't re-download; new downloads always go to app data.
+    let legacy = workspace_root
+        .join(".claudinio/models")
+        .join(embeddings::model_cache_dirname());
+    if legacy.join(model_file).exists() {
+        return Some(legacy);
     }
     None
 }
 
-fn cache_model_dir(workspace_root: &Path) -> std::path::PathBuf {
-    workspace_root
-        .join(".claudinio/models")
-        .join(embeddings::model_cache_dirname())
+// Machine-local app data, NOT the workspace: caching per-workspace meant one
+// ~90MB HuggingFace download per project, written through SMB when the
+// workspace lives on a network drive.
+fn cache_model_dir(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
+    let base = app_handle
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claudinio-code"));
+    base.join("models").join(embeddings::model_cache_dirname())
 }
 
 #[tauri::command]
@@ -143,7 +156,7 @@ pub async fn open_workspace(
 
     // Download model to cache if not bundled
     if resolve_model_dir(&app_handle, ws_root).is_none() {
-        let cache = cache_model_dir(ws_root);
+        let cache = cache_model_dir(&app_handle);
         if let Err(e) = embeddings::ensure_model_downloaded(&cache).await {
             eprintln!("[open_workspace] failed to download embedding model: {e}");
             let _ = app_handle.emit("index-progress", indexer::IndexProgress {
@@ -213,7 +226,7 @@ pub async fn open_workspace(
     };
 
     // Phase 3: Wait for scan to complete (this is what the user sees)
-    let (files_count, symbols_count) = scan_handle
+    let (files_count, symbols_count, scanned_content) = scan_handle
         .await
         .map_err(|e| format!("scan task panicked: {e}"))?
         .map_err(|e| e)?;
@@ -255,7 +268,13 @@ pub async fn open_workspace(
         let emit_handle = app_handle.clone();
         let ws_path = path.clone();
         let join = spawn_blocking(move || {
-            indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle), &ws_path)
+            indexer::generate_all_embeddings(
+                db2.as_ref(),
+                &shared,
+                Some(&emit_handle),
+                &ws_path,
+                &scanned_content,
+            )
         });
         let emit_handle = app_handle.clone();
         let db3 = db.clone();

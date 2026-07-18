@@ -184,21 +184,21 @@ describe("GitIndicator", () => {
 
   // ── polling behavior ─────────────────────────────────────────────────
 
-  it("polls gitStatus every 10 seconds", async () => {
+  it("polls gitStatus every 30 seconds", async () => {
     mount();
     await drainMicrotasks();
 
     // Clear initial call history so we only count poll-driven calls
     vi.clearAllMocks();
 
-    // Advance 10s → gitStatus interval fires once
-    vi.advanceTimersByTime(10000);
+    // Advance 30s → gitStatus interval fires once
+    vi.advanceTimersByTime(30000);
     // Drain microtasks so the resolved promise's .then() resets statusInFlight
     await drainMicrotasks();
     expect(gitStatus).toHaveBeenCalledTimes(1);
 
-    // Advance another 10s (total 20s) → gitStatus fires again
-    vi.advanceTimersByTime(10000);
+    // Advance another 30s (total 60s) → gitStatus fires again
+    vi.advanceTimersByTime(30000);
     await drainMicrotasks();
     expect(gitStatus).toHaveBeenCalledTimes(2);
   });
@@ -211,8 +211,8 @@ describe("GitIndicator", () => {
     // Initial refreshStatus called gitStatus and set statusInFlight = true
     vi.clearAllMocks();
 
-    // Advance 20s — 2 ticks would fire, but the in-flight guard prevents both
-    vi.advanceTimersByTime(20000);
+    // Advance 60s — 2 ticks would fire, but the in-flight guard prevents both
+    vi.advanceTimersByTime(60000);
     expect(gitStatus).toHaveBeenCalledTimes(0);
   });
 
@@ -310,14 +310,14 @@ describe("GitIndicator", () => {
 
     vi.clearAllMocks();
 
-    // Advance 10s → refreshStatus fires, gitStatus is called
-    vi.advanceTimersByTime(10000);
+    // Advance 30s → refreshStatus fires, gitStatus is called
+    vi.advanceTimersByTime(30000);
     await drainMicrotasks();
     expect(gitStatus).toHaveBeenCalledTimes(1);
 
-    // Advance another 10s → the previous call has resolved, so inFlight was
+    // Advance another 30s → the previous call has resolved, so inFlight was
     // reset and this tick fires again
-    vi.advanceTimersByTime(10000);
+    vi.advanceTimersByTime(30000);
     await drainMicrotasks();
     expect(gitStatus).toHaveBeenCalledTimes(2);
   });

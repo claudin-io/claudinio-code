@@ -26,7 +26,7 @@ export const TasksPanel: Component<{
   };
 
   // Pauses while the window is hidden — no reason to poll tasks in background.
-  createVisibilityAwareInterval(load, 3000);
+  createVisibilityAwareInterval(load, 10000);
 
   onCleanup(() => {
     if (closeTimer) clearTimeout(closeTimer);
