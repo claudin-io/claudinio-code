@@ -25,6 +25,9 @@ const dict: LocaleDict = {
   "app.config.maxParallelAgentsHint": "Quanto maior, mais rápido — porém consome mais do limite por hora. Quanto menor, mais lento, mas economiza o limite.",
   "app.config.slower": "mais lento",
   "app.config.faster": "mais rápido",
+  "app.config.lowerRisk": "menor risco",
+  "app.config.higherRisk": "maior risco",
+  "app.config.contextRotRisk": "Risco de Context Rot",
   "app.config.cancel": "Cancelar",
   "app.config.save": "Salvar",
   "app.sidebar.projects": "Projetos",
@@ -359,7 +362,6 @@ const dict: LocaleDict = {
   "settings.maxGoldenCycles": "Máx. ciclos golden",
   "settings.maxGoldenCyclesHint": "Quantos ciclos automáticos Brain↔Builder rodar enquanto golden goals (tags <goal>) estiverem pendentes. Vazio = 5.",
   "settings.handoffThreshold": "Limite de handoff da sessão",
-  "settings.handoffThresholdHint": "Tamanho de contexto em que a sessão escreve um documento de handoff e continua em uma nova sessão encadeada.",
   "settings.maxGoldenStalls": "Máx. estagnações golden",
   "settings.maxGoldenStallsHint": "Para o golden loop após este número de ciclos sem progresso. Vazio = 2.",
 
