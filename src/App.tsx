@@ -1187,38 +1187,58 @@ function App() {
               <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{t("app.config.yoloBlacklistHint")}</p>
             </Show>
 
-            <label class="mb-4 flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={configKeepAwake()}
-                onChange={(e) => setConfigKeepAwake(e.currentTarget.checked)}
-                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
-              />
-              <span class="text-sm font-medium text-ink">{t("app.config.keepAwake")}</span>
-              <span class="text-[11px] text-ink-faint">{t("app.config.keepAwakeHint")}</span>
-            </label>
+            <div class="space-y-1">
+              {/* Keep awake while working */}
+              <label class="group flex cursor-pointer items-start gap-3 border-l-2 border-transparent py-2 pl-3 pr-1 transition-colors has-[:checked]:border-accent hover:border-accent/30">
+                <div class="mt-0.5 flex shrink-0 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={configKeepAwake()}
+                    onChange={(e) => setConfigKeepAwake(e.currentTarget.checked)}
+                    class="h-3.5 w-3.5 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+                  />
+                  <Icon name="coffee-cup" class="h-4 w-4 text-ink-faint" stroke />
+                </div>
+                <div class="min-w-0">
+                  <span class="text-sm font-medium text-ink">{t("app.config.keepAwake")}</span>
+                  <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.keepAwakeHint")}</span>
+                </div>
+              </label>
 
-            <label class="mb-4 flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={configCodeIntelEnabled()}
-                onChange={(e) => setConfigCodeIntelEnabled(e.currentTarget.checked)}
-                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
-              />
-              <span class="text-sm font-medium text-ink">{t("app.config.codeIntel")}</span>
-              <span class="text-[11px] text-ink-faint">{t("app.config.codeIntelHint")}</span>
-            </label>
+              {/* Code intelligence */}
+              <label class="group flex cursor-pointer items-start gap-3 border-l-2 border-transparent py-2 pl-3 pr-1 transition-colors has-[:checked]:border-accent hover:border-accent/30">
+                <div class="mt-0.5 flex shrink-0 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={configCodeIntelEnabled()}
+                    onChange={(e) => setConfigCodeIntelEnabled(e.currentTarget.checked)}
+                    class="h-3.5 w-3.5 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+                  />
+                  <Icon name="brain" class="h-4 w-4 text-ink-faint" />
+                </div>
+                <div class="min-w-0">
+                  <span class="text-sm font-medium text-ink">{t("app.config.codeIntel")}</span>
+                  <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.codeIntelHint")}</span>
+                </div>
+              </label>
 
-            <label class="mb-4 flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={configAutoCommitPlan()}
-                onChange={(e) => setConfigAutoCommitPlan(e.currentTarget.checked)}
-                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
-              />
-              <span class="text-sm font-medium text-ink">{t("app.config.autoCommitPlan")}</span>
-              <span class="text-[11px] text-ink-faint">{t("app.config.autoCommitPlanHint")}</span>
-            </label>
+              {/* Auto-commit plan on finalize */}
+              <label class="group flex cursor-pointer items-start gap-3 border-l-2 border-transparent py-2 pl-3 pr-1 transition-colors has-[:checked]:border-accent hover:border-accent/30">
+                <div class="mt-0.5 flex shrink-0 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={configAutoCommitPlan()}
+                    onChange={(e) => setConfigAutoCommitPlan(e.currentTarget.checked)}
+                    class="h-3.5 w-3.5 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+                  />
+                  <Icon name="notebook-pen" class="h-4 w-4 text-ink-faint" stroke />
+                </div>
+                <div class="min-w-0">
+                  <span class="text-sm font-medium text-ink">{t("app.config.autoCommitPlan")}</span>
+                  <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.autoCommitPlanHint")}</span>
+                </div>
+              </label>
+            </div>
 
             <label class="mb-3 block flex cursor-pointer items-center gap-2">
               <span class="text-sm font-medium text-ink">{t("app.config.preferredIde")}</span>

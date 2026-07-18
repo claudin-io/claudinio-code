@@ -242,3 +242,25 @@ Per design-taste-frontend:
 3. Strip emoji prefixes from same keys in `src/lib/locales/pt-BR.ts`
 4. Replace the three checkbox `<label>` elements in `src/App.tsx` (lines ~1191–1225) with the new card-style layout
 5. Build, verify, and visually inspect
+
+
+## Implementation Log — 2026-07-18 13:45
+**Summary:** Redesigned config toggle cards: coffee-cup icon, card layout with accent left border, emoji-free locale labels
+**Changed files:** A	docs/plans/2026-07-18_auto-commit-plan.md, A	docs/plans/2026-07-18_redesign-config-cards.md, M	docs/plans/2026-07-18_update-button-header.md, M	src-tauri/src/agent/provider.rs, M	src-tauri/src/agent/session.rs, M	src-tauri/src/agent/tools/write_plan.rs, M	src-tauri/src/commands/agent.rs, M	src/App.tsx, M	src/lib/ipc.ts, M	src/lib/locales/en-US.ts, M	src/lib/locales/pt-BR.ts
+**Commits:** eae3fb5 docs: add implementation log to update-button-header plan, 25730f3 feat: auto-commit plan on finalize with config toggle, fe790b8 docs(plan): redesign-config-cards, 59569ba docs(plan): redesign-config-cards
+**Journal:** All 5 tasks completed successfully. 
+
+Key decisions during implementation:
+- Coffee cup icon placed alphabetically before "construction-worker" in PATHS (line 93) and before "notebook-pen" in STROKE_ICONS (line 265) — fits naturally into existing ordering.
+- Card layout uses `has-[:checked]` pseudo-class on the group `<label>` — works with Tauri 2.x WebKit. Icon row gets `mt-0.5` for optical centering with text baseline.
+- Locale changes were surgical: only the 3 label keys, hints never had emojis so zero risk of collateral damage.
+- Build verified: 35 test files / 643 tests pass, Vite production build produces clean output.
+
+Gotchas: None. The plan was precise — all file paths, line numbers, and markup matched reality exactly.
+
+**Task journal:**
+- Add coffee-cup icon to Icon.tsx: Added 'coffee-cup' to PATHS (before construction-worker) and STROKE_ICONS (before notebook-pen). Alphabetical order correct.
+- Strip emoji from en-US locale labels: Stripped ☕, 🧠, 📋 prefixes from keepAwake, codeIntel, autoCommitPlan labels. Hints unchanged.
+- Strip emoji from pt-BR locale labels: Stripped ☕, 🧠, 📋 prefixes from keepAwake, codeIntel, autoCommitPlan labels in pt-BR. Hints unchanged.
+- Replace checkbox rows with card layout in App.tsx: Replaced old labels with card layout. Three <Icon> components: coffee-cup (stroke), brain (fill), notebook-pen (stroke). Old mb-4 flex cursor-pointer pattern fully gone.
+- Build and verify: Build: 35 test files, 643 tests all passed. Vite build succeeded, zero errors. Verified: coffee-cup in PATHS + STROKE_ICONS, zero emojis in locale files, old mb-4 flex pattern gone from App.tsx.
