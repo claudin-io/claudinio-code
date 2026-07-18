@@ -144,3 +144,16 @@ Already defined in `src/components/Icon.tsx` (line ~72). Animated with `animate-
 - Add Portuguese locale keys for update button: Inserted at lines 63-64, right after 'update.error'. Both keys have trailing commas, correct 2-space indentation.
 - Insert update button in App.tsx header: Inserted at lines 691-708, right after logo pill </span> and before <div class='ml-auto...'>. Nested Show structure: outer Show gates on updateInfo(), inner Show switches between idle (clickable, shows "Update to v{version}") and installing (spinner + "Installing…", disabled).
 - Build and verify compilation: Build: 643 tests passed (35 test files), vite build succeeded with 1491 modules transformed, no TypeScript errors. Commit: 328322b on main.
+
+
+## Implementation Log — 2026-07-18 12:45
+**Summary:** Committed plan file with implementation log (was the only missing step)
+**Changed files:** A	docs/plans/2026-07-18_update-button-header.md, M	src/App.tsx, M	src/lib/locales/en-US.ts, M	src/lib/locales/pt-BR.ts
+**Commits:** 5837ccd docs: add implementation log to update-button-header plan, 328322b feat: add update button in header next to logo
+**Journal:** Plan was already implemented with all tasks done (commit 328322b). The only missing piece was the plan file's own implementation log which hadn't been committed. That's now in 5837ccd. All 4 tasks completed successfully: locale keys inserted in en-US and pt-BR, update button inserted in App.tsx header between logo pill and ml-auto controls, 643 tests green, Vite build clean. Single atomic commit for the feature, second commit for the plan doc.
+
+**Task journal:**
+- Add English locale keys for update button: Inserted at lines 63-64, right after 'update.error'. Both keys have trailing commas, correct 2-space indentation matching existing style.
+- Add Portuguese locale keys for update button: Inserted at lines 63-64, right after 'update.error'. Both keys have trailing commas, correct 2-space indentation.
+- Insert update button in App.tsx header: Inserted at lines 691-708, right after logo pill </span> and before <div class='ml-auto...'>. Nested Show structure: outer Show gates on updateInfo(), inner Show switches between idle (clickable, shows "Update to v{version}") and installing (spinner + "Installing…", disabled).
+- Build and verify compilation: Build: 643 tests passed (35 test files), vite build succeeded with 1491 modules transformed, no TypeScript errors. Commit: 328322b on main.
