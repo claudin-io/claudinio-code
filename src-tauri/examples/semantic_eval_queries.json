@@ -40,7 +40,10 @@
     {"query": "tree-sitter supported languages configuration", "expected": ["parser.rs"]},
     {"query": "i18n greeting translation test in grill-me.test.ts", "expected": ["grill-me.test.ts", "grill-me.ts"]},
     {"query": "skill mention autocomplete popover with skill tag insertion", "expected": ["SkillMentionPopover.tsx", "TagMentionPopover.tsx", "ChatPanel.tsx"]},
-    {"query": "context compaction summarize conversation when window is full", "expected": ["session.rs", "ChatPanel.tsx"]}
+    {"query": "context compaction summarize conversation when window is full", "expected": ["session.rs", "ChatPanel.tsx"]},
+    {"query": "theme colors palette design tokens", "expected": ["App.css", "index.css", "monacoThemes.ts"]},
+    {"query": "header navigation bar logo", "expected": ["App.tsx", "App.css"]},
+    {"query": "update notification version check", "expected": ["ipc.ts", "App.tsx"]}
   ],
   "negative": [
     {"query": "kubernetes deployment yaml configuration"},

@@ -762,6 +762,20 @@ impl IndexDb {
         Ok(scored)
     }
 
+    /// Number of indexed files whose embeddings are missing or stale
+    /// (`embed_hash` absent or behind the content hash). Non-zero means the
+    /// background embedding pass hasn't caught up yet, so semantic search may
+    /// silently miss content.
+    pub fn embedding_pending_files(&self) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT count(*) FROM files WHERE embed_hash IS NULL OR embed_hash != hash",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("embedding_pending_files: {e}"))
+    }
+
     #[allow(dead_code)]
     pub fn index_stats(&self) -> Result<(i64, i64, i64), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
