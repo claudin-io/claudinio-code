@@ -210,3 +210,29 @@ Left CPU/MEM in the header but kept NetworkIndicator in both header AND Thinking
 - Initialize system stats listener in App.tsx: Added import for startSystemStatsListener line 25, called in onMount line 217 alongside startNetworkActivityListener()
 - Move CPU/MEM from ThinkingBar to header bar in ChatPanel: Moved CPU/MEM span from ThinkingBar (line ~3248) to ChatPanel header bar (line 1867), right after NetworkIndicator. ThinkingBar now only has NetworkIndicator on the right side. Build verified (vite build passed in 13.5s).
 - Build, verify event delivery, and screenshot: cargo check: passed (warnings only, none from our code). vite build: passed (14.3s). Rust sysinfo 0.33 API differed from plan — fixed RefreshKind::new()→nothing(), refresh_process_specifics→refresh_processes_specifics with ProcessesToUpdate.
+
+
+## Implementation Log — 2026-07-18 02:54
+**Summary:** Bump v0.1.11 → v0.1.12, release publicada com sucesso
+**Changed files:** M	package.json, M	src-tauri/Cargo.lock, M	src-tauri/Cargo.toml, M	src-tauri/tauri.conf.json
+**Commits:** 95358da chore: bump version 0.1.11 → 0.1.12
+**Journal:** Bump de patch 0.1.11 → 0.1.12 bem sucedido.
+
+Processo:
+1. Investigação: 3 arquivos canônicos de versão (package.json, Cargo.toml, tauri.conf.json) + CI/CD trigger via tag push
+2. Bump: alteração das 3 referências de versão + Cargo.lock auto-regenerado
+3. Commit direto na main + tag v0.1.12 + push
+4. Release workflow disparou automaticamente: 5 builds de plataforma passaram sem erros
+5. create-release gerou 23 assets e publicou no repositório público claudin-io/claudinio-code-releases
+6. Updater latest.json verificado: v0.1.12 servindo para todas as 5 plataformas com assinaturas
+
+Nenhum erro, nenhuma correção necessária. Release completa e funcional.
+
+**Task journal:**
+- Plan: bump do patch e release: Found 3 canonical version files: package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json; CI/CD: push tag v0.1.12 triggers release.yml → 5-platform build → create-release on claudin-io/claudinio-code-releases; Current version: 0.1.11 → target: 0.1.12
+- Execute & verify: bump do patch e release: Version bumped 0.1.11→0.1.12 in package.json, Cargo.toml, tauri.conf.json; All 5 platform builds: SUCCESS; GitHub Release created on claudin-io/claudinio-code-releases with 23 assets; Updater latest.json serving v0.1.12, all 5 platforms with signatures verified
+- Find all version references: 3 canonical files: package.json line 3, Cargo.toml line 3, tauri.conf.json line 4; Cargo.lock auto-regenerates, vite.config.ts reads package.json at build time
+- Understand CI/CD release pipeline: Single workflow: .github/workflows/release.yml; Trigger: push tag matching semver; Jobs: build (5 platforms) → create-release (publishes to claudin-io/claudinio-code-releases)
+- Bump patch version 0.1.11 → 0.1.12: Updated package.json, Cargo.toml, tauri.conf.json: 0.1.11 → 0.1.12; Cargo.lock auto-regenerated
+- Commit bump and create tag v0.1.12: Commit 95358da: chore: bump version 0.1.11 → 0.1.12; Tag v0.1.12 created and pushed; Pushed to claudin-io/claudinio-code
+- Monitor release CI/CD workflow: All 5 platform builds PASSED; create-release job PASSED; Release published: 23 assets across 5 platforms; Updater latest.json verified: v0.1.12, all 5 platforms + signatures
