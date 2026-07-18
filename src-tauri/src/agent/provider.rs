@@ -136,8 +136,18 @@ pub struct AgentConfig {
 impl AgentConfig {
     /// True when the session uses claudinio's own API key (not a BYOK override)
     /// and that key is present. This gates subscriber-only features like web_search.
+    /// If override_api_key is set to the same value as api_key (or not set at all),
+    /// it's still a Claudinio account — only a truly different override key is BYOK.
     pub fn is_claudinio_account(&self) -> bool {
-        self.override_api_key.is_none() && !self.api_key.is_empty()
+        if self.api_key.is_empty() {
+            return false;
+        }
+        // override_api_key being set to the same value as api_key is NOT real BYOK
+        // Only a truly different override key disqualifies the account
+        match self.override_api_key.as_deref() {
+            None => true,
+            Some(k) => k == self.api_key,
+        }
     }
 
     /// The effective context-handoff threshold in tokens. The

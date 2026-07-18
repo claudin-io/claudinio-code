@@ -12,6 +12,11 @@ use tauri::Manager;
 use tauri::State;
 use tokio::task::spawn_blocking;
 
+// Only one workspace indexes at a time. Restoring several workspaces at
+// startup used to launch parallel scans + embedding runs that together
+// pegged every core (and hammered slow/network drives).
+static INDEX_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStatus {
@@ -151,6 +156,13 @@ pub async fn open_workspace(
         }
     }
 
+    // Serialize indexing across workspaces (see INDEX_SEMAPHORE above). The
+    // permit is held through the async embedding phase below.
+    let index_permit = INDEX_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|e| format!("index semaphore: {e}"))?;
+
     // Phase 1: Start scanning WITHOUT embeddings immediately
     let scan_handle = spawn_blocking({
         let db = db.clone();
@@ -249,6 +261,9 @@ pub async fn open_workspace(
         let db3 = db.clone();
         let ws_path = path.clone();
         tokio::spawn(async move {
+            // Hold the indexing permit until embedding finishes so another
+            // workspace's scan doesn't run concurrently with this.
+            let _index_permit = index_permit;
             let result = join.await;
             let (status, files) = match result {
                 Ok(Ok((processed, _total))) => ("embeddings_done", processed),

@@ -643,6 +643,9 @@ pub fn generate_all_embeddings(
                         break;
                     }
                 }
+                // Breathe between batches so the UI process isn't starved on
+                // low-core machines during a long initial index.
+                std::thread::sleep(std::time::Duration::from_millis(30));
             }
         }
 

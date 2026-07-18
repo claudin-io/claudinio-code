@@ -111,6 +111,15 @@ impl CodeEmbedder {
             // so disable it and let the allocator release memory between runs.
             .with_memory_pattern(false)
             .map_err(|e| format!("ort memory pattern: {e}"))?
+            // Cap ONNX threading: the default (one intra-op thread per
+            // physical core) saturates the whole machine during indexing and
+            // starves the WebView UI thread — Windows then flags the window
+            // as "Not responding". Embedding is background work; keep it slow
+            // and polite.
+            .with_intra_threads(2)
+            .map_err(|e| format!("ort intra threads: {e}"))?
+            .with_inter_threads(1)
+            .map_err(|e| format!("ort inter threads: {e}"))?
             .commit_from_file(&model_path)
             .map_err(|e| format!("ort load model: {e}"))?;
 
