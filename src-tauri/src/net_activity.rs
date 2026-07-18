@@ -6,10 +6,19 @@
 //! on the `network-activity` Tauri event whenever it changes.
 
 use serde::Serialize;
+use std::fs::OpenOptions;
+use csv::Writer;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tauri::Emitter;
+
+/// Set by open_workspace so NetGuard::begin() captures which project sent the request.
+static CURRENT_WORKSPACE: OnceLock<String> = OnceLock::new();
+
+pub fn set_current_workspace(workspace: String) {
+    let _ = CURRENT_WORKSPACE.set(workspace);
+}
 
 pub const EVENT_NAME: &str = "network-activity";
 /// Minimum interval between byte-count re-emits for a streaming op.
@@ -32,12 +41,29 @@ pub enum NetSource {
     Mcp,
 }
 
+fn source_to_str(source: NetSource) -> &'static str {
+    match source {
+        NetSource::LlmStream => "llm_stream",
+        NetSource::LlmClassify => "llm_classify",
+        NetSource::LlmOneShot => "llm_one_shot",
+        NetSource::ListModels => "list_models",
+        NetSource::Auth => "auth",
+        NetSource::SkillsIndex => "skills_index",
+        NetSource::SkillFetch => "skill_fetch",
+        NetSource::EmbeddingModelDownload => "embedding_model_download",
+        NetSource::WebSearch => "web_search",
+        NetSource::Mcp => "mcp",
+    }
+}
+
 struct NetOp {
     id: u64,
     source: NetSource,
     detail: String,
     started: Instant,
     bytes: u64,
+    workspace: String,
+    status_code: Option<u16>,
 }
 
 /// Serialized snapshot of one active operation, sent to the frontend.
@@ -49,6 +75,7 @@ pub struct NetOpView {
     pub detail: String,
     pub elapsed_ms: u64,
     pub bytes: u64,
+    pub status_code: Option<u16>,
 }
 
 #[derive(Default)]
@@ -84,6 +111,7 @@ fn emit_snapshot() {
                 detail: op.detail.clone(),
                 elapsed_ms: op.started.elapsed().as_millis() as u64,
                 bytes: op.bytes,
+                status_code: op.status_code,
             })
             .collect(),
         Err(_) => return,
@@ -105,6 +133,7 @@ pub struct NetGuard {
 impl NetGuard {
     pub fn begin(source: NetSource, detail: impl Into<String>) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let workspace = CURRENT_WORKSPACE.get().cloned().unwrap_or_default();
         if let Ok(mut ops) = tracker().ops.lock() {
             ops.push(NetOp {
                 id,
@@ -112,6 +141,8 @@ impl NetGuard {
                 detail: detail.into(),
                 started: Instant::now(),
                 bytes: 0,
+                workspace,
+                status_code: None,
             });
         }
         emit_snapshot();
@@ -141,11 +172,65 @@ impl NetGuard {
             emit_snapshot();
         }
     }
+
+    /// Record the HTTP status code the call site received. Optional — if never
+    /// called the column stays empty in the CSV.
+    pub fn set_status(&self, code: u16) {
+        if let Ok(mut ops) = tracker().ops.lock() {
+            if let Some(op) = ops.iter_mut().find(|op| op.id == self.id) {
+                op.status_code = Some(code);
+            }
+        }
+    }
+}
+
+static CSV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn csv_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("claudinio-code")
+        .join("network-log.csv")
+}
+
+fn append_csv_row(op: &NetOp) {
+    let path = csv_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _lock = CSV_MUTEX.lock().unwrap();
+    let file_exists = path.exists();
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path);
+    if let Ok(file) = file {
+        let mut wtr = Writer::from_writer(file);
+        if !file_exists {
+            let _ = wtr.write_record(&[
+                "workspace", "timestamp", "source", "detail",
+                "duration_ms", "bytes", "status_code",
+            ]);
+        }
+        let _ = wtr.write_record(&[
+            &op.workspace,
+            &chrono::Utc::now().to_rfc3339(),
+            source_to_str(op.source),
+            &op.detail,
+            &op.started.elapsed().as_millis().to_string(),
+            &op.bytes.to_string(),
+            &op.status_code.map(|c| c.to_string()).unwrap_or_default(),
+        ]);
+        let _ = wtr.flush();
+    }
 }
 
 impl Drop for NetGuard {
     fn drop(&mut self) {
         if let Ok(mut ops) = tracker().ops.lock() {
+            if let Some(op) = ops.iter().find(|op| op.id == self.id) {
+                append_csv_row(op);
+            }
             ops.retain(|op| op.id != self.id);
         }
         emit_snapshot();

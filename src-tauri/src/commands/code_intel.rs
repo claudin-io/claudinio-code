@@ -58,6 +58,8 @@ pub async fn open_workspace(
     state: State<'_, AppState>,
     progress_channel: Channel<indexer::IndexProgress>,
 ) -> Result<IndexStatus, String> {
+    crate::net_activity::set_current_workspace(path.clone());
+
     // Already open: switching back to this workspace must be cheap and must
     // not restart indexing/watcher/LSP under a possibly-running agent.
     if let Ok(ws) = state.workspace(&path).await {

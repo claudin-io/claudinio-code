@@ -197,6 +197,7 @@ pub async fn login_with_claudinio(
         .await
         .map_err(|e| format!("login exchange request failed: {e}"))?;
     let status = resp.status();
+    _net_guard.set_status(status.as_u16());
 
     if status == reqwest::StatusCode::FORBIDDEN {
         let err: ExchangeError = resp.json().await.map_err(|e| e.to_string())?;
@@ -265,6 +266,7 @@ pub async fn validate_api_key(
         .send()
         .await
         .map_err(|e| format!("Network error: {e}"))?;
+    _net_guard.set_status(response.status().as_u16());
 
     if !response.status().is_success() {
         let status = response.status();
