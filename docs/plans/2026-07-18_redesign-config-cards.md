@@ -264,3 +264,20 @@ Gotchas: None. The plan was precise — all file paths, line numbers, and markup
 - Strip emoji from pt-BR locale labels: Stripped ☕, 🧠, 📋 prefixes from keepAwake, codeIntel, autoCommitPlan labels in pt-BR. Hints unchanged.
 - Replace checkbox rows with card layout in App.tsx: Replaced old labels with card layout. Three <Icon> components: coffee-cup (stroke), brain (fill), notebook-pen (stroke). Old mb-4 flex cursor-pointer pattern fully gone.
 - Build and verify: Build: 35 test files, 643 tests all passed. Vite build succeeded, zero errors. Verified: coffee-cup in PATHS + STROKE_ICONS, zero emojis in locale files, old mb-4 flex pattern gone from App.tsx.
+
+
+## Implementation Log — 2026-07-18 14:34
+**Summary:** v0.1.13 released: all 5 platforms built successfully, latest.json cross-arch fix verified
+**Changed files:** M	.github/workflows/release.yml, M	package.json, M	src-tauri/Cargo.lock, M	src-tauri/Cargo.toml, M	src-tauri/tauri.conf.json
+**Commits:** 9556a00 chore: version bump 0.1.13 + release workflow guard against arm64/x86_64 asset mismatch, 581801d chore: bump version 0.1.12 → 0.1.13
+**Journal:** Release v0.1.13 deployed successfully. 
+
+Key findings:
+1. The tag v0.1.13 was initially created on commit 581801d (the version bump), but the user had added a workflow fix on commit 9556a00. We force-moved the tag to 9556a00 and pushed to retrigger.
+2. The workflow fix resolved the cross-arch asset mismatch bug that existed in v0.1.12 (windows-x86_64 → arm64 exe, linux-x86_64 → aarch64 AppImage). latest.json now maps all 5 platforms correctly.
+3. All 6 jobs passed: macos-arm64, windows-latest, windows-arm64, linux-x64, linux-arm64 builds + Create GitHub Release.
+4. Release published as non-draft, 24 assets, latest.json version 0.1.13.
+
+**Task journal:**
+- Plan: bump patch version 0.1.12 → 0.1.13 and verify release: Current version: 0.1.12 across package.json, Cargo.toml, tauri.conf.json; 13 commits since v0.1.12 tag; v0.1.12 release published 2026-07-18 with all 5 platform targets passing; NOTED BUG: latest.json windows-x86_64 URL points to arm64 exe, linux-x86_64 URL points to aarch64 AppImage — workflow issue, not in scope; Release workflow triggers on v* tags via .github/workflows/release.yml with environment: RELEASE; Plan: bump 3 files → commit → tag v0.1.13 → push → verify workflow + release
+- Execute & verify: bump to 0.1.13 and release: Commit 581801d: bumped versions in all 3 files, created tag v0.1.13; Commit 9556a00: user added release workflow fix for arm64/x86_64 asset mismatch guard; Tag v0.1.13 moved to 9556a00 and force-pushed to retrigger workflow with fix; Run #29645223957: all 6 jobs passed (5 builds + Create Release); Release v0.1.13 published 2026-07-18T13:32:21Z, isDraft=false, 24 assets; latest.json cross-arch check: ALL CLEAN — windows-x86_64→x64 exe, linux-x86_64→amd64 AppImage, etc. Fix confirmed working.
