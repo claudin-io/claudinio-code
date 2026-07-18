@@ -1084,25 +1084,52 @@ function App() {
             </div>
 
 
-            <div>
-            <label class="mb-1 block text-xs text-ink-muted">
-              {t("settings.handoffThreshold")}
-              <span class="ml-2 font-mono text-[11px] text-ink-faint">{Math.round(configHandoffTokens() / 1000)}k tokens</span>
-            </label>
-            <input
-              type="range"
-              min="120000"
-              max="256000"
-              step="8000"
-              value={configHandoffTokens()}
-              onInput={(e) => setConfigHandoffTokens(parseInt(e.currentTarget.value, 10))}
-              class="mb-1 w-full accent-accent"
-            />
-            <p class="mb-0 text-[11px] text-ink-faint">{t("settings.handoffThresholdHint")}</p>
             </div>
 
-            </div>
+            {/* Session Handoff Threshold slider — full width */}
+            <div class="mb-4">
+              <div class="flex items-center gap-2 mb-1">
+                <label class="block text-xs text-ink-muted">
+                  {t("settings.handoffThreshold")}
+                  <span class="ml-2 font-mono text-[11px] text-ink-faint">{Math.round(configHandoffTokens() / 1000)}k tokens</span>
+                </label>
+                <Show when={workspaceConfigFields().has("handoff_context_tokens")}>
+                  <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
+                </Show>
+                <Show when={!workspaceConfigFields().has("handoff_context_tokens")}>
+                  <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
+                </Show>
+              </div>
 
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] text-ink-faint w-10 text-right">120k</span>
+                <input
+                  type="range"
+                  min="120000"
+                  max="256000"
+                  step="8000"
+                  value={configHandoffTokens()}
+                  onInput={(e) => setConfigHandoffTokens(parseInt(e.currentTarget.value, 10))}
+                  disabled={workspaceConfigFields().has("handoff_context_tokens")}
+                  class="flex-1 h-2 rounded-lg appearance-none cursor-pointer handoff-slider"
+                  classList={{
+                    "opacity-50 cursor-not-allowed": workspaceConfigFields().has("handoff_context_tokens"),
+                  }}
+                />
+                <span class="text-[10px] text-ink-faint w-10">256k</span>
+              </div>
+
+              {/* Context rot risk — neutral line with centered label */}
+              <div class="mt-1 flex items-center gap-2">
+                <span class="text-[10px] text-ink-faint">{t("app.config.lowerRisk")}</span>
+                <div class="flex-1 flex items-center">
+                  <div class="flex-1 border-t border-border-subtle"></div>
+                  <span class="mx-2 text-[10px] text-ink-faint whitespace-nowrap">{t("app.config.contextRotRisk")}</span>
+                  <div class="flex-1 border-t border-border-subtle"></div>
+                </div>
+                <span class="text-[10px] text-ink-faint">{t("app.config.higherRisk")}</span>
+              </div>
+            </div>
 
             <hr class="mb-4 border-border-subtle" />
 

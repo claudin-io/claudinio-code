@@ -2264,6 +2264,21 @@ pub async fn run_workflow_with_profile(
                 )
             } else if in_brain
                 && tool_name == "bash"
+                && permissions::bash_writes_files(
+                    tool_input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            {
+                deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    "This bash command writes files. In Brain mode you cannot mutate \
+                     — record the change in the plan (write_plan) instead.",
+                    event_tx,
+                    session_id,
+                )
+            } else if in_brain
+                && tool_name == "bash"
                 && !matches!(
                     permissions::bash_permission(
                         tool_input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
