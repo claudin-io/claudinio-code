@@ -116,7 +116,17 @@ export interface AgentConfig {
   handoffContextTokens?: number | null;
   autoCommitPlan?: boolean;
   thinkingEffort?: string;
+  providers?: Record<string, ConnectedProviderInfo>;
   workspaceConfig?: Record<string, unknown> | null;
+}
+
+/** A connected external provider as reported by get_config — never the key. */
+export interface ConnectedProviderInfo {
+  connected: boolean;
+  baseUrl: string;
+  label?: string | null;
+  protocol?: string;
+  enabledModels?: string[];
 }
 
 export interface SetConfigArgs {
@@ -552,6 +562,66 @@ export function reconnectMcp(workspace: string): Promise<McpServerStatus[]> {
 
 export function listModels(): Promise<string[]> {
   return invoke<string[]>("list_models");
+}
+
+// --- External providers (OpenRouter + models.dev catalog) ---
+
+export interface CatalogModel {
+  id: string;
+  name: string;
+  costInput?: number | null;
+  costOutput?: number | null;
+  context?: number | null;
+  outputLimit?: number | null;
+  reasoning?: boolean;
+  toolCall?: boolean;
+}
+
+export interface CatalogProvider {
+  id: string;
+  name: string;
+  api: string;
+  env: string[];
+  doc?: string | null;
+  protocol: "openai" | "anthropic";
+  models: CatalogModel[];
+}
+
+/** One picker group per provider; external models are "<providerId>/<model>" qualified. */
+export interface ModelGroup {
+  providerId: string;
+  providerName: string;
+  models: string[];
+}
+
+/** OpenRouter OAuth PKCE connect; resolves with the live model list. */
+export function openrouterLogin(): Promise<string[]> {
+  return invoke<string[]>("openrouter_login");
+}
+
+/** Abort a pending openrouterLogin stuck waiting for the browser callback. */
+export function openrouterLoginCancel(): Promise<void> {
+  return invoke<void>("openrouter_login_cancel");
+}
+
+export function fetchProviderCatalog(force?: boolean): Promise<{ providers: CatalogProvider[] }> {
+  return invoke<{ providers: CatalogProvider[] }>("fetch_provider_catalog", { force: force ?? false });
+}
+
+export function connectProvider(providerId: string, apiKey: string, baseUrl?: string): Promise<string[]> {
+  return invoke<string[]>("connect_provider", { providerId, apiKey, baseUrl: baseUrl ?? null });
+}
+
+export function disconnectProvider(providerId: string): Promise<void> {
+  return invoke<void>("disconnect_provider", { providerId });
+}
+
+export function listProviderModels(providerId: string): Promise<string[]> {
+  return invoke<string[]>("list_provider_models", { providerId });
+}
+
+export function listAllModels(): Promise<ModelGroup[]> {
+  return invoke<ModelGroup[]>("list_all_models");
 }
 
 export interface LoginResult {

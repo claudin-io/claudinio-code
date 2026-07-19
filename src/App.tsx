@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ThinkingEffort } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listAllModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, openrouterLogin, openrouterLoginCancel, disconnectProvider, type ConnectedProviderInfo, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ModelGroup, type ThinkingEffort } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -25,6 +25,7 @@ import { startSystemStatsListener } from "./lib/systemStats";
 import { AskpassModal } from "./components/AskpassModal";
 import { type AskpassRequest } from "./lib/ipc";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ProviderCatalogModal } from "./components/ProviderCatalogModal";
 
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
@@ -106,7 +107,13 @@ function App() {
   const [configApiKey, setConfigApiKey] = createSignal("");
   const [configBrainModel, setConfigBrainModel] = createSignal("claudius");
   const [configBuilderModel, setConfigBuilderModel] = createSignal("claudinio");
-  const [availableModels, setAvailableModels] = createSignal<string[]>(["claudinio", "claudius"]);
+  const [modelGroups, setModelGroups] = createSignal<ModelGroup[]>([
+    { providerId: "claudinio", providerName: "Claudinio", models: ["claudinio", "claudius"] },
+  ]);
+  const [configProviders, setConfigProviders] = createSignal<Record<string, ConnectedProviderInfo>>({});
+  const [openrouterConnecting, setOpenrouterConnecting] = createSignal(false);
+  const [providerError, setProviderError] = createSignal<string | null>(null);
+  const [showProviderCatalog, setShowProviderCatalog] = createSignal(false);
   const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
   const [configMaxGoldenCycles, setConfigMaxGoldenCycles] = createSignal<number | null>(null);
@@ -340,7 +347,7 @@ function App() {
 
   const openConfig = async () => {
     try {
-      const [cfg, models] = await Promise.all([getConfig(activeWorkspace() ?? undefined), listModels()]);
+      const [cfg, groups] = await Promise.all([getConfig(activeWorkspace() ?? undefined), listAllModels()]);
       if (cfg) {
         setConfigBrainModel(cfg.brainModel);
         setConfigBuilderModel(cfg.builderModel);
@@ -372,11 +379,13 @@ function App() {
           }
         }
         setWorkspaceConfigFields(wsKeys);
+        setConfigProviders(cfg.providers ?? {});
       }
-      if (models && models.length > 0) {
-        setAvailableModels(models);
+      if (groups && groups.length > 0) {
+        setModelGroups(groups);
       }
     } catch {}
+    setProviderError(null);
     // Reset Easter egg — precisa digitar "iddqd" novamente a cada abertura
     setEasterEggActive(false);
     setKeystrokeBuf("");
@@ -486,6 +495,49 @@ function App() {
     setAccountLogin(null);
     setAccountTier(null);
     setHasApiKey(false);
+  };
+
+  /** Re-read provider connections + model groups after a connect/disconnect. */
+  const refreshProviders = async () => {
+    try {
+      const [cfg, groups] = await Promise.all([getConfig(activeWorkspace() ?? undefined), listAllModels()]);
+      setConfigProviders(cfg.providers ?? {});
+      if (groups && groups.length > 0) {
+        setModelGroups(groups);
+      }
+    } catch {}
+  };
+
+  const doOpenrouterConnect = async () => {
+    setOpenrouterConnecting(true);
+    setProviderError(null);
+    try {
+      await openrouterLogin();
+      await refreshProviders();
+    } catch (e) {
+      // A user-initiated cancel is not an error worth surfacing.
+      if (!String(e).includes("login cancelled")) setProviderError(String(e));
+    } finally {
+      setOpenrouterConnecting(false);
+    }
+  };
+
+  const doOpenrouterCancel = () => {
+    openrouterLoginCancel().catch(() => {});
+  };
+
+  const doDisconnectProvider = async (providerId: string) => {
+    setProviderError(null);
+    try {
+      await disconnectProvider(providerId);
+      // The backend already reset persisted model slots pointing at the
+      // removed provider; mirror that in the open settings form.
+      if (configBrainModel().startsWith(`${providerId}/`)) setConfigBrainModel("claudius");
+      if (configBuilderModel().startsWith(`${providerId}/`)) setConfigBuilderModel("claudinio");
+      await refreshProviders();
+    } catch (e) {
+      setProviderError(String(e));
+    }
   };
 
   const pickPlanPath = async () => {
@@ -766,7 +818,7 @@ function App() {
         setConfigBrainModel={setConfigBrainModel}
         configBuilderModel={configBuilderModel}
         setConfigBuilderModel={setConfigBuilderModel}
-        availableModels={availableModels}
+        modelGroups={modelGroups}
         configMaxParallelAgents={configMaxParallelAgents}
         setConfigMaxParallelAgents={setConfigMaxParallelAgents}
         configMaxRounds={configMaxRounds}
@@ -813,6 +865,13 @@ function App() {
         setConfigOverrideBaseUrl={setConfigOverrideBaseUrl}
         configOverrideApiKey={configOverrideApiKey}
         setConfigOverrideApiKey={setConfigOverrideApiKey}
+        providers={configProviders}
+        openrouterConnecting={openrouterConnecting}
+        providerError={providerError}
+        onOpenrouterConnect={doOpenrouterConnect}
+        onOpenrouterCancel={doOpenrouterCancel}
+        onDisconnectProvider={doDisconnectProvider}
+        onOpenProviderCatalog={() => setShowProviderCatalog(true)}
         saveConfig={saveConfig}
         doLogin={doLogin}
         doLogout={doLogout}
@@ -821,6 +880,14 @@ function App() {
         testAllMcpServers={testAllMcpServers}
         openSupportUrl={() => openExternalUrl("https://claudin.io/dashboard#account")}
       />
+
+      <Show when={showProviderCatalog()}>
+        <ProviderCatalogModal
+          providers={configProviders}
+          onClose={() => setShowProviderCatalog(false)}
+          onChanged={refreshProviders}
+        />
+      </Show>
 
       {/* Update-available prompt (auto-check on startup) */}
       <Show when={updateInfo() && !updateBannerDismissed()}>

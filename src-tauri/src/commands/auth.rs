@@ -10,8 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
 
-const CALLBACK_OK: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style=\"font-family:sans-serif;text-align:center;padding-top:64px\"><h2>Signed in</h2><p>You can return to Claudinio Code.</p></body></html>";
-const CALLBACK_ERR: &str = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style=\"font-family:sans-serif;text-align:center;padding-top:64px\"><h2>Login failed</h2><p>Please return to Claudinio Code and try again.</p></body></html>";
+pub(crate) const CALLBACK_OK: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style=\"font-family:sans-serif;text-align:center;padding-top:64px\"><h2>Signed in</h2><p>You can return to Claudinio Code.</p></body></html>";
+pub(crate) const CALLBACK_ERR: &str = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style=\"font-family:sans-serif;text-align:center;padding-top:64px\"><h2>Login failed</h2><p>Please return to Claudinio Code and try again.</p></body></html>";
 
 #[derive(Serialize)]
 pub struct LoginResult {
@@ -37,13 +37,13 @@ struct ExchangeError {
     upgrade_url: Option<String>,
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Random hex string of `n_bytes` bytes, sourced from `uuid`'s CSPRNG-backed
 /// v4 generator so we don't need to add a dedicated `rand` dependency.
-fn random_hex(n_bytes: usize) -> String {
+pub(crate) fn random_hex(n_bytes: usize) -> String {
     let mut bytes = Vec::with_capacity(n_bytes);
     while bytes.len() < n_bytes {
         bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
@@ -83,7 +83,10 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn parse_callback_query(request_line: &str) -> Option<(String, String)> {
+/// Parse `code` (and `state`, when present) from the callback request line.
+/// OpenRouter's PKCE flow has no state param, so state is optional here;
+/// callers that require it enforce the match in `wait_for_callback`.
+pub(crate) fn parse_callback_query(request_line: &str) -> Option<(String, Option<String>)> {
     let path = request_line.split_whitespace().nth(1)?;
     let (_, query) = path.split_once('?')?;
     let mut code = None;
@@ -96,10 +99,18 @@ fn parse_callback_query(request_line: &str) -> Option<(String, String)> {
             _ => {}
         }
     }
-    Some((code?, state?))
+    Some((code?, state))
 }
 
-async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<String, String> {
+/// Accept one loopback connection and extract the OAuth code. When
+/// `expected_state` is Some, the callback must echo a matching `state` param
+/// (CSRF check); None skips the check for flows without a state round-trip
+/// (OpenRouter PKCE — a forged code is useless without our in-memory
+/// verifier).
+pub(crate) async fn wait_for_callback(
+    listener: TcpListener,
+    expected_state: Option<&str>,
+) -> Result<String, String> {
     let (mut stream, _) = timeout(Duration::from_secs(120), listener.accept())
         .await
         .map_err(|_| "login timed out waiting for browser callback".to_string())?
@@ -123,9 +134,11 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
         }
     };
 
-    if state != expected_state {
-        let _ = stream.write_all(CALLBACK_ERR.as_bytes()).await;
-        return Err("login state mismatch — possible CSRF, aborting".into());
+    if let Some(expected) = expected_state {
+        if state.as_deref() != Some(expected) {
+            let _ = stream.write_all(CALLBACK_ERR.as_bytes()).await;
+            return Err("login state mismatch — possible CSRF, aborting".into());
+        }
     }
 
     let _ = stream.write_all(CALLBACK_OK.as_bytes()).await;
@@ -172,7 +185,7 @@ pub async fn login_with_claudinio(
         .open_url(authorize_url, None::<&str>)
         .map_err(|e| format!("failed to open browser: {e}"))?;
 
-    let code = wait_for_callback(listener, &oauth_state).await?;
+    let code = wait_for_callback(listener, Some(oauth_state.as_str())).await?;
 
     let exchange_path = "/api/app/exchange";
     let exchange_url = format!("{}{}", services_url.trim_end_matches('/'), exchange_path);

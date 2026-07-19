@@ -87,20 +87,39 @@ describe("locale dictionaries — en-US & pt-BR parity", () => {
     });
   });
 
-  describe("empty locales (16 new — awaiting translation)", () => {
-    const emptyLocales: Record<string, Record<string, unknown>> = {
+  describe("locale file health", () => {
+    const allLocales: Record<string, Record<string, unknown>> = {
       "es-ES": esES, "fr-FR": frFR, "de-DE": deDE, "it-IT": itIT,
       "ru-RU": ruRU, "tr-TR": trTR, "ar-SA": arSA, "hi-IN": hiIN,
       "bn-BD": bnBD, "ur-PK": urPK, "zh-CN": zhCN, "ja-JP": jaJP,
       "ko-KR": koKR, "vi-VN": viVN, "id-ID": idID, "pt-PT": ptPT,
     };
 
-    it("all 16 empty locale files export empty dictionaries", () => {
-      for (const [code, dict] of Object.entries(emptyLocales)) {
+    it("all 16 locale files export a defined dictionary", () => {
+      for (const [code, dict] of Object.entries(allLocales)) {
         expect(dict, `${code} dict should be defined`).toBeDefined();
-        expect(Object.keys(dict).length, `${code} should have 0 keys`).toBe(0);
       }
     });
+  });
+
+  describe("key parity — all 16 translated locales", () => {
+    const enKeys = Object.keys(enUS);
+
+    const allLocales: Record<string, Record<string, unknown>> = {
+      "es-ES": esES, "fr-FR": frFR, "de-DE": deDE, "it-IT": itIT,
+      "ru-RU": ruRU, "tr-TR": trTR, "ar-SA": arSA, "hi-IN": hiIN,
+      "bn-BD": bnBD, "ur-PK": urPK, "zh-CN": zhCN, "ja-JP": jaJP,
+      "ko-KR": koKR, "vi-VN": viVN, "id-ID": idID, "pt-PT": ptPT,
+    };
+
+    for (const [code, dict] of Object.entries(allLocales)) {
+      it(`${code} has the same keys as en-US`, () => {
+        expect(Object.keys(dict).length, `${code} should have ${enKeys.length} keys`).toBe(enKeys.length);
+        for (const key of enKeys) {
+          expect(dict, `${code} missing key "${key}"`).toHaveProperty(key);
+        }
+      });
+    }
   });
 
   describe("resolveLocale", () => {
