@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ThinkingEffort } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -118,6 +118,7 @@ function App() {
   const [configKeepAwake, setConfigKeepAwake] = createSignal(true);
   const [configCodeIntelEnabled, setConfigCodeIntelEnabled] = createSignal(true);
   const [configAutoCommitPlan, setConfigAutoCommitPlan] = createSignal(true);
+  const [configThinkingEffort, setConfigThinkingEffort] = createSignal<ThinkingEffort>("medium");
   const [configPreferredIde, setConfigPreferredIde] = createSignal("");
   const [availableIdes, setAvailableIdes] = createSignal<string[]>([]);
   const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
@@ -283,6 +284,7 @@ function App() {
       setAccountLogin(cfg.accountLogin ?? null);
       setAccountTier(cfg.accountTier ?? null);
       setHasApiKey(cfg.hasApiKey ?? false);
+      setConfigThinkingEffort(normalizeThinkingEffort(cfg.thinkingEffort));
     } catch {
       // Config file may not exist yet — silently assume no auth.
     }
@@ -329,6 +331,13 @@ function App() {
     void checkUpdates(false);
   });
 
+  // Discrete 5-step slider — no debounce needed; set_config only touches the
+  // fields present, so the Settings save flow can't clobber this.
+  const changeThinkingEffort = (v: ThinkingEffort) => {
+    setConfigThinkingEffort(v);
+    setConfig({ thinkingEffort: v }).catch(() => {});
+  };
+
   const openConfig = async () => {
     try {
       const [cfg, models] = await Promise.all([getConfig(activeWorkspace() ?? undefined), listModels()]);
@@ -346,6 +355,7 @@ function App() {
         setConfigKeepAwake(cfg.keepAwake ?? true);
         setConfigCodeIntelEnabled(cfg.codeIntelEnabled ?? true);
         setConfigAutoCommitPlan(cfg.autoCommitPlan ?? true);
+        setConfigThinkingEffort(normalizeThinkingEffort(cfg.thinkingEffort));
         setConfigPreferredIde(cfg.preferredIde ?? "");
         setConfigPlanSavePath(cfg.planSavePath ?? "");
         setConfigOverrideBaseUrl(cfg.overrideBaseUrl ?? "");
@@ -1161,7 +1171,7 @@ function App() {
             <For each={openWorkspaces()}>
               {(ws) => (
                 <div class="h-full" style={{ display: activeWorkspace() === ws ? "block" : "none" }}>
-                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} />
+                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} thinkingEffort={configThinkingEffort} onThinkingEffortChange={changeThinkingEffort} />
                 </div>
               )}
             </For>

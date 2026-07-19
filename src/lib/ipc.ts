@@ -115,6 +115,7 @@ export interface AgentConfig {
   preferredIde?: string | null;
   handoffContextTokens?: number | null;
   autoCommitPlan?: boolean;
+  thinkingEffort?: string;
   workspaceConfig?: Record<string, unknown> | null;
 }
 
@@ -139,6 +140,7 @@ export interface SetConfigArgs {
   preferredIde?: string;
   handoffContextTokens?: number | null;
   autoCommitPlan?: boolean;
+  thinkingEffort?: ThinkingEffort;
 }
 
 export interface ApproveArgs {
@@ -169,6 +171,15 @@ export interface SubagentDoneData {
 }
 
 export type SessionMode = "brain" | "builder";
+
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/// Slider order, lowest to highest — index in this array is the range value.
+export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+export function normalizeThinkingEffort(s: unknown): ThinkingEffort {
+  return THINKING_EFFORTS.includes(s as ThinkingEffort) ? (s as ThinkingEffort) : "medium";
+}
 
 /// Map a persisted mode string to the current ids. Old session JSONLs carry
 /// the original names "pensador"/"constructor".

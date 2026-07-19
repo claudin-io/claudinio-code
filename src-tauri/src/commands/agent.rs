@@ -675,6 +675,7 @@ pub struct SetConfigArgs {
     pub preferred_ide: Option<String>,
     pub handoff_context_tokens: Option<Option<u64>>,
     pub auto_commit_plan: Option<bool>,
+    pub thinking_effort: Option<String>,
 }
 
 #[tauri::command]
@@ -751,6 +752,11 @@ pub async fn set_config(
     if let Some(auto_commit_plan) = args.auto_commit_plan {
         cfg.auto_commit_plan = auto_commit_plan;
     }
+    if let Some(thinking_effort) = args.thinking_effort {
+        if ["low", "medium", "high", "xhigh", "max"].contains(&thinking_effort.as_str()) {
+            cfg.thinking_effort = thinking_effort;
+        }
+    }
     save_config(&cfg);
     Ok(())
 }
@@ -797,6 +803,7 @@ pub async fn get_config(
         "codeIntelEnabled": cfg.code_intel_enabled,
         "preferredIde": cfg.preferred_ide,
         "handoffContextTokens": cfg.handoff_context_tokens,
+        "thinkingEffort": cfg.thinking_effort,
         "workspaceConfig": workspace_config,
     }))
 }

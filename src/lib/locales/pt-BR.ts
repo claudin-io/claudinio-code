@@ -246,6 +246,13 @@ const dict: LocaleDict = {
   "chat.input.askCode": "Escreva algo… | @arquivo | <tag> | <skill>",
   "chat.input.dropToAttach": "Solte o arquivo para anexar",
   "chat.input.dropHint": "Imagens, PDFs, documentos, código e mais",
+  "chat.effort.label": "Esforço de raciocínio",
+  "chat.effort.low": "Baixo",
+  "chat.effort.medium": "Médio",
+  "chat.effort.high": "Alto",
+  "chat.effort.xhigh": "Extra-alto",
+  "chat.effort.max": "Máximo",
+  "chat.effort.tooltip": "Esforço de raciocínio: {0} — vale a partir da próxima mensagem",
   "chat.toast.fileAttached": "Arquivo anexado",
 
   // ── ChatPanel - Approval ──────────────────────────────────────────
