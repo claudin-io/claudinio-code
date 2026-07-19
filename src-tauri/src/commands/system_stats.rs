@@ -20,6 +20,11 @@ pub fn start_poller(app: AppHandle) {
             RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
         );
         let pid = Pid::from(std::process::id() as usize);
+        // sysinfo reports CPU summed across cores (a 12-thread machine can
+        // read "535%"); normalize to a 0-100% whole-machine share.
+        let logical_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as f32;
 
         let mut ticker = interval(Duration::from_secs(5));
         loop {
@@ -34,7 +39,7 @@ pub fn start_poller(app: AppHandle) {
 
             if let Some(process) = system.process(pid) {
                 let payload = SystemStatsPayload {
-                    cpu_percent: process.cpu_usage(),
+                    cpu_percent: process.cpu_usage() / logical_cores,
                     // sysinfo::Process::memory() returns bytes on all platforms
                     memory_rss_bytes: process.memory(),
                 };

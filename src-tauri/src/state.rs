@@ -29,6 +29,9 @@ pub struct SessionHandle {
 pub struct WorkspaceState {
     pub root: PathBuf,
     pub index_db: Arc<IndexDb>,
+    /// Machine-local path of the index SQLite file (under app data, never
+    /// inside the workspace — see `commands::code_intel::index_db_path`).
+    pub index_db_path: PathBuf,
     pub skills_manager: Arc<Mutex<SkillManager>>,
     /// One LSP manager per workspace: `LspManager` keys servers by language,
     /// so a shared manager would answer workspace B from workspace A's root.

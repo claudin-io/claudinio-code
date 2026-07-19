@@ -3,4 +3,5 @@ pub mod embeddings;
 pub mod fallback;
 pub mod indexer;
 pub mod parser;
+pub mod thread_priority;
 pub mod watcher;
