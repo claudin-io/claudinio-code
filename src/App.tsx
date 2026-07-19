@@ -5,9 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
-import { t, locale, setLocale, type LocaleId, SUPPORTED_LOCALES, FLAGS, LOCALE_LABELS } from "./lib/grill-me";
+import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
 import { FileTree } from "./components/FileTree";
-import ThemePicker from "./components/ThemePicker";
 import { ChatPanel } from "./components/ChatPanel";
 import { EmptyState } from "./components/EmptyState";
 import { OnboardingWizard } from "./components/OnboardingWizard";
@@ -25,6 +24,7 @@ import { startNetworkActivityListener } from "./lib/networkActivity";
 import { startSystemStatsListener } from "./lib/systemStats";
 import { AskpassModal } from "./components/AskpassModal";
 import { type AskpassRequest } from "./lib/ipc";
+import { SettingsPanel } from "./components/SettingsPanel";
 
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
@@ -141,8 +141,8 @@ function App() {
   const [configOverrideApiKey, setConfigOverrideApiKey] = createSignal("");
   const [updateInfo, setUpdateInfo] = createSignal<UpdateInfo | null>(null);
   const [updateBannerDismissed, setUpdateBannerDismissed] = createSignal(false);
-  const [updateCheckState, setUpdateCheckState] = createSignal<"idle" | "checking" | "upToDate" | "error">("idle");
-  const [updateCheckError, setUpdateCheckError] = createSignal<string | null>(null);
+  const [_updateCheckState, setUpdateCheckState] = createSignal<"idle" | "checking" | "upToDate" | "error">("idle");
+  const [_updateCheckError, setUpdateCheckError] = createSignal<string | null>(null);
   const [updateProgress, setUpdateProgress] = createSignal<number | null>(null);
   const [updateInstallError, setUpdateInstallError] = createSignal<string | null>(null);
   const [activeEditorCursor, setActiveEditorCursor] = createSignal<{ path: string; line: number } | null>(null);
@@ -743,630 +743,74 @@ function App() {
         </div>
       </header>
 
-      <Show when={showConfig()}>
-        <div
-          class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]"
-        >
-          <div class="w-[680px] max-h-[90vh] overflow-y-auto rounded-lg bg-surface-1 p-5 shadow-modal">
-            <h2 class="mb-4 text-sm font-semibold text-ink">{t("app.config.title")}</h2>
-
-            {/* Lang selector */}
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.language")}</label>
-            <select
-              value={locale()}
-              onChange={(e) => setLocale(e.currentTarget.value as LocaleId)}
-              class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            >
-              <For each={SUPPORTED_LOCALES}>
-                {(loc) => (
-                  <option value={loc}>{FLAGS[loc]} {LOCALE_LABELS[loc]}</option>
-                )}
-              </For>
-            </select>
-
-            {/* Theme selector */}
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.theme")}</label>
-            <div class="mb-4">
-              <ThemePicker />
-            </div>
-
-
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.account")}</label>
-            <Show
-              when={accountLogin() || hasApiKey()}
-              fallback={
-                <div class="mb-2 space-y-2">
-                  <button
-                    onClick={doLogin}
-                    disabled={loggingIn()}
-                    class="w-full rounded-md bg-accent p-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
-                  >
-                    {loggingIn() ? t("app.config.signingIn") : t("app.config.signIn")}
-                  </button>
-                  <label class="block text-xs text-ink-muted">{t("app.config.apiKey")}</label>
-                  <input
-                    type="password"
-                    value={configApiKey()}
-                    onInput={(e) => setConfigApiKey(e.currentTarget.value)}
-                    placeholder="sk-..."
-                    class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                  />
-                  <Show when={settingsApiKeyError()}>
-                    <div class="text-sm text-red-400">{settingsApiKeyError()}</div>
-                  </Show>
-                </div>
-
-              }
-            >
-              <div class="mb-2 flex items-center justify-between rounded-md border border-border-subtle bg-surface-0 p-2 text-sm">
-                <span class="truncate text-ink">{t("app.config.signedIn")}</span>
-                <button onClick={doLogout} class="ml-2 shrink-0 text-xs text-ink-muted hover:text-ink hover:underline">
-                  {t("app.config.signOut")}
-                </button>
-              </div>
-
-            </Show>
-
-            {/* Support link */}
-            <div class="mb-3">
-              <button
-                onClick={() => openExternalUrl("https://claudin.io/dashboard#account")}
-                class="flex items-center gap-2 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink hover:bg-surface-2 hover:border-accent/40 transition-colors"
-              >
-                <Icon name="speech-balloon-alt" class="h-4 w-4 shrink-0" />
-                <span>{t("app.config.support")}</span>
-              </button>
-            </div>
-
-
-            {/* Easter egg "iddqd" — override fields for LLM */}
-            <Show when={easterEggActive()}>
-              <div class="mb-4">
-                <label class="mb-1 block text-xs text-ink-muted">{t("app.config.overrideBaseUrl")}</label>
-                <input
-                  type="text"
-                  value={configOverrideBaseUrl()}
-                  onInput={(e) => setConfigOverrideBaseUrl(e.currentTarget.value)}
-                  placeholder="https://api.claudin.io"
-                  class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-                <p class="mt-1 mb-3 text-[11px] text-ink-faint">{t("app.config.overrideBaseUrlHint")}</p>
-                <label class="mb-1 block text-xs text-ink-muted">{t("app.config.overrideApiKey")}</label>
-                <input
-                  type="password"
-                  value={configOverrideApiKey()}
-                  onInput={(e) => setConfigOverrideApiKey(e.currentTarget.value)}
-                  placeholder="sk-ant-..."
-                  class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-                <p class="mt-1 text-[11px] text-ink-faint">{t("app.config.overrideApiKeyHint")}</p>
-              </div>
-
-            </Show>
-
-            <hr class="mb-4 border-border-subtle" />
-
-            {/* Plan save path — always editable */}
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.planSavePath")}</label>
-            <div class="mb-1 flex gap-1">
-              <div class="relative flex-1">
-                <input
-                  type="text"
-                  value={configPlanSavePath()}
-                  onInput={(e) => setConfigPlanSavePath(e.currentTarget.value)}
-                  placeholder=".claudinio/plans"
-                  class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 pr-8 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-                <Show when={configPlanSavePath()}>
-                  <button
-                    onClick={() => setConfigPlanSavePath("")}
-                    class="absolute right-2 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink"
-                    title={t("app.config.resetToDefault")}
-                  >
-                    <Icon name="x" class="h-3.5 w-3.5" />
-                  </button>
-                </Show>
-              </div>
-
-              <button
-                onClick={pickPlanPath}
-                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle text-ink-muted hover:bg-surface-2 hover:text-ink"
-                title={t("app.config.browseFolder")}
-              >
-                <Icon name="folder" class="h-4 w-4" />
-              </button>
-            </div>
-
-            <div class="mb-4 flex items-center gap-2">
-              <Show when={!configPlanSavePath()}>
-                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.default")}</span>
-              </Show>
-              <p class="text-[11px] text-ink-faint">{t("app.config.planSavePathHint")}</p>
-            </div>
-
-
-            <div class="grid grid-cols-2 gap-x-4 mb-4">
-            {/* Brain model selector */}
-            <div>
-            <div class="flex items-center gap-2 mb-1">
-              <label class="block text-xs text-ink-muted">{t("app.config.brainModel")}</label>
-              <Show when={workspaceConfigFields().has("brain_model")}>
-                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
-              </Show>
-              <Show when={!workspaceConfigFields().has("brain_model")}>
-                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
-              </Show>
-            </div>
-
-            <Show
-              when={easterEggActive()}
-              fallback={
-                <select
-                  value={configBrainModel()}
-                  onChange={(e) => setConfigBrainModel(e.currentTarget.value)}
-                  disabled={workspaceConfigFields().has("brain_model")}
-                  class="w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                  classList={{
-                    "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("brain_model"),
-                    "bg-surface-0": !workspaceConfigFields().has("brain_model"),
-                  }}
-                >
-                  <For each={availableModels()}>
-                    {(m) => <option value={m} selected={configBrainModel() === m}>{m}</option>}
-                  </For>
-                </select>
-              }
-            >
-              <input
-                type="text"
-                value={configBrainModel()}
-                onInput={(e) => setConfigBrainModel(e.currentTarget.value)}
-                placeholder="claudius"
-                class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            </Show>
-            </div>
-
-
-            {/* Builder model selector */}
-            <div>
-            <div class="flex items-center gap-2 mb-1">
-              <label class="block text-xs text-ink-muted">{t("app.config.builderModel")}</label>
-              <Show when={workspaceConfigFields().has("builder_model")}>
-                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
-              </Show>
-              <Show when={!workspaceConfigFields().has("builder_model")}>
-                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
-              </Show>
-            </div>
-
-            <Show
-              when={easterEggActive()}
-              fallback={
-                <select
-                  value={configBuilderModel()}
-                  onChange={(e) => setConfigBuilderModel(e.currentTarget.value)}
-                  disabled={workspaceConfigFields().has("builder_model")}
-                  class="w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                  classList={{
-                    "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("builder_model"),
-                    "bg-surface-0": !workspaceConfigFields().has("builder_model"),
-                  }}
-                >
-                  <For each={availableModels()}>
-                    {(m) => <option value={m} selected={configBuilderModel() === m}>{m}</option>}
-                  </For>
-                </select>
-              }
-            >
-              <input
-                type="text"
-                value={configBuilderModel()}
-                onInput={(e) => setConfigBuilderModel(e.currentTarget.value)}
-                placeholder="claudinio"
-                class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            </Show>
-            </div>
-
-            </div>
-
-
-            {/* Max Parallel Agents slider — full width */}
-            <div class="mb-4">
-              <div class="flex items-center gap-2 mb-1">
-                <label class="block text-xs text-ink-muted">{t("app.config.maxParallelAgents")}: {configMaxParallelAgents()}</label>
-                <Show when={workspaceConfigFields().has("max_parallel_agents")}>
-                  <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
-                </Show>
-                <Show when={!workspaceConfigFields().has("max_parallel_agents")}>
-                  <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
-                </Show>
-              </div>
-
-              <div class="flex items-center gap-2">
-                <span class="text-[10px] text-ink-faint w-10 text-right">{t("app.config.slower")}</span>
-                <input
-                  type="range"
-                  min="1"
-                  max="8"
-                  step="1"
-                  value={configMaxParallelAgents()}
-                  onInput={(e) => setConfigMaxParallelAgents(parseInt(e.currentTarget.value, 10) || 4)}
-                  disabled={workspaceConfigFields().has("max_parallel_agents")}
-                  class="flex-1 h-2 rounded-lg appearance-none cursor-pointer accent-accent"
-                  classList={{
-                    "opacity-50 cursor-not-allowed": workspaceConfigFields().has("max_parallel_agents"),
-                  }}
-                />
-                <span class="text-[10px] text-ink-faint w-10">{t("app.config.faster")}</span>
-              </div>
-
-              <p class="mt-1 mb-0 text-[11px] text-ink-faint">{t("app.config.maxParallelAgentsHint")}</p>
-            </div>
-
-
-            <hr class="mb-4 border-border-subtle" />
-
-            <div class="grid grid-cols-2 gap-x-4 gap-y-2 mb-4">
-            <div>
-            <div class="flex items-center gap-2 mb-1">
-              <label class="block text-xs text-ink-muted">{t("app.config.maxRounds")}</label>
-              <Show when={workspaceConfigFields().has("max_rounds")}>
-                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
-              </Show>
-              <Show when={!workspaceConfigFields().has("max_rounds")}>
-                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
-              </Show>
-            </div>
-
-            <input
-              type="number"
-              min="0"
-              value={configMaxRounds() ?? ""}
-              onInput={(e) => {
-                const v = e.currentTarget.value;
-                setConfigMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
-              }}
-              placeholder={t("app.config.unlimited")}
-              class="mb-1 w-full rounded-md border border-border-subtle p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              classList={{
-                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("max_rounds"),
-                "bg-surface-0": !workspaceConfigFields().has("max_rounds"),
-              }}
-              disabled={workspaceConfigFields().has("max_rounds")}
-            />
-            <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.maxRoundsHint")}</p>
-            </div>
-
-
-            <div>
-            <div class="flex items-center gap-2 mb-1">
-              <label class="block text-xs text-ink-muted">{t("app.config.subMaxRounds")}</label>
-              <Show when={workspaceConfigFields().has("sub_max_rounds")}>
-                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
-              </Show>
-              <Show when={!workspaceConfigFields().has("sub_max_rounds")}>
-                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
-              </Show>
-            </div>
-
-            <input
-              type="number"
-              min="0"
-              value={configSubMaxRounds() ?? ""}
-              onInput={(e) => {
-                const v = e.currentTarget.value;
-                setConfigSubMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
-              }}
-              placeholder={t("app.config.unlimited")}
-              class="mb-1 w-full rounded-md border border-border-subtle p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              classList={{
-                "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("sub_max_rounds"),
-                "bg-surface-0": !workspaceConfigFields().has("sub_max_rounds"),
-              }}
-              disabled={workspaceConfigFields().has("sub_max_rounds")}
-            />
-            <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
-            </div>
-
-
-            <div>
-            <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenCycles")}</label>
-            <input
-              type="number"
-              min="0"
-              value={configMaxGoldenCycles() ?? ""}
-              onInput={(e) => {
-                const v = e.currentTarget.value;
-                setConfigMaxGoldenCycles(v === "" ? null : Math.max(0, parseInt(v, 10) || 0));
-              }}
-              placeholder="5"
-              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            />
-            <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenCyclesHint")}</p>
-            </div>
-
-
-            <div>
-            <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenStalls")}</label>
-            <input
-              type="number"
-              min="0"
-              value={configMaxGoldenStalls() ?? ""}
-              onInput={(e) => {
-                const v = e.currentTarget.value;
-                setConfigMaxGoldenStalls(v === "" ? null : Math.max(0, parseInt(v, 10) || 0));
-              }}
-              placeholder="2"
-              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            />
-            <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenStallsHint")}</p>
-            </div>
-
-
-            </div>
-
-            {/* Session Handoff Threshold slider — full width */}
-            <div class="mb-4">
-              <div class="flex items-center gap-2 mb-1">
-                <label class="block text-xs text-ink-muted">
-                  {t("settings.handoffThreshold")}
-                  <span class="ml-2 font-mono text-[11px] text-ink-faint">{Math.round(configHandoffTokens() / 1000)}k tokens</span>
-                </label>
-                <Show when={workspaceConfigFields().has("handoff_context_tokens")}>
-                  <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
-                </Show>
-                <Show when={!workspaceConfigFields().has("handoff_context_tokens")}>
-                  <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
-                </Show>
-              </div>
-
-              <div class="flex items-center gap-2">
-                <span class="text-[10px] text-ink-faint w-10 text-right">120k</span>
-                <input
-                  type="range"
-                  min="120000"
-                  max="256000"
-                  step="8000"
-                  value={configHandoffTokens()}
-                  onInput={(e) => setConfigHandoffTokens(parseInt(e.currentTarget.value, 10))}
-                  disabled={workspaceConfigFields().has("handoff_context_tokens")}
-                  class="flex-1 h-2 rounded-lg appearance-none cursor-pointer handoff-slider"
-                  classList={{
-                    "opacity-50 cursor-not-allowed": workspaceConfigFields().has("handoff_context_tokens"),
-                  }}
-                />
-                <span class="text-[10px] text-ink-faint w-10">256k</span>
-              </div>
-
-              {/* Context rot risk — neutral line with centered label */}
-              <div class="mt-1 flex items-center gap-2">
-                <span class="text-[10px] text-ink-faint">{t("app.config.lowerRisk")}</span>
-                <div class="flex-1 flex items-center">
-                  <div class="flex-1 border-t border-border-subtle"></div>
-                  <span class="mx-2 text-[10px] text-ink-faint whitespace-nowrap">{t("app.config.contextRotRisk")}</span>
-                  <div class="flex-1 border-t border-border-subtle"></div>
-                </div>
-                <span class="text-[10px] text-ink-faint">{t("app.config.higherRisk")}</span>
-              </div>
-            </div>
-
-            <hr class="mb-4 border-border-subtle" />
-
-            <label class="mb-2 flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={configYoloMode()}
-                onChange={(e) => setConfigYoloMode(e.currentTarget.checked)}
-                class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
-                disabled={workspaceConfigFields().has("yolo_mode")}
-              />
-              <span class="text-sm font-medium text-ink">{t("app.config.yoloMode")}</span>
-              <span class="text-[11px] text-ink-faint">{t("app.config.yoloModeHint")}</span>
-              <Show when={workspaceConfigFields().has("yolo_mode")}>
-                <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">{t("app.config.sourceWorkspace")}</span>
-              </Show>
-              <Show when={!workspaceConfigFields().has("yolo_mode")}>
-                <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">{t("app.config.sourceLocal")}</span>
-              </Show>
-            </label>
-
-            <Show when={configYoloMode()}>
-              <label class="mb-1 block text-xs text-ink-muted">{t("app.config.yoloBlacklist")}</label>
-              <textarea
-                value={configYoloBlacklist()}
-                onInput={(e) => setConfigYoloBlacklist(e.currentTarget.value)}
-                placeholder="edit_file, bash"
-                rows={2}
-                class="mb-4 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                classList={{
-                  "bg-surface-2 text-ink-muted pointer-events-none": workspaceConfigFields().has("yolo_blacklist"),
-                }}
-                disabled={workspaceConfigFields().has("yolo_blacklist")}
-              />
-              <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{t("app.config.yoloBlacklistHint")}</p>
-            </Show>
-
-            <div class="space-y-1">
-              {/* Keep awake while working */}
-              <label class="group flex cursor-pointer items-start gap-3 border-l-2 border-transparent py-2 pl-3 pr-1 transition-colors has-[:checked]:border-accent hover:border-accent/30">
-                <div class="mt-0.5 flex shrink-0 items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={configKeepAwake()}
-                    onChange={(e) => setConfigKeepAwake(e.currentTarget.checked)}
-                    class="h-3.5 w-3.5 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
-                  />
-                  <Icon name="coffee-cup" class="h-4 w-4 text-ink-faint" stroke />
-                </div>
-                <div class="min-w-0">
-                  <span class="text-sm font-medium text-ink">{t("app.config.keepAwake")}</span>
-                  <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.keepAwakeHint")}</span>
-                </div>
-              </label>
-
-              {/* Code intelligence */}
-              <label class="group flex cursor-pointer items-start gap-3 border-l-2 border-transparent py-2 pl-3 pr-1 transition-colors has-[:checked]:border-accent hover:border-accent/30">
-                <div class="mt-0.5 flex shrink-0 items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={configCodeIntelEnabled()}
-                    onChange={(e) => setConfigCodeIntelEnabled(e.currentTarget.checked)}
-                    class="h-3.5 w-3.5 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
-                  />
-                  <Icon name="brain" class="h-4 w-4 text-ink-faint" />
-                </div>
-                <div class="min-w-0">
-                  <span class="text-sm font-medium text-ink">{t("app.config.codeIntel")}</span>
-                  <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.codeIntelHint")}</span>
-                </div>
-              </label>
-
-              {/* Auto-commit plan on finalize */}
-              <label class="group flex cursor-pointer items-start gap-3 border-l-2 border-transparent py-2 pl-3 pr-1 transition-colors has-[:checked]:border-accent hover:border-accent/30">
-                <div class="mt-0.5 flex shrink-0 items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={configAutoCommitPlan()}
-                    onChange={(e) => setConfigAutoCommitPlan(e.currentTarget.checked)}
-                    class="h-3.5 w-3.5 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
-                  />
-                  <Icon name="notebook-pen" class="h-4 w-4 text-ink-faint" stroke />
-                </div>
-                <div class="min-w-0">
-                  <span class="text-sm font-medium text-ink">{t("app.config.autoCommitPlan")}</span>
-                  <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.autoCommitPlanHint")}</span>
-                </div>
-              </label>
-            </div>
-
-            <label class="mb-3 block flex cursor-pointer items-center gap-2">
-              <span class="text-sm font-medium text-ink">{t("app.config.preferredIde")}</span>
-            </label>
-            <Show
-              when={availableIdes().length > 0}
-              fallback={
-                <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.noIdesDetected")}</p>
-              }
-            >
-              <select
-                value={configPreferredIde()}
-                onChange={(e) => setConfigPreferredIde(e.currentTarget.value)}
-                class="mb-3 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              >
-                <For each={availableIdes()}>
-                  {(ide) => (
-                    <option value={ide} selected={configPreferredIde() === ide}>
-                      {ide === "vscode" ? "VS Code" : "Cursor"}
-                    </option>
-                  )}
-                </For>
-              </select>
-            </Show>
-            <p class="-mt-2 mb-3 text-[11px] text-ink-faint">{t("app.config.preferredIdeHint")}</p>
-
-            <hr class="mb-4 border-border-subtle" />
-
-            <div class="mb-2 flex items-center justify-between">
-              <span class="text-sm font-medium text-ink">{t("app.config.mcpServers")}</span>
-              <div class="flex gap-2">
-                <button
-                  onClick={addMcpServerTemplate}
-                  class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
-                >
-                  {t("app.config.mcpAddServer")}
-                </button>
-                <button
-                  onClick={testAllMcpServers}
-                  disabled={mcpTesting()}
-                  class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
-                >
-                  {mcpTesting() ? t("app.config.mcpTesting") : t("app.config.mcpTest")}
-                </button>
-              </div>
-
-            </div>
-
-
-            <textarea
-              value={configMcpJson()}
-              onInput={(e) => setConfigMcpJson(e.currentTarget.value)}
-              rows={10}
-              spellcheck={false}
-              class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 font-mono text-xs text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              classList={{ "border-red-500": !!mcpJsonError() }}
-            />
-            <Show when={mcpJsonError()}>
-              <p class="mb-2 text-[11px] text-red-500">{mcpJsonError()}</p>
-            </Show>
-            <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.mcpJsonHint")}</p>
-
-            <Show when={Object.keys(mcpStatuses()).length > 0}>
-              <div class="mb-4 space-y-1.5">
-                <For each={Object.entries(mcpStatuses())}>
-                  {([name, status]) => (
-                    <div class="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-1 px-2 py-1.5 text-xs">
-                      <span
-                        class="h-2 w-2 shrink-0 rounded-full"
-                        classList={{
-                          "bg-green-500": status.connected,
-                          "bg-red-500": !status.connected,
-                        }}
-                      />
-                      <span class="font-medium text-ink">{name}</span>
-                      <span class="text-ink-faint">
-                        {status.connected ? t("app.config.mcpToolCount", String(status.toolCount)) : (status.error ?? t("app.config.mcpNotConnected"))}
-                      </span>
-                    </div>
-
-                  )}
-                </For>
-              </div>
-
-            </Show>
-
-            {/* Updates */}
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.updates")}</label>
-            <div class="mb-4 flex items-center gap-2 rounded-md border border-border-subtle bg-surface-0 p-2">
-              <button
-                onClick={() => void checkUpdates(true)}
-                disabled={updateCheckState() === "checking"}
-                class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
-              >
-                {updateCheckState() === "checking" ? t("app.config.updatesChecking") : t("app.config.updatesCheck")}
-              </button>
-              <span class="truncate text-xs text-ink-muted">
-                <Switch>
-                  <Match when={updateInfo()}>{t("update.available", updateInfo()!.version)}</Match>
-                  <Match when={updateCheckState() === "upToDate"}>{t("app.config.updatesUpToDate")}</Match>
-                  <Match when={updateCheckState() === "error"}>
-                    <span class="text-red-400">{t("app.config.updatesError", updateCheckError() ?? "")}</span>
-                  </Match>
-                </Switch>
-              </span>
-            </div>
-
-
-            <div class="flex justify-end gap-2">
-              <button
-                onClick={() => setShowConfig(false)}
-                class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
-              >
-                {t("app.config.cancel")}
-              </button>
-              <button
-                onClick={saveConfig}
-                class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
-              >
-                {t("app.config.save")}
-              </button>
-            </div>
-
-          </div>
-
-        </div>
-      </Show>
+      <SettingsPanel
+        showConfig={showConfig}
+        setShowConfig={setShowConfig}
+        language={locale}
+        setLanguage={(v: LocaleId | ((prev: LocaleId) => LocaleId)) => {
+          const id = typeof v === "function" ? v(locale()) : v;
+          setLocale(id);
+          return id;
+        }}
+        configBrainModel={configBrainModel}
+        setConfigBrainModel={setConfigBrainModel}
+        configBuilderModel={configBuilderModel}
+        setConfigBuilderModel={setConfigBuilderModel}
+        availableModels={availableModels}
+        configMaxParallelAgents={configMaxParallelAgents}
+        setConfigMaxParallelAgents={setConfigMaxParallelAgents}
+        configMaxRounds={configMaxRounds}
+        setConfigMaxRounds={setConfigMaxRounds}
+        configSubMaxRounds={configSubMaxRounds}
+        setConfigSubMaxRounds={setConfigSubMaxRounds}
+        configMaxGoldenCycles={configMaxGoldenCycles}
+        setConfigMaxGoldenCycles={setConfigMaxGoldenCycles}
+        configMaxGoldenStalls={configMaxGoldenStalls}
+        setConfigMaxGoldenStalls={setConfigMaxGoldenStalls}
+        configHandoffTokens={configHandoffTokens}
+        setConfigHandoffTokens={setConfigHandoffTokens}
+        configYoloMode={configYoloMode}
+        setConfigYoloMode={setConfigYoloMode}
+        configYoloBlacklist={configYoloBlacklist}
+        setConfigYoloBlacklist={setConfigYoloBlacklist}
+        configKeepAwake={configKeepAwake}
+        setConfigKeepAwake={setConfigKeepAwake}
+        configCodeIntelEnabled={configCodeIntelEnabled}
+        setConfigCodeIntelEnabled={setConfigCodeIntelEnabled}
+        configAutoCommitPlan={configAutoCommitPlan}
+        setConfigAutoCommitPlan={setConfigAutoCommitPlan}
+        configPreferredIde={configPreferredIde}
+        setConfigPreferredIde={setConfigPreferredIde}
+        availableIdes={availableIdes}
+        configPlanSavePath={configPlanSavePath}
+        setConfigPlanSavePath={setConfigPlanSavePath}
+        workspaceConfigFields={workspaceConfigFields}
+        accountLogin={accountLogin}
+        hasApiKey={hasApiKey}
+        loggingIn={loggingIn}
+        configApiKey={configApiKey}
+        setConfigApiKey={setConfigApiKey}
+        settingsApiKeyError={settingsApiKeyError}
+        configMcpJson={configMcpJson}
+        setConfigMcpJson={setConfigMcpJson}
+        mcpJsonError={mcpJsonError}
+        setMcpJsonError={setMcpJsonError}
+        mcpStatuses={mcpStatuses}
+        mcpTesting={mcpTesting}
+        setMcpTesting={setMcpTesting}
+        easterEggActive={easterEggActive}
+        configOverrideBaseUrl={configOverrideBaseUrl}
+        setConfigOverrideBaseUrl={setConfigOverrideBaseUrl}
+        configOverrideApiKey={configOverrideApiKey}
+        setConfigOverrideApiKey={setConfigOverrideApiKey}
+        saveConfig={saveConfig}
+        doLogin={doLogin}
+        doLogout={doLogout}
+        pickPlanPath={pickPlanPath}
+        addMcpServerTemplate={addMcpServerTemplate}
+        testAllMcpServers={testAllMcpServers}
+        openSupportUrl={() => openExternalUrl("https://claudin.io/dashboard#account")}
+      />
 
       {/* Update-available prompt (auto-check on startup) */}
       <Show when={updateInfo() && !updateBannerDismissed()}>
