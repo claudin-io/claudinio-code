@@ -110,8 +110,8 @@ describe("TasksPanel", () => {
     // task-1: todo → bg-ink-faint
     expect(dotSpan(0).className).toContain("bg-ink-faint");
 
-    // task-2: doing → bg-white
-    expect(dotSpan(1).className).toContain("bg-white");
+    // task-2: doing → bg-amber-500
+    expect(dotSpan(1).className).toContain("bg-amber-500");
 
     // task-5: done → bg-success
     expect(dotSpan(4).className).toContain("bg-success");
@@ -133,9 +133,9 @@ describe("TasksPanel", () => {
       expect(span.className).toContain(expectedClass);
     };
 
-    // todo → doing
+    // todo → doing (amber-500)
     expect(dotSpan(0).className).toContain("bg-ink-faint");
-    await clickAndCheck("bg-white"); // doing
+    await clickAndCheck("bg-amber-500"); // doing
 
     // doing → done
     await clickAndCheck("bg-success"); // done
@@ -361,7 +361,7 @@ describe("TasksPanel", () => {
     expect(todoDot).toBeTruthy();
     expect(todoDot!.className).toContain("bg-ink-faint");
     expect(doingDot).toBeTruthy();
-    expect(doingDot!.className).toContain("bg-white");
+    expect(doingDot!.className).toContain("bg-amber-500");
     expect(doneDot).toBeTruthy();
     expect(doneDot!.className).toContain("bg-success");
 
