@@ -7,6 +7,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
+pub mod catalog;
+pub mod openai;
+
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Prefixo-sentinela para erros de budget esgotado. O frontend detecta isso
@@ -140,6 +143,74 @@ pub struct AgentConfig {
     /// stream_message request; the claudin_router buckets it upstream.
     #[serde(default = "default_thinking_effort")]
     pub thinking_effort: String,
+    /// External LLM providers connected by the user (OpenRouter, models.dev
+    /// catalog entries), keyed by provider id. A model id of the form
+    /// "<provider_id>/<model>" routes to the matching entry; anything else
+    /// goes to Claudinio. base_url/protocol/pricing are snapshotted at
+    /// connect time so inference never depends on the catalog being reachable.
+    #[serde(default)]
+    pub providers: std::collections::HashMap<String, ProviderEntry>,
+}
+
+/// A connected external provider. Credentials follow the existing plaintext
+/// config.json precedent (same as `api_key`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    pub api_key: String,
+    pub base_url: String,
+    /// Wire protocol: "openai" (chat/completions) or "anthropic" (/v1/messages).
+    #[serde(default = "default_openai_protocol")]
+    pub protocol: String,
+    /// Models the user chose to expose in the pickers; empty = all.
+    #[serde(default)]
+    pub enabled_models: Vec<String>,
+    /// Display name from the catalog (e.g. "OpenRouter", "DeepSeek").
+    #[serde(default)]
+    pub label: Option<String>,
+    /// (input, output) USD per million tokens, snapshotted from models.dev at
+    /// connect time, keyed by wire model id. Used for local cost estimation
+    /// when the provider doesn't return cost itself.
+    #[serde(default)]
+    pub model_pricing: std::collections::HashMap<String, (f64, f64)>,
+    /// Max output tokens per model, snapshotted from models.dev `limit.output`.
+    /// Clamps the request max_tokens so smaller models don't 400.
+    #[serde(default)]
+    pub model_output_limits: std::collections::HashMap<String, u32>,
+}
+
+fn default_openai_protocol() -> String {
+    "openai".into()
+}
+
+/// Wire protocol a request is spoken in. Decided per request from the model id
+/// (the "Strategy" resolved at model-selection time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    Anthropic,
+    OpenAiChat,
+}
+
+/// Everything a single LLM request needs to know about where and how to talk:
+/// resolved from `(AgentConfig, model id)` at the top of each entry point.
+#[derive(Debug, Clone)]
+pub struct ResolvedProvider {
+    pub protocol: Protocol,
+    pub base_url: String,
+    pub api_key: String,
+    /// Wire model id (provider prefix stripped for external providers).
+    pub model: String,
+    pub provider_id: String,
+    /// (input, output) USD per Mtok for local cost estimation.
+    pub pricing: Option<(f64, f64)>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ResolvedProvider {
+    /// Claudinio-only behaviors (budget-exceeded marker, proxy cost fields)
+    /// must not leak onto external providers.
+    pub fn is_claudinio(&self) -> bool {
+        self.provider_id == "claudinio"
+    }
 }
 
 impl AgentConfig {
@@ -252,6 +323,7 @@ impl Default for AgentConfig {
             handoff_context_tokens: None,
             auto_commit_plan: true,
             thinking_effort: default_thinking_effort(),
+            providers: std::collections::HashMap::new(),
         }
     }
 }
@@ -277,6 +349,58 @@ impl AgentConfig {
             "xhigh" => 24_576,
             "max" => 30_000,
             _ => 8_192,
+        }
+    }
+
+    /// Resolve which provider/protocol/credentials serve a model id.
+    /// A "<provider_id>/<rest>" prefix matching a connected provider routes
+    /// there (split at the FIRST slash only — OpenRouter model ids contain
+    /// slashes themselves, e.g. "openrouter/openai/gpt-4o-mini" → provider
+    /// "openrouter", wire model "openai/gpt-4o-mini"). Anything else — no
+    /// slash, or an unknown prefix — is the unchanged Claudinio path,
+    /// preserving the override_base_url/override_api_key BYOK precedence.
+    pub fn resolve_provider(&self, model: &str) -> ResolvedProvider {
+        if let Some((prefix, rest)) = model.split_once('/') {
+            if let Some(entry) = self.providers.get(prefix) {
+                let protocol = if entry.protocol == "anthropic" {
+                    Protocol::Anthropic
+                } else {
+                    Protocol::OpenAiChat
+                };
+                let mut base_url = entry.base_url.trim_end_matches('/').to_string();
+                // The Anthropic client appends "/v1/messages", but models.dev
+                // base URLs already end in "/v1" — strip it so external
+                // Anthropic-protocol entries don't produce "/v1/v1/messages".
+                if protocol == Protocol::Anthropic {
+                    if let Some(stripped) = base_url.strip_suffix("/v1") {
+                        base_url = stripped.to_string();
+                    }
+                }
+                return ResolvedProvider {
+                    protocol,
+                    base_url,
+                    api_key: entry.api_key.clone(),
+                    model: rest.to_string(),
+                    provider_id: prefix.to_string(),
+                    pricing: entry.model_pricing.get(rest).copied(),
+                    max_output_tokens: entry.model_output_limits.get(rest).copied(),
+                };
+            }
+        }
+        ResolvedProvider {
+            protocol: Protocol::Anthropic,
+            base_url: self
+                .override_base_url
+                .clone()
+                .unwrap_or_else(|| self.base_url.clone()),
+            api_key: self
+                .override_api_key
+                .clone()
+                .unwrap_or_else(|| self.api_key.clone()),
+            model: model.to_string(),
+            provider_id: "claudinio".into(),
+            pricing: None,
+            max_output_tokens: None,
         }
     }
 }
@@ -626,6 +750,17 @@ pub async fn classify_turn_completion(
     model: &str,
     assistant_text: &str,
 ) -> Result<String, String> {
+    let rp = config.resolve_provider(model);
+    if rp.protocol == Protocol::OpenAiChat {
+        return openai::complete(
+            &rp,
+            COMPLETION_JUDGE_SYSTEM,
+            &format!("Assistant's final message of the turn:\n\n{assistant_text}"),
+            1024,
+            crate::net_activity::NetSource::LlmClassify,
+        )
+        .await;
+    }
     let _net_guard = crate::net_activity::NetGuard::begin(
         crate::net_activity::NetSource::LlmClassify,
         model,
@@ -636,7 +771,7 @@ pub async fn classify_turn_completion(
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let body = RequestBody {
-        model: model.to_string(),
+        model: rp.model.clone(),
         // The Brain model is a thinking model: it burns output tokens on a
         // reasoning block before the one-word verdict. Too small a cap (e.g. 8)
         // is entirely consumed by thinking and yields an empty answer, so leave
@@ -655,13 +790,11 @@ pub async fn classify_turn_completion(
         // and forced thinking only adds cost/latency to a one-token verdict.
         thinking: None,
     };
-    let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
-    let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
-    let url = format!("{}/v1/messages", effective_base_url.trim_end_matches('/'));
+    let url = format!("{}/v1/messages", rp.base_url.trim_end_matches('/'));
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("x-api-key", effective_api_key)
+        .header("x-api-key", &rp.api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
         .send()
@@ -671,7 +804,7 @@ pub async fn classify_turn_completion(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return match budget_exceeded_message(&body) {
+        return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
             Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
             None => Err(format!("API error: HTTP {status}")),
         };
@@ -707,6 +840,17 @@ pub async fn one_shot(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
+    let rp = config.resolve_provider(model);
+    if rp.protocol == Protocol::OpenAiChat {
+        return openai::complete(
+            &rp,
+            system,
+            user,
+            max_tokens,
+            crate::net_activity::NetSource::LlmOneShot,
+        )
+        .await;
+    }
     let _net_guard = crate::net_activity::NetGuard::begin(
         crate::net_activity::NetSource::LlmOneShot,
         model,
@@ -717,7 +861,7 @@ pub async fn one_shot(
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let body = RequestBody {
-        model: model.to_string(),
+        model: rp.model.clone(),
         max_tokens,
         stream: false,
         messages: vec![Message {
@@ -728,13 +872,11 @@ pub async fn one_shot(
         system: Some(system.to_string()),
         thinking: None,
     };
-    let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
-    let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
-    let url = format!("{}/v1/messages", effective_base_url.trim_end_matches('/'));
+    let url = format!("{}/v1/messages", rp.base_url.trim_end_matches('/'));
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("x-api-key", effective_api_key)
+        .header("x-api-key", &rp.api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
         .send()
@@ -744,7 +886,7 @@ pub async fn one_shot(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return match budget_exceeded_message(&body) {
+        return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
             Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
             None => Err(format!("API error: HTTP {status}")),
         };
@@ -804,34 +946,57 @@ pub async fn stream_message(
     // subagent goal, …). Not sent to the API.
     net_detail: &str,
 ) -> Result<StreamOutput, String> {
+    let rp = config.resolve_provider(model);
+    if rp.protocol == Protocol::OpenAiChat {
+        return openai::stream_message(
+            &rp,
+            config,
+            messages,
+            tools,
+            system,
+            event_tx,
+            session_id,
+            assistant_text,
+            interrupt,
+            emit_text_deltas,
+            net_detail,
+        )
+        .await;
+    }
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    // Large tasks (thinking + a whole-file edit in one tool call) easily
+    // blow past 8k output tokens; a truncated stream ends the turn with
+    // the work half-done. 32k fits every current Claude model's cap; external
+    // Anthropic-protocol models with a smaller cap get clamped to it.
+    let max_tokens = rp.max_output_tokens.map_or(32_000, |m| m.min(32_000));
+    // budget_tokens must stay below max_tokens (and ≥ the API minimum of
+    // 1024), so a clamped max_tokens also clamps the thinking budget.
+    let budget_tokens = config
+        .thinking_budget_tokens()
+        .min(max_tokens.saturating_sub(2_000))
+        .max(1_024);
     let body = RequestBody {
-        model: model.to_string(),
-        // Large tasks (thinking + a whole-file edit in one tool call) easily
-        // blow past 8k output tokens; a truncated stream ends the turn with
-        // the work half-done. 32k fits every current Claude model's cap.
-        max_tokens: 32_000,
+        model: rp.model.clone(),
+        max_tokens,
         stream: true,
         messages: messages.to_vec(),
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
         system: system.map(|s| s.to_string()),
         thinking: Some(ThinkingConfig {
             kind: "enabled",
-            budget_tokens: config.thinking_budget_tokens(),
+            budget_tokens,
         }),
     };
 
-    let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
-    let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
-    let url = format!("{}/v1/messages", effective_base_url.trim_end_matches('/'));
+    let url = format!("{}/v1/messages", rp.base_url.trim_end_matches('/'));
 
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("x-api-key", effective_api_key)
+        .header("x-api-key", &rp.api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
         .send()
@@ -843,7 +1008,7 @@ pub async fn stream_message(
         let body = response.text().await.unwrap_or_default();
         let err_msg = if status.as_u16() == 401 {
             "Unauthorized — check your API key".into()
-        } else if let Some(m) = budget_exceeded_message(&body) {
+        } else if let Some(m) = budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
             format!("{BUDGET_EXCEEDED_MARKER}{m}")
         } else {
             format!("API error: HTTP {status}")
@@ -1277,6 +1442,109 @@ mod tests {
         let cfg: AgentConfig = serde_json::from_str(r#"{"base_url":"x","api_key":"","model":"m"}"#)
             .expect("config without thinking_effort must deserialize");
         assert_eq!(cfg.thinking_effort, "medium");
+    }
+
+    #[test]
+    fn test_legacy_config_without_providers_deserializes_empty() {
+        let cfg: AgentConfig = serde_json::from_str(
+            r#"{"base_url":"https://api.claudin.io","api_key":"sk-x","model":"claudinio"}"#,
+        )
+        .expect("pre-providers config must deserialize");
+        assert!(cfg.providers.is_empty());
+    }
+
+    fn cfg_with_openrouter() -> AgentConfig {
+        let mut cfg = AgentConfig::default();
+        cfg.api_key = "sk-claudinio".into();
+        cfg.providers.insert(
+            "openrouter".into(),
+            ProviderEntry {
+                api_key: "sk-or-abc".into(),
+                base_url: "https://openrouter.ai/api/v1/".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: Some("OpenRouter".into()),
+                model_pricing: [("openai/gpt-4o-mini".to_string(), (0.15, 0.6))]
+                    .into_iter()
+                    .collect(),
+                model_output_limits: [("openai/gpt-4o-mini".to_string(), 16_384u32)]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn test_resolve_provider_unqualified_goes_to_claudinio() {
+        let cfg = cfg_with_openrouter();
+        let rp = cfg.resolve_provider("claudius");
+        assert_eq!(rp.protocol, Protocol::Anthropic);
+        assert_eq!(rp.provider_id, "claudinio");
+        assert_eq!(rp.model, "claudius");
+        assert_eq!(rp.base_url, "https://api.claudin.io");
+        assert_eq!(rp.api_key, "sk-claudinio");
+    }
+
+    #[test]
+    fn test_resolve_provider_splits_first_slash_only() {
+        let cfg = cfg_with_openrouter();
+        let rp = cfg.resolve_provider("openrouter/openai/gpt-4o-mini");
+        assert_eq!(rp.protocol, Protocol::OpenAiChat);
+        assert_eq!(rp.provider_id, "openrouter");
+        assert_eq!(rp.model, "openai/gpt-4o-mini");
+        assert_eq!(rp.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(rp.api_key, "sk-or-abc");
+        assert_eq!(rp.pricing, Some((0.15, 0.6)));
+        assert_eq!(rp.max_output_tokens, Some(16_384));
+        assert!(!rp.is_claudinio());
+    }
+
+    #[test]
+    fn test_resolve_provider_unknown_prefix_falls_back_to_claudinio() {
+        let cfg = cfg_with_openrouter();
+        let rp = cfg.resolve_provider("anthropic/claude-sonnet-4");
+        assert_eq!(rp.protocol, Protocol::Anthropic);
+        assert_eq!(rp.provider_id, "claudinio");
+        // model id passes through unchanged on the Claudinio path
+        assert_eq!(rp.model, "anthropic/claude-sonnet-4");
+    }
+
+    #[test]
+    fn test_resolve_provider_preserves_byok_override_precedence() {
+        let mut cfg = cfg_with_openrouter();
+        cfg.override_base_url = Some("https://my-proxy.example".into());
+        cfg.override_api_key = Some("sk-byok".into());
+        let rp = cfg.resolve_provider("claudinio");
+        assert_eq!(rp.base_url, "https://my-proxy.example");
+        assert_eq!(rp.api_key, "sk-byok");
+        // qualified external models ignore the BYOK override entirely
+        let rp = cfg.resolve_provider("openrouter/openai/gpt-4o-mini");
+        assert_eq!(rp.api_key, "sk-or-abc");
+    }
+
+    #[test]
+    fn test_resolve_provider_anthropic_protocol_entry() {
+        let mut cfg = AgentConfig::default();
+        cfg.providers.insert(
+            "anthropic".into(),
+            ProviderEntry {
+                api_key: "sk-ant".into(),
+                base_url: "https://api.anthropic.com/v1".into(),
+                protocol: "anthropic".into(),
+                enabled_models: vec![],
+                label: Some("Anthropic".into()),
+                model_pricing: Default::default(),
+                model_output_limits: Default::default(),
+            },
+        );
+        let rp = cfg.resolve_provider("anthropic/claude-sonnet-4-5");
+        assert_eq!(rp.protocol, Protocol::Anthropic);
+        assert_eq!(rp.provider_id, "anthropic");
+        assert_eq!(rp.model, "claude-sonnet-4-5");
+        // models.dev base URLs end in /v1; the client appends /v1/messages
+        assert_eq!(rp.base_url, "https://api.anthropic.com");
+        assert!(!rp.is_claudinio());
     }
 
     #[test]

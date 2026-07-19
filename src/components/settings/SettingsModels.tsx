@@ -1,6 +1,8 @@
-import { Component, For, Show, createSignal, type Accessor, type Setter } from "solid-js";
+import { Component, Show, createSignal, type Accessor, type Setter } from "solid-js";
 import { t } from "../../lib/grill-me";
 import { Icon } from "../Icon";
+import { ModelSelect } from "../ModelSelect";
+import type { ModelGroup } from "../../lib/ipc";
 
 interface SettingsModelsProps {
   brainModel: Accessor<string>;
@@ -25,7 +27,7 @@ interface SettingsModelsProps {
   setOverrideBaseUrl: Setter<string>;
   overrideApiKey: Accessor<string>;
   setOverrideApiKey: Setter<string>;
-  availableModels: Accessor<string[]>;
+  modelGroups: Accessor<ModelGroup[]>;
 }
 
 export const SettingsModels: Component<SettingsModelsProps> = (props) => {
@@ -65,17 +67,12 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
           <Show
             when={props.easterEggActive()}
             fallback={
-              <select
-                value={props.brainModel()}
-                onChange={(e) => props.setBrainModel(e.currentTarget.value)}
-                disabled={props.workspaceConfigFields().has("brain_model")}
-                class="w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                classList={workspaceDisabledClass("brain_model")}
-              >
-                <For each={props.availableModels()}>
-                  {(m) => <option value={m} selected={props.brainModel() === m}>{m}</option>}
-                </For>
-              </select>
+              <ModelSelect
+                value={props.brainModel}
+                onChange={(m) => props.setBrainModel(m)}
+                groups={props.modelGroups}
+                disabled={() => props.workspaceConfigFields().has("brain_model")}
+              />
             }
           >
             <input
@@ -98,17 +95,12 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
           <Show
             when={props.easterEggActive()}
             fallback={
-              <select
-                value={props.builderModel()}
-                onChange={(e) => props.setBuilderModel(e.currentTarget.value)}
-                disabled={props.workspaceConfigFields().has("builder_model")}
-                class="w-full appearance-none rounded-md border border-border-subtle p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-                classList={workspaceDisabledClass("builder_model")}
-              >
-                <For each={props.availableModels()}>
-                  {(m) => <option value={m} selected={props.builderModel() === m}>{m}</option>}
-                </For>
-              </select>
+              <ModelSelect
+                value={props.builderModel}
+                onChange={(m) => props.setBuilderModel(m)}
+                groups={props.modelGroups}
+                disabled={() => props.workspaceConfigFields().has("builder_model")}
+              />
             }
           >
             <input

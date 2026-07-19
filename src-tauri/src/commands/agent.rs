@@ -804,6 +804,16 @@ pub async fn get_config(
         "preferredIde": cfg.preferred_ide,
         "handoffContextTokens": cfg.handoff_context_tokens,
         "thinkingEffort": cfg.thinking_effort,
+        // Connected external providers — never the keys (hasApiKey precedent).
+        "providers": cfg.providers.iter().map(|(id, p)| {
+            (id.clone(), serde_json::json!({
+                "connected": true,
+                "baseUrl": p.base_url,
+                "label": p.label,
+                "protocol": p.protocol,
+                "enabledModels": p.enabled_models,
+            }))
+        }).collect::<serde_json::Map<String, Value>>(),
         "workspaceConfig": workspace_config,
     }))
 }
