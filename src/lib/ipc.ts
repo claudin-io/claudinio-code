@@ -229,6 +229,7 @@ export type AgentEvent =
   | { event: "Done"; data: DoneData }
   | { event: "SteeringInjected"; data: { text: string; attachments?: Array<{ name: string; mediaType: string; size: number }> } }
   | { event: "Error"; data: string }
+  | { event: "Retrying"; data: RetryingData }
   | { event: "SubagentStarted"; data: SubagentStartedData }
   | { event: "SubagentDone"; data: SubagentDoneData }
   | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } }
@@ -246,6 +247,16 @@ export type AgentEvent =
         compactThreshold: number;
       };
     };
+
+/** Transient provider failure being retried with backoff (claudin.io
+ * failover can take ~2min) — the UI shows a reconnecting banner instead of
+ * dropping the run. */
+export interface RetryingData {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  error: string;
+}
 
 export interface AskUserQuestion {
   question: string;

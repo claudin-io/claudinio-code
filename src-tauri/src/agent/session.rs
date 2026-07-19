@@ -658,6 +658,19 @@ pub enum AgentEvent {
     },
     #[serde(rename = "Error")]
     Error(String),
+    /// Transient provider failure being retried with backoff — lets the UI
+    /// show "reconnecting" instead of looking dead during waits of up to 5min
+    /// (claudin.io failover: one server dies, the backup takes ~2min to pick
+    /// up). Never persisted.
+    #[serde(rename = "Retrying")]
+    Retrying {
+        attempt: u32,
+        #[serde(rename = "maxAttempts")]
+        max_attempts: u32,
+        #[serde(rename = "delayMs")]
+        delay_ms: u64,
+        error: String,
+    },
     #[serde(rename = "SubagentStarted")]
     SubagentStarted {
         #[serde(rename = "subagentId")]
@@ -1030,8 +1043,24 @@ fn is_retryable_error(msg: &str) -> bool {
     if msg.starts_with("stream error:") || msg.starts_with("request failed:") {
         return true;
     }
-    if let Some(code) = msg.strip_prefix("API error: HTTP ").and_then(|s| s.parse::<u16>().ok()) {
-        return code == 429 || (500..600).contains(&code);
+    // The wire message is "API error: HTTP 502 Bad Gateway" — StatusCode's
+    // Display includes the canonical reason phrase, so parse only the first
+    // token. (Parsing the whole remainder silently classified every 5xx as
+    // non-retryable: a claudin.io failover 502 aborted the run instead of
+    // waiting out the ~2min the backup server takes to pick up.)
+    if let Some(rest) = msg.strip_prefix("API error: HTTP ") {
+        if let Some(code) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+        {
+            return code == 429 || (500..600).contains(&code);
+        }
+    }
+    // Mid-stream SSE errors ("API error: overloaded_error — Overloaded"): the
+    // server accepted the request and died mid-turn — same transient class.
+    if msg.contains("overloaded") {
+        return true;
     }
     false
 }
@@ -1120,7 +1149,23 @@ async fn stream_message_with_retry(
                 if interrupt.load(Ordering::SeqCst) {
                     return Err(e);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(BACKOFFS_MS[attempt])).await;
+                let delay_ms = BACKOFFS_MS[attempt];
+                let _ = event_tx.send(AgentEvent::Retrying {
+                    attempt: (attempt + 1) as u32,
+                    max_attempts: BACKOFFS_MS.len() as u32,
+                    delay_ms,
+                    error: e.clone(),
+                });
+                // Interruptible wait: a 5-minute uninterruptible sleep would
+                // ignore the user's Stop for its whole duration.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(delay_ms);
+                while std::time::Instant::now() < deadline {
+                    if interrupt.load(Ordering::SeqCst) {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
                 attempt += 1;
             }
             Err(e) => return Err(e),
@@ -3265,6 +3310,25 @@ mod tests {
         assert!(!is_retryable_error(&msg));
         // sanity: transient 500 stays retryable
         assert!(is_retryable_error("API error: HTTP 500"));
+    }
+
+    #[test]
+    fn http_errors_with_reason_phrase_are_retryable() {
+        // Real wire format: StatusCode's Display appends the canonical reason
+        // ("502 Bad Gateway"), which the old whole-string parse rejected —
+        // the exact bug that aborted runs during claudin.io failover.
+        assert!(is_retryable_error("API error: HTTP 502 Bad Gateway"));
+        assert!(is_retryable_error("API error: HTTP 503 Service Unavailable"));
+        assert!(is_retryable_error("API error: HTTP 529 <unknown status code>"));
+        assert!(is_retryable_error("API error: HTTP 429 Too Many Requests"));
+        // openai-protocol shape appends the body message after the status
+        assert!(is_retryable_error("API error: HTTP 502 Bad Gateway — upstream connect error"));
+        // mid-stream SSE overload errors are the same transient class
+        assert!(is_retryable_error("API error: overloaded_error — Overloaded"));
+        // non-transient statuses must NOT retry
+        assert!(!is_retryable_error("API error: HTTP 400 Bad Request"));
+        assert!(!is_retryable_error("API error: HTTP 404 Not Found"));
+        assert!(!is_retryable_error("Unauthorized — check your API key"));
     }
 
     #[test]
