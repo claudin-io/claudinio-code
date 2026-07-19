@@ -17,6 +17,7 @@ interface SettingsAccountProps {
   openrouterConnecting: Accessor<boolean>;
   providerError: Accessor<string | null>;
   onOpenrouterConnect: () => void;
+  onOpenrouterCancel: () => void;
   onDisconnectProvider: (providerId: string) => void;
   onOpenProviderCatalog: () => void;
 }
@@ -95,15 +96,25 @@ export const SettingsAccount: Component<SettingsAccountProps> = (props) => {
         <Show
           when={openrouterConnected()}
           fallback={
-            <button
-              onClick={props.onOpenrouterConnect}
-              disabled={props.openrouterConnecting()}
-              class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink hover:bg-surface-2 hover:border-accent/40 transition-colors disabled:opacity-50"
-            >
-              {props.openrouterConnecting()
-                ? t("settings.providers.connecting")
-                : t("settings.providers.connect")}
-            </button>
+            <div class="flex items-center gap-2">
+              <button
+                onClick={props.onOpenrouterConnect}
+                disabled={props.openrouterConnecting()}
+                class="flex-1 rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink hover:bg-surface-2 hover:border-accent/40 transition-colors disabled:opacity-50"
+              >
+                {props.openrouterConnecting()
+                  ? t("settings.providers.connecting")
+                  : t("settings.providers.connect")}
+              </button>
+              <Show when={props.openrouterConnecting()}>
+                <button
+                  onClick={props.onOpenrouterCancel}
+                  class="shrink-0 text-xs text-ink-muted hover:text-ink hover:underline"
+                >
+                  {t("app.config.cancel")}
+                </button>
+              </Show>
+            </div>
           }
         >
           <div class="flex items-center justify-between rounded-md border border-border-subtle bg-surface-0 p-2 text-sm">

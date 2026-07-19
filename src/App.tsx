@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listAllModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, openrouterLogin, disconnectProvider, type ConnectedProviderInfo, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ModelGroup, type ThinkingEffort } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listAllModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, openrouterLogin, openrouterLoginCancel, disconnectProvider, type ConnectedProviderInfo, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ModelGroup, type ThinkingEffort } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import "./lib/grill-me";
 import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
@@ -515,10 +515,15 @@ function App() {
       await openrouterLogin();
       await refreshProviders();
     } catch (e) {
-      setProviderError(String(e));
+      // A user-initiated cancel is not an error worth surfacing.
+      if (!String(e).includes("login cancelled")) setProviderError(String(e));
     } finally {
       setOpenrouterConnecting(false);
     }
+  };
+
+  const doOpenrouterCancel = () => {
+    openrouterLoginCancel().catch(() => {});
   };
 
   const doDisconnectProvider = async (providerId: string) => {
@@ -864,6 +869,7 @@ function App() {
         openrouterConnecting={openrouterConnecting}
         providerError={providerError}
         onOpenrouterConnect={doOpenrouterConnect}
+        onOpenrouterCancel={doOpenrouterCancel}
         onDisconnectProvider={doDisconnectProvider}
         onOpenProviderCatalog={() => setShowProviderCatalog(true)}
         saveConfig={saveConfig}

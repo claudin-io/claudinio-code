@@ -58,7 +58,18 @@ pub async fn openrouter_login(
         .open_url(authorize_url, None::<&str>)
         .map_err(|e| format!("failed to open browser: {e}"))?;
 
-    let code = wait_for_callback(listener, None).await?;
+    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    *state.oauth_cancel.lock().await = Some(cancel.clone());
+    let code = tokio::select! {
+        code = wait_for_callback(listener, None) => {
+            *state.oauth_cancel.lock().await = None;
+            code?
+        }
+        _ = cancel.notified() => {
+            *state.oauth_cancel.lock().await = None;
+            return Err("login cancelled".into());
+        }
+    };
 
     let _net_guard = crate::net_activity::NetGuard::begin(
         crate::net_activity::NetSource::Auth,
@@ -122,6 +133,16 @@ pub async fn openrouter_login(
     }
 
     list_openrouter_models_live().await
+}
+
+/// Abort a pending `openrouter_login` stuck waiting for the browser callback
+/// (user closed the consent page). No-op when no login is in flight.
+#[tauri::command]
+pub async fn openrouter_login_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(cancel) = state.oauth_cancel.lock().await.take() {
+        cancel.notify_waiters();
+    }
+    Ok(())
 }
 
 /// Live model listing from OpenRouter ({data:[{id}]} shape).

@@ -47,6 +47,7 @@ pub fn run() {
             commands::auth::logout_claudinio,
             commands::auth::validate_api_key,
             commands::providers::openrouter_login,
+            commands::providers::openrouter_login_cancel,
             commands::providers::fetch_provider_catalog,
             commands::providers::connect_provider,
             commands::providers::disconnect_provider,
