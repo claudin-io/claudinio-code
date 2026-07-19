@@ -158,3 +158,26 @@ Seguindo o padrão existente no projeto (`@media (prefers-reduced-motion: no-pre
 1. Adicionar animação slide-in/slide-out no `SettingsPanel.tsx` (phase state machine, remover `Show`, classes condicionais)
 2. Adicionar keyframes/transitions CSS no `App.css` (overlay fade + panel slide + reduced-motion)
 3. Verificar build + testes
+
+
+## Implementation Log — 2026-07-19 09:36
+**Summary:** SettingsPanel now slides in from right with fade overlay (200ms), exits sliding right with fade out
+**Changed files:** A	docs/plans/2026-07-19_settings-panel-slide-animation.md, A	docs/plans/2026-07-19_settings-redesign-vscode-panel.md
+**Commits:** 755b3ea docs(plan): settings-panel-slide-animation, 67fa003 docs(plan): settings-redesign-vscode-panel, 4bff3ff docs(plan): settings-redesign-vscode-panel
+**Journal:** Implementation of slide-in/slide-out animation for SettingsPanel.
+
+**What was done:**
+- Replaced `<Show when={showConfig()}>` with a 4-phase state machine (`hidden` → `entering` → `visible` → `exiting` → `hidden`) using a local `phase` signal
+- Enter animation: element renders with `.settings-overlay-enter` (opacity:0) and `.settings-panel-enter` (translateX:100%), then `requestAnimationFrame` removes those classes → CSS transitions animate to final state over 200ms ease-out
+- Exit animation: `.settings-overlay-exit` and `.settings-panel-exit` classes added → overlay fades out, panel slides right over 200ms ease-in, then `setTimeout(200)` removes from DOM
+- Overlay click and Escape key now trigger the exit animation instead of instant removal
+- Cleaned up 5 unused imports (FLAGS, LOCALE_LABELS, McpServerMap, UpdateInfo, SUPPORTED_LOCALES)
+- Wrapped all transitions in `@media (prefers-reduced-motion: no-preference)` for accessibility
+- Fixed missing overlay closing `</div>` after subagent missed it on first pass
+
+**Gotcha:** The subagent missed the overlay closing `</div>` tag when replacing the `<Show>` wrapper, causing JSX parse errors. Fixed in a follow-up edit.
+
+**Task journal:**
+- Add phase state machine to SettingsPanel.tsx: Added phase signal + exitTimer var after panelWidth (line ~109-110); Changed escape key listener from !props.showConfig() to phase() === 'hidden'; Replaced 'When closing' effect with full phase state machine: entering→requestAnimationFrame→visible, exiting→setTimeout(200ms)→hidden; Added exitTimer cleanup in onCleanup; Return block: replaced <Show when={...}> with <> + phase() !== 'hidden' && conditional render + classList on overlay and panel; Show import kept (still used by 6 inner <Show> calls for category content); Cleaned up 3 unused imports: FLAGS, LOCALE_LABELS, McpServerMap, UpdateInfo, SUPPORTED_LOCALES
+- Add slide/fade CSS transitions to App.css: Added opacity: 1 to .settings-panel-overlay; Added transform: translateX(0) to .settings-panel; Appended @media (prefers-reduced-motion: no-preference) block at EOF with 6 rules: overlay transition 200ms ease-out, overlay-enter opacity:0, overlay-exit opacity:0 ease-in, panel transition 200ms ease-out, panel-enter translateX(100%), panel-exit translateX(100%) ease-in
+- Verify build and tests: tsc --noEmit: zero SettingsPanel errors (pre-existing errors in TasksPanel and subagentTimeline.test.ts untouched); pnpm test: 35 test files, 643 tests, ALL passed; pnpm run build: built in 13.83s, no errors
