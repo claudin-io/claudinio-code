@@ -53,3 +53,14 @@ Also fix the dot indicator on line 144 which uses `bg-white` for the "doing" dot
 - Fix doing dot color function: Changed line 66: bg-white → bg-amber-500 in dotColor function
 - Fix doing dot in summary area: Changed line 144: bg-white → bg-amber-500 in summary legend dot
 - Verify badge visibility in light theme: All 3 lines verified in source. TypeScript check shows pre-existing errors in other files — no new errors from our change. Amber-500 on amber-500/15 provides strong contrast on both light and dark themes.
+
+
+## Implementation Log — 2026-07-19 09:52
+**Summary:** Atualiza TasksPanel.test.tsx: 3 asserções bg-white → bg-amber-500 para alinhar com o source já corrigido.
+**Changed files:** M	docs/plans/2026-07-19_fix-doing-badge-visibility.md, M	src/components/TasksPanel.test.tsx, M	src/components/TasksPanel.tsx
+**Commits:** b7adaa8 docs(test): update TasksPanel test assertions bg-white → bg-amber-500 after source fix, 1dc2015 fix(tasks): change doing badge from white to amber-500 for light theme visibility
+**Journal:** Os 3 testes quebrados eram asserções que ainda referiam a classe antiga `bg-white` do status "doing". O source (`TasksPanel.tsx`) já havia sido migrado no commit anterior (`7ac0c07`) para `bg-amber-500`, mas o arquivo de teste não foi atualizado junto. Corrigi as 3 linhas + comentários associados no `TasksPanel.test.tsx`. Após a correção: 35 test files, 643 testes, 0 falhas.
+
+**Task journal:**
+- Corrigir 3 asserções 'bg-white' → 'bg-amber-500' no TasksPanel.test.tsx: 3 asserções (linhas 113-114, 136-138, 364) atualizadas de bg-white → bg-amber-500. Commit b7adaa8.
+- Rodar testes e verificar que todos passam: pnpm test: 35 test files, 643 tests, 0 failed. Nenhuma regressão. TasksPanel.test.tsx passa limpo.

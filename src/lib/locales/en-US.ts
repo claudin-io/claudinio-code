@@ -246,6 +246,13 @@ const dict: LocaleDict = {
   "chat.input.askCode": "Write anything… | @file | <tag> | <skill>",
   "chat.input.dropToAttach": "Drop file to attach",
   "chat.input.dropHint": "Images, PDFs, docs, code and more",
+  "chat.effort.label": "Thinking effort",
+  "chat.effort.low": "Low",
+  "chat.effort.medium": "Medium",
+  "chat.effort.high": "High",
+  "chat.effort.xhigh": "X-High",
+  "chat.effort.max": "Max",
+  "chat.effort.tooltip": "Thinking effort: {0} — applies from your next message",
   "chat.toast.fileAttached": "File attached",
 
   // ── ChatPanel - Approval ──────────────────────────────────────────

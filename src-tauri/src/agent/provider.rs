@@ -135,6 +135,11 @@ pub struct AgentConfig {
     /// final write_plan call (with Low-Level Design) or when exiting Brain mode.
     #[serde(default = "default_true")]
     pub auto_commit_plan: bool,
+    /// Thinking effort level: "low" | "medium" | "high" | "xhigh" | "max".
+    /// Mapped to an Anthropic `thinking.budget_tokens` value on each
+    /// stream_message request; the claudin_router buckets it upstream.
+    #[serde(default = "default_thinking_effort")]
+    pub thinking_effort: String,
 }
 
 impl AgentConfig {
@@ -201,6 +206,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_thinking_effort() -> String {
+    "medium".into()
+}
+
 fn default_claudinio() -> String {
     "claudinio".into()
 }
@@ -242,6 +251,7 @@ impl Default for AgentConfig {
             preferred_ide: None,
             handoff_context_tokens: None,
             auto_commit_plan: true,
+            thinking_effort: default_thinking_effort(),
         }
     }
 }
@@ -252,6 +262,21 @@ impl AgentConfig {
         match mode {
             "brain" | "pensador" => &self.brain_model,
             _ => &self.builder_model,
+        }
+    }
+
+    /// Anthropic `thinking.budget_tokens` for the configured effort level.
+    /// Values align with the claudin_router bucket ceilings (low ≤4096,
+    /// medium ≤8192, high ≤16384, xhigh ≤24576, max >24576). "max" is 30_000
+    /// rather than 32_768 because budget_tokens must stay below the
+    /// stream_message max_tokens (32_000).
+    pub fn thinking_budget_tokens(&self) -> u32 {
+        match self.thinking_effort.as_str() {
+            "low" => 4_096,
+            "high" => 16_384,
+            "xhigh" => 24_576,
+            "max" => 30_000,
+            _ => 8_192,
         }
     }
 }
@@ -495,6 +520,18 @@ struct RequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ToolDescription>>,
     system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+/// Anthropic extended-thinking block: `{"type":"enabled","budget_tokens":N}`.
+/// The claudin_router proxy buckets budget_tokens into a reasoning-effort
+/// level per routed deployment tier.
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -614,6 +651,9 @@ pub async fn classify_turn_completion(
         }],
         tools: None,
         system: Some(COMPLETION_JUDGE_SYSTEM.to_string()),
+        // No thinking block: budget_tokens must be < max_tokens (1024 here),
+        // and forced thinking only adds cost/latency to a one-token verdict.
+        thinking: None,
     };
     let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
     let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
@@ -686,6 +726,7 @@ pub async fn one_shot(
         }],
         tools: None,
         system: Some(system.to_string()),
+        thinking: None,
     };
     let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
     let effective_api_key = config.override_api_key.as_deref().unwrap_or(&config.api_key);
@@ -777,6 +818,10 @@ pub async fn stream_message(
         messages: messages.to_vec(),
         tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
         system: system.map(|s| s.to_string()),
+        thinking: Some(ThinkingConfig {
+            kind: "enabled",
+            budget_tokens: config.thinking_budget_tokens(),
+        }),
     };
 
     let effective_base_url = config.override_base_url.as_deref().unwrap_or(&config.base_url);
@@ -1209,6 +1254,56 @@ mod tests {
             McpTransportConfig::Remote { url, .. } => assert_eq!(url, "http://localhost:9000/mcp"),
             _ => panic!("expected remote transport"),
         }
+    }
+
+    #[test]
+    fn test_thinking_budget_tokens_maps_all_levels_and_falls_back() {
+        let mut cfg = AgentConfig::default();
+        for (level, expected) in [
+            ("low", 4_096),
+            ("medium", 8_192),
+            ("high", 16_384),
+            ("xhigh", 24_576),
+            ("max", 30_000),
+            ("garbage", 8_192),
+        ] {
+            cfg.thinking_effort = level.into();
+            assert_eq!(cfg.thinking_budget_tokens(), expected, "level {level}");
+        }
+    }
+
+    #[test]
+    fn test_config_without_thinking_effort_defaults_to_medium() {
+        let cfg: AgentConfig = serde_json::from_str(r#"{"base_url":"x","api_key":"","model":"m"}"#)
+            .expect("config without thinking_effort must deserialize");
+        assert_eq!(cfg.thinking_effort, "medium");
+    }
+
+    #[test]
+    fn test_request_body_serializes_thinking_block_and_omits_when_none() {
+        let base = RequestBody {
+            model: "claudinio".into(),
+            max_tokens: 32_000,
+            stream: true,
+            messages: vec![],
+            tools: None,
+            system: None,
+            thinking: Some(ThinkingConfig { kind: "enabled", budget_tokens: 8_192 }),
+        };
+        let v = serde_json::to_value(&base).unwrap();
+        assert_eq!(v["thinking"], json!({"type": "enabled", "budget_tokens": 8192}));
+
+        let without = RequestBody {
+            model: "claudinio".into(),
+            max_tokens: 1024,
+            stream: false,
+            messages: vec![],
+            tools: None,
+            system: None,
+            thinking: None,
+        };
+        let v = serde_json::to_value(&without).unwrap();
+        assert!(v.get("thinking").is_none(), "thinking must be omitted when None");
     }
 
     #[test]
