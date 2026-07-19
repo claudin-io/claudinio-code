@@ -40,3 +40,16 @@ Also fix the dot indicator on line 144 which uses `bg-white` for the "doing" dot
 2. Fix "doing" dot color function on line 66
 3. Fix "doing" dot in summary on line 144
 4. Verify visually in light theme
+
+
+## Implementation Log — 2026-07-19 09:45
+**Summary:** Fix "Doing" badge invisible in light themes — changed white to amber-500
+**Changed files:** A	docs/plans/2026-07-19_fix-doing-badge-visibility.md
+**Commits:** 7ac0c07 docs(plan): fix-doing-badge-visibility
+**Journal:** 3 one-line CSS class changes in TasksPanel.tsx, swapping "doing" status indicators from white to amber-500. White-on-transparent-white was invisible in light themes. Amber-500 matches existing conventions (golden task badge, CommitPushModal interrupted state). TypeScript check confirms no new errors — only pre-existing issues in unrelated files.
+
+**Task journal:**
+- Fix doing status badge class: Changed line 196: bg-white/15 text-white → bg-amber-500/15 text-amber-500
+- Fix doing dot color function: Changed line 66: bg-white → bg-amber-500 in dotColor function
+- Fix doing dot in summary area: Changed line 144: bg-white → bg-amber-500 in summary legend dot
+- Verify badge visibility in light theme: All 3 lines verified in source. TypeScript check shows pre-existing errors in other files — no new errors from our change. Amber-500 on amber-500/15 provides strong contrast on both light and dark themes.

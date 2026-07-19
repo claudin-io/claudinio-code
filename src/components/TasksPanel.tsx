@@ -63,7 +63,7 @@ export const TasksPanel: Component<{
 
   const dotColor = (s: string) => {
     if (s === "done") return "bg-success";
-    if (s === "doing") return "bg-white";
+    if (s === "doing") return "bg-amber-500";
     return "bg-ink-faint";
   };
 
@@ -141,7 +141,7 @@ export const TasksPanel: Component<{
       <Show when={tasks().length > 0}>
         <div class="flex flex-col items-center gap-1.5 border-t border-border-subtle px-1 pt-2">
           <span class="inline-block h-2 w-2 rounded-full bg-ink-faint" title={t("tasks.status.todo")} />
-          <span class="inline-block h-2 w-2 rounded-full bg-white" title={t("tasks.status.doing")} />
+          <span class="inline-block h-2 w-2 rounded-full bg-amber-500" title={t("tasks.status.doing")} />
           <span class="inline-block h-2 w-2 rounded-full bg-success" title={t("tasks.status.done")} />
         </div>
       </Show>
@@ -193,7 +193,7 @@ export const TasksPanel: Component<{
                   class="shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-medium"
                   classList={{
                     "bg-success/15 text-success": task.status === "done",
-                    "bg-white/15 text-white": task.status === "doing",
+                    "bg-amber-500/15 text-amber-500": task.status === "doing",
                     "bg-ink-faint/10 text-ink-muted": task.status === "todo",
                   }}
                 >
