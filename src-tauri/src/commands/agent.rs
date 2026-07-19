@@ -252,9 +252,7 @@ pub async fn send_message(
     let steering = state.steering_for(&handle.id).await;
     steering.clear();
 
-    let db_path: Option<String> = workspace_root
-        .as_ref()
-        .map(|p| format!("{p}/.claudinio/index.db"));
+    let db_path: Option<String> = Some(ws.index_db_path.to_string_lossy().to_string());
 
     // Capture the git HEAD at run start so finalize_plan can compute the
     // changed files / commits since this plan's work began. Best-effort:
@@ -938,9 +936,7 @@ pub async fn compact_session(
     }
     .unwrap_or_else(|| std::sync::Arc::new(crate::agent::session::SteeringCtl::new()));
 
-    let db_path: Option<String> = workspace_root
-        .as_ref()
-        .map(|p| format!("{p}/.claudinio/index.db"));
+    let db_path: Option<String> = Some(ws.index_db_path.to_string_lossy().to_string());
 
     let ctx = ToolContext {
         db_path,
@@ -1088,9 +1084,7 @@ pub async fn continue_with_builder(
     steering.clear();
     let mode_ctl = state.mode_for(&new_handle.id, &new_handle.store_path).await;
 
-    let db_path: Option<String> = workspace_root
-        .as_ref()
-        .map(|p| format!("{p}/.claudinio/index.db"));
+    let db_path: Option<String> = Some(ws.index_db_path.to_string_lossy().to_string());
     let base_commit: Option<String> = workspace_root
         .as_ref()
         .and_then(|root| crate::agent::tools::git_head(root));
@@ -1341,9 +1335,7 @@ pub async fn commit_and_push(
 
     let steering = state.steering_for(&id).await;
 
-    let db_path: Option<String> = workspace_root
-        .as_ref()
-        .map(|p| format!("{p}/.claudinio/index.db"));
+    let db_path: Option<String> = Some(ws.index_db_path.to_string_lossy().to_string());
 
     let base_commit: Option<String> = workspace_root
         .as_ref()

@@ -816,6 +816,7 @@ dependencies = [
  "tree-sitter-zig",
  "tree-sitter-zsh",
  "uuid",
+ "windows-sys 0.59.0",
  "xxhash-rust",
 ]
 

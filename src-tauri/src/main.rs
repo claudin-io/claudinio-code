@@ -2,5 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // HF tokenizers otherwise rayon-parallelizes encode_batch across every
+    // logical core, saturating the machine during indexing; the ONNX session
+    // is already capped to 2 intra-op threads (see embeddings.rs). Must be set
+    // before any thread spawns so the rayon pool never initializes parallel.
+    std::env::set_var("TOKENIZERS_PARALLELISM", "false");
     claudinio_code_lib::run()
 }

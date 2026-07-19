@@ -71,6 +71,8 @@ impl FileWatcher {
             let h = handle.clone();
             let ws = root_owned.clone();
             std::thread::spawn(move || {
+                // Dedicated thread — hold the demotion for its whole life.
+                let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
                 loop {
                     // Block for the first path in a batch.
                     let first = match rx.recv() {
@@ -87,6 +89,22 @@ impl FileWatcher {
                     while let Ok(p) = rx.try_recv() {
                         pending.insert(p);
                     }
+
+                    // Defer while a full scan/embedding pass holds the index
+                    // semaphore — reindexing on top of it doubled the CPU and
+                    // contended the embedder lock. Keep coalescing while we
+                    // wait; nothing is dropped.
+                    let _permit = loop {
+                        match crate::commands::code_intel::INDEX_SEMAPHORE.try_acquire() {
+                            Ok(p) => break p,
+                            Err(_) => {
+                                std::thread::sleep(Duration::from_secs(2));
+                                while let Ok(p) = rx.try_recv() {
+                                    pending.insert(p);
+                                }
+                            }
+                        }
+                    };
 
                     let db = match IndexDb::open(&db_p) {
                         Ok(d) => d,

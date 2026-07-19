@@ -224,7 +224,8 @@ function App() {
     const unlisten = listen<AskpassRequest>("askpass-request", (event) => {
       setAskpassRequest(event.payload);
     });
-    return () => { unlisten.then((f) => f()); };
+    // onMount return values are ignored by SolidJS — cleanup must be registered
+    onCleanup(() => { unlisten.then((f) => f()); });
   });
 
   onMount(() => {
@@ -257,7 +258,7 @@ function App() {
         clearIf(4000);
       }
     });
-    return () => { unlisten.then((f) => f()); };
+    onCleanup(() => { unlisten.then((f) => f()); });
   });
 
   // Restore workspaces that were open in the previous run.

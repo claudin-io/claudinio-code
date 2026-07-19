@@ -537,7 +537,9 @@ pub fn generate_all_embeddings(
     embedder: &SharedEmbedder,
     app_handle: Option<&tauri::AppHandle>,
     workspace: &str,
-    content_cache: &std::collections::HashMap<String, String>,
+    // By value: entries are removed as they are consumed so the full-corpus
+    // text does not stay resident for the whole (long) embedding phase.
+    mut content_cache: std::collections::HashMap<String, String>,
 ) -> Result<(i64, i64), String> {
     let files = db.all_files()?;
     let total = files.len() as i64;
@@ -559,8 +561,8 @@ pub fn generate_all_embeddings(
 
         // Prefer content already read during the scan — re-reading every file
         // here doubled the I/O, which is brutal on network-drive workspaces.
-        let content = match content_cache.get(&file.path) {
-            Some(c) => c.clone(),
+        let content = match content_cache.remove(&file.path) {
+            Some(c) => c,
             None => match std::fs::read_to_string(&file.path) {
                 Ok(c) => c,
                 Err(_) => continue,

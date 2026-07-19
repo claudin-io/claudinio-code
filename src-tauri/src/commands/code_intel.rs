@@ -15,7 +15,7 @@ use tokio::task::spawn_blocking;
 // Only one workspace indexes at a time. Restoring several workspaces at
 // startup used to launch parallel scans + embedding runs that together
 // pegged every core (and hammered slow/network drives).
-static INDEX_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+pub(crate) static INDEX_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +69,59 @@ fn cache_model_dir(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
     base.join("models").join(embeddings::model_cache_dirname())
 }
 
+/// Machine-local index DB path for a workspace, NOT inside the workspace:
+/// SQLite (especially in WAL mode) is unsupported over network filesystems,
+/// and writing every symbol/embedding upsert through SMB made indexing crawl
+/// and saturate the network on workspaces opened from a mapped drive.
+fn index_db_path(app_handle: &tauri::AppHandle, workspace_root: &Path) -> std::path::PathBuf {
+    let base = app_handle
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claudinio-code"));
+    let stem: String = workspace_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".into())
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(40)
+        .collect();
+    let hash = xxhash_rust::xxh3::xxh3_64(workspace_root.to_string_lossy().as_bytes());
+    base.join("indexes").join(format!("{stem}-{hash:016x}.db"))
+}
+
+/// One-time move of a pre-0.1.14 index DB out of `<workspace>/.claudinio/`
+/// into app data. Best-effort: on any failure the schema-version rebuild in
+/// `IndexDb::open` regenerates the index from scratch.
+fn migrate_legacy_index_db(workspace_root: &Path, new_db_path: &Path) {
+    if new_db_path.exists() {
+        return;
+    }
+    let legacy = workspace_root.join(".claudinio/index.db");
+    if !legacy.exists() {
+        return;
+    }
+    if let Some(parent) = new_db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::copy(&legacy, new_db_path).is_ok() {
+        let legacy_wal = workspace_root.join(".claudinio/index.db-wal");
+        if legacy_wal.exists() {
+            let mut wal_target = new_db_path.as_os_str().to_owned();
+            wal_target.push("-wal");
+            let _ = std::fs::copy(&legacy_wal, std::path::PathBuf::from(wal_target));
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(workspace_root.join(format!(".claudinio/index.db{suffix}")));
+        }
+        eprintln!(
+            "[open_workspace] migrated index db out of workspace: {} -> {}",
+            legacy.display(),
+            new_db_path.display()
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn open_workspace(
     path: String,
@@ -92,7 +145,8 @@ pub async fn open_workspace(
         });
     }
 
-    let db_path = Path::new(&path).join(".claudinio/index.db");
+    let db_path = index_db_path(&app_handle, Path::new(&path));
+    migrate_legacy_index_db(Path::new(&path), &db_path);
     let db = Arc::new(IndexDb::open(&db_path)?);
 
     // ── Build workspace state EARLY so send_message works during indexing ──
@@ -109,6 +163,7 @@ pub async fn open_workspace(
     let early_workspace = Arc::new(WorkspaceState {
         root: root.clone(),
         index_db: db.clone(),
+        index_db_path: db_path.clone(),
         skills_manager: Arc::new(tokio::sync::Mutex::new(
             crate::agent::skills::SkillManager::new(Some(root.clone())),
         )),
@@ -184,6 +239,7 @@ pub async fn open_workspace(
         let progress_channel = progress_channel.clone();
         let shared_progress = index_progress.clone();
         move || {
+            let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
             indexer::scan_workspace(
                 db.as_ref(),
                 &path,
@@ -268,12 +324,13 @@ pub async fn open_workspace(
         let emit_handle = app_handle.clone();
         let ws_path = path.clone();
         let join = spawn_blocking(move || {
+            let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
             indexer::generate_all_embeddings(
                 db2.as_ref(),
                 &shared,
                 Some(&emit_handle),
                 &ws_path,
-                &scanned_content,
+                scanned_content,
             )
         });
         let emit_handle = app_handle.clone();
