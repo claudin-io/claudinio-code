@@ -68,6 +68,7 @@ interface SettingsPanelProps {
   openrouterConnecting: Accessor<boolean>;
   providerError: Accessor<string | null>;
   onOpenrouterConnect: () => void;
+  onOpenrouterCancel: () => void;
   onDisconnectProvider: (providerId: string) => void;
   onOpenProviderCatalog: () => void;
   saveConfig: () => Promise<void>;
@@ -302,6 +303,7 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   openrouterConnecting={props.openrouterConnecting}
                   providerError={props.providerError}
                   onOpenrouterConnect={props.onOpenrouterConnect}
+                  onOpenrouterCancel={props.onOpenrouterCancel}
                   onDisconnectProvider={props.onDisconnectProvider}
                   onOpenProviderCatalog={props.onOpenProviderCatalog}
                 />

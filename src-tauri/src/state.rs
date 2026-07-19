@@ -100,6 +100,9 @@ pub struct AppState {
     /// state shared between the UI toggle and a running workflow. Initialized
     /// lazily from the session's JSONL (last Mode record).
     pub modes: Arc<Mutex<HashMap<String, Arc<ModeCtl>>>>,
+    /// Cancel signal for a pending OAuth loopback wait (OpenRouter connect),
+    /// so the UI can abort instead of sitting out the 120s callback timeout.
+    pub oauth_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
     pub records_cache: std::sync::Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>,
 }
@@ -113,6 +116,7 @@ impl AppState {
             workspaces: Mutex::new(HashMap::new()),
             steering: Arc::new(Mutex::new(HashMap::new())),
             modes: Arc::new(Mutex::new(HashMap::new())),
+            oauth_cancel: Mutex::new(None),
             embedding_model: Arc::new(Mutex::new(None)),
             records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap()))),
         }

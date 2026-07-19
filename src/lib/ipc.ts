@@ -588,6 +588,11 @@ export function openrouterLogin(): Promise<string[]> {
   return invoke<string[]>("openrouter_login");
 }
 
+/** Abort a pending openrouterLogin stuck waiting for the browser callback. */
+export function openrouterLoginCancel(): Promise<void> {
+  return invoke<void>("openrouter_login_cancel");
+}
+
 export function fetchProviderCatalog(force?: boolean): Promise<{ providers: CatalogProvider[] }> {
   return invoke<{ providers: CatalogProvider[] }>("fetch_provider_catalog", { force: force ?? false });
 }
