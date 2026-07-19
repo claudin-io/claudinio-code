@@ -1,6 +1,6 @@
 import { Component, createSignal, createEffect, onCleanup, createMemo, For, Show, type Accessor, type Setter } from "solid-js";
 import { t, type LocaleId } from "../lib/grill-me";
-import type { McpServerStatus } from "../lib/ipc";
+import type { ConnectedProviderInfo, McpServerStatus, ModelGroup } from "../lib/ipc";
 import { Icon } from "./Icon";
 import { SettingsGeneral } from "./settings/SettingsGeneral";
 import { SettingsModels } from "./settings/SettingsModels";
@@ -17,7 +17,7 @@ interface SettingsPanelProps {
   setConfigBrainModel: Setter<string>;
   configBuilderModel: Accessor<string>;
   setConfigBuilderModel: Setter<string>;
-  availableModels: Accessor<string[]>;
+  modelGroups: Accessor<ModelGroup[]>;
   configMaxParallelAgents: Accessor<number>;
   setConfigMaxParallelAgents: Setter<number>;
   configMaxRounds: Accessor<number | null>;
@@ -64,6 +64,13 @@ interface SettingsPanelProps {
   setConfigOverrideBaseUrl: Setter<string>;
   configOverrideApiKey: Accessor<string>;
   setConfigOverrideApiKey: Setter<string>;
+  providers: Accessor<Record<string, ConnectedProviderInfo>>;
+  openrouterConnecting: Accessor<boolean>;
+  providerError: Accessor<string | null>;
+  onOpenrouterConnect: () => void;
+  onOpenrouterCancel: () => void;
+  onDisconnectProvider: (providerId: string) => void;
+  onOpenProviderCatalog: () => void;
   saveConfig: () => Promise<void>;
   doLogin: () => Promise<void>;
   doLogout: () => Promise<void>;
@@ -85,7 +92,7 @@ interface Category {
 const CATEGORIES: Category[] = [
   { id: 'general', icon: 'sliders', labelKey: 'app.config.language', searchKeys: ['app.config.language','app.config.theme','app.config.keepAwake','app.config.planSavePath','app.config.preferredIde','app.config.autoCommitPlan','app.config.codeIntel'] },
   { id: 'models', icon: 'brain', labelKey: 'app.config.brainModel', searchKeys: ['app.config.brainModel','app.config.builderModel','app.config.maxRounds','app.config.subMaxRounds','app.config.maxParallelAgents','settings.maxGoldenCycles','settings.maxGoldenStalls','settings.handoffThreshold','app.config.overrideBaseUrl','app.config.overrideApiKey'] },
-  { id: 'account', icon: 'key', labelKey: 'app.config.account', searchKeys: ['app.config.account','app.config.signIn','app.config.signOut','app.config.apiKey','app.config.support'] },
+  { id: 'account', icon: 'key', labelKey: 'app.config.account', searchKeys: ['app.config.account','app.config.signIn','app.config.signOut','app.config.apiKey','app.config.support','settings.providers.title','settings.providers.more','settings.providers.connect','settings.providers.openrouterDesc'] },
   { id: 'agent', icon: 'construction-worker', labelKey: 'app.config.yoloMode', searchKeys: ['app.config.yoloMode','app.config.yoloBlacklist'] },
   { id: 'mcp', icon: 'package-process', labelKey: 'app.config.mcpServers', searchKeys: ['app.config.mcpServers','app.config.mcpAddServer','app.config.mcpTest'] },
 ];
@@ -277,7 +284,7 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   setOverrideBaseUrl={props.setConfigOverrideBaseUrl}
                   overrideApiKey={props.configOverrideApiKey}
                   setOverrideApiKey={props.setConfigOverrideApiKey}
-                  availableModels={props.availableModels}
+                  modelGroups={props.modelGroups}
                 />
               </Show>
 
@@ -292,6 +299,13 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   doLogin={props.doLogin}
                   doLogout={props.doLogout}
                   openSupportUrl={props.openSupportUrl}
+                  providers={props.providers}
+                  openrouterConnecting={props.openrouterConnecting}
+                  providerError={props.providerError}
+                  onOpenrouterConnect={props.onOpenrouterConnect}
+                  onOpenrouterCancel={props.onOpenrouterCancel}
+                  onDisconnectProvider={props.onDisconnectProvider}
+                  onOpenProviderCatalog={props.onOpenProviderCatalog}
                 />
               </Show>
 
