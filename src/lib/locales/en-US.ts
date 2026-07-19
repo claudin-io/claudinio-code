@@ -186,6 +186,7 @@ const dict: LocaleDict = {
   "chat.status.error": "Error",
   "chat.status.idle": "Idle",
   "chat.errorBar.dismiss": "Dismiss",
+  "chat.reconnecting.banner": "Connection lost — retrying in {2}s (attempt {0} of {1})",
   "chat.errorBar.continue": "Continue",
   "chat.budgetBanner.title": "Plan budget reached",
   "chat.budgetBanner.description": "You've hit your usage limit, so the agent can't continue. Upgrade your plan to keep going.",
