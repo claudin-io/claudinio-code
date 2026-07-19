@@ -84,7 +84,15 @@ A search bar sits at the top of the sidebar. As the user types:
 - Resize handle: 4px wide, hover glow with accent color
 - Panel slides in from right with a 200ms ease-out transition
 
-### Non-goals
+## Risks
+
+- **Extraction regression**: moving settings signals from App.tsx to child components could break reactive updates. Mitigation: pass signals as accessor/setter props, not values; test each category in isolation.
+- **Save flow**: the current `saveConfig()` is a monolithic function in App.tsx. After extraction, save logic must remain intact. Mitigation: keep saveConfig in App.tsx and pass it as a callback.
+- **Resize behavior on small screens**: below 1024px, panel could overflow. Mitigation: clamp min width to 480px, below which panel takes full viewport width.
+- **Easter egg persistence**: the "iddqd" easter egg state must remain accessible to the Models sub-category. Mitigation: keep `easterEggActive` signal and keystroke handler in App.tsx, pass as prop.
+- **SolidJS reactivity**: passing signal accessors as props preserves reactivity. Passing values (calling the accessor) at render time loses it. Mitigation: always pass accessor functions (e.g., `brainModel={() => string}`), never raw values. Verify with a quick smoke test that changing a setting in-state reflects immediately.
+
+## Non-goals
 
 - No settings page persistence (panel closes via Escape or clicking backdrop, same as current)
 - No import/export settings
@@ -92,13 +100,6 @@ A search bar sits at the top of the sidebar. As the user types:
 - No per-workspace settings editing (workspace overrides are read-only indicators, same as current)
 - No change to the backend config storage (Rust `provider.rs`, `config.json`, `.claudinio.json`)
 - No changes to theme or locale storage (they remain in localStorage)
-
-### Risks
-
-- **Extraction regression**: moving settings signals from App.tsx to child components could break reactive updates. Mitigation: pass signals as accessor/setter props, not values; test each category in isolation.
-- **Save flow**: the current `saveConfig()` is a monolithic function in App.tsx. After extraction, save logic must remain intact. Mitigation: keep saveConfig in App.tsx and pass it as a callback.
-- **Resize behavior on small screens**: below 1024px, panel could overflow. Mitigation: clamp min width to 480px, below which panel takes full viewport width.
-- **Easter egg persistence**: the "iddqd" easter egg state must remain accessible to the Models sub-category. Mitigation: keep `easterEggActive` signal and keystroke handler in App.tsx, pass as prop.
 
 ## Low-Level Design
 
