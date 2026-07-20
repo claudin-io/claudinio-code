@@ -1,4 +1,5 @@
 pub mod app_sign;
+pub mod attachments;
 pub mod install_id;
 pub mod mcp;
 pub mod permissions;
