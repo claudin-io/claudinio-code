@@ -221,7 +221,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "code_search".into(),
-            description: "Full-text search across indexed symbols (FTS5). Faster and more targeted than grep for finding definitions — prefer this over grep.".into(),
+            description: "Full-text search across indexed symbol names and signatures (FTS5). Faster and more targeted than grep for finding definitions — prefer this over grep. Searches names/signatures only; to find words inside code bodies or docs, use semantic_search.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -233,7 +233,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "symbol_lookup".into(),
-            description: "Look up a symbol by exact name across the workspace. Use when you know the exact symbol name.".into(),
+            description: "Look up a symbol by exact name across the workspace (case-insensitive). Use when you know the exact symbol name; use code_search for partial names.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -281,7 +281,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "semantic_search".into(),
-            description: "Semantic (concept-based) code & documentation search using CodeBERT embeddings. Finds code and documentation by meaning and behavior, not keywords — e.g. 'message queue system' finds SteeringCtl.drain/push/queue even without identifier match. Prefer this when you can describe the functionality but don't know the exact symbol name. The embedding model is ENGLISH-ONLY: always translate the user's phrasing to English before querying — never pass a query in another language. Top results include a source snippet. Ranking: go_to_definition (precise) → semantic_search (conceptual) → code_search (keyword) → grep (fallback).".into(),
+            description: "Hybrid code & documentation search: BM25 keyword matching over code bodies, docs and file paths, fused with MiniLM semantic embeddings. Finds code by exact identifiers, rare terms and file names AND by meaning/behavior — e.g. 'message queue system' finds SteeringCtl.drain/push/queue without an identifier match, and 'TOKENIZERS_PARALLELISM' finds the exact term inside a body. Prefer this whenever you don't have a precise symbol position. The index is ENGLISH-ONLY: always translate the user's phrasing to English before querying — never pass a query in another language. Response is always {mode, note?, results}: mode is 'hybrid' or 'lexical-only' (while the embedding model loads), each result has score (relative confidence in (0,1]; 1.0 = top-ranked by both keyword and semantic evidence) and matchType ('hybrid'|'semantic'|'lexical'); top results include a source snippet. Ranking: go_to_definition (precise) → semantic_search → code_search (symbol names) → grep (fallback).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -525,7 +525,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             check_index_ready(ctx)?;
             let db = open_db(&ctx.db_path)?;
             let name = args.get("name").and_then(|v| v.as_str()).ok_or("missing name")?;
-            let results = db.search_symbols(name, 20)?;
+            let results = db.lookup_symbols_exact(name, 20)?;
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
         }
         "file_outline" => {
@@ -578,8 +578,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(15);
             let db = open_db(&ctx.db_path)?;
 
-            // Bounded wait: the embedding model may still be loading at startup.
-            // Poll for up to ~5s before giving up and falling back to lexical search.
+            // Bounded wait: the embedding model may still be loading at
+            // startup. The BM25 leg works without it, but full hybrid ranking
+            // is worth a short wait.
             let mut model = ctx.embedding_model.lock().await.clone();
             if model.is_none() {
                 const MAX_WAIT_MS: u64 = 5000;
@@ -592,53 +593,49 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 }
             }
 
-            let model = match model {
-                Some(model) => model,
-                None => {
-                    // Embedding model still unavailable after the bounded wait —
-                    // degrade gracefully to lexical symbol search instead of failing outright.
-                    let results = db.search_symbols(query, limit)?;
-                    let envelope = serde_json::json!({
-                        "fallback": "lexical",
-                        "note": "embedding model unavailable; results from lexical symbol search",
-                        "results": results,
-                    });
-                    return Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&envelope).unwrap_or_default() });
+            // One code path for every situation: encode the query when the
+            // model is there, otherwise run the BM25 leg alone.
+            let query_vec: Option<Vec<f32>> = match model {
+                Some(model) => {
+                    let query_owned = query.to_string();
+                    Some(
+                        tokio::task::spawn_blocking(move || {
+                            let mut model = model.lock().map_err(|e| format!("embedder lock: {e}"))?;
+                            model.encode_query(&query_owned)
+                        })
+                        .await
+                        .map_err(|e| format!("encode task panicked: {e}"))??,
+                    )
                 }
+                None => None,
             };
 
-            let query_owned = query.to_string();
-            let query_vec = tokio::task::spawn_blocking(move || {
-                let mut model = model.lock().map_err(|e| format!("embedder lock: {e}"))?;
-                model.encode_query(&query_owned)
-            })
-            .await
-            .map_err(|e| format!("encode task panicked: {e}"))??;
-            let mut results = db.search_by_embedding(query, &query_vec, limit as usize)?;
+            let mut results = db.search_hybrid(query, query_vec.as_deref(), limit as usize)?;
             attach_snippets(&mut results);
-            if !results.is_empty() {
-                return Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() });
-            }
 
-            // Nothing cleared the semantic threshold. That can mean the query
-            // genuinely has no match — but also that the background embedding
-            // pass hasn't caught up yet, so fall back to lexical search and
-            // say which situation we're in instead of a bare [].
             let pending = db.embedding_pending_files().unwrap_or(0);
-            let lexical = db.search_symbols(query, limit)?;
-            let note = if pending > 0 {
-                format!(
-                    "semantic index still embedding ({pending} files pending); \
-                     results below are from lexical symbol search — retry later for semantic results"
-                )
+            let mode = if query_vec.is_some() { "hybrid" } else { "lexical-only" };
+            let note = if query_vec.is_none() {
+                Some(if pending > 0 {
+                    format!(
+                        "embedding model unavailable and {pending} files not yet embedded; \
+                         keyword (BM25) matches only — semantic ranking joins once the model loads"
+                    )
+                } else {
+                    "embedding model unavailable; keyword (BM25) matches only".to_string()
+                })
+            } else if pending > 0 {
+                Some(format!(
+                    "{pending} files still embedding in the background; \
+                     semantic ranking improves when that finishes"
+                ))
             } else {
-                "no semantic matches above the relevance threshold; results below are from lexical symbol search".to_string()
+                None
             };
-            let envelope = serde_json::json!({
-                "fallback": "lexical",
-                "note": note,
-                "results": lexical,
-            });
+            let mut envelope = serde_json::json!({ "mode": mode, "results": results });
+            if let Some(n) = note {
+                envelope["note"] = serde_json::json!(n);
+            }
             Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&envelope).unwrap_or_default() })
         }
         "bash" => {
@@ -714,11 +711,12 @@ const SNIPPET_MAX_CHARS: usize = 2400;
 fn attach_snippets(results: &mut [crate::code_intel::db::SemanticSearchResult]) {
     for r in results.iter_mut().take(SNIPPET_TOP_HITS) {
         let Ok(content) = std::fs::read_to_string(&r.file_path) else { continue };
-        let start = (r.start_line.max(0)) as usize;
+        // start_line/end_line are 1-based (inclusive), lines() is 0-based.
+        let start = r.start_line.max(1) as usize;
         let end = (r.end_line.max(r.start_line)) as usize;
         let mut snippet: String = content
             .lines()
-            .skip(start)
+            .skip(start.saturating_sub(1))
             .take((end - start + 1).min(SNIPPET_MAX_LINES))
             .collect::<Vec<_>>()
             .join("\n");
@@ -954,6 +952,27 @@ mod tests {
         let lines: Vec<String> = (1..=20).map(|i| format!("line{i}")).collect();
         std::fs::write(&p, lines.join("\n")).unwrap();
         p
+    }
+
+    #[test]
+    fn snippet_starts_at_symbol_first_line() {
+        let p = write_20line_file("snippet_first_line");
+        let mut results = vec![crate::code_intel::db::SemanticSearchResult {
+            symbol_id: 1,
+            name: "x".into(),
+            kind: "function".into(),
+            file_path: p.to_string_lossy().to_string(),
+            start_line: 1,
+            end_line: 3,
+            signature: None,
+            score: 0.9,
+            match_type: "hybrid".into(),
+            snippet: None,
+        }];
+        attach_snippets(&mut results);
+        let snip = results[0].snippet.as_deref().expect("snippet attached");
+        assert_eq!(snip.lines().next(), Some("line1"), "must include the signature line");
+        assert_eq!(snip.lines().count(), 3);
     }
 
     // ── read_file range tests ──

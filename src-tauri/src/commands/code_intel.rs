@@ -269,6 +269,18 @@ pub async fn open_workspace(
                         Ok(shared) => Some(shared),
                         Err(e) => {
                             eprintln!("[open_workspace] embedding model load failed: {e}");
+                            // Self-heal a corrupt download: if the broken
+                            // files are OUR app-data cache (not the bundle or
+                            // a dev dir), delete them so the next
+                            // open_workspace re-downloads instead of failing
+                            // the same way forever.
+                            if d == cache_model_dir(&app_handle) {
+                                eprintln!(
+                                    "[open_workspace] removing corrupt cached model at {} for re-download",
+                                    d.display()
+                                );
+                                let _ = std::fs::remove_dir_all(&d);
+                            }
                             None
                         }
                     },
@@ -282,7 +294,7 @@ pub async fn open_workspace(
     };
 
     // Phase 3: Wait for scan to complete (this is what the user sees)
-    let (files_count, symbols_count, scanned_content) = scan_handle
+    let (files_count, symbols_count) = scan_handle
         .await
         .map_err(|e| format!("scan task panicked: {e}"))?
         .map_err(|e| e)?;
@@ -330,7 +342,6 @@ pub async fn open_workspace(
                 &shared,
                 Some(&emit_handle),
                 &ws_path,
-                scanned_content,
             )
         });
         let emit_handle = app_handle.clone();
@@ -444,7 +455,7 @@ pub async fn symbol_lookup(
     state: State<'_, AppState>,
 ) -> Result<Vec<SearchResult>, String> {
     let ws = state.workspace(&workspace).await?;
-    ws.index_db.search_symbols(&name, 20)
+    ws.index_db.lookup_symbols_exact(&name, 20)
 }
 
 #[tauri::command]

@@ -234,40 +234,26 @@ async fn build_code_section(
 
     let mut results: Vec<SemanticSearchResult> = Vec::new();
     for query in &queries {
-        let hits = match &embedder {
+        // Hybrid search works with or without the embedder: BM25 alone
+        // still returns real line ranges while the model loads.
+        let query_vec: Option<Vec<f32>> = match &embedder {
             Some(embedder) => {
                 let embedder = embedder.clone();
                 let query_owned = query.clone();
-                let query_vec = tokio::task::spawn_blocking(move || {
+                tokio::task::spawn_blocking(move || {
                     let mut model = embedder.lock().map_err(|e| format!("embedder lock: {e}"))?;
                     model.encode_query(&query_owned)
                 })
                 .await
                 .ok()?
-                .ok()?;
-                ws.index_db
-                    .search_by_embedding(query, &query_vec, RESULTS_PER_QUERY)
-                    .ok()?
+                .ok()
             }
-            // Embedder not loaded yet — degrade to lexical symbol search.
-            None => ws
-                .index_db
-                .search_symbols(query, RESULTS_PER_QUERY as i64)
-                .ok()?
-                .into_iter()
-                .map(|r| SemanticSearchResult {
-                    symbol_id: r.symbol_id,
-                    name: r.name,
-                    kind: r.kind,
-                    file_path: r.file_path,
-                    start_line: r.start_line,
-                    end_line: r.start_line,
-                    signature: r.signature,
-                    score: 0.0,
-                    snippet: None,
-                })
-                .collect(),
+            None => None,
         };
+        let hits = ws
+            .index_db
+            .search_hybrid(query, query_vec.as_deref(), RESULTS_PER_QUERY)
+            .ok()?;
         for hit in hits {
             if !results.iter().any(|r| r.symbol_id == hit.symbol_id) {
                 results.push(hit);
@@ -294,7 +280,7 @@ async fn build_code_section(
             r.kind,
             r.name,
             path,
-            r.start_line + 1
+            r.start_line
         ));
         if let Some(sig) = &r.signature {
             section.push_str(&format!(" — {}", sig));
@@ -355,11 +341,12 @@ fn attach_snippets(results: &mut [SemanticSearchResult]) {
         let Ok(content) = std::fs::read_to_string(&r.file_path) else {
             continue;
         };
-        let start = r.start_line.max(0) as usize;
+        // start_line/end_line are 1-based (inclusive), lines() is 0-based.
+        let start = r.start_line.max(1) as usize;
         let end = r.end_line.max(r.start_line) as usize;
         let mut snippet: String = content
             .lines()
-            .skip(start)
+            .skip(start.saturating_sub(1))
             .take((end - start + 1).min(SNIPPET_MAX_LINES))
             .collect::<Vec<_>>()
             .join("\n");

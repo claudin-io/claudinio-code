@@ -177,6 +177,10 @@ pnpm tauri dev
 ### Build
 
 ```bash
+# Baixa o modelo de embeddings (uma vez; sha256 pinado) para ser
+# empacotado como resource — a busca semântica funciona 100% offline.
+python3 scripts/fetch_embedding_model.py
+
 pnpm tauri build
 ```
 
@@ -185,7 +189,7 @@ pnpm tauri build
 ## Como Usar
 
 1. **Abra um projeto** — Clique em "Abrir pasta" na tela inicial ou selecione um projeto recente.
-2. **Aguarde a indexação** — O Claudinio Code vai escanear, extrair símbolos (tree-sitter) e gerar embeddings (LateOn-Code ONNX). A barra de progresso mostra o status.
+2. **Aguarde a indexação** — O Claudinio Code vai escanear, extrair símbolos (tree-sitter) e gerar embeddings (all-MiniLM-L6-v2 ONNX, 100% local). A busca por palavra-chave (BM25) funciona imediatamente; o ranking semântico entra assim que os embeddings terminam.
 3. **Configure a API** — Clique no ícone de engrenagem e configure sua API Key e Base URL (padrão: `https://api.claudin.io`).
 4. **Converse com o agente** — Digite sua tarefa em linguagem natural. O agente planeja, executa ferramentas e mostra tudo na timeline.
 5. **Aprove ações** — Comandos bash e edições de arquivo aparecem para aprovação. Veja o diff e decida.

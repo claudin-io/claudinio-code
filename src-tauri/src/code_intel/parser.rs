@@ -83,6 +83,9 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "cs" => Some("c-sharp"),
         // CSS
         "css" => Some("css"),
+        // SCSS/SASS route to the regex fallback scanner (grammar disabled by
+        // the old-API conflict below); indented .sass degrades gracefully.
+        "scss" | "sass" => Some("scss"),
         // CUDA
         "cu" | "cuh" => Some("cuda"),
         // D
@@ -126,6 +129,8 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "html" | "htm" => Some("html"),
         // INI / config
         "ini" | "cfg" => Some("ini"),
+        // TOML (no grammar wired — handled by the fallback section scanner)
+        "toml" => Some("toml"),
         // Java
         "java" => Some("java"),
         // JavaScript (also handled by typescript grammar); JSX needs the TSX
@@ -240,13 +245,15 @@ pub fn detect_doc_language(path: &str) -> Option<&'static str> {
 }
 
 /// Parse a documentation file (markdown or text) into chunked sections.
-/// Produces one `ParsedSymbol` per heading section (levels 2–6).
+/// Produces one `ParsedSymbol` per heading section (levels 1–6). Indexing H1
+/// captures the document title and the preamble before the first H2 — the
+/// part of a README that says what the project IS.
 /// Falls back to a single symbol using the file stem if no headings are found.
 pub fn parse_doc_file(path: &str, content: &str) -> Vec<ParsedSymbol> {
     const MAX_BODY: usize = 800;
 
-    // Find all heading lines (levels 2–6: ## through ######)
-    let re = Regex::new(r"^(#{2,6})\s+(.+)$").unwrap();
+    // Find all heading lines (levels 1–6: # through ######)
+    let re = Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
 
     let headings: Vec<(usize, String)> = content
         .lines()
@@ -422,6 +429,7 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         "vhdl" => Ok(tree_sitter_vhdl::LANGUAGE.into()),
         "xml" => Ok(tree_sitter_xml::LANGUAGE_XML.into()),
         "yaml" => Ok(tree_sitter_yaml::LANGUAGE.into()),
+        "fortran" => Ok(tree_sitter_fortran::LANGUAGE.into()),
         "zig" => Ok(tree_sitter_zig::LANGUAGE.into()),
         "zsh" => Ok(tree_sitter_zsh::LANGUAGE.into()),
 
@@ -1243,22 +1251,24 @@ Call the function with options.
 Deep details here.
 ";
         let symbols = parse_doc_file("test.md", content);
-        assert_eq!(symbols.len(), 3, "should create 3 symbols for ##, ##, and ###");
+        assert_eq!(symbols.len(), 4, "should create 4 symbols for #, ##, ## and ###");
 
-        // First heading: Installation
-        assert_eq!(symbols[0].name, "Installation");
+        // H1 title captures the preamble before the first H2.
+        assert_eq!(symbols[0].name, "Title");
         assert_eq!(symbols[0].kind, "doc_section");
-        assert!(symbols[0].body_text.as_ref().unwrap().contains("npm install"));
-        assert_eq!(symbols[0].start_line, 4);
-        assert_eq!(symbols[0].parent_context.as_deref(), Some("test.md"));
+        assert!(symbols[0].body_text.as_ref().unwrap().contains("intro text"));
 
-        // Second heading: Usage
-        assert_eq!(symbols[1].name, "Usage");
-        assert!(symbols[1].body_text.as_ref().unwrap().contains("Call the function"));
+        assert_eq!(symbols[1].name, "Installation");
+        assert_eq!(symbols[1].kind, "doc_section");
+        assert!(symbols[1].body_text.as_ref().unwrap().contains("npm install"));
+        assert_eq!(symbols[1].start_line, 4);
+        assert_eq!(symbols[1].parent_context.as_deref(), Some("test.md"));
 
-        // Third heading: Advanced
-        assert_eq!(symbols[2].name, "Advanced");
-        assert!(symbols[2].body_text.as_ref().unwrap().contains("Deep details"));
+        assert_eq!(symbols[2].name, "Usage");
+        assert!(symbols[2].body_text.as_ref().unwrap().contains("Call the function"));
+
+        assert_eq!(symbols[3].name, "Advanced");
+        assert!(symbols[3].body_text.as_ref().unwrap().contains("Deep details"));
     }
 
     #[test]
@@ -1300,17 +1310,63 @@ Deep details here.
     }
 
     #[test]
-    fn parse_doc_file_skips_h1_headings() {
+    fn parse_doc_file_indexes_h1_title_and_preamble() {
         let content = "\
-# This is an H1 and should be skipped
-Some intro.
+# Project Title
+The preamble that says what the project is.
 
 ## Actual section
 Content here.
 ";
         let symbols = parse_doc_file("test.md", content);
-        assert_eq!(symbols.len(), 1, "H1 headings should not create symbols");
-        assert_eq!(symbols[0].name, "Actual section");
+        assert_eq!(symbols.len(), 2, "H1 becomes a section too");
+        assert_eq!(symbols[0].name, "Project Title");
+        assert!(symbols[0].body_text.as_ref().unwrap().contains("preamble"));
+        assert_eq!(symbols[1].name, "Actual section");
+    }
+
+    #[test]
+    fn toml_sections_become_symbols() {
+        let content = "\
+title = \"top\"
+
+[package]
+name = \"claudinio\"
+version = \"0.1.0\"
+
+[dependencies.serde]
+features = [\"derive\"]
+
+[[bin]]
+name = \"main\"
+";
+        let result = parse_file("Cargo.toml", content);
+        assert!(result.error.is_none());
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"package"), "sections found: {names:?}");
+        assert!(names.contains(&"dependencies.serde"));
+        assert!(names.contains(&"bin"));
+        assert!(result.symbols.iter().all(|s| s.kind == "table"));
+    }
+
+    #[test]
+    fn scss_rules_are_indexed_via_fallback() {
+        let content = "\
+@mixin theme($color) {
+  color: $color;
+}
+.button-primary {
+  @include theme(blue);
+  padding: 4px;
+}
+";
+        let result = parse_file("styles/app.scss", content);
+        assert!(result.error.is_none());
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&".button-primary"), "rule found: {names:?}");
+        assert!(result.symbols.len() >= 2, "mixin + rule expected: {names:?}");
+        // .sass routes to the same scanner instead of being invisible.
+        assert_eq!(detect_language("styles/app.sass"), Some("scss"));
     }
 
     #[test]

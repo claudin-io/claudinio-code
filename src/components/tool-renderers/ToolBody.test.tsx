@@ -120,6 +120,24 @@ describe("parseJsonList", () => {
   it("returns null when nothing can be salvaged", () => {
     expect(parseJsonList('[{"a":...(truncated)')).toBeNull();
   });
+
+  it("unwraps the semantic_search envelope", () => {
+    const out = parseJsonList(
+      '{"mode":"hybrid","note":"3 files still embedding","results":[{"name":"foo","matchType":"lexical"}]}'
+    );
+    expect(out).toEqual({ list: [{ name: "foo", matchType: "lexical" }], truncated: false });
+  });
+
+  it("salvages complete objects from a truncated envelope", () => {
+    const out = parseJsonList(
+      '{"mode":"hybrid","results":[{"a":1},{"b":"x}y"},{"c":...(truncated, 999 chars total)'
+    );
+    expect(out).toEqual({ list: [{ a: 1 }, { b: "x}y" }], truncated: true });
+  });
+
+  it("returns null for a truncated envelope with no results array", () => {
+    expect(parseJsonList('{"mode":"hybrid","note":"still emb...(truncated)')).toBeNull();
+  });
 });
 
 describe("ToolBody", () => {
