@@ -268,9 +268,16 @@ export interface RetryingData {
   error: string;
 }
 
+export interface AskUserOption {
+  /** Concise choice shown on the button. */
+  label: string;
+  /** Optional one-line explanation rendered under the label. */
+  description?: string;
+}
+
 export interface AskUserQuestion {
   question: string;
-  options: string[];
+  options: AskUserOption[];
   multi_select?: boolean;
 }
 
@@ -715,6 +722,11 @@ export function fileOutline(workspace: string, filePath: string): Promise<Symbol
 
 export function writeFile(path: string, content: string): Promise<void> {
   return invoke<void>("write_file", { path, content });
+}
+
+/** Write binary content (base64-encoded) to disk — e.g. an exported PNG. */
+export function writeFileBytes(path: string, base64Data: string): Promise<void> {
+  return invoke<void>("write_file_bytes", { path, base64Data });
 }
 
 // --- LSP ---

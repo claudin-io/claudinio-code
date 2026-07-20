@@ -5,6 +5,13 @@ description = "Claudinio Code — agentic coding platform"
 authors = ["Victor Tavernari"]
 edition = "2021"
 
+# This crate is a standalone workspace root. The declaration stops cargo from
+# walking up and being absorbed by the main checkout's workspace manifest, since
+# this git worktree lives nested inside the main repo tree (.claude/worktrees/).
+# Local dev workaround — do NOT commit onto a branch that merges into the
+# workspace-based main, where src-tauri is a member and this table would clash.
+[workspace]
+
 [lib]
 name = "claudinio_code_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

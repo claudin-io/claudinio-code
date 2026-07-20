@@ -49,7 +49,7 @@ const QuestionCard: Component<{
     if (!allAnswered()) return;
     const answers: UserAnswer[] = props.ask.questions.map((q, qi) => {
       const d = drafts()[qi];
-      const parts = d.picks.map((oi) => q.options[oi]);
+      const parts = d.picks.map((oi) => q.options[oi].label);
       if (d.otherSelected && d.otherText.trim()) parts.push(d.otherText.trim());
       return { question: q.question, answer: parts.join(", ") };
     });
@@ -76,14 +76,14 @@ const QuestionCard: Component<{
                   {(opt, oi) => (
                     <button
                       onClick={() => pickOption(qi(), oi(), multi())}
-                      class={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-left text-[13px] transition-colors ${
+                      class={`flex items-start gap-2 rounded-md border px-3 py-1.5 text-left text-[13px] transition-colors ${
                         draft().picks.includes(oi())
                           ? "border-accent bg-accent/10 text-ink"
                           : "border-border-subtle bg-surface-0 text-ink-muted hover:border-accent/40"
                       }`}
                     >
                       <span
-                        class={`flex h-3.5 w-3.5 shrink-0 items-center justify-center border ${
+                        class={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center border ${
                           multi() ? "rounded-sm" : "rounded-full"
                         } ${draft().picks.includes(oi()) ? "border-accent bg-accent" : "border-ink-faint"}`}
                       >
@@ -91,7 +91,14 @@ const QuestionCard: Component<{
                           <Icon name="check" class="h-2.5 w-2.5 text-accent-ink" />
                         </Show>
                       </span>
-                      {opt}
+                      <span class="flex min-w-0 flex-col gap-0.5">
+                        <span>{opt.label}</span>
+                        <Show when={opt.description}>
+                          <span class="text-[11px] leading-[1.4] text-ink-faint">
+                            {opt.description}
+                          </span>
+                        </Show>
+                      </span>
                     </button>
                   )}
                 </For>
