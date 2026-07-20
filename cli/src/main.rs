@@ -4,6 +4,7 @@
 
 mod model;
 mod commands;
+mod tui;
 
 use clap::{Parser, Subcommand};
 
@@ -15,7 +16,7 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -78,7 +79,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    match cli.command.unwrap_or(Command::Chat { path: None }) {
         Command::Config { action } => commands::config::run(action),
         Command::Models => commands::config::run_models().await,
         Command::Index { path } => commands::index::run(path).await,
