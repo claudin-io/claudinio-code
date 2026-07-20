@@ -1,0 +1,24 @@
+{
+  "name": "claudinio",
+  "version": "0.1.14",
+  "description": "Claudinio Code CLI — agente de código no terminal (brain/builder, busca semântica). Sem JS/webview.",
+  "type": "module",
+  "bin": {
+    "claudinio": "bin/claudinio.mjs"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "homepage": "https://claudin.io",
+  "optionalDependencies": {
+    "@claudinio/cli-darwin-arm64": "0.1.14",
+    "@claudinio/cli-linux-x64": "0.1.14",
+    "@claudinio/cli-linux-arm64": "0.1.14",
+    "@claudinio/cli-win32-x64": "0.1.14",
+    "@claudinio/cli-win32-arm64": "0.1.14"
+  }
+}

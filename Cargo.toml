@@ -11,3 +11,11 @@ version = "0.1.14"
 edition = "2021"
 authors = ["Victor Tavernari"]
 license = "MIT"
+
+# Remove símbolos dos binários release (CLI ~194M→~183M; o resto do tamanho é
+# código real: onnxruntime estático + ~90 gramáticas tree-sitter + tokenizers).
+# Reduzir mais exigiria feature-gate das gramáticas (follow-up). Sem LTO aqui
+# para não estourar o tempo de build release do app Tauri; sem panic=abort
+# porque os subagentes dependem de capturar panics de tasks.
+[profile.release]
+strip = true
