@@ -23,6 +23,7 @@ import { createVisibilityAwareInterval } from "./lib/visibility";
 import { startNetworkActivityListener } from "./lib/networkActivity";
 import { startSystemStatsListener } from "./lib/systemStats";
 import { AskpassModal } from "./components/AskpassModal";
+import MermaidViewerModal from "./components/MermaidViewerModal";
 import { type AskpassRequest } from "./lib/ipc";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ProviderCatalogModal } from "./components/ProviderCatalogModal";
@@ -1319,6 +1320,7 @@ function App() {
       </Show>
       </Show>
       <AskpassModal request={askpassRequest()} onDone={() => setAskpassRequest(null)} />
+      <MermaidViewerModal />
     </div>
   );
 }
