@@ -6,21 +6,28 @@
 
 use crate::agent::persist::{self, now_ms, SessionRecord, SessionStore};
 use crate::agent::provider;
-use crate::agent::session::{AgentEvent, HandoffReason, HandoffSpec, ModeCtl, SteeringCtl};
-use crate::commands::tasks as tasks_cmd;
+use crate::agent::session::{AgentEvent, EventTx, HandoffReason, HandoffSpec, ModeCtl, SteeringCtl};
+use crate::tasks as tasks_cmd;
 use crate::state::{SessionHandle, WorkspaceState};
 use lru::LruCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 
 /// Shared LRU cache of parsed session records (same shape as
 /// `AppState.records_cache`).
 pub type RecordsCache =
     Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>;
+
+/// Cria um cache de records vazio (64 entradas), para frontends que montam o
+/// estado sem `AppState` (o CLI). Mantém a versão do `lru` encapsulada no core.
+pub fn new_records_cache() -> RecordsCache {
+    Arc::new(std::sync::Mutex::new(LruCache::new(
+        std::num::NonZeroUsize::new(64).unwrap(),
+    )))
+}
 
 /// The `AppState` maps a transition needs, cloned before `tokio::spawn` so the
 /// driver loop can link sessions without borrowing Tauri state.
@@ -39,7 +46,7 @@ pub async fn link_session(
     ws: &Arc<WorkspaceState>,
     old_handle: &SessionHandle,
     spec: &HandoffSpec,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
 ) -> Result<SessionHandle, String> {
     let workspace_root = Some(ws.root.to_string_lossy().to_string());
     let new_id = uuid::Uuid::new_v4().to_string();

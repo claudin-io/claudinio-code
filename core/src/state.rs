@@ -53,6 +53,28 @@ pub struct WorkspaceState {
 }
 
 impl WorkspaceState {
+    /// Abre um workspace para uso headless (CLI): abre o índice já existente e
+    /// inicializa os managers vazios (watcher desligado, MCP conectado sob
+    /// demanda). O app Tauri monta o `WorkspaceState` com o pipeline completo de
+    /// `open_workspace` (scan + embeddings + watcher); aqui assumimos que o
+    /// índice já foi criado por `claudinio index`.
+    pub fn open(root: PathBuf, index_db_path: PathBuf) -> Result<Self, String> {
+        let index_db = Arc::new(IndexDb::open(&index_db_path)?);
+        Ok(Self {
+            skills_manager: Arc::new(Mutex::new(SkillManager::new(Some(root.clone())))),
+            lsp_manager: Arc::new(Mutex::new(LspManager::new())),
+            root,
+            index_db,
+            index_db_path,
+            _watcher: Mutex::new(None),
+            watcher_warning: Mutex::new(None),
+            active_session: Mutex::new(None),
+            mcp: Mutex::new(None),
+            mcp_fingerprint: Mutex::new(None),
+            index_progress: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
     /// Connect to configured MCP servers if not already connected with the
     /// current config, and return the (possibly cached) manager. Reconnects
     /// whenever `mcp_servers` changed since the last connection.

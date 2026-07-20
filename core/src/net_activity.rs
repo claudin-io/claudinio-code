@@ -11,7 +11,10 @@ use csv::Writer;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
-use tauri::Emitter;
+
+/// Observador do snapshot de atividade de rede. O app Tauri registra um que
+/// emite o evento `network-activity`; o CLI pode não registrar nenhum.
+pub type NetObserver = Box<dyn Fn(Vec<NetOpView>) + Send + Sync>;
 
 /// Set by open_workspace so NetGuard::begin() captures which project sent the request.
 static CURRENT_WORKSPACE: OnceLock<String> = OnceLock::new();
@@ -82,7 +85,7 @@ pub struct NetOpView {
 
 #[derive(Default)]
 struct Tracker {
-    app: Mutex<Option<tauri::AppHandle>>,
+    observer: Mutex<Option<NetObserver>>,
     ops: Mutex<Vec<NetOp>>,
     last_bytes_emit: Mutex<Option<Instant>>,
 }
@@ -94,11 +97,11 @@ fn tracker() -> &'static Tracker {
     TRACKER.get_or_init(Tracker::default)
 }
 
-/// Store the AppHandle once at startup (`.setup()` in lib.rs) so guards can
-/// emit events without threading an AppHandle through every network call.
-pub fn set_app_handle(handle: tauri::AppHandle) {
-    if let Ok(mut app) = tracker().app.lock() {
-        *app = Some(handle);
+/// Registra o observador uma vez no startup (`.setup()` no lib.rs do app) para
+/// que os guards reportem o snapshot sem carregar um handle em cada chamada.
+pub fn set_observer(observer: NetObserver) {
+    if let Ok(mut obs) = tracker().observer.lock() {
+        *obs = Some(observer);
     }
 }
 
@@ -118,9 +121,9 @@ fn emit_snapshot() {
             .collect(),
         Err(_) => return,
     };
-    if let Ok(app) = t.app.lock() {
-        if let Some(app) = app.as_ref() {
-            let _ = app.emit(EVENT_NAME, &views);
+    if let Ok(obs) = t.observer.lock() {
+        if let Some(obs) = obs.as_ref() {
+            obs(views);
         }
     }
 }
@@ -188,7 +191,7 @@ impl NetGuard {
 
 static CSV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub(crate) fn csv_path() -> std::path::PathBuf {
+pub fn csv_path() -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("claudinio-code")

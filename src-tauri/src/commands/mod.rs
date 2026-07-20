@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod askpass;
 pub mod auth;
 pub mod clipboard;
 pub mod code_intel;
@@ -11,7 +12,8 @@ pub mod locale;
 pub mod lsp;
 pub mod mcp;
 pub mod power;
-pub mod procutil;
+// procutil foi para o core; reexporta para manter `crate::commands::procutil::*`.
+pub use claudinio_core::procutil;
 pub mod providers;
 pub mod system_stats;
 pub mod shell;

@@ -1,4 +1,4 @@
-use crate::commands::procutil;
+use crate::procutil;
 use serde::Deserialize;
 use serde::Serialize;
 use std::process::Command;

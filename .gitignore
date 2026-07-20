@@ -1,5 +1,8 @@
 node_modules
 dist
+# Workspace Cargo: o target/ passou para a raiz; mantemos src-tauri/target por
+# compatibilidade com builds/CI antigos que ainda apontem para lá.
+/target
 src-tauri/target
 .DS_Store
 .claudinio/

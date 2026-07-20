@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::agent::tools::ToolContext;
-use crate::commands::procutil::no_window_tokio;
+use crate::procutil::no_window_tokio;
 use lru::LruCache;
 
 const MAX_OUTPUT_BYTES: u64 = 100 * 1024;

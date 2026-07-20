@@ -5,8 +5,6 @@ use crate::code_intel::embeddings::{
 use crate::code_intel::parser::{self, ParseResult};
 use std::time::SystemTime;
 use xxhash_rust::xxh3::xxh3_64;
-use tauri::Emitter;
-use tauri::ipc::Channel;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,6 +17,13 @@ pub struct IndexProgress {
     /// Root path of the workspace this progress belongs to, so the frontend
     /// can route global "index-progress" events to the right workspace entry.
     pub workspace: String,
+}
+
+/// Destino do progresso de indexação. O app Tauri implementa emitindo um evento
+/// `index-progress`/`ipc::Channel`; o CLI atualiza uma barra de progresso. O core
+/// só conhece este trait — não depende de Tauri.
+pub trait ProgressSink: Send + Sync {
+    fn emit(&self, progress: IndexProgress);
 }
 
 pub fn compute_hash(content: &str) -> String {
@@ -409,9 +414,8 @@ fn encode_and_store_batched(db: &IndexDb, emb: &mut CodeEmbedder, chunks: &[(i64
 pub fn scan_workspace(
     db: &IndexDb,
     root: &str,
-    app_handle: Option<&tauri::AppHandle>,
+    progress: Option<&dyn ProgressSink>,
     mut embedder: Option<&mut CodeEmbedder>,
-    progress_channel: Option<&Channel<IndexProgress>>,
     shared_progress: Option<&std::sync::Mutex<Option<IndexProgress>>>,
 ) -> Result<(i64, i64), String> {
     let mut total_files = 0i64;
@@ -450,11 +454,8 @@ pub fn scan_workspace(
         total_files: total,
         workspace: root.to_string(),
     };
-    if let Some(handle) = app_handle.as_ref() {
-        let _ = handle.emit("index-progress", initial_progress.clone());
-    }
-    if let Some(ch) = progress_channel {
-        let _ = ch.send(initial_progress.clone());
+    if let Some(p) = progress {
+        p.emit(initial_progress.clone());
     }
     if let Some(sp) = shared_progress {
         let _ = sp.lock().map(|mut guard| *guard = Some(initial_progress));
@@ -531,11 +532,8 @@ pub fn scan_workspace(
                 total_files: total,
                 workspace: root.to_string(),
             };
-            if let Some(handle) = app_handle {
-                let _ = handle.emit("index-progress", prog.clone());
-            }
-            if let Some(ch) = progress_channel {
-                let _ = ch.send(prog.clone());
+            if let Some(p) = progress {
+                p.emit(prog.clone());
             }
             if let Some(sp) = shared_progress {
                 let _ = sp.lock().map(|mut guard| *guard = Some(prog));
@@ -571,8 +569,8 @@ pub fn scan_workspace(
         total_files: grand_total,
         workspace: root.to_string(),
     };
-    if let Some(handle) = app_handle.as_ref() {
-        let _ = handle.emit("index-progress", grand_progress.clone());
+    if let Some(p) = progress {
+        p.emit(grand_progress.clone());
     }
     if let Some(sp) = shared_progress {
         let _ = sp.lock().map(|mut guard| *guard = Some(grand_progress));
@@ -629,11 +627,8 @@ pub fn scan_workspace(
         total_files: grand_total,
         workspace: root.to_string(),
     };
-    if let Some(handle) = app_handle {
-        let _ = handle.emit("index-progress", done_progress.clone());
-    }
-    if let Some(ch) = progress_channel {
-        let _ = ch.send(done_progress.clone());
+    if let Some(p) = progress {
+        p.emit(done_progress.clone());
     }
     if let Some(sp) = shared_progress {
         let _ = sp.lock().map(|mut guard| *guard = Some(done_progress));
@@ -645,7 +640,7 @@ pub fn scan_workspace(
 pub fn generate_all_embeddings(
     db: &IndexDb,
     embedder: &SharedEmbedder,
-    app_handle: Option<&tauri::AppHandle>,
+    progress: Option<&dyn ProgressSink>,
     workspace: &str,
 ) -> Result<(i64, i64), String> {
     let files = db.all_files()?;
@@ -718,8 +713,8 @@ pub fn generate_all_embeddings(
         }
 
         if processed % 10 == 0 {
-            if let Some(handle) = app_handle {
-                let _ = handle.emit("index-progress", IndexProgress {
+            if let Some(p) = progress {
+                p.emit(IndexProgress {
                     status: "embedding".into(),
                     files_indexed: processed,
                     symbols_indexed: total_embeddings,

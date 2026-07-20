@@ -9,11 +9,10 @@ use super::{
     maybe_emit_text_delta, AgentConfig, ContentBlock, Message, ResolvedProvider, StreamOutput,
     ToolDescription, Usage, STREAM_IDLE_TIMEOUT, TEXT_DELTA_THROTTLE,
 };
-use crate::agent::session::AgentEvent;
+use crate::agent::session::{AgentEvent, EventTx};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::ipc::Channel;
 
 /// Translate the internal Anthropic-shaped history into OpenAI chat messages.
 /// `tool_result` blocks become standalone `role:"tool"` messages emitted
@@ -307,7 +306,7 @@ pub async fn stream_message(
     messages: &[Message],
     tools: &[ToolDescription],
     system: Option<&str>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     assistant_text: &mut String,
     interrupt: &AtomicBool,
@@ -484,7 +483,7 @@ pub async fn stream_message(
 fn process_chunk(
     data: &str,
     rp: &ResolvedProvider,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     assistant_text: &mut String,
     thinking_text: &mut String,
     text_deltas: &mut Vec<String>,
@@ -595,7 +594,6 @@ pub async fn complete(
 mod tests {
     use super::*;
     use crate::agent::provider::Protocol;
-    use tauri::ipc::InvokeResponseBody;
 
     fn test_rp() -> ResolvedProvider {
         ResolvedProvider {
@@ -740,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_process_chunk_text_finish_and_usage_with_local_cost() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(crate::agent::session::NullSink);
         let mut rp = test_rp();
         rp.provider_id = "deepseek".into();
         rp.pricing = Some((1.0, 2.0)); // $1/Mtok in, $2/Mtok out
@@ -782,7 +780,7 @@ mod tests {
 
     #[test]
     fn test_process_chunk_native_cost_wins_over_estimate() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(crate::agent::session::NullSink);
         let mut rp = test_rp();
         rp.pricing = Some((1.0, 2.0));
         let mut assistant_text = String::new();
@@ -803,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_process_chunk_reasoning_feeds_thinking() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(crate::agent::session::NullSink);
         let rp = test_rp();
         let mut assistant_text = String::new();
         let mut thinking_text = String::new();
@@ -830,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_process_chunk_mid_stream_error_is_err() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(crate::agent::session::NullSink);
         let rp = test_rp();
         let mut assistant_text = String::new();
         let mut thinking_text = String::new();

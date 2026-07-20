@@ -4,7 +4,7 @@
 //! catalog. Claudinio's own login stays in `commands::auth`.
 
 use crate::agent::provider::{catalog, save_config, ProviderEntry};
-use crate::commands::auth::{random_hex, wait_for_callback};
+use claudinio_core::auth::{random_hex, wait_for_callback};
 use crate::state::AppState;
 use base64::Engine;
 use serde::Serialize;

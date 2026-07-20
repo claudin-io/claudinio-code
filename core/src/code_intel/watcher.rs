@@ -1,7 +1,6 @@
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
 use crate::code_intel::indexer;
-use crate::state::AppState;
 use ignore::gitignore::Gitignore;
 use notify::Config;
 use notify::RecommendedWatcher;
@@ -10,15 +9,16 @@ use notify::Watcher;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
-use tauri::Emitter;
-use tauri::Manager;
 
-fn resolve_embedder(handle: &tauri::AppHandle) -> Option<SharedEmbedder> {
-    let state = handle.state::<AppState>();
-    let guard = state.embedding_model.blocking_lock();
-    guard.clone()
-}
+/// Handle compartilhado para o modelo de embeddings (o mesmo de `AppState`),
+/// resolvido de forma preguiçosa a cada batch de reindexação.
+pub type EmbeddingSlot = Arc<tokio::sync::Mutex<Option<SharedEmbedder>>>;
+
+/// Callback opcional para reportar progresso de reindexação (status/file/...).
+/// O app Tauri emite um evento `index-progress`; o CLI pode imprimir ou ignorar.
+pub type ReindexNotify = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 
 /// True if any path component is hidden (starts with `.`) or a well-known
 /// junk directory. Mirrors the `.hidden(true)` rule the initial workspace
@@ -63,10 +63,10 @@ impl FileWatcher {
     pub fn start(
         root: &str,
         db_path: &Path,
-        app_handle: tauri::AppHandle,
+        embedding_model: EmbeddingSlot,
+        notify: Option<ReindexNotify>,
     ) -> Result<Self, String> {
         let db_path = db_path.to_path_buf();
-        let handle = app_handle.clone();
         let root_owned = root.to_string();
 
         let (gitignore, _) = Gitignore::new(Path::new(root).join(".gitignore"));
@@ -78,7 +78,8 @@ impl FileWatcher {
 
         {
             let db_p = db_path.clone();
-            let h = handle.clone();
+            let em = embedding_model.clone();
+            let notify = notify.clone();
             let ws = root_owned.clone();
             std::thread::spawn(move || {
                 // Dedicated thread — hold the demotion for its whole life.
@@ -105,7 +106,7 @@ impl FileWatcher {
                     // contended the embedder lock. Keep coalescing while we
                     // wait; nothing is dropped.
                     let _permit = loop {
-                        match crate::commands::code_intel::INDEX_SEMAPHORE.try_acquire() {
+                        match crate::code_intel::INDEX_SEMAPHORE.try_acquire() {
                             Ok(p) => break p,
                             Err(_) => {
                                 std::thread::sleep(Duration::from_secs(2));
@@ -121,7 +122,7 @@ impl FileWatcher {
                         Err(_) => continue,
                     };
 
-                    let embedder = resolve_embedder(&h);
+                    let embedder = em.blocking_lock().clone();
 
                     for path_str in &pending {
                         let p = Path::new(path_str);
@@ -132,30 +133,36 @@ impl FileWatcher {
                             continue;
                         }
 
-                        let _ = h.emit("index-progress", serde_json::json!({
-                            "status": "reindexing",
-                            "file": path_str,
-                            "workspace": ws,
-                        }));
+                        if let Some(n) = &notify {
+                            n(serde_json::json!({
+                                "status": "reindexing",
+                                "file": path_str,
+                                "workspace": ws,
+                            }));
+                        }
 
                         let mut emb = embedder.as_ref().and_then(|e| e.lock().ok());
                         match indexer::reindex_file(&db, path_str, emb.as_deref_mut(), Some(&ws)) {
                             Ok(Some(result)) => {
-                                let _ = h.emit("index-progress", serde_json::json!({
-                                    "status": "reindexed",
-                                    "file": path_str,
-                                    "symbols": result.symbols.len(),
-                                    "workspace": ws,
-                                }));
+                                if let Some(n) = &notify {
+                                    n(serde_json::json!({
+                                        "status": "reindexed",
+                                        "file": path_str,
+                                        "symbols": result.symbols.len(),
+                                        "workspace": ws,
+                                    }));
+                                }
                             }
                             Ok(None) => {}
                             Err(e) => {
-                                let _ = h.emit("index-progress", serde_json::json!({
-                                    "status": "reindex_error",
-                                    "file": path_str,
-                                    "error": e,
-                                    "workspace": ws,
-                                }));
+                                if let Some(n) = &notify {
+                                    n(serde_json::json!({
+                                        "status": "reindex_error",
+                                        "file": path_str,
+                                        "error": e,
+                                        "workspace": ws,
+                                    }));
+                                }
                             }
                         }
                     }

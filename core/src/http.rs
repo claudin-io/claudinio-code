@@ -4,7 +4,7 @@ const USER_AGENT: &str = concat!("Claudinio-Code/", env!("CARGO_PKG_VERSION"));
 
 /// Returns a `reqwest::Client` pre-configured with the Claudinio-Code User-Agent.
 /// Use instead of `reqwest::Client::new()`.
-pub(crate) fn default_client() -> Client {
+pub fn default_client() -> Client {
     Client::builder()
         .user_agent(USER_AGENT)
         .build()
@@ -13,6 +13,6 @@ pub(crate) fn default_client() -> Client {
 
 /// Returns a `reqwest::ClientBuilder` pre-configured with the Claudinio-Code User-Agent.
 /// Use instead of `reqwest::Client::builder()` — callers can add timeouts before `.build()`.
-pub(crate) fn default_client_builder() -> ClientBuilder {
+pub fn default_client_builder() -> ClientBuilder {
     Client::builder().user_agent(USER_AGENT)
 }

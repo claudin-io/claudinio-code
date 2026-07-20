@@ -28,66 +28,35 @@ pub struct IndexStatus {
     pub watcher_warning: Option<String>,
 }
 
+// Diretório de dados do app (Tauri). A lógica de derivação de caminhos vive em
+// `claudinio_core::paths`, compartilhada com o CLI para garantir que ambos
+// apontem para o MESMO índice/cache.
+fn app_data_dir(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
+    app_handle
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claudinio-code"))
+}
+
 fn resolve_model_dir(app_handle: &tauri::AppHandle, workspace_root: &Path) -> Option<std::path::PathBuf> {
-    let subdir = format!("models/{}", embeddings::model_cache_dirname());
-    let model_file = embeddings::model_filename();
+    // Extras específicos do desktop: o resource dir do bundle (modelo embarcado)
+    // e o CARGO_MANIFEST_DIR em dev.
+    let mut extra: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(r) = app_handle.path().resource_dir() {
-        let p = r.join(&subdir);
-        if p.join(model_file).exists() {
-            return Some(p);
-        }
+        extra.push(r);
     }
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = Path::new(&manifest).join(&subdir);
-        if p.join(model_file).exists() {
-            return Some(p);
-        }
+        extra.push(Path::new(&manifest).to_path_buf());
     }
-    let cache = cache_model_dir(app_handle);
-    if cache.join(model_file).exists() {
-        return Some(cache);
-    }
-    // Legacy per-workspace cache (pre-0.1.13). Kept read-only so existing
-    // installs don't re-download; new downloads always go to app data.
-    let legacy = workspace_root
-        .join(".claudinio/models")
-        .join(embeddings::model_cache_dirname());
-    if legacy.join(model_file).exists() {
-        return Some(legacy);
-    }
-    None
+    claudinio_core::paths::resolve_model_dir(&app_data_dir(app_handle), workspace_root, &extra)
 }
 
-// Machine-local app data, NOT the workspace: caching per-workspace meant one
-// ~90MB HuggingFace download per project, written through SMB when the
-// workspace lives on a network drive.
 fn cache_model_dir(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
-    let base = app_handle
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("claudinio-code"));
-    base.join("models").join(embeddings::model_cache_dirname())
+    claudinio_core::paths::model_cache_dir(&app_data_dir(app_handle))
 }
 
-/// Machine-local index DB path for a workspace, NOT inside the workspace:
-/// SQLite (especially in WAL mode) is unsupported over network filesystems,
-/// and writing every symbol/embedding upsert through SMB made indexing crawl
-/// and saturate the network on workspaces opened from a mapped drive.
 fn index_db_path(app_handle: &tauri::AppHandle, workspace_root: &Path) -> std::path::PathBuf {
-    let base = app_handle
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("claudinio-code"));
-    let stem: String = workspace_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "workspace".into())
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .take(40)
-        .collect();
-    let hash = xxhash_rust::xxh3::xxh3_64(workspace_root.to_string_lossy().as_bytes());
-    base.join("indexes").join(format!("{stem}-{hash:016x}.db"))
+    claudinio_core::paths::index_db_path(&app_data_dir(app_handle), workspace_root)
 }
 
 /// One-time move of a pre-0.1.14 index DB out of `<workspace>/.claudinio/`
@@ -240,12 +209,15 @@ pub async fn open_workspace(
         let shared_progress = index_progress.clone();
         move || {
             let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
+            let sink = crate::tauri_sinks::IndexProgressSink {
+                app: app_handle.clone(),
+                channel: Some(progress_channel.clone()),
+            };
             indexer::scan_workspace(
                 db.as_ref(),
                 &path,
-                Some(&app_handle),
+                Some(&sink),
                 None, // no embedder yet
-                Some(&progress_channel),
                 Some(&shared_progress),
             )
         }
@@ -337,10 +309,14 @@ pub async fn open_workspace(
         let ws_path = path.clone();
         let join = spawn_blocking(move || {
             let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
+            let sink = crate::tauri_sinks::IndexProgressSink {
+                app: emit_handle.clone(),
+                channel: None,
+            };
             indexer::generate_all_embeddings(
                 db2.as_ref(),
                 &shared,
-                Some(&emit_handle),
+                Some(&sink),
                 &ws_path,
             )
         });
@@ -377,8 +353,18 @@ pub async fn open_workspace(
         });
     }
 
+    let watcher_app = app_handle.clone();
+    let watcher_notify: claudinio_core::code_intel::watcher::ReindexNotify =
+        std::sync::Arc::new(move |v: serde_json::Value| {
+            let _ = watcher_app.emit("index-progress", v);
+        });
     let (watcher, watcher_warning): (Option<FileWatcher>, Option<String>) =
-        match FileWatcher::start(&path, &db_path, app_handle.clone()) {
+        match FileWatcher::start(
+            &path,
+            &db_path,
+            state.embedding_model.clone(),
+            Some(watcher_notify),
+        ) {
             Ok(w) => (Some(w), None),
             Err(e) => {
                 eprintln!("[open_workspace] file watcher failed (workspace still usable): {e}");

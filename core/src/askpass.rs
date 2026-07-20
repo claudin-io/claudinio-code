@@ -16,7 +16,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
@@ -24,7 +23,11 @@ pub const EVENT_NAME: &str = "askpass-request";
 /// How long a prompt waits for the user before failing the git/ssh command.
 const ANSWER_TIMEOUT_SECS: u64 = 300;
 
-static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+/// Observador de um novo prompt `(id, prompt)`. O app Tauri emite o evento
+/// `askpass-request` e mostra o modal; o CLI mostra um prompt no terminal.
+pub type AskpassObserver = Box<dyn Fn(u64, String) + Send + Sync>;
+
+static OBSERVER: OnceLock<AskpassObserver> = OnceLock::new();
 static BRIDGE: OnceLock<Bridge> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Number of prompts currently waiting on the user — the bash tool pauses its
@@ -38,15 +41,9 @@ struct Bridge {
     waiting: Mutex<HashMap<u64, oneshot::Sender<Option<String>>>>,
 }
 
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AskpassRequest {
-    id: u64,
-    prompt: String,
-}
-
-pub fn set_app_handle(handle: tauri::AppHandle) {
-    let _ = APP.set(handle);
+/// Registra o observador de prompts (uma vez, no startup do frontend).
+pub fn set_observer(observer: AskpassObserver) {
+    let _ = OBSERVER.set(observer);
 }
 
 pub fn pending_count() -> usize {
@@ -82,7 +79,7 @@ pub fn env_for_child() -> Vec<(String, String)> {
 
 /// Resolve a pending prompt from the UI. `secret: None` means the user
 /// cancelled — the helper exits nonzero and git/ssh abort immediately.
-#[tauri::command]
+/// O wrapper `#[tauri::command]` vive no desktop e chama esta função.
 pub fn answer_askpass(id: u64, secret: Option<String>) {
     if let Some(b) = BRIDGE.get() {
         let tx = b.waiting.lock().ok().and_then(|mut m| m.remove(&id));
@@ -92,18 +89,19 @@ pub fn answer_askpass(id: u64, secret: Option<String>) {
     }
 }
 
-/// Start the loopback listener and write the helper script. Called once from
-/// Tauri setup; failures are logged and leave the app fully functional (git
-/// just won't be able to prompt).
+/// Conveniência para o CLI: spawna `serve()` na runtime tokio atual. O desktop
+/// spawna `serve()` diretamente na runtime do Tauri (ver lib.rs).
 pub fn start() {
-    tauri::async_runtime::spawn(async {
-        if let Err(e) = start_inner().await {
+    tokio::spawn(async {
+        if let Err(e) = serve().await {
             eprintln!("[askpass] bridge unavailable: {e}");
         }
     });
 }
 
-async fn start_inner() -> Result<(), String> {
+/// Bind do listener loopback + escrita do helper + loop de accept. Deve ser
+/// chamada dentro de uma runtime tokio (o desktop usa `tauri::async_runtime`).
+pub async fn serve() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("bind: {e}"))?;
@@ -132,7 +130,7 @@ async fn start_inner() -> Result<(), String> {
 
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let _ = handle_conn(stream).await;
         });
     }
@@ -215,8 +213,8 @@ async fn handle_conn(mut stream: tokio::net::TcpStream) -> Result<(), String> {
         }
     }
     PENDING.fetch_add(1, Ordering::SeqCst);
-    if let Some(app) = APP.get() {
-        let _ = app.emit(EVENT_NAME, AskpassRequest { id, prompt });
+    if let Some(obs) = OBSERVER.get() {
+        obs(id, prompt);
     }
 
     let answer = tokio::time::timeout(
@@ -256,10 +254,10 @@ mod tests {
     use super::*;
 
     async fn ensure_bridge() -> &'static Bridge {
-        // start_inner loops forever accepting; run it in the background once.
+        // serve loops forever accepting; run it in the background once.
         if BRIDGE.get().is_none() {
             tokio::spawn(async {
-                let _ = start_inner().await;
+                let _ = serve().await;
             });
         }
         for _ in 0..100 {
