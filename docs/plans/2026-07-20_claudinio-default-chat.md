@@ -37,11 +37,30 @@ derive) e não exige introduzir uma flag nova.
   (`npm/claudinio/bin/claudinio.mjs`) já passa `-T`/pseudo-tty quando preciso,
   nada muda aqui.
 
-### Non-goals
+## Risks
+
+- **Mudança de UX para usuários existentes que rodam `claudinio` por engano.**
+  Antes: mensagem de erro "Subcommand required" do clap. Agora: abre TUI.
+  Mitigação: o clap derive continua exigindo subcomandos para `config/run/auth/...`,
+  então quem digita `claudinio config` etc. segue funcionando. Quem digita
+  `claudinio <enter>` (ou invoca o binário sem args via script) agora recebe
+  TUI em vez de erro — alinhado com o pedido.
+
+- **Empacotamento npm (`npm/claudinio/bin/claudinio.mjs`) passa argv ao binário.**
+  Rodar `npx claudinio` sem args agora dispara TUI em vez de erro. Comportamento
+  desejado.
+
+- **Auto-commit do plano:** o harness gravou `docs/plans/2026-07-20_claudinio-default-chat.md`
+  no HEAD antes da edição do código. O commit do código (mudança Rust) deve
+  ser em commit separado, referenciando o plano.
+
+## Non-goals
+
 - Não mudar layout/visual da TUI.
 - Não trocar o nome do binário.
 - Não mudar `Chat { path }` — o campo `path: Option<String>` segue valendo.
 - Não promover `chat` ao único subcomando (mantemos os outros).
+- Não introduzir nova flag nem subcomando.
 
 ## Low-Level Design
 
@@ -54,8 +73,7 @@ derive) e não exige introduzir uma flag nova.
   opcionalidade vem do tipo.
 - `fn main` (`cli/src/main.rs:80-91`): inserir um braço `None` no `match`
   antes do `Some(Command::Chat)` que despacha `commands::chat::run(None).await`,
-  e trocar o acesso `cli.command` por `cli.command` (já é `Option`, só
-  ajustar o pattern).
+  e envolver cada `Command::X { .. }` em `Some(...)`.
 - `enum Command` (`cli/src/main.rs:23-77`): atualizar o `///` doc do
   `Command::Chat` para mencionar que também é o default quando o usuário
   não passa subcomando. Nenhuma mudança de shape.
