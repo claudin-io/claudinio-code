@@ -4,6 +4,9 @@ dist
 # compatibilidade com builds/CI antigos que ainda apontem para lá.
 /target
 src-tauri/target
+# pacotes npm montados no release (gerados por scripts/build-npm.mjs)
+npm/dist
+npm/**/node_modules
 .DS_Store
 .claudinio/
 .serena/

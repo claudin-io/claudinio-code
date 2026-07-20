@@ -1,5 +1,27 @@
 # Plano: CLI + TUI reaproveitando o backend Rust (`feat/cli-tui`)
 
+> ## Status de implementação (branch `feat/cli-tui`)
+> **Fases 0–7 implementadas.** Core `claudinio-core` extraído e 100% Tauri-free
+> (0 deps de tauri); app Tauri delega ao core (sem regressão). CLI `claudinio`
+> com `config/models/index/search/run/chat/auth/sessions` — `index`, `search` e
+> `run` (brain/builder streaming) verificados de ponta a ponta com API real; TUI
+> `chat` compila (testar em terminal real). Testes: 282 core + 2 desktop, verdes.
+>
+> **Distribuição npm:** launcher `npm/claudinio` + `scripts/build-npm.mjs` +
+> job `publish-npm` no `release.yml` (build do CLI na matriz existente).
+> Mecanismo validado localmente (shim resolve o pacote de plataforma e executa).
+> **Pré-requisitos p/ publicar:** secret `NPM_TOKEN`, org npm `@claudinio`, e o
+> nome `claudinio` livre (`npm view claudinio`).
+>
+> **Desvios do plano:**
+> - Modelo MiniLM **não** foi movido para `core/models` (evita churn no bundle
+>   Tauri, sem ganho funcional): o CLI resolve via `../src-tauri` em dev e baixa
+>   em produção (`ensure_model_downloaded`). Fonte única efetiva: `src-tauri/models`.
+> - Binário do CLI ≈ **183 MB** (onnxruntime estático + ~90 gramáticas
+>   tree-sitter + tokenizers). `strip` aplicado no profile release. Reduzir mais
+>   exige feature-gate das gramáticas — **follow-up**.
+
+
 ## Contexto
 
 O Claudinio Code hoje é um app Tauri 2 + SolidJS. Todo o "cérebro" (harness de

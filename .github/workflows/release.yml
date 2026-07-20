@@ -211,6 +211,26 @@ jobs:
           name: ${{ matrix.artifact-name }}-${{ steps.version.outputs.version }}
           path: ${{ matrix.bundle-path }}
 
+      # ── CLI (`claudinio`) para distribuição via npm/npx ──────────────────
+      - name: Build CLI binary
+        run: cargo build --release -p claudinio-cli --target ${{ matrix.target }}
+
+      - name: Stage CLI binary
+        shell: bash
+        run: |
+          mkdir -p cli-staging/${{ matrix.target }}
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/claudinio.exe" "cli-staging/${{ matrix.target }}/"
+          else
+            cp "target/${{ matrix.target }}/release/claudinio" "cli-staging/${{ matrix.target }}/"
+          fi
+
+      - name: Upload CLI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: cli-staging/
+
   create-release:
     name: Create GitHub Release
     needs: build
@@ -379,3 +399,54 @@ jobs:
         run: gh cache delete --all
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # Publica o CLI no npm: um launcher `claudinio` + um pacote por plataforma
+  # (`@claudinio/cli-<os>-<cpu>`) como optionalDependencies. Requer o secret
+  # NPM_TOKEN e a org `@claudinio` no npm (`claudinio` puro para o launcher).
+  publish-npm:
+    name: Publish CLI to npm
+    needs: build
+    runs-on: ubuntu-22.04
+    environment: RELEASE
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # merge-multiple junta o conteúdo de cada artefato (`<target>/claudinio`)
+      # num só diretório → bins/<rust-target>/claudinio, que é o layout esperado
+      # por scripts/build-npm.mjs.
+      - name: Download CLI binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: bins
+          merge-multiple: true
+
+      - name: Build npm packages
+        run: node scripts/build-npm.mjs --version "${{ steps.version.outputs.version }}" --binaries bins
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in npm/dist/cli-*; do
+            npm publish "$pkg" --access public
+          done
+
+      - name: Publish launcher
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish npm/dist/claudinio --access public
