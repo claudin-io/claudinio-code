@@ -1,0 +1,13 @@
+# Workspace raiz — reúne o backend compartilhado (core), o app Tauri (src-tauri)
+# e o CLI/TUI (cli). A crate `core` concentra agent/ + code_intel/ e é livre de
+# Tauri, para que app e CLI compartilhem a mesma lógica sem duplicação.
+[workspace]
+resolver = "2"
+members = ["src-tauri", "core", "cli"]
+
+# Versão única para os três crates; ajustada em conjunto a cada release.
+[workspace.package]
+version = "0.1.14"
+edition = "2021"
+authors = ["Victor Tavernari"]
+license = "MIT"

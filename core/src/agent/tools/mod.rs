@@ -6,7 +6,7 @@ mod list_dir;
 mod read_file;
 pub mod tasks;
 mod web_search;
-pub(crate) mod write_plan;
+pub mod write_plan;
 
 pub use finalize_plan::git_head;
 

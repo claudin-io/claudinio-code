@@ -19,7 +19,7 @@ use std::process::Command;
 
 use crate::agent::persist::{self, SessionRecord, SessionStore};
 use crate::agent::tools::{write_plan, ToolContext};
-use crate::commands::procutil::no_window;
+use crate::procutil::no_window;
 
 #[derive(Deserialize)]
 pub struct FinalizePlanArgs {
@@ -302,7 +302,7 @@ fn collect_task_notes(ctx: &ToolContext) -> Vec<String> {
     let Some(path) = ctx.session_store_path.as_deref() else {
         return Vec::new();
     };
-    let tasks = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
+    let tasks = crate::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
     tasks
         .iter()
         .filter(|t| t.status == "done" && !t.journal.is_empty())

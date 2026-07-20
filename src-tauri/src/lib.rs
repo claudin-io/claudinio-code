@@ -1,13 +1,13 @@
-mod agent;
-pub(crate) mod askpass;
-pub mod code_intel;
+// O backend foi extraído para o crate `claudinio-core` (Fase 1). Reexportamos
+// os módulos aqui para que os caminhos `crate::agent::...`, `crate::state::...`
+// etc. usados no restante do app (commands/) continuem resolvendo sem reescrita.
+pub use claudinio_core::{agent, askpass, code_intel, http, lsp, net_activity, state};
+
 mod commands;
-pub(crate) mod http;
-mod lsp;
-pub(crate) mod net_activity;
-mod state;
+mod tauri_sinks;
 
 use state::AppState;
+use tauri::Emitter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,9 +19,24 @@ pub fn run() {
         .manage(AppState::new())
         .manage(commands::power::KeepAwakeState::default())
         .setup(|app| {
-            net_activity::set_app_handle(tauri::AppHandle::clone(app.handle()));
-            askpass::set_app_handle(tauri::AppHandle::clone(app.handle()));
-            askpass::start();
+            // Liga os sinks/observers do core (Tauri-free) aos eventos do app.
+            let net_app = tauri::AppHandle::clone(app.handle());
+            net_activity::set_observer(Box::new(move |views| {
+                let _ = net_app.emit(net_activity::EVENT_NAME, &views);
+            }));
+            let ask_app = tauri::AppHandle::clone(app.handle());
+            askpass::set_observer(Box::new(move |id, prompt| {
+                let _ = ask_app.emit(
+                    askpass::EVENT_NAME,
+                    serde_json::json!({ "id": id, "prompt": prompt }),
+                );
+            }));
+            // O core spawna o listener na runtime do Tauri.
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = askpass::serve().await {
+                    eprintln!("[askpass] bridge unavailable: {e}");
+                }
+            });
             commands::system_stats::start_poller(app.handle().clone());
             Ok(())
         })
@@ -96,7 +111,7 @@ pub fn run() {
             commands::power::set_keep_awake,
             commands::ide::detect_ides,
             commands::ide::open_in_ide,
-            askpass::answer_askpass,
+            commands::askpass::answer_askpass,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

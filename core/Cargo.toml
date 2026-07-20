@@ -1,31 +1,24 @@
 [package]
-name = "claudinio-code"
-version = "0.1.14"
-description = "Claudinio Code — agentic coding platform"
-authors = ["Victor Tavernari"]
-edition = "2021"
+name = "claudinio-core"
+description = "Claudinio Code — backend compartilhado (agente, indexação, busca, providers)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 [lib]
-name = "claudinio_code_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
+name = "claudinio_core"
 
 [dependencies]
-# Backend compartilhado: agent/, code_intel/, state, http, net_activity, askpass,
-# lsp, procutil, tasks. Foram extraídos para o crate `core` (Fase 1).
-claudinio-core = { path = "../core" }
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
+# Fase 2 concluída: o core é totalmente livre de Tauri. Os eventos saem por
+# `trait EventSink`/`ProgressSink`/observers, implementados por cada frontend.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ignore = "0.4"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-tokio = { version = "1", features = ["sync", "io-util", "process", "macros", "net", "time"] }
+# rt/rt-multi-thread: antes vinham transitivamente do `tauri`; agora que o core
+# é standalone (e o CLI cria a própria runtime), precisam ser explícitos.
+tokio = { version = "1", features = ["sync", "io-util", "process", "macros", "net", "time", "rt", "rt-multi-thread"] }
 sysinfo = "0.33"
 hmac = "0.12"
 futures = "0.3"
@@ -117,7 +110,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 notify = "8"
 notify-debouncer-mini = "0.5"
 dirs = "6"
-keepawake = "0.6"
 sys-locale = "0.3"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 # default drops "esaxx_fast": it pulls esaxx-rs, a C++ lib that force-builds
@@ -143,7 +135,6 @@ rmcp = { version = "2", default-features = false, features = [
     "transport-streamable-http-client-reqwest",
     "base64",
 ] }
-
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }

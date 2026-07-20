@@ -2,12 +2,12 @@ use lru::LruCache;
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::commands::tasks::TaskItem;
+use crate::tasks::TaskItem;
 
 /// Return the current list of tasks from the session JSONL.
 pub fn execute_get(ctx: &crate::agent::tools::ToolContext) -> Result<String, String> {
     let path = ctx.session_store_path.as_ref().ok_or("session_store_path not set")?;
-    let tasks = crate::commands::tasks::load_last_tasks(Path::new(path))?;
+    let tasks = crate::tasks::load_last_tasks(Path::new(path))?;
     Ok(serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "[]".into()))
 }
 
@@ -23,10 +23,10 @@ pub fn execute_set(
 ) -> Result<String, String> {
     check_brain_lld_gate(ctx)?;
     let path = ctx.session_store_path.as_ref().ok_or("session_store_path not set")?;
-    let prev = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
+    let prev = crate::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
-    crate::commands::tasks::append_tasks(Path::new(path), &merged)?;
+    crate::tasks::append_tasks(Path::new(path), &merged)?;
     let mut note = String::new();
     if renamed > 0 {
         note.push_str(&format!(
@@ -301,7 +301,7 @@ mod lld_gate_tests {
 #[cfg(test)]
 mod golden_tests {
     use super::*;
-    use crate::commands::tasks::TaskItem;
+    use crate::tasks::TaskItem;
 
     #[test]
     fn test_create_golden_tasks() {

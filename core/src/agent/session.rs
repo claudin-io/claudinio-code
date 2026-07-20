@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tauri::ipc::Channel;
 use tokio::sync::{oneshot, Mutex};
 
 /// Context window of the supported models (claudinio and claudius: 256K).
@@ -128,7 +127,7 @@ pub async fn compact_history(
     config: &AgentConfig,
     store: &SessionStore,
     ctx: &ToolContext,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -594,6 +593,24 @@ File tools take absolute paths inside this root."
 
 
 
+/// Sink de eventos do agente. Abstrai para onde os `AgentEvent` vão: no app
+/// Tauri é um `ipc::Channel`; no CLI/TUI, um canal de terminal/mpsc. Todo o
+/// harness depende apenas deste trait — não de Tauri.
+pub trait EventSink: Send + Sync {
+    fn send(&self, ev: AgentEvent);
+}
+
+/// Handle compartilhável do sink, clonável para subagentes e tasks spawnadas
+/// (substitui o antigo `Channel<AgentEvent>`, que era `Clone` via Arc interno).
+pub type EventTx = std::sync::Arc<dyn EventSink>;
+
+/// Sink que descarta todos os eventos — usado em testes e caminhos sem UI.
+pub struct NullSink;
+
+impl EventSink for NullSink {
+    fn send(&self, _ev: AgentEvent) {}
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data")]
 pub enum AgentEvent {
@@ -860,7 +877,7 @@ fn inject_steering(
     store: &SessionStore,
     ctx: &ToolContext,
     steering: &SteeringCtl,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
 ) -> bool {
     let entries = steering.drain();
     if entries.is_empty() {
@@ -1128,7 +1145,7 @@ async fn stream_message_with_retry(
     messages: &[Message],
     tools: &[ToolDescription],
     system: Option<&str>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     assistant_text: &mut String,
     interrupt: &AtomicBool,
@@ -1199,7 +1216,7 @@ async fn maybe_context_handoff(
     system: &str,
     store: &SessionStore,
     ctx: &ToolContext,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     steering: &Arc<SteeringCtl>,
     mode_ctl: &Arc<ModeCtl>,
@@ -1377,7 +1394,7 @@ pub async fn run_workflow(
     history: &mut Vec<Message>,
     user_message: String,
     attachment_blocks: Vec<ContentBlock>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -1402,7 +1419,7 @@ pub async fn run_workflow_with_profile(
     history: &mut Vec<Message>,
     user_message: String,
     attachment_blocks: Vec<ContentBlock>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -2000,7 +2017,7 @@ pub async fn run_workflow_with_profile(
                 .session_store_path
                 .as_deref()
                 .and_then(|p| {
-                    crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok()
+                    crate::tasks::load_last_tasks(std::path::Path::new(p)).ok()
                 })
                 .map(|t| crate::agent::tools::tasks::golden_pending_ids(&t))
                 .unwrap_or_default();
@@ -2096,7 +2113,7 @@ pub async fn run_workflow_with_profile(
                     .session_store_path
                     .as_deref()
                     .and_then(|p| {
-                        crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok()
+                        crate::tasks::load_last_tasks(std::path::Path::new(p)).ok()
                     })
                     .unwrap_or_default();
                 let had_golden = tasks
@@ -2545,7 +2562,7 @@ pub(crate) async fn run_tool(
     tool_use_id: &str,
     tool_input: Value,
     perm: permissions::PermissionLevel,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -2958,7 +2975,7 @@ fn deny_tool(
     tool_use_id: &str,
     tool_input: &Value,
     msg: &str,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
 ) -> ContentBlock {
     let _ = event_tx.send(AgentEvent::ToolCall {
@@ -3005,7 +3022,7 @@ fn handle_mode_switch(
     mode_ctl: &Arc<ModeCtl>,
     store: &SessionStore,
     ctx: &ToolContext,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     pending_handoff: &mut Option<HandoffSpec>,
 ) -> ContentBlock {
@@ -3177,7 +3194,7 @@ async fn ask_user(
     tool_name: &str,
     tool_use_id: &str,
     tool_input: Value,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     answers: &AnswerMap,
     session_id: &str,
 ) -> ContentBlock {

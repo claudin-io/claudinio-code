@@ -4,7 +4,7 @@
 
 use crate::agent::provider::{McpServerEntry, McpTransportConfig};
 use crate::agent::tools::ToolDef;
-use crate::commands::procutil;
+use crate::procutil;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;

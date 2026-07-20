@@ -2,7 +2,8 @@ use crate::agent::persist::{
     self, load_records, now_ms, AttachmentMeta, SessionRecord, SessionStore, SessionSummary,
 };
 use crate::agent::provider::{save_config, ContentBlock};
-use crate::agent::session::{self, AgentEvent, SteeringEntry};
+use crate::agent::session::{self, AgentEvent, EventTx, SteeringEntry};
+use crate::tauri_sinks::ChannelSink;
 use crate::agent::transition;
 use crate::agent::tools::{ReadTracker, ToolContext};
 use crate::commands::tasks as tasks_cmd;
@@ -184,6 +185,7 @@ pub async fn send_message(
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
 ) -> Result<SessionStarted, String> {
+    let event_channel: EventTx = Arc::new(ChannelSink(event_channel));
     let config = {
         let cfg = state.config.lock().await;
         if cfg.api_key.is_empty() {
@@ -366,120 +368,9 @@ fn transition_maps(state: &State<'_, AppState>) -> transition::TransitionMaps {
     }
 }
 
-struct RunLoopArgs {
-    config: crate::agent::provider::AgentConfig,
-    ws: Arc<crate::state::WorkspaceState>,
-    maps: transition::TransitionMaps,
-    approvals: session::ApprovalMap,
-    answers: session::AnswerMap,
-    chan: Channel<AgentEvent>,
-    handle: SessionHandle,
-    store: SessionStore,
-    ctx: ToolContext,
-    mode_ctl: Arc<session::ModeCtl>,
-    steering: Arc<session::SteeringCtl>,
-    history: Vec<crate::agent::provider::Message>,
-    message: String,
-    attachment_blocks: Vec<ContentBlock>,
-}
-
-/// Drive a session run to completion, following handoffs across linked
-/// sessions: whenever `run_workflow` returns `RunOutcome::Handoff`, a new
-/// linked session is created and the loop continues there with a fresh
-/// history — same event channel, so the frontend streams one continuous
-/// conversation.
-fn spawn_run_loop(args: RunLoopArgs) {
-    let RunLoopArgs {
-        config: cfg,
-        ws,
-        maps,
-        approvals: appr,
-        answers: answ,
-        chan,
-        mut handle,
-        mut store,
-        mut ctx,
-        mut mode_ctl,
-        steering,
-        mut history,
-        mut message,
-        mut attachment_blocks,
-    } = args;
-
-    tokio::spawn(async move {
-        loop {
-            let msg = std::mem::take(&mut message);
-            let atts = std::mem::take(&mut attachment_blocks);
-            match session::run_workflow(
-                &cfg, &mut history, msg, atts, &chan, &appr, &answ, &handle.id, &ctx, &store,
-                &steering, &mode_ctl,
-            )
-            .await
-            {
-                Ok(session::RunOutcome::Completed) => break,
-                Ok(session::RunOutcome::Handoff(spec)) => {
-                    let mut spec = *spec;
-                    spec.first_message = transition::resolve_first_message(
-                        &spec,
-                        ctx.workspace_root.as_deref(),
-                        ctx.plan_save_path.as_deref(),
-                    );
-                    match transition::link_session(&maps, &ws, &handle, &spec, &chan).await {
-                        Ok(new_handle) => {
-                            let new_mode_ctl = maps
-                                .modes
-                                .lock()
-                                .await
-                                .get(&new_handle.id)
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    Arc::new(session::ModeCtl::new(
-                                        spec.next_mode,
-                                        spec.next_origin,
-                                    ))
-                                });
-                            ctx = transition::rebuild_tool_context(
-                                &ctx,
-                                &new_handle.store_path,
-                                new_mode_ctl.clone(),
-                                cfg.clone(),
-                            );
-                            mode_ctl = new_mode_ctl;
-                            store = SessionStore {
-                                path: new_handle.store_path.clone(),
-                            };
-                            history = Vec::new();
-                            message = spec.first_message;
-                            handle = new_handle;
-                        }
-                        Err(e) => {
-                            store.try_append(&SessionRecord::Error {
-                                message: e.clone(),
-                                ts: now_ms(),
-                            });
-                            let _ = chan.send(AgentEvent::Error(e));
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    store.try_append(&SessionRecord::Error {
-                        message: e.clone(),
-                        ts: now_ms(),
-                    });
-                    let _ = chan.send(AgentEvent::Error(e));
-                    break;
-                }
-            }
-        }
-        // Run finished (success, error or panic-free return): drop the
-        // steering entry so interrupt/steer report "session not running".
-        // `handle.id` tracks the FINAL session of the chain — link_session
-        // moved the steering entry along with each handoff.
-        let mut map = maps.steering.lock().await;
-        map.remove(&handle.id);
-    });
-}
+// O driver de execução com handoff vive no core (compartilhado com o CLI).
+// Aliases mantêm os call sites abaixo inalterados.
+use claudinio_core::run::{drive as spawn_run_loop, RunArgs as RunLoopArgs};
 
 /// Start a new conversation in a workspace: the next `send_message` opens a
 /// fresh JSONL session there.
@@ -923,6 +814,7 @@ pub async fn compact_session(
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let event_channel: EventTx = Arc::new(ChannelSink(event_channel));
     let config = {
         let cfg = state.config.lock().await;
         if cfg.api_key.is_empty() {
@@ -1041,6 +933,7 @@ pub async fn continue_with_builder(
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
 ) -> Result<SessionStarted, String> {
+    let event_channel: EventTx = Arc::new(ChannelSink(event_channel));
     let config = {
         let cfg = state.config.lock().await;
         if cfg.api_key.is_empty() {
@@ -1324,6 +1217,7 @@ pub async fn commit_and_push(
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
 ) -> Result<SessionStarted, String> {
+    let event_channel: EventTx = Arc::new(ChannelSink(event_channel));
     let config = {
         let cfg = state.config.lock().await;
         if cfg.api_key.is_empty() {

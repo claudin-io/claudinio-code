@@ -1,12 +1,11 @@
 use crate::agent::permissions;
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
-use crate::agent::session::{self, AgentEvent, ApprovalMap, AnswerMap, SteeringCtl};
+use crate::agent::session::{self, AgentEvent, ApprovalMap, AnswerMap, EventSink, EventTx, SteeringCtl};
 use crate::agent::tools::{self, ToolContext, ToolDef};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::ipc::Channel;
 
 pub const MAX_PARALLEL_AGENTS: usize = 4;
 pub const MAX_PARALLEL_AGENTS_CAP: usize = 8;
@@ -106,21 +105,26 @@ fn api_tools(mode: SubagentMode, mcp_defs: &[ToolDef], config: &AgentConfig) -> 
 /// channel. The subagent sends events to this wrapped channel; the Tauri IPC
 /// serializes them, the callback catches them, wraps them, and re-sends on the
 /// parent channel that goes to the frontend.
-fn wrap_channel(parent: &Channel<AgentEvent>, subagent_id: &str) -> Channel<AgentEvent> {
-    let sid = subagent_id.to_string();
-    let parent = parent.clone();
-    Channel::new(move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
-        let json_str = match &body {
-            tauri::ipc::InvokeResponseBody::Json(s) => s.clone(),
-            _ => return Ok(()),
-        };
-        if let Ok(event) = serde_json::from_str::<AgentEvent>(&json_str) {
-            let _ = parent.send(AgentEvent::Subagent {
-                subagent_id: sid.clone(),
-                event: Box::new(event),
-            });
-        }
-        Ok(())
+/// Sink que embrulha cada evento de um subagente em
+/// `AgentEvent::Subagent { subagent_id, event }` e reenvia ao sink pai.
+struct SubagentSink {
+    parent: EventTx,
+    subagent_id: String,
+}
+
+impl EventSink for SubagentSink {
+    fn send(&self, ev: AgentEvent) {
+        self.parent.send(AgentEvent::Subagent {
+            subagent_id: self.subagent_id.clone(),
+            event: Box::new(ev),
+        });
+    }
+}
+
+fn wrap_channel(parent: &EventTx, subagent_id: &str) -> EventTx {
+    Arc::new(SubagentSink {
+        parent: parent.clone(),
+        subagent_id: subagent_id.to_string(),
     })
 }
 
@@ -146,7 +150,7 @@ pub async fn run_spawn_agents(
     ctx: &ToolContext,
     parent_tool_use_id: &str,
     tool_input: Value,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -283,7 +287,7 @@ pub async fn run_subagent(
     config: &AgentConfig,
     ctx: &ToolContext,
     spec: &SubagentSpec,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -499,7 +503,7 @@ pub async fn run_summary_agent(
     ctx: &ToolContext,
     jsonl_path: &str,
     tail_turns: usize,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
