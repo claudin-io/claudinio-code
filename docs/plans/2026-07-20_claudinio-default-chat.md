@@ -37,30 +37,24 @@ derive) e não exige introduzir uma flag nova.
   (`npm/claudinio/bin/claudinio.mjs`) já passa `-T`/pseudo-tty quando preciso,
   nada muda aqui.
 
-## Risks
-
-- **Mudança de UX para usuários existentes que rodam `claudinio` por engano.**
-  Antes: mensagem de erro "Subcommand required" do clap. Agora: abre TUI.
-  Mitigação: o clap derive continua exigindo subcomandos para `config/run/auth/...`,
-  então quem digita `claudinio config` etc. segue funcionando. Quem digita
-  `claudinio <enter>` (ou invoca o binário sem args via script) agora recebe
-  TUI em vez de erro — alinhado com o pedido.
-
-- **Empacotamento npm (`npm/claudinio/bin/claudinio.mjs`) passa argv ao binário.**
-  Rodar `npx claudinio` sem args agora dispara TUI em vez de erro. Comportamento
-  desejado.
-
-- **Auto-commit do plano:** o harness gravou `docs/plans/2026-07-20_claudinio-default-chat.md`
-  no HEAD antes da edição do código. O commit do código (mudança Rust) deve
-  ser em commit separado, referenciando o plano.
-
-## Non-goals
-
+### Non-goals
 - Não mudar layout/visual da TUI.
 - Não trocar o nome do binário.
 - Não mudar `Chat { path }` — o campo `path: Option<String>` segue valendo.
 - Não promover `chat` ao único subcomando (mantemos os outros).
 - Não introduzir nova flag nem subcomando.
+
+## Risks
+
+- **Mudança de UX para usuários existentes que rodam `claudinio` por engano.**
+  Antes: mensagem "Subcommand required" do clap. Agora: abre TUI.
+  `claudinio config/run/auth/...` segue exigindo o subcomando; só `claudinio`
+  solto muda — alinhado com o pedido.
+- **Empacotamento npm** (`npm/claudinio/bin/claudinio.mjs`) passa argv ao
+  binário; rodar `npx claudinio` sem args dispara TUI em vez de erro.
+  Comportamento desejado.
+- **Auto-commit do plano** já gravou `docs/plans/2026-07-20_claudinio-default-chat.md`
+  no HEAD antes da edição. O commit do código Rust deve ser separado.
 
 ## Low-Level Design
 
@@ -68,25 +62,22 @@ derive) e não exige introduzir uma flag nova.
 `cli/src/main.rs`
 
 ### Símbolos
-- `struct Cli` (atual `cli/src/main.rs:16-21`): trocar `command: Command` →
-  `command: Option<Command>`. O atributo `#[command(subcommand)]` continua;
+- `struct Cli` (`cli/src/main.rs:16-21`): trocar `command: Command` →
+  `command: Option<Command>`. Atributo `#[command(subcommand)]` continua;
   opcionalidade vem do tipo.
 - `fn main` (`cli/src/main.rs:80-91`): inserir um braço `None` no `match`
-  antes do `Some(Command::Chat)` que despacha `commands::chat::run(None).await`,
-  e envolver cada `Command::X { .. }` em `Some(...)`.
-- `enum Command` (`cli/src/main.rs:23-77`): atualizar o `///` doc do
-  `Command::Chat` para mencionar que também é o default quando o usuário
-  não passa subcomando. Nenhuma mudança de shape.
+  que despacha `commands::chat::run(None).await`; envolver cada `Command::X`
+  em `Some(...)`.
+- `enum Command::Chat` (`cli/src/main.rs:54-58`): atualizar o `///` doc
+  para mencionar que também é o default quando o usuário não passa
+  subcomando. Nenhuma mudança de shape.
 
 ### Pontos de reuso (não mexer)
 - `commands::chat::run` (`cli/src/commands/chat.rs:6`) já delega para
-  `crate::tui::run(path).await`. Recebe `None` hoje (`claudinio chat` sem
-  `--path`) e abre no cwd — comportamento desejado.
+  `crate::tui::run(path).await`. `None` abre no cwd.
 - `tui::run` (`cli/src/tui/mod.rs`) não muda.
-- `npm/claudinio/bin/claudinio.mjs` e `scripts/build-npm.mjs` não mudam —
-  eles só repassam argv ao binário; o default é decidido no Rust.
-- `npm/claudinio/README.md:14` (`npx claudinio chat`) continua válido porque
-  `chat` segue registrado como subcomando explícito.
+- `npm/claudinio/bin/claudinio.mjs`, `scripts/build-npm.mjs` e
+  `npm/claudinio/README.md:14` não mudam — `chat` segue sendo subcomando.
 
 ### Wiring sketch (em `cli/src/main.rs`)
 
@@ -132,16 +123,22 @@ Chat {
 1. **Compila:** `cargo check -p claudinio-cli` → exit 0, sem novos warnings
    introduzidos por esta mudança (warnings preexistentes em `core/agent/tools/*`
    permanecem, não são escopo).
-2. **Default dispara chat:** rodar `cargo run -p claudinio-cli --` em stdin
-   pipe para isolar do TTY e confirmar que a chamada entra em
-   `commands::chat::run` (path de erro do TUI: "stdout não é um TTY").
-   Esse erro é a prova de que o despacho foi para o chat (único comando que
-   exige TTY via `ratatui::init`).
+2. **Default dispara chat:** rodar `cargo run -p claudinio-cli --` com stdout
+   pipe (sem TTY) → confirmar que entra em `commands::chat::run` (path de
+   erro do TUI: "stdout não é um TTY"). Esse erro é a prova de que o despacho
+   foi para o chat (único comando que exige TTY via `ratatui::init`).
 3. **`claudinio chat` segue funcionando:** `cargo run -p claudinio-cli --
-   chat` → mesmo erro de TTY em stdout pipe (prova que o caminho explícito
-   também despacha `commands::chat::run`).
+   chat` → mesmo erro de TTY em stdout pipe.
 4. **Outros subcomandos inalterados:** `cargo run -p claudinio-cli -- --help`
    lista `config, models, index, search, run, chat, auth, sessions` na mesma
    ordem/forma de antes.
 5. **Version inalterada:** `cargo run -p claudinio-cli -- --version` imprime
    a versão do `Cargo.toml`.
+
+## Tasks summary
+
+- `cli-chat-default-1` — Em `cli/src/main.rs`: `Cli.command: Option<Command>`;
+  doc do `Command::Chat`; novo braço `None` no `match` despachando
+  `commands::chat::run(None)`; demais variantes envoltas em `Some(...)`.
+- `cli-chat-default-2` — Rodar `cargo check -p claudinio-cli`; em stdout
+  pipe confirmar (2) e (3) acima; `--help` (4); `--version` (5).
