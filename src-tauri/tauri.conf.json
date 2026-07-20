@@ -40,7 +40,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "models/LateOn-Code-edge/*": "models/LateOn-Code-edge/"
+      "models/all-MiniLM-L6-v2/*": "models/all-MiniLM-L6-v2/"
     }
   },
   "plugins": {

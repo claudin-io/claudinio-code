@@ -288,3 +288,14 @@ Additionally, add assertions that each locale has all the same keys as en-US (sa
 - Create scripts/translate_locales.py: Script created at scripts/translate_locales.py (494 lines, executable). Parser extracts 373 keys across 30 sections. Updated for OpenAI-compatible endpoint.
 - Run translate_locales.py for all 16 locales: Ran in two passes: first 7 locales completed before 40-min timeout, then 8 more locales + test update in second pass. All 16 locales have 374 keys each. Test file updated with key-parity assertions.
 - Verify all translations: tests + typecheck: vitest: 25/25 passed (49ms); tsc --noEmit: zero locale errors in output; hi-IN.ts: Hindi translations verified — {0} placeholders intact, proper names ('Claudinio Code', 'Brain Model', 'Builder Model') preserved, section comments match en-US order; pt-PT.ts: Portugal Portuguese verified — distinct orthography from pt-BR ('Autenticado', 'iniciar sessão', 'Chave API'), all 374 keys present, placeholders intact
+
+
+## Implementation Log — 2026-07-20 00:34
+**Summary:** Deploy v0.1.14 — pushed 7 commits + v0.1.14 tag, release workflow succeeded across all 5 platforms, published to claudinio-code-releases.
+**Changed files:** M src-tauri/examples/semantic_eval_queries.json, M src-tauri/src/agent/tools/mod.rs, M src-tauri/src/code_intel/mod.rs, M src-tauri/src/commands/enhance.rs, ?? scripts/__pycache__/, ?? src-tauri/src/code_intel/text.rs
+**Commits:** _(git unavailable or none)_
+**Journal:** Deploy v0.1.14 was straightforward — the version was already bumped to 0.1.14 in all three manifest files (package.json, Cargo.toml, tauri.conf.json), with 7 unpushed commits on main. No version bump was needed, just pushing commits + tag. The release workflow triggered cleanly, built all 5 platform targets successfully on first try, and published to the public claudinio-code-releases repo with full asset set including latest.json for the in-app updater. No issues encountered.
+
+**Task journal:**
+- Plan: Deploy v0.1.14 release: Version 0.1.14 already set in package.json, Cargo.toml, tauri.conf.json; 7 unpushed commits on main ahead of origin/main; No v0.1.14 tag exists locally or remotely; Release workflow triggers on tag push, publishes to claudin-io/claudinio-code-releases repo; Workflow needs RELEASES_REPO_TOKEN secret
+- Deploy v0.1.14 release: 7 unpushed commits pushed to origin/main (b7959ba); Tag v0.1.14 created and pushed to origin; Release workflow run #29707119495 triggered; All 5 build jobs (linux-arm64, linux-x64, macos-arm64, windows-arm64, windows-x64) completed success; Create GitHub Release job completed success; Release published at https://github.com/claudin-io/claudinio-code-releases/releases/tag/v0.1.14; 24 assets uploaded including latest.json for in-app updater

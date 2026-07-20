@@ -45,6 +45,16 @@ fn is_ignored_path(root: &Path, path: &Path, gitignore: &Gitignore) -> bool {
     false
 }
 
+/// Watch events only for files the indexer can actually parse — derived from
+/// the parsers themselves, not a hand-maintained extension list (the old list
+/// covered 9 of ~74 indexed languages, so most files went stale until a full
+/// workspace reopen).
+fn is_indexable_file(path: &Path) -> bool {
+    let p = path.to_string_lossy();
+    crate::code_intel::parser::detect_language(&p).is_some()
+        || crate::code_intel::parser::detect_doc_language(&p).is_some()
+}
+
 pub struct FileWatcher {
     _watcher: RecommendedWatcher,
 }
@@ -116,13 +126,9 @@ impl FileWatcher {
                     for path_str in &pending {
                         let p = Path::new(path_str);
                         if !p.exists() {
-                            if let Ok(Some(_)) = db.file_by_path(path_str) {
-                                let conn = match db.conn.lock() {
-                                    Ok(c) => c,
-                                    Err(_) => continue,
-                                };
-                                let _ = conn.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path_str]);
-                            }
+                            // Explicit-delete path so the FTS delete triggers
+                            // fire (cascades alone leave ghost FTS rows).
+                            let _ = db.delete_file(path_str);
                             continue;
                         }
 
@@ -169,11 +175,7 @@ impl FileWatcher {
                     if !p.is_file() {
                         continue;
                     }
-                    let ext_ok = p
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| matches!(e, "ts" | "tsx" | "js" | "jsx" | "rs" | "py" | "swift" | "md" | "txt"));
-                    if !ext_ok {
+                    if !is_indexable_file(p) {
                         continue;
                     }
                     if is_ignored_path(&watch_root, p, &gitignore) {
@@ -211,6 +213,20 @@ impl FileWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watcher_accepts_all_indexable_extensions() {
+        for accepted in [
+            "src/main.go", "app/Main.kt", "styles/theme.scss", "Cargo.toml",
+            "src/lib.rs", "docs/guide.md", "notes.txt", "web/app.tsx",
+            "api/server.rb", "native/window.cpp",
+        ] {
+            assert!(is_indexable_file(Path::new(accepted)), "should accept {accepted}");
+        }
+        for rejected in ["logo.png", "pnpm-lock.lock", "video.mp4", "binary.bin"] {
+            assert!(!is_indexable_file(Path::new(rejected)), "should reject {rejected}");
+        }
+    }
 
     #[test]
     fn ignores_hidden_and_junk_dirs() {

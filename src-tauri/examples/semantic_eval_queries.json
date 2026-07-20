@@ -43,11 +43,29 @@
     {"query": "context compaction summarize conversation when window is full", "expected": ["session.rs", "ChatPanel.tsx"]},
     {"query": "theme colors palette design tokens", "expected": ["App.css", "index.css", "monacoThemes.ts"]},
     {"query": "header navigation bar logo", "expected": ["App.tsx", "App.css"]},
-    {"query": "update notification version check", "expected": ["ipc.ts", "App.tsx"]}
+    {"query": "update notification version check", "expected": ["ipc.ts", "App.tsx"]},
+    {"query": "generate_all_embeddings", "class": "exact-identifier", "expected": ["indexer.rs"]},
+    {"query": "parseJsonList", "class": "exact-identifier", "expected": ["ToolBody.tsx"]},
+    {"query": "INDEX_SEMAPHORE", "class": "exact-identifier", "expected": ["code_intel.rs"]},
+    {"query": "build_embedding_chunks", "class": "exact-identifier", "expected": ["embeddings.rs"]},
+    {"query": "resolve_i18n_keys", "class": "exact-identifier", "expected": ["embeddings.rs"]},
+    {"query": "is_ignored_path", "class": "exact-identifier", "expected": ["watcher.rs"]},
+    {"query": "watcher.rs debounce logic", "class": "exact-basename", "expected": ["watcher.rs"]},
+    {"query": "ToolBody.tsx list rendering", "class": "exact-basename", "expected": ["ToolBody.tsx"]},
+    {"query": "enhance.rs prompt rewriter", "class": "exact-basename", "expected": ["enhance.rs"]},
+    {"query": "fallback.rs regex scanners", "class": "exact-basename", "expected": ["fallback.rs"]},
+    {"query": "TOKENIZERS_PARALLELISM", "class": "body-term", "expected": ["main.rs"]},
+    {"query": "encode_batch tokenizer call", "class": "body-term", "expected": ["embeddings.rs"]},
+    {"query": "with_poll_interval watcher fallback", "class": "body-term", "expected": ["watcher.rs"]},
+    {"query": "xxh3 content hash", "class": "rare-term", "expected": ["indexer.rs", "code_intel.rs"]},
+    {"query": "FTS5 MATCH query sanitization", "class": "rare-term", "expected": ["db.rs"]},
+    {"query": "mean pooling attention mask", "class": "rare-term", "expected": ["embeddings.rs"]}
   ],
   "negative": [
     {"query": "kubernetes deployment yaml configuration"},
     {"query": "django rest framework serializer validation"},
-    {"query": "android jetpack compose navigation graph"}
+    {"query": "android jetpack compose navigation graph"},
+    {"query": "kubernetes ingress nginx controller annotations"},
+    {"query": "stripe payment webhook signature verification"}
   ]
 }

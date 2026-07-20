@@ -101,6 +101,12 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Bundled as a Tauri resource so semantic search works 100% offline
+      # from first launch — the runtime HF download is only a fallback.
+      - name: Fetch embedding model
+        shell: bash
+        run: python3 scripts/fetch_embedding_model.py
+
       - name: Determine version from tag
         id: version
         shell: bash

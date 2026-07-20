@@ -8,10 +8,13 @@ use tokenizers::Tokenizer;
 struct ModelConfig {
     /// HF repo id, e.g. "Xenova/bge-small-en-v1.5".
     repo: &'static str,
-    /// (remote path relative to `resolve/main/`, local filename in cache_dir).
-    /// Quantized ONNX exports from Xenova live under an `onnx/` subfolder in
-    /// the repo, but we flatten them into cache_dir for simplicity.
-    files: &'static [(&'static str, &'static str)],
+    /// (remote path relative to `resolve/main/`, local filename in cache_dir,
+    /// sha256 hex, size in bytes). Quantized ONNX exports from Xenova live
+    /// under an `onnx/` subfolder in the repo, but we flatten them into
+    /// cache_dir for simplicity. Hash/size pin the exact artifacts the app
+    /// was calibrated with — the fallback download verifies against them
+    /// (keep in sync with scripts/fetch_embedding_model.py).
+    files: &'static [(&'static str, &'static str, &'static str, u64)],
     /// Local filename (from `files`) of the ONNX model, used to check
     /// presence and to load the session.
     model_filename: &'static str,
@@ -30,9 +33,24 @@ struct ModelConfig {
 const BGE_SMALL: ModelConfig = ModelConfig {
     repo: "Xenova/bge-small-en-v1.5",
     files: &[
-        ("onnx/model_quantized.onnx", "model_quantized.onnx"),
-        ("tokenizer.json", "tokenizer.json"),
-        ("config.json", "config.json"),
+        (
+            "onnx/model_quantized.onnx",
+            "model_quantized.onnx",
+            "6c9c6101a956d62dfb5e7190c538226c0c5bb9cb27b651234b6df063ee7dbfe4",
+            34_014_426,
+        ),
+        (
+            "tokenizer.json",
+            "tokenizer.json",
+            "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+            711_396,
+        ),
+        (
+            "config.json",
+            "config.json",
+            "fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350",
+            683,
+        ),
     ],
     model_filename: "model_quantized.onnx",
     tokenizer_filename: "tokenizer.json",
@@ -43,9 +61,24 @@ const BGE_SMALL: ModelConfig = ModelConfig {
 const MINILM_L6: ModelConfig = ModelConfig {
     repo: "Xenova/all-MiniLM-L6-v2",
     files: &[
-        ("onnx/model_quantized.onnx", "model_quantized.onnx"),
-        ("tokenizer.json", "tokenizer.json"),
-        ("config.json", "config.json"),
+        (
+            "onnx/model_quantized.onnx",
+            "model_quantized.onnx",
+            "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1",
+            22_972_370,
+        ),
+        (
+            "tokenizer.json",
+            "tokenizer.json",
+            "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
+            711_661,
+        ),
+        (
+            "config.json",
+            "config.json",
+            "7135149f7cffa1a573466c6e4d8423ed73b62fd2332c575bf738a0d033f70df7",
+            650,
+        ),
     ],
     model_filename: "model_quantized.onnx",
     tokenizer_filename: "tokenizer.json",
@@ -309,7 +342,9 @@ const CHUNK_OVERLAP_LINES: usize = 2;
 /// One embeddable slice of a symbol. Large symbol bodies (big components,
 /// long functions) are split into several chunks so content deep inside them
 /// is searchable — a single mean-pooled vector of the first MAX_BODY_CHARS
-/// can't represent a 300-line component.
+/// can't represent a 300-line component. The `fts_*` fields mirror the same
+/// slice into the chunk_fts BM25 index so both retrieval legs cover
+/// byte-identical units.
 #[derive(Debug, Clone)]
 pub struct EmbedChunk {
     pub chunk_index: i64,
@@ -317,6 +352,12 @@ pub struct EmbedChunk {
     pub start_line: i64,
     pub end_line: i64,
     pub text: String,
+    /// Symbol name plus its split words ("buildChunks build chunks").
+    pub fts_name: String,
+    /// Basename/stem/dir words of the owning file.
+    pub fts_path: String,
+    /// Doc comment + body slice + resolved i18n copy + split camel words.
+    pub fts_body: String,
 }
 
 /// Max chars of resolved i18n copy appended to one chunk's embedding text.
@@ -357,15 +398,54 @@ fn resolve_i18n_keys(slice: &str, dict: &std::collections::HashMap<String, Strin
     out.join(" ")
 }
 
+/// Path-derived terms for the chunk FTS index: basename, stem, split words of
+/// the stem and of the last three parent directories — so "ToolBody.tsx list
+/// rendering" or "tool renderers" match on path evidence alone.
+fn build_fts_path_terms(file_path: &str, basename: &str, stem: &str) -> String {
+    let mut terms: Vec<String> = Vec::new();
+    for t in [basename, stem] {
+        if !t.is_empty() && !terms.iter().any(|x| x == t) {
+            terms.push(t.to_string());
+        }
+    }
+    for w in crate::code_intel::text::split_identifier_words(stem) {
+        if !terms.contains(&w) {
+            terms.push(w);
+        }
+    }
+    let dirs: Vec<String> = Path::new(file_path)
+        .parent()
+        .map(|p| {
+            p.components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(os) => Some(os.to_string_lossy().to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for dir in dirs.iter().rev().take(3) {
+        for w in crate::code_intel::text::split_identifier_words(dir) {
+            if !terms.contains(&w) {
+                terms.push(w);
+            }
+        }
+    }
+    terms.join(" ")
+}
+
 /// Split a symbol into embedding chunks. Line-based and language-agnostic:
 /// works identically for any tree-sitter grammar (and doc sections), since it
 /// only sees the extracted body text. Every chunk repeats the symbol header
 /// (kind/name/context/doc) so it stays anchored to its symbol. When an i18n
 /// dict is given, copy referenced via `t("key")` inside a chunk is resolved
 /// and appended to that chunk's text, so user-visible wording is searchable.
+/// Each chunk also carries `fts_*` mirrors of the same content for the BM25
+/// leg — see EmbedChunk.
 pub fn build_embedding_chunks(
     kind: &str,
     name: &str,
+    file_path: &str,
     parent_context: Option<&str>,
     doc: Option<&str>,
     body: Option<&str>,
@@ -373,20 +453,69 @@ pub fn build_embedding_chunks(
     symbol_end_line: i64,
     i18n: Option<&std::collections::HashMap<String, String>>,
 ) -> Vec<EmbedChunk> {
-    let mut header_parts = vec![format!("{kind}: {name}")];
+    let path = Path::new(file_path);
+    let basename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name_words = crate::code_intel::text::identifier_word_string(name);
+
+    // The split words go into the embed header too: MiniLM's WordPiece
+    // subwords camelCase poorly, and NL queries say "build embedding chunks",
+    // not "buildEmbeddingChunks".
+    let mut header_parts = vec![match &name_words {
+        Some(words) => format!("{kind}: {name} ({words})"),
+        None => format!("{kind}: {name}"),
+    }];
+    if !stem.is_empty() {
+        header_parts.push(format!("file: {stem}"));
+    }
     if let Some(ctx) = parent_context {
         let trimmed = ctx.trim();
         if !trimmed.is_empty() {
             header_parts.push(format!("context: {trimmed}"));
         }
     }
-    if let Some(d) = doc {
-        let trimmed = d.trim();
-        if !trimmed.is_empty() {
-            header_parts.push(trimmed.to_string());
-        }
+    let doc_trimmed = doc.map(str::trim).filter(|d| !d.is_empty());
+    if let Some(d) = doc_trimmed {
+        header_parts.push(d.to_string());
     }
     let header = header_parts.join(" | ");
+
+    let fts_name = match &name_words {
+        Some(words) => format!("{name} {words}"),
+        None => name.to_string(),
+    };
+    let fts_path = build_fts_path_terms(file_path, &basename, &stem);
+    let fts_body_for = |slice: &str, i18n_copy: &str| -> String {
+        let mut out = String::new();
+        if let Some(d) = doc_trimmed {
+            out.push_str(d);
+        }
+        if !slice.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(slice);
+        }
+        if !i18n_copy.is_empty() {
+            out.push('\n');
+            out.push_str(i18n_copy);
+        }
+        let split = crate::code_intel::text::body_split_words(
+            slice,
+            crate::code_intel::text::FTS_BODY_SPLIT_CAP_CHARS,
+        );
+        if !split.is_empty() {
+            out.push('\n');
+            out.push_str(&split);
+        }
+        out
+    };
 
     let body = body.map(str::trim_end).unwrap_or("");
     if body.trim().is_empty() {
@@ -395,6 +524,9 @@ pub fn build_embedding_chunks(
             start_line: symbol_start_line,
             end_line: symbol_end_line,
             text: header,
+            fts_name,
+            fts_path,
+            fts_body: fts_body_for("", ""),
         }];
     }
 
@@ -420,19 +552,23 @@ pub fn build_embedding_chunks(
         let slice = lines[i..j].join("\n");
         let slice = slice.trim();
         if !slice.is_empty() {
+            let i18n_copy = match i18n {
+                Some(dict) => resolve_i18n_keys(slice, dict),
+                None => String::new(),
+            };
             let mut text = format!("{header} | {slice}");
-            if let Some(dict) = i18n {
-                let copy = resolve_i18n_keys(slice, dict);
-                if !copy.is_empty() {
-                    text.push_str(" | i18n: ");
-                    text.push_str(&copy);
-                }
+            if !i18n_copy.is_empty() {
+                text.push_str(" | i18n: ");
+                text.push_str(&i18n_copy);
             }
             chunks.push(EmbedChunk {
                 chunk_index: chunks.len() as i64,
                 start_line: body_first_line + i as i64,
                 end_line: body_first_line + j as i64 - 1,
                 text,
+                fts_name: fts_name.clone(),
+                fts_path: fts_path.clone(),
+                fts_body: fts_body_for(slice, &i18n_copy),
             });
         }
         if j >= lines.len() {
@@ -447,11 +583,21 @@ pub fn build_embedding_chunks(
             start_line: symbol_start_line,
             end_line: symbol_end_line,
             text: header,
+            fts_name,
+            fts_path,
+            fts_body: fts_body_for("", ""),
         });
     }
     chunks
 }
 
+const DOWNLOAD_RETRIES: usize = 3;
+
+/// Runtime fallback download — the normal path is the model bundled as a
+/// Tauri resource (fetched at build time by scripts/fetch_embedding_model.py).
+/// Streams to a `.part` file with an incremental sha256, verifies size+hash
+/// against the pinned values, then atomically renames into place, with
+/// retries — a corrupt or truncated download can never become the cache.
 pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
     if cache_dir.join(ACTIVE_MODEL.model_filename).exists() {
         return Ok(());
@@ -471,38 +617,93 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
 
     let base_url = format!("https://huggingface.co/{}/resolve/main", ACTIVE_MODEL.repo);
 
-    for (remote_path, local_filename) in ACTIVE_MODEL.files {
+    for (remote_path, local_filename, sha256_hex, expected_len) in ACTIVE_MODEL.files {
         let url = format!("{base_url}/{remote_path}");
         let dest = cache_dir.join(local_filename);
         if dest.exists() {
             continue;
         }
 
-        let net_guard = crate::net_activity::NetGuard::begin(
-            crate::net_activity::NetSource::EmbeddingModelDownload,
-            *local_filename,
-        );
-        let client = crate::http::default_client();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("download {local_filename}: {e}"))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("download {local_filename} failed: HTTP {status}"));
+        let mut last_error = String::new();
+        let mut done = false;
+        for attempt in 0..DOWNLOAD_RETRIES {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2 << (attempt - 1))).await;
+            }
+            match download_verified(&url, &dest, local_filename, sha256_hex, *expected_len).await {
+                Ok(()) => {
+                    done = true;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[embeddings] download attempt {} failed: {e}", attempt + 1);
+                    last_error = e;
+                }
+            }
         }
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("read {local_filename}: {e}"))?;
-        net_guard.add_bytes(bytes.len() as u64);
-
-        std::fs::write(&dest, &bytes).map_err(|e| format!("write {local_filename}: {e}"))?;
+        if !done {
+            return Err(format!(
+                "download {local_filename} failed after {DOWNLOAD_RETRIES} attempts: {last_error}. \
+                 If the error is a hash mismatch, the model files changed upstream — \
+                 update the pinned hashes in embeddings.rs and fetch_embedding_model.py."
+            ));
+        }
     }
 
+    Ok(())
+}
+
+async fn download_verified(
+    url: &str,
+    dest: &Path,
+    local_filename: &str,
+    sha256_hex: &str,
+    expected_len: u64,
+) -> Result<(), String> {
+    use futures::StreamExt;
+    use sha2::Digest;
+
+    let net_guard = crate::net_activity::NetGuard::begin(
+        crate::net_activity::NetSource::EmbeddingModelDownload,
+        local_filename,
+    );
+    let client = crate::http::default_client();
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("download {local_filename}: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("download {local_filename} failed: HTTP {status}"));
+    }
+
+    let part_path = dest.with_extension("part");
+    let mut file = std::fs::File::create(&part_path)
+        .map_err(|e| format!("create {}: {e}", part_path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut written: u64 = 0;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read {local_filename}: {e}"))?;
+        std::io::Write::write_all(&mut file, &chunk)
+            .map_err(|e| format!("write {local_filename}: {e}"))?;
+        hasher.update(&chunk);
+        written += chunk.len() as u64;
+        net_guard.add_bytes(chunk.len() as u64);
+    }
+    drop(file);
+
+    let digest = format!("{:x}", hasher.finalize());
+    if written != expected_len || digest != sha256_hex {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(format!(
+            "verification failed for {local_filename}: got {written} bytes sha256 {digest}, \
+             expected {expected_len} bytes sha256 {sha256_hex}"
+        ));
+    }
+    std::fs::rename(&part_path, dest).map_err(|e| format!("finalize {local_filename}: {e}"))?;
     Ok(())
 }
 
@@ -548,7 +749,7 @@ mod tests {
 
     #[test]
     fn small_body_yields_single_chunk_with_symbol_lines() {
-        let chunks = build_embedding_chunks("function", "foo", None, None, Some("let x = 1;"), 10, 10, None);
+        let chunks = build_embedding_chunks("function", "foo", "", None, None, Some("let x = 1;"), 10, 10, None);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].chunk_index, 0);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (10, 10));
@@ -558,7 +759,7 @@ mod tests {
 
     #[test]
     fn no_body_yields_header_only_chunk() {
-        let chunks = build_embedding_chunks("struct", "Config", Some("mod db"), None, None, 5, 8, None);
+        let chunks = build_embedding_chunks("struct", "Config", "", Some("mod db"), None, None, 5, 8, None);
         assert_eq!(chunks.len(), 1);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 8));
         assert_eq!(chunks[0].text, "struct: Config | context: mod db");
@@ -570,7 +771,7 @@ mod tests {
         let body: Vec<String> = (0..100).map(|i| format!("line {i} {}", "x".repeat(32))).collect();
         let body = body.join("\n");
         // Symbol spans lines 50..149 and body covers the whole range.
-        let chunks = build_embedding_chunks("function", "big", None, None, Some(&body), 50, 149, None);
+        let chunks = build_embedding_chunks("function", "big", "", None, None, Some(&body), 50, 149, None);
         assert!(chunks.len() > 2, "expected multiple chunks, got {}", chunks.len());
         assert_eq!(chunks[0].start_line, 50);
         assert_eq!(chunks.last().unwrap().end_line, 149);
@@ -600,7 +801,7 @@ mod tests {
             "let b = NSLocalizedString('app.title', comment: '');\n",
             "let c = other(\"not.a.key\");"
         );
-        let chunks = build_embedding_chunks("function", "Wizard", None, None, Some(body), 1, 3, Some(&dict));
+        let chunks = build_embedding_chunks("function", "Wizard", "", None, None, Some(body), 1, 3, Some(&dict));
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("i18n: "));
         assert!(chunks[0].text.contains("Agent-first coding"));
@@ -608,7 +809,7 @@ mod tests {
         assert!(!chunks[0].text.contains("not.a.key\" resolved"));
 
         // Without a dict, text is unchanged (no i18n marker).
-        let plain = build_embedding_chunks("function", "Wizard", None, None, Some(body), 1, 3, None);
+        let plain = build_embedding_chunks("function", "Wizard", "", None, None, Some(body), 1, 3, None);
         assert!(!plain[0].text.contains("i18n:"));
     }
 
@@ -629,8 +830,34 @@ mod tests {
         // Doc sections: body starts after the heading line, so absolute lines
         // are anchored from end_line (body = last N lines of the range).
         let body = "para one\npara two\npara three";
-        let chunks = build_embedding_chunks("doc_section", "Intro", None, None, Some(body), 4, 7, None);
+        let chunks = build_embedding_chunks("doc_section", "Intro", "", None, None, Some(body), 4, 7, None);
         assert_eq!(chunks.len(), 1);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 7));
+    }
+
+    #[test]
+    fn chunk_headers_and_fts_fields_carry_name_words_and_path() {
+        let chunks = build_embedding_chunks(
+            "function",
+            "buildEmbeddingChunks",
+            "src/code_intel/embeddings.rs",
+            None,
+            Some("Splits symbols"),
+            Some("let toolBody = attachSnippets();"),
+            1,
+            2,
+            None,
+        );
+        assert_eq!(chunks.len(), 1);
+        let c = &chunks[0];
+        assert!(c.text.contains("function: buildEmbeddingChunks (build embedding chunks)"));
+        assert!(c.text.contains("file: embeddings"));
+        assert_eq!(c.fts_name, "buildEmbeddingChunks build embedding chunks");
+        assert!(c.fts_path.contains("embeddings.rs"));
+        assert!(c.fts_path.contains("intel"), "dir words missing: {}", c.fts_path);
+        assert!(c.fts_body.contains("Splits symbols"), "doc missing");
+        assert!(c.fts_body.contains("attachSnippets"), "raw body missing");
+        assert!(c.fts_body.contains("tool body"), "split words missing: {}", c.fts_body);
+        assert!(c.fts_body.contains("attach snippets"));
     }
 }

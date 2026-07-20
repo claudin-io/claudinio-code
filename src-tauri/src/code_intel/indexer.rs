@@ -169,6 +169,42 @@ fn should_embed_symbol(kind: &str, name: &str, embedding_text: &str) -> bool {
     true
 }
 
+/// Files larger than this are recorded (path/hash) but never parsed or
+/// embedded — above it, content is dominated by generated bundles and data
+/// dumps whose "symbols" are noise and whose parse/embed cost is unbounded.
+pub const MAX_INDEXED_FILE_BYTES: u64 = 1_500_000;
+
+/// Generated/minified output detection: a sizeable file whose average line
+/// length exceeds this is bundler output, not hand-written code.
+const MINIFIED_MIN_BYTES: usize = 50_000;
+const MINIFIED_AVG_LINE_LEN: usize = 300;
+
+fn is_probably_minified(content: &str) -> bool {
+    content.len() >= MINIFIED_MIN_BYTES
+        && content.len() / content.lines().count().max(1) > MINIFIED_AVG_LINE_LEN
+}
+
+/// Record a file we deliberately do not index: the row keeps the hash-skip
+/// and prune machinery working, old symbols/chunks are purged, and
+/// embed_hash is set so the file never counts as embedding-pending.
+/// grep/read_file still reach these files — only the index skips them.
+fn record_unindexed_file(
+    db: &IndexDb,
+    path: &str,
+    lang: &str,
+    hash: &str,
+    size: i64,
+) -> Result<(), String> {
+    let modified = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let file_id = db.upsert_file(path, lang, hash, modified, size)?;
+    db.delete_symbols_for_file(file_id)?;
+    let _ = db.set_embed_hash(file_id, hash);
+    Ok(())
+}
+
 pub fn index_file(
     db: &IndexDb,
     path: &str,
@@ -178,6 +214,16 @@ pub fn index_file(
 ) -> Result<ParseResult, String> {
     let lang = parser::detect_language(path).unwrap_or("unknown");
     let hash = compute_hash(content);
+
+    if content.len() as u64 > MAX_INDEXED_FILE_BYTES || is_probably_minified(content) {
+        record_unindexed_file(db, path, lang, &hash, content.len() as i64)?;
+        return Ok(ParseResult {
+            language: lang.into(),
+            symbols: vec![],
+            calls: vec![],
+            error: None,
+        });
+    }
     let modified = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -223,10 +269,10 @@ pub fn index_file(
         }
     }
 
-    db.update_fts_for_file(file_id)?;
+    let chunks = collect_embedding_chunks(&parse_result.symbols, &symbol_ids, path, i18n);
+    store_chunks(db, &chunks);
 
     if let Some(ref mut emb) = embedder {
-        let chunks = collect_embedding_chunks(&parse_result.symbols, &symbol_ids, i18n);
         encode_and_store_batched(db, emb, &chunks);
         let _ = db.set_embed_hash(file_id, &hash);
     }
@@ -240,6 +286,7 @@ pub fn index_file(
 fn collect_embedding_chunks(
     symbols: &[parser::ParsedSymbol],
     symbol_ids: &[(String, i64)],
+    file_path: &str,
     i18n: Option<&I18nDict>,
 ) -> Vec<(i64, EmbedChunk)> {
     let mut out: Vec<(i64, EmbedChunk)> = Vec::new();
@@ -257,6 +304,7 @@ fn collect_embedding_chunks(
         for chunk in build_embedding_chunks(
             &sym.kind,
             &sym.name,
+            file_path,
             sym.parent_context.as_deref(),
             sym.doc_comment.as_deref(),
             sym.body_text.as_deref(),
@@ -270,6 +318,24 @@ fn collect_embedding_chunks(
     out
 }
 
+/// Persist retrieval chunks (embed text + BM25 mirror). Runs at scan time,
+/// with or without an embedder — this is what makes keyword search available
+/// while the background embedding pass is still catching up.
+fn store_chunks(db: &IndexDb, chunks: &[(i64, EmbedChunk)]) {
+    for (sid, c) in chunks {
+        let _ = db.insert_chunk(
+            *sid,
+            c.chunk_index,
+            c.start_line,
+            c.end_line,
+            &c.text,
+            &c.fts_name,
+            &c.fts_path,
+            &c.fts_body,
+        );
+    }
+}
+
 pub fn index_doc_file(
     db: &IndexDb,
     path: &str,
@@ -279,6 +345,11 @@ pub fn index_doc_file(
 ) -> Result<usize, String> {
     let lang = parser::detect_doc_language(path).unwrap_or("markdown");
     let hash = compute_hash(content);
+
+    if content.len() as u64 > MAX_INDEXED_FILE_BYTES || is_probably_minified(content) {
+        record_unindexed_file(db, path, lang, &hash, content.len() as i64)?;
+        return Ok(0);
+    }
     let modified = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -306,10 +377,12 @@ pub fn index_doc_file(
         symbol_ids.push((sym.name.clone(), id));
     }
 
+    // Doc symbols carry no doc_comment (the body is the content), so the
+    // shared chunk collector works for them unchanged.
+    let chunks = collect_embedding_chunks(&doc_symbols, &symbol_ids, path, i18n);
+    store_chunks(db, &chunks);
+
     if let Some(ref mut emb) = embedder {
-        // Doc symbols carry no doc_comment (the body is the content), so the
-        // shared chunk collector works for them unchanged.
-        let chunks = collect_embedding_chunks(&doc_symbols, &symbol_ids, i18n);
         encode_and_store_batched(db, emb, &chunks);
         let _ = db.set_embed_hash(file_id, &hash);
     }
@@ -340,14 +413,10 @@ pub fn scan_workspace(
     mut embedder: Option<&mut CodeEmbedder>,
     progress_channel: Option<&Channel<IndexProgress>>,
     shared_progress: Option<&std::sync::Mutex<Option<IndexProgress>>>,
-) -> Result<(i64, i64, std::collections::HashMap<String, String>), String> {
+) -> Result<(i64, i64), String> {
     let mut total_files = 0i64;
     let mut total_symbols = 0i64;
     let mut counted = 0i64;
-    // Content of files (re)parsed this scan, handed to the embedding phase so
-    // it doesn't read every file a second time (expensive on network drives).
-    let mut scanned_content: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
 
     // Resolved once per scan; empty when the project has no locale resources,
     // in which case chunk texts are unchanged.
@@ -392,6 +461,32 @@ pub fn scan_workspace(
     }
 
     for path_str in &all_paths {
+        // Oversized files are recorded without ever being read — the
+        // metadata-derived hash keeps the skip/prune machinery working.
+        if let Ok(meta) = std::fs::metadata(path_str) {
+            if meta.len() > MAX_INDEXED_FILE_BYTES {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let hash = format!("oversized:{}:{}", meta.len(), mtime);
+                let already = db
+                    .file_by_path(path_str)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|f| f.hash.as_deref() == Some(hash.as_str()));
+                if !already {
+                    let lang = parser::detect_language(path_str).unwrap_or("unknown");
+                    let _ = record_unindexed_file(db, path_str, lang, &hash, meta.len() as i64);
+                }
+                total_files += 1;
+                counted += 1;
+                continue;
+            }
+        }
+
         let content = match std::fs::read_to_string(path_str) {
             Ok(c) => c,
             Err(_) => continue,
@@ -426,7 +521,6 @@ pub fn scan_workspace(
                 total_files += 1;
             }
         }
-        scanned_content.insert(path_str.clone(), content);
 
         counted += 1;
         if counted % 10 == 0 {
@@ -485,6 +579,23 @@ pub fn scan_workspace(
     }
 
     for path_str in &doc_paths {
+        // Same oversized guard as the code pass (huge .txt logs exist).
+        if let Ok(meta) = std::fs::metadata(path_str) {
+            if meta.len() > MAX_INDEXED_FILE_BYTES {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let hash = format!("oversized:{}:{}", meta.len(), mtime);
+                let lang = parser::detect_doc_language(path_str).unwrap_or("markdown");
+                let _ = record_unindexed_file(db, path_str, lang, &hash, meta.len() as i64);
+                total_files += 1;
+                continue;
+            }
+        }
+
         let content = match std::fs::read_to_string(path_str) {
             Ok(c) => c,
             Err(_) => continue,
@@ -499,7 +610,6 @@ pub fn scan_workspace(
                 total_files += 1;
             }
         }
-        scanned_content.insert(path_str.clone(), content);
     }
 
     // Drop rows for files no longer in the scan set (deleted files, or junk
@@ -529,7 +639,7 @@ pub fn scan_workspace(
         let _ = sp.lock().map(|mut guard| *guard = Some(done_progress));
     }
 
-    Ok((total_files, total_symbols, scanned_content))
+    Ok((total_files, total_symbols))
 }
 
 pub fn generate_all_embeddings(
@@ -537,17 +647,12 @@ pub fn generate_all_embeddings(
     embedder: &SharedEmbedder,
     app_handle: Option<&tauri::AppHandle>,
     workspace: &str,
-    // By value: entries are removed as they are consumed so the full-corpus
-    // text does not stay resident for the whole (long) embedding phase.
-    mut content_cache: std::collections::HashMap<String, String>,
 ) -> Result<(i64, i64), String> {
     let files = db.all_files()?;
     let total = files.len() as i64;
     let mut processed = 0i64;
     let mut total_embeddings = 0i64;
     let mut failed = 0i64;
-    let i18n_dict = load_i18n_dict(workspace);
-    let i18n = if i18n_dict.is_empty() { None } else { Some(&i18n_dict) };
 
     for file in &files {
         processed += 1;
@@ -559,115 +664,57 @@ pub fn generate_all_embeddings(
             continue;
         }
 
-        // Prefer content already read during the scan — re-reading every file
-        // here doubled the I/O, which is brutal on network-drive workspaces.
-        let content = match content_cache.remove(&file.path) {
-            Some(c) => c,
-            None => match std::fs::read_to_string(&file.path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            },
-        };
+        // Chunks were persisted at scan time from the exact content `hash`
+        // describes — no re-read or re-parse here (that doubled the I/O,
+        // which is brutal on network-drive workspaces, and needed fragile
+        // identity-matching of parsed symbols back to DB rows).
+        let chunks = db.chunks_for_file(file.id)?;
 
-        // Delete old embeddings for this file so stale symbols don't linger
+        // Delete old embeddings for this file so stale chunks don't linger.
         let _ = db.delete_embeddings_for_file(file.id);
 
-        // For doc files, use parse_doc_file; for code files, use tree-sitter parser
-        let symbols: Vec<parser::ParsedSymbol> = if file.language.as_deref() == Some("markdown")
-            || file.language.as_deref() == Some("text")
-        {
-            parser::parse_doc_file(&file.path, &content)
-        } else {
-            let parse_result = parser::parse_file(&file.path, &content);
-            if parse_result.error.is_some() {
-                continue;
-            }
-            parse_result.symbols
-        };
-
-        // Skip low-signal symbols (imports, tiny property signatures, generic
-        // names), then split survivors into line-based chunks. Chunks stay
-        // paired with their parsed symbol so the DB-row lookup below matches
-        // by identity, not position.
-        let filtered: Vec<(&parser::ParsedSymbol, EmbedChunk)> = symbols
-            .iter()
-            .filter(|sym| {
-                let gate_text = build_embedding_text(
-                    &sym.kind,
-                    &sym.name,
-                    sym.parent_context.as_deref(),
-                    sym.doc_comment.as_deref(),
-                    sym.body_text.as_deref(),
-                );
-                should_embed_symbol(&sym.kind, &sym.name, &gate_text)
-            })
-            .flat_map(|sym| {
-                build_embedding_chunks(
-                    &sym.kind,
-                    &sym.name,
-                    sym.parent_context.as_deref(),
-                    sym.doc_comment.as_deref(),
-                    sym.body_text.as_deref(),
-                    sym.start_line,
-                    sym.end_line,
-                    i18n,
-                )
-                .into_iter()
-                .map(move |c| (sym, c))
-            })
-            .collect();
-
         let mut encode_failed = false;
-        if !filtered.is_empty() {
-            let db_symbols = db.symbols_in_file(&file.path)?;
-            // Encode in small batches, locking per batch, so the watcher and
-            // semantic_search never wait long and memory stays bounded.
-            for chunk in filtered.chunks(EMBED_BATCH_SIZE) {
-                let str_refs: Vec<&str> = chunk.iter().map(|(_, c)| c.text.as_str()).collect();
-                let vectors = {
-                    let mut emb = match embedder.lock() {
-                        Ok(g) => g,
-                        Err(e) => return Err(format!("embedder lock poisoned: {e}")),
-                    };
-                    emb.encode(&str_refs)
+        // Encode in small batches, locking per batch, so the watcher and
+        // semantic_search never wait long and memory stays bounded.
+        for batch in chunks.chunks(EMBED_BATCH_SIZE) {
+            let str_refs: Vec<&str> = batch.iter().map(|c| c.embed_text.as_str()).collect();
+            let vectors = {
+                let mut emb = match embedder.lock() {
+                    Ok(g) => g,
+                    Err(e) => return Err(format!("embedder lock poisoned: {e}")),
                 };
-                match vectors {
-                    Ok(vectors) => {
-                        for ((sym, c), vec) in chunk.iter().zip(vectors.iter()) {
-                            // Match parsed symbols to DB rows by identity, not position.
-                            let row = db_symbols.iter().find(|r| {
-                                r.name == sym.name
-                                    && r.kind == sym.kind
-                                    && r.start_line == sym.start_line
-                            });
-                            if let Some(row) = row {
-                                if db
-                                    .upsert_embedding(row.id, c.chunk_index, c.start_line, c.end_line, vec)
-                                    .is_ok()
-                                {
-                                    total_embeddings += 1;
-                                }
-                            }
+                emb.encode(&str_refs)
+            };
+            match vectors {
+                Ok(vectors) => {
+                    for (c, vec) in batch.iter().zip(vectors.iter()) {
+                        if db
+                            .upsert_embedding(c.symbol_id, c.chunk_index, c.start_line, c.end_line, vec)
+                            .is_ok()
+                        {
+                            total_embeddings += 1;
                         }
                     }
-                    Err(e) => {
-                        failed += 1;
-                        encode_failed = true;
-                        eprintln!("[embeddings] encode failed for {}: {e}", file.path);
-                        break;
-                    }
                 }
-                // Breathe between batches so the UI process isn't starved on
-                // low-core machines during a long initial index.
-                std::thread::sleep(std::time::Duration::from_millis(30));
+                Err(e) => {
+                    failed += 1;
+                    encode_failed = true;
+                    eprintln!("[embeddings] encode failed for {}: {e}", file.path);
+                    break;
+                }
             }
+            // Breathe between batches so the UI process isn't starved on
+            // low-core machines during a long initial index.
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
 
         // Only mark this file's content as "embedded" if nothing failed —
-        // otherwise a transient encode error would permanently skip it.
+        // otherwise a transient encode error would permanently skip it. The
+        // stored hash is the scan-time content hash the chunks came from.
         if !encode_failed {
-            let hash = compute_hash(&content);
-            let _ = db.set_embed_hash(file.id, &hash);
+            if let Some(ref hash) = file.hash {
+                let _ = db.set_embed_hash(file.id, hash);
+            }
         }
 
         if processed % 10 == 0 {
@@ -701,8 +748,7 @@ pub fn reindex_file(
         Ok(c) => c,
         Err(_) => {
             if existing.is_some() {
-                let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                let _ = conn.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path]);
+                let _ = db.delete_file(path);
             }
             return Ok(None);
         }
@@ -733,6 +779,33 @@ pub fn reindex_file(
 
     let result = index_file(db, path, &content, embedder, i18n).ok();
     Ok(result)
+}
+
+#[cfg(test)]
+mod size_cap_tests {
+    use super::*;
+
+    #[test]
+    fn minified_content_detected() {
+        // One enormous line -> minified; normal multi-line code -> not.
+        let minified = "var a=1;".repeat(10_000);
+        assert!(is_probably_minified(&minified));
+        let normal: String = (0..2_000).map(|i| format!("let line_{i} = {i};\n")).collect();
+        assert!(!is_probably_minified(&normal));
+        // Small files never trip the heuristic, however dense.
+        assert!(!is_probably_minified("x".repeat(1_000).as_str()));
+    }
+
+    #[test]
+    fn minified_file_indexed_without_symbols_or_pending() {
+        let db = IndexDb::open(std::path::Path::new(":memory:")).unwrap();
+        let minified = format!("var x=[{}];", "1,".repeat(40_000));
+        let result = index_file(&db, "dist-like/bundle.js", &minified, None, None).unwrap();
+        assert!(result.symbols.is_empty());
+        let file = db.file_by_path("dist-like/bundle.js").unwrap().unwrap();
+        assert_eq!(file.hash, file.embed_hash, "must not count as embedding-pending");
+        assert!(db.symbols_in_file("dist-like/bundle.js").unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -58,19 +58,70 @@ pub struct SemanticSearchResult {
     pub end_line: i64,
     pub signature: Option<String>,
     pub score: f32,
+    /// Which retrieval evidence produced this hit: "hybrid" (both legs),
+    /// "semantic" (vector only), or "lexical" (BM25 only).
+    pub match_type: String,
     /// Source excerpt of the symbol, filled in by the tool layer for top hits.
     pub snippet: Option<String>,
 }
 
+/// One persisted retrieval chunk, as fed to the embedding pass.
+#[derive(Debug, Clone)]
+pub struct StoredChunk {
+    pub symbol_id: i64,
+    pub chunk_index: i64,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub embed_text: String,
+}
+
 /// Bump when the index format changes (schema, embedding layout, ignore
 /// rules). A mismatched on-disk index is deleted and rebuilt from scratch.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
-/// Minimum final score (cosine similarity + lexical boost, clamped to
-/// [0, 1]) for a semantic search hit to be returned at all. Calibrated
-/// empirically against bge-small/MiniLM-class 384-dim embeddings — tune if
-/// the embedding model changes and score distributions shift.
-const MIN_SEMANTIC_SCORE: f32 = 0.35;
+/// Tuning knobs for `search_hybrid_with`. `Default` holds the production
+/// values, calibrated with `examples/semantic_eval.rs --sweep` — re-run the
+/// sweep before changing any of them by hand.
+#[derive(Debug, Clone)]
+pub struct HybridParams {
+    /// RRF smoothing constant: higher flattens the rank curve.
+    pub rrf_k: f32,
+    /// Leg weights in the fused score.
+    pub w_vector: f32,
+    pub w_bm25: f32,
+    /// Candidates kept per leg (best chunk per symbol) before fusion.
+    pub k_candidates: usize,
+    /// Entry gate for the vector leg: chunks below this raw cosine never
+    /// become candidates. Off-topic queries score ~0.36-0.44 against random
+    /// code on MiniLM-class models — do not lower this; BM25 rescues the
+    /// relevant hits that sit in that band (sweep 2026-07-20: 0.40 kept
+    /// top-3/top-15 intact while halving negative-query leaks vs 0.35).
+    pub min_cosine_candidate: f32,
+    /// Final gate on the fused+boosted score, in the same [0, 1] range the
+    /// old cosine threshold used.
+    pub min_hybrid_score: f32,
+    /// Floor of distinct query tokens a BM25-only hit must contain (see
+    /// `required_token_matches`).
+    pub min_bm25_term_matches: usize,
+}
+
+impl Default for HybridParams {
+    // Calibrated with `semantic_eval --sweep` on 2026-07-20 (59 positives /
+    // 5 negatives from real sessions): top-1 67%, top-3 91%, top-15 98%,
+    // exact-identifier/basename/body-term 100% top-1, negatives 3/5 empty
+    // (the two leaks are genuine repo-vocabulary collisions, scored low).
+    fn default() -> Self {
+        HybridParams {
+            rrf_k: 60.0,
+            w_vector: 1.0,
+            w_bm25: 1.0,
+            k_candidates: 50,
+            min_cosine_candidate: 0.40,
+            min_hybrid_score: 0.35,
+            min_bm25_term_matches: 2,
+        }
+    }
+}
 
 /// Doc sections (markdown headings) embed dense natural language, so they
 /// consistently out-score code symbols on NL queries; this penalty keeps them
@@ -97,6 +148,102 @@ fn tokenize_query(query_text: &str) -> Vec<String> {
         .map(|t| t.to_lowercase())
         .filter(|t| t.len() >= 3 && !STOPWORDS.contains(&t.as_str()))
         .collect()
+}
+
+/// Max quoted terms in a MATCH expression — queries are short NL phrases;
+/// beyond this, OR-recall only adds noise and cost.
+const MAX_FTS_TERMS: usize = 12;
+
+/// Standalone words dropped from FTS queries. Identifier runs (containing
+/// `_`/`-`/`.`) are never filtered — "for" inside delete_symbols_for_file
+/// stays part of the phrase.
+const FTS_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "this", "that", "does", "how", "what",
+    "where", "when", "which", "code", "file",
+];
+
+/// BM25 column weights for chunk_fts (fts_name, fts_path, fts_body): a term
+/// hit on the symbol name outweighs one on the path, which outweighs one in
+/// the body.
+const BM25_W_NAME: f64 = 3.0;
+const BM25_W_PATH: f64 = 2.0;
+const BM25_W_BODY: f64 = 1.0;
+
+/// Build a safe FTS5 MATCH expression from free text. Runs of
+/// `[A-Za-z0-9_.-]` are extracted, stopwords and 1-char runs dropped, each
+/// run double-quoted (internal quotes doubled) so FTS5 operators (AND, OR,
+/// NOT, NEAR, `*`, `^`, `-`, `:`) can never be injected, then joined with OR
+/// for recall — BM25 ranking rewards multi-term hits, so OR does not flood
+/// the top ranks. Quoted runs containing `_`/`-`/`.` tokenize into phrases,
+/// which is what makes "delete_symbols_for_file" an exact adjacency match.
+/// Returns None when nothing usable survives.
+fn build_fts_match_query(query_text: &str) -> Option<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for raw in query_text.split(|c: char| !(c.is_alphanumeric() || "_-.".contains(c))) {
+        let run = raw.trim_matches(|c: char| "_-.".contains(c));
+        if run.chars().count() < 2 {
+            continue;
+        }
+        let is_identifier = run.contains('_') || run.contains('-') || run.contains('.');
+        if !is_identifier && FTS_STOPWORDS.contains(&run.to_lowercase().as_str()) {
+            continue;
+        }
+        let quoted = format!("\"{}\"", run.replace('"', "\"\""));
+        if !terms.contains(&quoted) {
+            terms.push(quoted);
+        }
+        if terms.len() >= MAX_FTS_TERMS {
+            break;
+        }
+    }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
+/// Distinct query tokens a BM25-only hit must contain to survive. Floored at
+/// `min_matches` (capped by the token count, so single-token exact-term
+/// queries work) and raised to a majority for long NL queries — one
+/// incidental common word can't drag junk in via OR-recall.
+fn required_token_matches(n_tokens: usize, min_matches: usize) -> usize {
+    min_matches.min(n_tokens).max(n_tokens.div_ceil(2)).max(1)
+}
+
+/// One candidate from a retrieval leg, reduced to the best chunk per symbol.
+struct LegHit {
+    symbol_id: i64,
+    name: String,
+    kind: String,
+    signature: Option<String>,
+    file_path: String,
+    sym_start_line: i64,
+    sym_end_line: i64,
+    chunk_start: i64,
+    chunk_end: i64,
+    /// Raw cosine (vector leg only; 0.0 for BM25 hits) — ordering only.
+    cosine: f32,
+    /// Concatenated fts_* text (BM25 leg only) for the evidence gate.
+    fts_text: String,
+}
+
+/// True when a hit found only by BM25 has enough lexical evidence to stand
+/// without vector support: an exact name/basename/stem token, or at least
+/// `required` distinct query tokens present as whole words in its FTS text.
+fn bm25_only_hit_has_evidence(tokens: &[String], hit: &LegHit, required: usize) -> bool {
+    let (base, stem) = basename_variants(&hit.file_path);
+    let name_lower = hit.name.to_lowercase();
+    if tokens.iter().any(|t| *t == name_lower || *t == base || *t == stem) {
+        return true;
+    }
+    let words: std::collections::HashSet<String> = hit
+        .fts_text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    tokens.iter().filter(|t| words.contains(t.as_str())).count() >= required
 }
 
 /// Returns the file's basename, with and without its extension.
@@ -197,8 +344,11 @@ impl IndexDb {
             conn = Connection::open(db_path).map_err(|e| format!("db reopen: {e}"))?;
         }
 
+        // recursive_triggers: without it, the internal DELETE half of an
+        // INSERT OR REPLACE does not fire delete triggers, which would leave
+        // ghost rows in the external-content FTS tables kept in sync below.
         conn.execute_batch(&format!(
-            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA user_version={SCHEMA_VERSION};"
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA user_version={SCHEMA_VERSION};"
         ))
         .map_err(|e| format!("pragma: {e}"))?;
         let db = IndexDb {
@@ -259,29 +409,72 @@ impl IndexDb {
                 PRIMARY KEY(symbol_id, chunk_index),
                 FOREIGN KEY(symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS symbol_chunks (
+                id INTEGER PRIMARY KEY,
+                symbol_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                start_line INTEGER NOT NULL DEFAULT 0,
+                end_line INTEGER NOT NULL DEFAULT 0,
+                embed_text TEXT NOT NULL,
+                fts_name TEXT NOT NULL DEFAULT '',
+                fts_path TEXT NOT NULL DEFAULT '',
+                fts_body TEXT NOT NULL DEFAULT '',
+                UNIQUE(symbol_id, chunk_index),
+                FOREIGN KEY(symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_symbol_chunks_symbol ON symbol_chunks(symbol_id);
             ",
         )
         .map_err(|e| format!("schema: {e}"))?;
 
-        let has_fts: bool = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='symbols_fts'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
+        // symbols_fts is the complete name/signature directory (covers
+        // non-embeddable symbols like imports for code_search); chunk_fts
+        // covers exactly the retrieval units embeddings cover, enriched with
+        // path and split-identifier words, and backs the BM25 leg of hybrid
+        // search. unicode61 note: `_`/`-`/`.` are separators, so quoted
+        // snake/kebab/dotted terms become adjacency-preserving phrases at
+        // query time; camelCase stays one token, which is why split words are
+        // stored explicitly in fts_name/fts_body.
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+                name, signature,
+                content='symbols',
+                content_rowid='id'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+                fts_name, fts_path, fts_body,
+                content='symbol_chunks',
+                content_rowid='id',
+                tokenize='unicode61 remove_diacritics 2'
+            );",
+        )
+        .map_err(|e| format!("fts5: {e}"))?;
 
-        if !has_fts {
-            conn.execute_batch(
-                "CREATE VIRTUAL TABLE symbols_fts USING fts5(
-                    name, signature,
-                    content='symbols',
-                    content_rowid='id'
-                );",
-            )
-            .map_err(|e| format!("fts5: {e}"))?;
-        }
+        // Triggers keep the external-content FTS tables in lockstep with
+        // their content tables, so no Rust code path can forget the FTS side
+        // (the v6 index leaked stale symbols_fts rows on incremental
+        // reindex). Deletes must be explicit statements — cascades are not
+        // relied on (see delete_symbols_for_file / delete_file).
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+                INSERT INTO symbols_fts(rowid, name, signature)
+                VALUES (new.id, new.name, new.signature);
+            END;
+            CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+                INSERT INTO symbols_fts(symbols_fts, rowid, name, signature)
+                VALUES ('delete', old.id, old.name, old.signature);
+            END;
+            CREATE TRIGGER IF NOT EXISTS symbol_chunks_ai AFTER INSERT ON symbol_chunks BEGIN
+                INSERT INTO chunk_fts(rowid, fts_name, fts_path, fts_body)
+                VALUES (new.id, new.fts_name, new.fts_path, new.fts_body);
+            END;
+            CREATE TRIGGER IF NOT EXISTS symbol_chunks_ad AFTER DELETE ON symbol_chunks BEGIN
+                INSERT INTO chunk_fts(chunk_fts, rowid, fts_name, fts_path, fts_body)
+                VALUES ('delete', old.id, old.fts_name, old.fts_path, old.fts_body);
+            END;",
+        )
+        .map_err(|e| format!("fts triggers: {e}"))?;
 
         Ok(())
     }
@@ -366,8 +559,11 @@ impl IndexDb {
                 .map_err(|e| format!("prune file: {e}"))?;
         }
         if !stale_ids.is_empty() {
-            // External-content FTS keeps ghost rows after cascade deletes.
+            // These prune deletes cascade files -> symbols -> chunks, and
+            // cascades don't reliably fire the FTS triggers — rebuild both
+            // external-content indexes from their content tables (self-heal).
             let _ = conn.execute("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')", []);
+            let _ = conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')", []);
         }
         Ok(stale_ids.len() as i64)
     }
@@ -399,8 +595,25 @@ impl IndexDb {
             .map_err(|e| format!("delete relations: {e}"))?;
         conn.execute("DELETE FROM symbol_embeddings WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)", params![file_id])
             .map_err(|e| format!("delete embeddings: {e}"))?;
+        // Explicit deletes (not cascades) so the AFTER DELETE triggers fire
+        // and purge the external-content FTS rows deterministically.
+        conn.execute("DELETE FROM symbol_chunks WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)", params![file_id])
+            .map_err(|e| format!("delete chunks: {e}"))?;
         conn.execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])
             .map_err(|e| format!("delete symbols: {e}"))?;
+        Ok(())
+    }
+
+    /// Remove a file and everything derived from it. Symbols/chunks are
+    /// deleted explicitly first so FTS triggers fire — the FK cascade from
+    /// `files` is only a safety net, not the mechanism.
+    pub fn delete_file(&self, path: &str) -> Result<(), String> {
+        if let Some(file) = self.file_by_path(path)? {
+            self.delete_symbols_for_file(file.id)?;
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM files WHERE path = ?1", params![path])
+            .map_err(|e| format!("delete file: {e}"))?;
         Ok(())
     }
 
@@ -437,18 +650,12 @@ impl IndexDb {
         Ok(())
     }
 
-    pub fn update_fts_for_file(&self, file_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO symbols_fts(rowid, name, signature)
-             SELECT id, name, signature FROM symbols WHERE file_id = ?1",
-            params![file_id],
-        )
-        .map_err(|e| format!("update fts: {e}"))?;
-        Ok(())
-    }
-
     pub fn search_symbols(&self, query: &str, limit: i64) -> Result<Vec<SearchResult>, String> {
+        // Raw agent/user text goes through the sanitizing builder — FTS5
+        // operator characters in a query used to be a syntax error here.
+        let Some(match_query) = build_fts_match_query(query) else {
+            return Ok(vec![]);
+        };
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -462,7 +669,7 @@ impl IndexDb {
             )
             .map_err(|e| format!("prepare search: {e}"))?;
         let results = stmt
-            .query_map(params![query, limit], |row| {
+            .query_map(params![match_query, limit], |row| {
                 Ok(SearchResult {
                     symbol_id: row.get(0)?,
                     name: row.get(1)?,
@@ -473,6 +680,37 @@ impl IndexDb {
                 })
             })
             .map_err(|e| format!("query search: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
+    /// Exact (case-insensitive) symbol-name lookup — the contract
+    /// symbol_lookup advertises, distinct from tokenized FTS matching.
+    pub fn lookup_symbols_exact(&self, name: &str, limit: i64) -> Result<Vec<SearchResult>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.name, s.kind, f.path, s.start_line, s.signature
+                 FROM symbols s
+                 JOIN files f ON f.id = s.file_id
+                 WHERE s.name = ?1 COLLATE NOCASE
+                 ORDER BY f.path, s.start_line
+                 LIMIT ?2",
+            )
+            .map_err(|e| format!("prepare lookup: {e}"))?;
+        let results = stmt
+            .query_map(params![name, limit], |row| {
+                Ok(SearchResult {
+                    symbol_id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    file_path: row.get(3)?,
+                    start_line: row.get(4)?,
+                    signature: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("query lookup: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(results)
@@ -543,6 +781,59 @@ impl IndexDb {
                 })
             })
             .map_err(|e| format!("query: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
+    /// Insert one retrieval chunk. Plain INSERT by design: callers always run
+    /// `delete_symbols_for_file` first, and REPLACE would route the implicit
+    /// delete around the FTS trigger on setups without recursive_triggers.
+    pub fn insert_chunk(
+        &self,
+        symbol_id: i64,
+        chunk_index: i64,
+        start_line: i64,
+        end_line: i64,
+        embed_text: &str,
+        fts_name: &str,
+        fts_path: &str,
+        fts_body: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO symbol_chunks (symbol_id, chunk_index, start_line, end_line, embed_text, fts_name, fts_path, fts_body)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![symbol_id, chunk_index, start_line, end_line, embed_text, fts_name, fts_path, fts_body],
+        )
+        .map_err(|e| format!("insert chunk: {e}"))?;
+        Ok(())
+    }
+
+    /// Stored retrieval chunks for one file, feeding the background embedding
+    /// pass — no re-read or re-parse of the source file is needed.
+    pub fn chunks_for_file(&self, file_id: i64) -> Result<Vec<StoredChunk>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.symbol_id, c.chunk_index, c.start_line, c.end_line, c.embed_text
+                 FROM symbol_chunks c
+                 JOIN symbols s ON s.id = c.symbol_id
+                 WHERE s.file_id = ?1
+                 ORDER BY c.symbol_id, c.chunk_index",
+            )
+            .map_err(|e| format!("prepare chunks: {e}"))?;
+        let results = stmt
+            .query_map(params![file_id], |row| {
+                Ok(StoredChunk {
+                    symbol_id: row.get(0)?,
+                    chunk_index: row.get(1)?,
+                    start_line: row.get(2)?,
+                    end_line: row.get(3)?,
+                    embed_text: row.get(4)?,
+                })
+            })
+            .map_err(|e| format!("query chunks: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(results)
@@ -676,18 +967,15 @@ impl IndexDb {
         Ok(results)
     }
 
-    pub fn search_by_embedding(
+    /// Vector leg: paginated cosine scan of every embedded chunk, gated at
+    /// `min_cosine`, reduced to the best chunk per symbol, ranked by cosine.
+    fn vector_leg_candidates(
         &self,
-        query_text: &str,
         query_vec: &[f32],
-        limit: usize,
-    ) -> Result<Vec<SemanticSearchResult>, String> {
-        let tokens = tokenize_query(query_text);
-        // Score every chunk via a paginated scan, then keep only the best
-        // chunk per symbol so a long function split into many chunks still
-        // yields one result — pointed at the chunk's line range, not the
-        // whole symbol.
-        let mut best_per_symbol: std::collections::HashMap<i64, SemanticSearchResult> =
+        min_cosine: f32,
+        k: usize,
+    ) -> Result<Vec<LegHit>, String> {
+        let mut best_per_symbol: std::collections::HashMap<i64, LegHit> =
             std::collections::HashMap::new();
         let mut offset: i64 = 0;
         loop {
@@ -702,56 +990,225 @@ impl IndexDb {
                 }
                 let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
                 let cosine = dot.max(0.0).min(1.0);
-                let file_path = sym.file_path.unwrap_or_default();
-                let boost = lexical_boost(&tokens, &sym.name, &file_path);
-                let mut penalty = if sym.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
-                if is_test_file(&file_path) || is_test_symbol(&sym.name) {
-                    penalty += TEST_FILE_PENALTY;
-                }
-                let score = (cosine + boost - penalty).clamp(0.0, 1.0);
-                if score < MIN_SEMANTIC_SCORE {
+                if cosine < min_cosine {
                     continue;
                 }
-                let (start_line, end_line) = if chunk_start > 0 {
-                    (chunk_start, chunk_end)
-                } else {
-                    (sym.start_line, sym.end_line)
-                };
-                let candidate = SemanticSearchResult {
+                let hit = LegHit {
                     symbol_id: sym.id,
                     name: sym.name,
                     kind: sym.kind,
-                    file_path,
-                    start_line,
-                    end_line,
                     signature: sym.signature,
-                    score,
-                    snippet: None,
+                    file_path: sym.file_path.unwrap_or_default(),
+                    sym_start_line: sym.start_line,
+                    sym_end_line: sym.end_line,
+                    chunk_start,
+                    chunk_end,
+                    cosine,
+                    fts_text: String::new(),
                 };
-                match best_per_symbol.entry(sym.id) {
+                match best_per_symbol.entry(hit.symbol_id) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {
-                        if candidate.score > e.get().score {
-                            e.insert(candidate);
+                        if hit.cosine > e.get().cosine {
+                            e.insert(hit);
                         }
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(candidate);
+                        e.insert(hit);
                     }
                 }
             }
-            // Advance the cursor by the actual number of rows read.
+            // Advance the cursor by the actual number of rows read; a short
+            // page means there are no more rows.
             offset += page_len as i64;
-            // If the page was smaller than the page size, there are no more rows.
             if (page_len as i64) < EMBEDDING_PAGE_SIZE {
                 break;
             }
         }
-        let mut scored: Vec<SemanticSearchResult> = best_per_symbol.into_values().collect();
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        let mut hits: Vec<LegHit> = best_per_symbol.into_values().collect();
+        hits.sort_by(|a, b| b.cosine.partial_cmp(&a.cosine).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
+    /// BM25 leg: weighted match over chunk_fts, reduced to the best-ranked
+    /// chunk per symbol (rows arrive rank-ordered, so first wins).
+    fn bm25_leg_candidates(&self, match_query: &str, k: usize) -> Result<Vec<LegHit>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT c.symbol_id, s.name, s.kind, s.signature, f.path,
+                    s.start_line, s.end_line, c.start_line, c.end_line,
+                    c.fts_name || ' ' || c.fts_path || ' ' || c.fts_body
+             FROM chunk_fts
+             JOIN symbol_chunks c ON c.id = chunk_fts.rowid
+             JOIN symbols s ON s.id = c.symbol_id
+             JOIN files f ON f.id = s.file_id
+             WHERE chunk_fts MATCH ?1
+             ORDER BY bm25(chunk_fts, {BM25_W_NAME}, {BM25_W_PATH}, {BM25_W_BODY})
+             LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare bm25: {e}"))?;
+        // 2x headroom: several chunks of one symbol can occupy top ranks.
+        let raw: Vec<LegHit> = stmt
+            .query_map(params![match_query, (k * 2) as i64], |row| {
+                Ok(LegHit {
+                    symbol_id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    signature: row.get(3)?,
+                    file_path: row.get(4)?,
+                    sym_start_line: row.get(5)?,
+                    sym_end_line: row.get(6)?,
+                    chunk_start: row.get(7)?,
+                    chunk_end: row.get(8)?,
+                    cosine: 0.0,
+                    fts_text: row.get(9)?,
+                })
+            })
+            .map_err(|e| format!("query bm25: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut hits: Vec<LegHit> = Vec::new();
+        for hit in raw {
+            if seen.insert(hit.symbol_id) {
+                hits.push(hit);
+            }
+            if hits.len() >= k {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
+    pub fn search_hybrid(
+        &self,
+        query_text: &str,
+        query_vec: Option<&[f32]>,
+        limit: usize,
+    ) -> Result<Vec<SemanticSearchResult>, String> {
+        self.search_hybrid_with(query_text, query_vec, limit, &HybridParams::default())
+    }
+
+    /// Hybrid retrieval: BM25 over chunk_fts fused with cosine over
+    /// symbol_embeddings via normalized Reciprocal Rank Fusion, then the
+    /// pre-existing lexical boosts and doc/test penalties. Either leg may be
+    /// absent (no vector while the model loads or embeddings are pending; no
+    /// BM25 when no query term survives sanitization) — the other leg still
+    /// returns results, which is the graceful-degradation story during the
+    /// background embedding window.
+    pub fn search_hybrid_with(
+        &self,
+        query_text: &str,
+        query_vec: Option<&[f32]>,
+        limit: usize,
+        params: &HybridParams,
+    ) -> Result<Vec<SemanticSearchResult>, String> {
+        let tokens = tokenize_query(query_text);
+        let match_query = build_fts_match_query(query_text);
+
+        let vector_hits = match query_vec {
+            Some(qv) => {
+                self.vector_leg_candidates(qv, params.min_cosine_candidate, params.k_candidates)?
+            }
+            None => vec![],
+        };
+        let bm25_hits = match &match_query {
+            Some(mq) => self.bm25_leg_candidates(mq, params.k_candidates)?,
+            None => vec![],
+        };
+
+        // Evidence gate for hits the vector leg doesn't corroborate, applied
+        // before ranks are assigned so surviving hits keep dense ranks.
+        let vector_ids: std::collections::HashSet<i64> =
+            vector_hits.iter().map(|h| h.symbol_id).collect();
+        let required = required_token_matches(tokens.len(), params.min_bm25_term_matches);
+        let bm25_hits: Vec<LegHit> = bm25_hits
+            .into_iter()
+            .filter(|h| {
+                vector_ids.contains(&h.symbol_id)
+                    || bm25_only_hit_has_evidence(&tokens, h, required)
+            })
+            .collect();
+
+        // Normalized RRF: 1.0 = rank 1 in both legs, 0.5 = rank 1 in exactly
+        // one. Vector hits are folded first so their chunk anchors the result
+        // line range when both legs agree on a symbol.
+        struct Fused {
+            hit: LegHit,
+            rrf: f32,
+            in_vector: bool,
+            in_bm25: bool,
+        }
+        let mut fused: std::collections::HashMap<i64, Fused> = std::collections::HashMap::new();
+        for (i, hit) in vector_hits.into_iter().enumerate() {
+            let contrib = params.w_vector / (params.rrf_k + (i + 1) as f32);
+            fused.insert(hit.symbol_id, Fused { hit, rrf: contrib, in_vector: true, in_bm25: false });
+        }
+        for (i, hit) in bm25_hits.into_iter().enumerate() {
+            let contrib = params.w_bm25 / (params.rrf_k + (i + 1) as f32);
+            match fused.entry(hit.symbol_id) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    let f = e.get_mut();
+                    f.rrf += contrib;
+                    f.in_bm25 = true;
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(Fused { hit, rrf: contrib, in_vector: false, in_bm25: true });
+                }
+            }
+        }
+        let norm_denom = (params.w_vector + params.w_bm25) / (params.rrf_k + 1.0);
+
+        let mut scored: Vec<SemanticSearchResult> = Vec::new();
+        for f in fused.into_values() {
+            let norm = if norm_denom > 0.0 { f.rrf / norm_denom } else { 0.0 };
+            let boost = lexical_boost(&tokens, &f.hit.name, &f.hit.file_path);
+            let mut penalty =
+                if f.hit.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
+            if is_test_file(&f.hit.file_path) || is_test_symbol(&f.hit.name) {
+                penalty += TEST_FILE_PENALTY;
+            }
+            let score = (norm + boost - penalty).clamp(0.0, 1.0);
+            if score < params.min_hybrid_score {
+                continue;
+            }
+            let (start_line, end_line) = if f.hit.chunk_start > 0 {
+                (f.hit.chunk_start, f.hit.chunk_end)
+            } else {
+                (f.hit.sym_start_line, f.hit.sym_end_line)
+            };
+            let match_type = match (f.in_vector, f.in_bm25) {
+                (true, true) => "hybrid",
+                (true, false) => "semantic",
+                _ => "lexical",
+            };
+            scored.push(SemanticSearchResult {
+                symbol_id: f.hit.symbol_id,
+                name: f.hit.name,
+                kind: f.hit.kind,
+                file_path: f.hit.file_path,
+                start_line,
+                end_line,
+                signature: f.hit.signature,
+                score,
+                match_type: match_type.to_string(),
+                snippet: None,
+            });
+        }
+        // Deterministic tiebreak on symbol_id: several hits clamp to 1.0, and
+        // without it their order follows HashMap drain order — ranks would
+        // flap between identical runs.
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.symbol_id.cmp(&b.symbol_id))
+        });
 
         // Dedupe by file (keep highest-scoring first) before applying limit,
         // so one large file can't occupy the whole ranking.
-        let mut per_file_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut per_file_count: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         scored.retain(|r| {
             let count = per_file_count.entry(r.file_path.clone()).or_insert(0);
             *count += 1;
@@ -853,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn search_by_embedding_dedupes_per_file_and_applies_threshold() {
+    fn hybrid_dedupes_per_file_and_applies_threshold() {
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
         let file_id = db
             .upsert_file("src/big_file.ts", "typescript", "hash1", 0, 0)
@@ -870,7 +1327,7 @@ mod tests {
         }
 
         // One symbol in a different file with a low-similarity embedding
-        // that should be dropped by MIN_SEMANTIC_SCORE.
+        // that falls below the vector-leg cosine gate.
         let other_file_id = db
             .upsert_file("src/other.ts", "typescript", "hash2", 0, 0)
             .expect("upsert file");
@@ -880,32 +1337,219 @@ mod tests {
         db.upsert_embedding(low_sym_id, 0, 0, 0, &unit_vec(4, 3)).expect("upsert embedding");
 
         let query_vec = unit_vec(4, 0);
-        let results = db
-            .search_by_embedding("sym", &query_vec, 10)
-            .expect("search_by_embedding");
+        let results = db.search_hybrid("sym", Some(&query_vec), 10).expect("search_hybrid");
 
         assert_eq!(results.len(), 3, "dedupe should cap results per file at 3");
         assert!(results.iter().all(|r| r.file_path == "src/big_file.ts"));
-        assert!(results.iter().all(|r| r.score >= MIN_SEMANTIC_SCORE));
+        let min_score = HybridParams::default().min_hybrid_score;
+        assert!(results.iter().all(|r| r.score >= min_score));
+        assert!(results.iter().all(|r| r.match_type == "semantic"));
     }
 
     #[test]
-    fn search_by_embedding_can_return_empty() {
+    fn hybrid_can_return_empty() {
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
         let file_id = db
             .upsert_file("src/only.ts", "typescript", "hash", 0, 0)
             .expect("upsert file");
         let sym_id = db
-            .insert_symbol(file_id, "unrelated", "function", None, 0, 0, 0, 0, None)
+            .insert_symbol(file_id, "unrelated", "function", None, 1, 0, 3, 0, None)
             .expect("insert symbol");
-        // Orthogonal embedding -> cosine ~0, no lexical overlap -> no boost.
+        // Orthogonal embedding -> cosine ~0; chunk text shares no word with
+        // the query -> the BM25 leg matches nothing either.
         db.upsert_embedding(sym_id, 0, 0, 0, &unit_vec(4, 1)).expect("upsert embedding");
+        db.insert_chunk(sym_id, 0, 1, 3, "function: unrelated", "unrelated", "only.ts only", "banana orchard code").unwrap();
 
         let query_vec = unit_vec(4, 0);
         let results = db
-            .search_by_embedding("totally different query", &query_vec, 10)
-            .expect("search_by_embedding");
+            .search_hybrid("totally different query", Some(&query_vec), 10)
+            .expect("search_hybrid");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn fts_match_builder_neutralizes_operators() {
+        // Operator-laden inputs must produce valid MATCH strings (or None) —
+        // never an SQL error surfaced to the caller.
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db.upsert_file("src/q.ts", "typescript", "h", 0, 0).unwrap();
+        db.insert_symbol(file_id, "fooBar", "function", None, 1, 0, 1, 0, None).unwrap();
+        for query in [
+            "foo(bar)",
+            "a AND b OR c*",
+            "\"unbalanced",
+            "name:x",
+            "-neg",
+            "NEAR(a b)",
+            "col : val",
+            "*)(^",
+        ] {
+            let result = db.search_symbols(query, 10);
+            assert!(result.is_ok(), "query {query:?} errored: {result:?}");
+        }
+        assert_eq!(build_fts_match_query("*)(^"), None);
+        assert_eq!(
+            build_fts_match_query("delete_symbols_for_file").as_deref(),
+            Some("\"delete_symbols_for_file\"")
+        );
+        // Sanitized query still finds the symbol: "fooBar" survives as a
+        // quoted term and unicode61 folds it to the same token as the name.
+        // (Camel-splitting is chunk_fts territory, not symbols_fts.)
+        let hits = db.search_symbols("fooBar(arg)", 10).unwrap();
+        assert_eq!(hits.len(), 1, "fooBar term should match the fooBar symbol");
+    }
+
+    #[test]
+    fn hybrid_exact_body_term_ranks_without_vectors() {
+        // The headline fix: a term that exists only inside a body must be
+        // findable with no vector leg at all (model missing / pending).
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db.upsert_file("src/thing.ts", "typescript", "h", 0, 0).unwrap();
+        let sym_id = db.insert_symbol(file_id, "handleThing", "function", None, 1, 0, 9, 0, None).unwrap();
+        db.insert_chunk(sym_id, 0, 1, 9, "embed", "handleThing handle thing", "thing.ts thing", "calls xyzzy_special_case() here").unwrap();
+
+        let results = db.search_hybrid("xyzzy_special_case", None, 10).expect("search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "handleThing");
+        assert_eq!(results[0].match_type, "lexical");
+        assert!(results[0].score >= HybridParams::default().min_hybrid_score);
+    }
+
+    #[test]
+    fn hybrid_fuses_both_legs_above_single_leg_hits() {
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        // A: vector-only rank 1. B: bm25-only rank 1. C: rank 2 in both —
+        // fusion must put C first (2/(k+2) > 1/(k+1) for k=60).
+        let fa = db.upsert_file("src/a.ts", "typescript", "h", 0, 0).unwrap();
+        let fb = db.upsert_file("src/b.ts", "typescript", "h", 0, 0).unwrap();
+        let fc = db.upsert_file("src/c.ts", "typescript", "h", 0, 0).unwrap();
+        let sa = db.insert_symbol(fa, "alphaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+        let sb = db.insert_symbol(fb, "betaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+        let sc = db.insert_symbol(fc, "gammaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+
+        db.upsert_embedding(sa, 0, 1, 2, &unit_vec(4, 0)).unwrap();
+        let mixed = {
+            // cosine 0.8 against unit(4,0) -> vector rank 2.
+            let v = vec![0.8f32, 0.6, 0.0, 0.0];
+            v
+        };
+        db.upsert_embedding(sc, 0, 1, 2, &mixed).unwrap();
+
+        // B mentions the term twice -> bm25 rank 1; C once -> rank 2.
+        db.insert_chunk(sb, 0, 1, 2, "e", "betaFn beta fn", "b.ts b", "zebrafinch pattern zebrafinch pattern").unwrap();
+        db.insert_chunk(sc, 0, 1, 2, "e", "gammaFn gamma fn", "c.ts c", "zebrafinch pattern once").unwrap();
+
+        let results = db
+            .search_hybrid("zebrafinch pattern", Some(&unit_vec(4, 0)), 10)
+            .expect("search");
+        assert_eq!(results[0].name, "gammaFn", "both-legs hit must outrank single-leg hits");
+        assert_eq!(results[0].match_type, "hybrid");
+        let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"betaFn"));
+        // alphaFn: vector rank 1 but zero lexical evidence — still present as
+        // a semantic hit (0.5 norm) since its cosine cleared the gate.
+        assert!(names.contains(&"alphaFn"));
+    }
+
+    #[test]
+    fn hybrid_bm25_only_incidental_word_is_gated() {
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db.upsert_file("src/pay.ts", "typescript", "h", 0, 0).unwrap();
+        let sym_id = db.insert_symbol(file_id, "renderList", "function", None, 1, 0, 9, 0, None).unwrap();
+        // Contains exactly one of the three query tokens ("payment") — not
+        // enough evidence for a BM25-only hit on a multi-word query.
+        db.insert_chunk(sym_id, 0, 1, 9, "e", "renderList render list", "pay.ts pay", "handles payment display rows").unwrap();
+
+        let results = db.search_hybrid("stripe payment webhook", None, 10).expect("search");
+        assert!(results.is_empty(), "single incidental word must not pass the gate: {results:?}");
+    }
+
+    #[test]
+    fn required_token_matches_scales_with_query_length() {
+        assert_eq!(required_token_matches(1, 2), 1, "single-token exact-term queries pass");
+        assert_eq!(required_token_matches(2, 2), 2);
+        assert_eq!(required_token_matches(3, 2), 2);
+        assert_eq!(required_token_matches(4, 2), 2);
+        assert_eq!(required_token_matches(5, 2), 3, "long NL queries need a majority");
+        assert_eq!(required_token_matches(6, 2), 3);
+    }
+
+    /// Count raw FTS index hits WITHOUT joining the content table — ghost
+    /// rows (index entries whose content row is gone) are only visible this
+    /// way, since joins silently mask them.
+    fn fts_raw_count(db: &IndexDb, table: &str, needle: &str) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            &format!("SELECT count(*) FROM {table} WHERE {table} MATCH ?1"),
+            params![needle],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn symbols_fts_has_no_ghosts_after_incremental_reindex() {
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db.upsert_file("src/a.ts", "typescript", "h1", 0, 0).unwrap();
+        db.insert_symbol(file_id, "uniqueAlphaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+        assert_eq!(fts_raw_count(&db, "symbols_fts", "uniqueAlphaFn"), 1);
+
+        // Incremental reindex: old symbols deleted, new content inserted.
+        db.delete_symbols_for_file(file_id).unwrap();
+        db.insert_symbol(file_id, "uniqueBetaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+
+        assert_eq!(
+            fts_raw_count(&db, "symbols_fts", "uniqueAlphaFn"),
+            0,
+            "stale FTS row survived an incremental reindex"
+        );
+        assert_eq!(fts_raw_count(&db, "symbols_fts", "uniqueBetaFn"), 1);
+    }
+
+    #[test]
+    fn chunk_fts_purged_by_delete_symbols_for_file_and_delete_file() {
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db.upsert_file("src/b.ts", "typescript", "h1", 0, 0).unwrap();
+        let sym_id = db.insert_symbol(file_id, "widgetFactory", "function", None, 1, 0, 9, 0, None).unwrap();
+        db.insert_chunk(sym_id, 0, 1, 9, "embed text", "widgetFactory widget factory", "b.ts b", "xyzzybody content here").unwrap();
+
+        let chunks = db.chunks_for_file(file_id).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].embed_text, "embed text");
+        assert_eq!((chunks[0].symbol_id, chunks[0].chunk_index), (sym_id, 0));
+        assert_eq!(fts_raw_count(&db, "chunk_fts", "xyzzybody"), 1);
+
+        db.delete_symbols_for_file(file_id).unwrap();
+        assert_eq!(fts_raw_count(&db, "chunk_fts", "xyzzybody"), 0, "chunk FTS ghost row");
+        assert!(db.chunks_for_file(file_id).unwrap().is_empty());
+
+        // Re-insert, then remove the whole file: everything must go.
+        let sym_id = db.insert_symbol(file_id, "widgetFactory", "function", None, 1, 0, 9, 0, None).unwrap();
+        db.insert_chunk(sym_id, 0, 1, 9, "embed text", "widgetFactory", "b.ts", "xyzzybody again").unwrap();
+        db.delete_file("src/b.ts").unwrap();
+        assert!(db.file_by_path("src/b.ts").unwrap().is_none());
+        assert_eq!(fts_raw_count(&db, "chunk_fts", "xyzzybody"), 0);
+        assert_eq!(fts_raw_count(&db, "symbols_fts", "widgetFactory"), 0);
+    }
+
+    #[test]
+    fn chunks_written_without_embedder_are_readable_for_later_embedding() {
+        // Scan-time behavior with no model loaded: chunks + FTS exist so BM25
+        // works, symbol_embeddings stays empty until the background pass.
+        let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
+        let file_id = db.upsert_file("src/c.ts", "typescript", "h1", 0, 0).unwrap();
+        let sym_id = db.insert_symbol(file_id, "pendingFn", "function", None, 1, 0, 4, 0, None).unwrap();
+        db.insert_chunk(sym_id, 0, 1, 4, "function: pendingFn | body", "pendingFn pending fn", "c.ts c", "body").unwrap();
+
+        let pending = db.embedding_pending_files().unwrap();
+        assert_eq!(pending, 1, "file without embed_hash counts as pending");
+
+        // The background pass reads the stored chunk and writes the vector
+        // keyed by (symbol_id, chunk_index).
+        let chunks = db.chunks_for_file(file_id).unwrap();
+        db.upsert_embedding(chunks[0].symbol_id, chunks[0].chunk_index, chunks[0].start_line, chunks[0].end_line, &unit_vec(4, 0)).unwrap();
+        db.set_embed_hash(file_id, "h1").unwrap();
+        assert_eq!(db.embedding_pending_files().unwrap(), 0);
     }
 
     #[test]

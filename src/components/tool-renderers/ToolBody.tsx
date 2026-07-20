@@ -289,8 +289,8 @@ export function parseJsonList(output: string): { list: unknown[]; truncated: boo
   try {
     const v = JSON.parse(text);
     if (Array.isArray(v)) return { list: v, truncated: false };
-    // Fallback envelopes ({ fallback, note, results: [...] }) from
-    // semantic_search wrap the list — render the inner results.
+    // Envelopes ({ mode, note?, results: [...] }) from semantic_search wrap
+    // the list — render the inner results.
     if (v && Array.isArray((v as Record<string, unknown>).results)) {
       return { list: (v as Record<string, unknown>).results as unknown[], truncated: false };
     }
@@ -298,13 +298,31 @@ export function parseJsonList(output: string): { list: unknown[]; truncated: boo
   } catch {
     /* fall through to salvage */
   }
-  if (!text.startsWith("[")) return null;
+  if (text.startsWith("[")) {
+    const list = salvageObjects(text, 1);
+    return list.length > 0 ? { list, truncated: true } : null;
+  }
+  if (text.startsWith("{")) {
+    // Truncated envelope: locate the results array and salvage complete
+    // objects from inside it.
+    const marker = text.indexOf('"results"');
+    const bracket = marker >= 0 ? text.indexOf("[", marker) : -1;
+    if (bracket >= 0) {
+      const list = salvageObjects(text, bracket + 1);
+      return list.length > 0 ? { list, truncated: true } : null;
+    }
+  }
+  return null;
+}
+
+/** Collect complete top-level `{...}` objects starting at `from`. */
+function salvageObjects(text: string, from: number): unknown[] {
   const list: unknown[] = [];
   let depth = 0;
   let start = -1;
   let inString = false;
   let escaped = false;
-  for (let i = 1; i < text.length; i++) {
+  for (let i = from; i < text.length; i++) {
     const ch = text[i];
     if (inString) {
       if (escaped) escaped = false;
@@ -328,7 +346,7 @@ export function parseJsonList(output: string): { list: unknown[]; truncated: boo
       }
     }
   }
-  return list.length > 0 ? { list, truncated: true } : null;
+  return list;
 }
 
 const JsonListBody: Component<{ result?: ToolResultData }> = (props) => {

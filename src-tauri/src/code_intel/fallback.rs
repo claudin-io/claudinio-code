@@ -238,6 +238,43 @@ fn parse_decl_keyword<'a>(line: &'a str, keywords: &[&'a str]) -> Option<(String
 }
 
 // ---------------------------------------------------------------------------
+// TOML — one chunk per [section] / [[array.table]] header
+// ---------------------------------------------------------------------------
+fn scan_toml(content: &str) -> Vec<Chunk> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut headers: Vec<(usize, String)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            let name = t.trim_matches(|c| c == '[' || c == ']').trim().to_string();
+            // Table names are bare/dotted/quoted keys — reject bracketed
+            // lines that are really array values ("[1, 2]").
+            let valid = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || "._-\"' ".contains(c));
+            if valid {
+                headers.push((i, name));
+            }
+        }
+    }
+    let mut chunks = Vec::new();
+    for (idx, (start, name)) in headers.iter().enumerate() {
+        let end = headers
+            .get(idx + 1)
+            .map(|(next, _)| next.saturating_sub(1))
+            .unwrap_or(lines.len().saturating_sub(1));
+        chunks.push(Chunk {
+            name: name.clone(),
+            kind: "table".into(),
+            start_line: start + 1,
+            end_line: end.max(*start) + 1,
+        });
+    }
+    chunks
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -250,6 +287,7 @@ pub fn chunk_fallback(lang: &str, path: &str, content: &str) -> Vec<ParsedSymbol
         "less"   => scan_less(content),
         "dot"    => scan_dot(content),
         "org"    => scan_org(content),
+        "toml"   => scan_toml(content),
         _ => vec![],
     };
 
