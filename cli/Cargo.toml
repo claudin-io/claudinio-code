@@ -1,0 +1,26 @@
+[package]
+name = "claudinio-cli"
+description = "Claudinio Code — CLI com TUI minimalista sobre o backend compartilhado"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# O binário instalado/`npx` se chama `claudinio`.
+[[bin]]
+name = "claudinio"
+path = "src/main.rs"
+
+[dependencies]
+claudinio-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow = "1"
+serde_json = "1"
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+# TUI (Fase 5)
+ratatui = "0.29"
+crossterm = "0.28"
+# auth: abrir o browser no fluxo OAuth (Fase 4/auth)
+open = "5"
