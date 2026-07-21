@@ -23,15 +23,25 @@ interface ProseContentProps {
 export function ProseContent(props: ProseContentProps): JSX.Element {
   let el!: HTMLDivElement;
   createEffect(() => {
-    const html = props.html;
-    el.innerHTML = html;
-    // Nothing more to do while streaming, or when there are no diagrams.
-    // Only content with a mermaid block touches the theme signal (which lazily
-    // boots theme state) and the mermaid runtime — plain markdown stays cheap.
-    if (props.live || !el.querySelector(".mermaid-block")) return;
-    // Track theme so diagrams re-render when the user switches themes.
-    resolvedTheme();
-    void renderMermaid(el);
+    // This effect runs synchronously during the surrounding render pass, so an
+    // uncaught throw here would abort rendering of every sibling message and
+    // blank the whole conversation (there is no ErrorBoundary between here and
+    // the message <For>). Keep it total: a bad diagram or theme boot must never
+    // take the thread down with it. The <pre class="mermaid-src"> fallback and
+    // the raw markdown stay visible on any failure.
+    try {
+      const html = typeof props.html === "string" ? props.html : String(props.html ?? "");
+      el.innerHTML = html;
+      // Nothing more to do while streaming, or when there are no diagrams.
+      // Only content with a mermaid block touches the theme signal (which lazily
+      // boots theme state) and the mermaid runtime — plain markdown stays cheap.
+      if (props.live || !el.querySelector(".mermaid-block")) return;
+      // Track theme so diagrams re-render when the user switches themes.
+      resolvedTheme();
+      void renderMermaid(el);
+    } catch (e) {
+      console.error("ProseContent render failed", e);
+    }
   });
 
   const handleClick = (e: MouseEvent & { currentTarget: HTMLDivElement; target: Element }) => {
