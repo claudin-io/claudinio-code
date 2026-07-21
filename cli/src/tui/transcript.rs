@@ -128,7 +128,7 @@ pub fn render_tool_card(card: &ToolCard, theme: &Theme, max_diff: usize) -> Vec<
     // Aprovação pendente
     if card.state == ToolState::AwaitingApproval {
         out.push(Line::from(Span::styled(
-            "  aprovar?  [y] sim · [n] não".to_string(),
+            "  approve?  [y] yes · [n] no".to_string(),
             Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
         )));
     }

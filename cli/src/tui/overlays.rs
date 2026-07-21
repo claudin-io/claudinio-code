@@ -13,15 +13,15 @@ pub struct SlashCmd {
 
 /// Comandos suportados (subconjunto de `pi_slash.ts` mapeado ao que o core faz).
 pub const COMMANDS: &[SlashCmd] = &[
-    SlashCmd { name: "model", desc: "escolher modelo do modo atual" },
-    SlashCmd { name: "effort", desc: "nível de raciocínio (thinking)" },
-    SlashCmd { name: "mode", desc: "alternar brain / builder" },
-    SlashCmd { name: "theme", desc: "alternar tema claro / escuro" },
-    SlashCmd { name: "new", desc: "iniciar nova sessão" },
-    SlashCmd { name: "attach", desc: "anexar arquivo/imagem (ou arraste o caminho)" },
-    SlashCmd { name: "copy", desc: "copiar última resposta (OSC52)" },
-    SlashCmd { name: "help", desc: "mostrar atalhos" },
-    SlashCmd { name: "quit", desc: "sair" },
+    SlashCmd { name: "model", desc: "pick the model for the current mode" },
+    SlashCmd { name: "effort", desc: "reasoning effort (thinking)" },
+    SlashCmd { name: "mode", desc: "switch brain / builder" },
+    SlashCmd { name: "theme", desc: "switch light / dark theme" },
+    SlashCmd { name: "new", desc: "start a new session" },
+    SlashCmd { name: "attach", desc: "attach a file/image (or drag the path)" },
+    SlashCmd { name: "copy", desc: "copy last reply (OSC52)" },
+    SlashCmd { name: "help", desc: "show shortcuts" },
+    SlashCmd { name: "quit", desc: "quit" },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,12 +158,12 @@ fn pad_to(width: u16, s: String) -> String {
 
 fn render_slash(s: &Slash, theme: &Theme, width: u16, max_rows: usize) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(Span::styled(
-        " comandos ".to_string(),
+        " commands ".to_string(),
         Style::default().fg(theme.border_accent).add_modifier(Modifier::BOLD),
     ))];
     if s.matches.is_empty() {
         out.push(Line::from(Span::styled(
-            "  sem correspondência".to_string(),
+            "  no matches".to_string(),
             theme.dim_style(),
         )));
         return out;
@@ -211,9 +211,9 @@ fn render_select(s: &Select, theme: &Theme, width: u16, max_rows: usize) -> Vec<
 
 fn render_mention(m: &Mention, theme: &Theme, width: u16, max_rows: usize) -> Vec<Line<'static>> {
     let title = if m.query.is_empty() {
-        " arquivos ".to_string()
+        " files ".to_string()
     } else {
-        format!(" arquivos: {} ", m.query)
+        format!(" files: {} ", m.query)
     };
     let mut out = vec![Line::from(Span::styled(
         title,
@@ -221,7 +221,7 @@ fn render_mention(m: &Mention, theme: &Theme, width: u16, max_rows: usize) -> Ve
     ))];
     if m.matches.is_empty() {
         out.push(Line::from(Span::styled(
-            "  nenhum arquivo".to_string(),
+            "  no files".to_string(),
             theme.dim_style(),
         )));
         return out;
@@ -302,7 +302,7 @@ pub fn effort_items(current: &str) -> Vec<SelectItem> {
         .iter()
         .map(|e| SelectItem {
             label: e.to_string(),
-            desc: if *e == current { "(atual)".into() } else { String::new() },
+            desc: if *e == current { "(current)".into() } else { String::new() },
             value: e.to_string(),
         })
         .collect()
@@ -314,7 +314,7 @@ pub fn theme_items(current: &str) -> Vec<SelectItem> {
         .iter()
         .map(|t| SelectItem {
             label: t.to_string(),
-            desc: if *t == current { "(atual)".into() } else { String::new() },
+            desc: if *t == current { "(current)".into() } else { String::new() },
             value: t.to_string(),
         })
         .collect()
@@ -323,15 +323,15 @@ pub fn theme_items(current: &str) -> Vec<SelectItem> {
 /// Linhas de ajuda (atalhos) para o overlay Help.
 pub fn help_items() -> Vec<SelectItem> {
     let pairs = [
-        ("Enter", "enviar (ou enfileirar durante execução)"),
-        ("Shift+Enter", "nova linha"),
-        ("Tab", "alternar brain / builder"),
-        ("/", "paleta de comandos"),
-        ("↑/↓", "histórico de mensagens"),
-        ("Ctrl+C", "interromper turno / sair"),
-        ("Ctrl+W", "apagar palavra"),
-        ("y / n", "aprovar / rejeitar ferramenta"),
-        ("Esc", "fechar overlay"),
+        ("Enter", "send (or queue while running)"),
+        ("Shift+Enter", "new line"),
+        ("Tab", "switch brain / builder"),
+        ("/", "command palette"),
+        ("↑/↓", "message history"),
+        ("Ctrl+C", "interrupt turn / quit"),
+        ("Ctrl+W", "delete word"),
+        ("y / n", "approve / reject tool"),
+        ("Esc", "close overlay"),
     ];
     pairs
         .iter()

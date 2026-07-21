@@ -173,15 +173,15 @@ fn status_line(app: &App) -> Line<'static> {
         return Line::from(vec![
             Span::styled(format!("{sp} "), theme.fg(theme.warning)),
             Span::styled(
-                format!("reconectando ({attempt}/{max}) em {secs}s…"),
+                format!("reconnecting ({attempt}/{max}) in {secs}s…"),
                 theme.muted_style(),
             ),
-            Span::styled("  (Ctrl+C cancela)".to_string(), theme.dim_style()),
+            Span::styled("  (Ctrl+C cancels)".to_string(), theme.dim_style()),
         ]);
     }
     if app.question.is_some() {
         return Line::from(Span::styled(
-            "responda a pergunta acima  ·  Enter envia · dígito escolhe opção".to_string(),
+            "answer the question above  ·  Enter sends · digit picks an option".to_string(),
             theme.dim_style(),
         ));
     }
@@ -189,12 +189,12 @@ fn status_line(app: &App) -> Line<'static> {
         let sp = spinner_frame(app.spinner_tick);
         return Line::from(vec![
             Span::styled(format!("{sp} "), theme.fg(theme.accent)),
-            Span::styled("trabalhando…".to_string(), theme.muted_style()),
-            Span::styled("  (Ctrl+C interrompe · Enter enfileira)".to_string(), theme.dim_style()),
+            Span::styled("working…".to_string(), theme.muted_style()),
+            Span::styled("  (Ctrl+C interrupts · Enter queues)".to_string(), theme.dim_style()),
         ]);
     }
     Line::from(Span::styled(
-        "Enter enviar · Tab modo · / comandos · @ arquivos · Ctrl+C sair".to_string(),
+        "Enter send · Tab mode · / commands · @ files · Ctrl+C quit".to_string(),
         theme.dim_style(),
     ))
 }
@@ -260,7 +260,7 @@ fn build_active_lines(app: &App) -> Vec<Line<'static>> {
             .collect::<Vec<_>>()
             .join("   ");
         lines.push(Line::from(Span::styled(
-            format!("anexos: {pills}"),
+            format!("attachments: {pills}"),
             theme.fg(theme.accent),
         )));
     }

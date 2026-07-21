@@ -16,7 +16,7 @@ pub struct Editor {
     cursor_style: Style,
 }
 
-const PLACEHOLDER: &str = "mensagem…  (/ para comandos)";
+const PLACEHOLDER: &str = "message…  (/ for commands)";
 
 impl Editor {
     pub fn new(theme: &Theme) -> Self {

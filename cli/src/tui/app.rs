@@ -143,7 +143,7 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
 
     let mut config = provider::load_config();
     if config.api_key.is_empty() {
-        anyhow::bail!("API key não configurada. Rode `claudinio config set api_key <key>`.");
+        anyhow::bail!("API key not configured. Run `claudinio config set api_key <key>`.");
     }
     if let Some(ws_cfg) = provider::read_workspace_config(&root) {
         provider::merge_workspace_config(&mut config, &ws_cfg);
@@ -225,7 +225,7 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         quit: false,
     };
     app.commit_notice(
-        format!("claudinio chat — {root}   ·  Tab: modo · / comandos · Ctrl+C: sair"),
+        format!("claudinio chat — {root}   ·  Tab: mode · / commands · Ctrl+C: quit"),
         app.theme.dim,
     );
 
@@ -237,7 +237,7 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         viewport: Viewport::Inline(init_vh),
     })
     .map_err(|e| {
-        anyhow::anyhow!("não foi possível inicializar a TUI (é preciso um terminal interativo): {e}")
+        anyhow::anyhow!("could not initialize the TUI (an interactive terminal is required): {e}")
     })?;
     let mut current_vh = init_vh;
 
@@ -701,7 +701,7 @@ async fn run_command(app: &mut App, chat: &ChatCtx, name: &str, arg: &str) -> an
                 let cur = app.theme_kind.as_str().to_string();
                 app.overlay = Some(Overlay::Select(Select::new(
                     SelectKind::Theme,
-                    "tema",
+                    "theme",
                     theme_items(&cur),
                     0,
                 )));
@@ -723,28 +723,28 @@ async fn run_command(app: &mut App, chat: &ChatCtx, name: &str, arg: &str) -> an
             if arg.is_empty() {
                 let items = model_items(&chat.config, &app.cur_model());
                 let sel = items.iter().position(|i| i.value == app.cur_model()).unwrap_or(0);
-                app.overlay = Some(Overlay::Select(Select::new(SelectKind::Model, "modelo", items, sel)));
+                app.overlay = Some(Overlay::Select(Select::new(SelectKind::Model, "model", items, sel)));
             } else {
                 set_model(app, arg);
-                app.commit_notice(format!("modelo ({}) → {arg}", app.mode.as_str()), app.theme.accent);
+                app.commit_notice(format!("model ({}) → {arg}", app.mode.as_str()), app.theme.accent);
             }
         }
         "help" | "hotkeys" | "?" => {
-            app.overlay = Some(Overlay::Select(Select::new(SelectKind::Help, "atalhos", help_items(), 0)));
+            app.overlay = Some(Overlay::Select(Select::new(SelectKind::Help, "shortcuts", help_items(), 0)));
         }
         "new" => new_session(app, chat).await?,
         "copy" => {
             if let Some(text) = &app.last_assistant {
                 copy_to_clipboard(text);
-                app.commit_notice("copiado para o clipboard", app.theme.success);
+                app.commit_notice("copied to clipboard", app.theme.success);
             } else {
-                app.commit_notice("nada para copiar ainda", app.theme.muted);
+                app.commit_notice("nothing to copy yet", app.theme.muted);
             }
         }
-        "attach" | "anexar" => {
+        "attach" => {
             if arg.is_empty() {
                 app.commit_notice(
-                    "uso: /attach <caminho>  (ou arraste o arquivo para o terminal)",
+                    "usage: /attach <path>  (or drag the file into the terminal)",
                     app.theme.muted,
                 );
             } else {
@@ -754,14 +754,14 @@ async fn run_command(app: &mut App, chat: &ChatCtx, name: &str, arg: &str) -> an
                         .map(|m| m.name)
                         .unwrap_or_else(|| path.clone());
                     app.attachments.push(path);
-                    app.commit_notice(format!("📎 anexado: {name}"), app.theme.accent);
+                    app.commit_notice(format!("📎 attached: {name}"), app.theme.accent);
                 } else {
-                    app.commit_notice(format!("arquivo não encontrado: {path}"), app.theme.warning);
+                    app.commit_notice(format!("file not found: {path}"), app.theme.warning);
                 }
             }
         }
         other => {
-            app.commit_notice(format!("comando desconhecido: /{other}"), app.theme.warning);
+            app.commit_notice(format!("unknown command: /{other}"), app.theme.warning);
         }
     }
     Ok(())
@@ -807,7 +807,7 @@ fn model_items(config: &AgentConfig, current: &str) -> Vec<SelectItem> {
     ids.dedup();
     ids.into_iter()
         .map(|id| SelectItem {
-            desc: if id == current { "(atual)".into() } else { String::new() },
+            desc: if id == current { "(current)".into() } else { String::new() },
             label: id.clone(),
             value: id,
         })
@@ -824,7 +824,7 @@ async fn interrupt(app: &mut App, chat: &ChatCtx) {
     if let Some(idx) = app.awaiting_idx() {
         decide_approval(app, chat, idx, false).await;
     }
-    app.commit_notice("⏹ interrompendo…", app.theme.warning);
+    app.commit_notice("⏹ interrupting…", app.theme.warning);
 }
 
 async fn decide_approval(app: &mut App, chat: &ChatCtx, idx: usize, ok: bool) {
@@ -845,7 +845,7 @@ async fn decide_approval(app: &mut App, chat: &ChatCtx, idx: usize, ok: bool) {
         if let Some(mut c) = app.tools.get(idx).cloned() {
             c.state = super::transcript::ToolState::Done;
             c.is_error = true;
-            c.output = Some("rejeitado pelo usuário".into());
+            c.output = Some("rejected by user".into());
             let lines = super::transcript::render_tool_card(&c, &theme, 60);
             app.commit(lines);
         }
@@ -892,7 +892,7 @@ async fn new_session(app: &mut App, chat: &ChatCtx) -> anyhow::Result<()> {
     app.tools.clear();
     app.subagents.clear();
     app.question = None;
-    app.commit_notice("── nova sessão ──", app.theme.dim);
+    app.commit_notice("── new session ──", app.theme.dim);
     Ok(())
 }
 
@@ -909,7 +909,7 @@ async fn start_turn(
         .lock()
         .await
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("sessão ativa ausente"))?;
+        .ok_or_else(|| anyhow::anyhow!("no active session"))?;
     let store = SessionStore {
         path: handle.store_path.clone(),
     };
@@ -1216,7 +1216,7 @@ mod tests {
         let s = screen(&app);
         // A caixa (única com borda) tem o modo como título; a dica fica fora dela.
         assert!(s.contains("brain"), "faltou modo no título da caixa: {s:?}");
-        assert!(s.contains("comandos"), "faltou dica de comandos");
+        assert!(s.contains("commands"), "faltou dica de comandos");
         assert!(s.contains("claudius·high"), "faltou footer com modelo·effort");
     }
 
@@ -1246,7 +1246,7 @@ mod tests {
             },
         );
         let s = screen(&app);
-        assert!(s.contains("trabalhando"), "faltou status de spinner: {s:?}");
+        assert!(s.contains("working"), "faltou status de spinner: {s:?}");
         assert!(s.contains("12%/200k"), "faltou % de contexto no footer");
         assert!(s.contains("claudius"), "faltou modelo no footer");
         // O bloco de "pensando" foi commitado ao scrollback quando o texto começou.
@@ -1287,7 +1287,7 @@ mod tests {
         assert_eq!(app.awaiting_idx(), Some(0));
         let s = screen(&app);
         assert!(s.contains("edit_file"), "faltou nome da ferramenta: {s:?}");
-        assert!(s.contains("aprovar"), "faltou prompt de aprovação");
+        assert!(s.contains("approve"), "faltou prompt de aprovação");
         assert!(s.contains("novo"), "faltou linha adicionada do diff");
         assert!(s.contains("+1"), "faltou contagem +add do diff");
 
@@ -1376,7 +1376,7 @@ mod tests {
         let mut app = App::for_test();
         app.attachments.push("/tmp/foo/bar.png".into());
         let s = screen(&app);
-        assert!(s.contains("anexos:"), "faltou rótulo de anexos: {s:?}");
+        assert!(s.contains("attachments:"), "faltou rótulo de anexos: {s:?}");
         assert!(s.contains("bar.png"), "faltou nome do anexo");
     }
 
@@ -1411,7 +1411,7 @@ mod tests {
             idx: 0,
         }));
         let s = screen(&app);
-        assert!(s.contains("arquivos"), "faltou título arquivos: {s:?}");
+        assert!(s.contains("files"), "faltou título arquivos: {s:?}");
         assert!(s.contains("main.rs"), "faltou arquivo listado");
     }
 }

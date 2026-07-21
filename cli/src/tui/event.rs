@@ -153,7 +153,7 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
                 name: name.clone(),
             });
             app.commit_notice(
-                format!("⟳ subagente: {name} — {}", transcript::truncate_line(&goal, 100)),
+                format!("⟳ subagent: {name} — {}", transcript::truncate_line(&goal, 100)),
                 theme.subagent,
             );
         }
@@ -180,7 +180,7 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
                 .iter()
                 .position(|s| s.id == subagent_id)
                 .map(|pos| app.subagents.remove(pos).name)
-                .unwrap_or_else(|| "subagente".into());
+                .unwrap_or_else(|| "subagent".into());
             let lines = transcript::render_subagent_done(
                 &name, &status, rounds, input_tokens, output_tokens, cost, &theme,
             );
@@ -189,10 +189,10 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
         AgentEvent::GoldenLoop {
             cycle, max_cycles, ..
         } => {
-            app.commit_notice(format!("◇ golden — ciclo {cycle}/{max_cycles}"), theme.warning);
+            app.commit_notice(format!("◇ golden — cycle {cycle}/{max_cycles}"), theme.warning);
         }
         AgentEvent::SessionLinked { reason, .. } => {
-            app.commit_notice(format!("⇄ handoff ({reason}) → nova sessão encadeada"), theme.warning);
+            app.commit_notice(format!("⇄ handoff ({reason}) → new linked session"), theme.warning);
         }
         AgentEvent::SteeringInjected { text, .. } => {
             app.commit_notice(format!("↳ steering: {}", transcript::truncate_line(&text, 120)), theme.muted);
@@ -202,13 +202,13 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
                 app.mode = m;
             }
             if origin == "agent" {
-                app.commit_notice(format!("⇄ modo → {mode} (agente)"), theme.muted);
+                app.commit_notice(format!("⇄ mode → {mode} (agent)"), theme.muted);
             }
         }
         AgentEvent::Error(e) => {
             app.running = false;
             app.status = Status::Idle;
-            app.commit_notice(format!("erro: {e}"), theme.error);
+            app.commit_notice(format!("error: {e}"), theme.error);
         }
     }
 }
