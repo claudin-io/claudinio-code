@@ -42,6 +42,22 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
         } => {
             clear_thinking(app);
             commit_assistant(app);
+            // `tasks_set` alimenta o painel fixo de tarefas (acima do input) em
+            // vez de virar um card genérico: os args já trazem a lista completa.
+            // Atualiza o painel e — quando não exige aprovação — suprime o card
+            // redundante. Se os args não parsearem, cai no fluxo normal (card).
+            if tool_name == "tasks_set" {
+                if let Some(arr) = args.get("tasks") {
+                    if let Ok(tasks) =
+                        serde_json::from_value::<Vec<claudinio_core::tasks::TaskItem>>(arr.clone())
+                    {
+                        app.tasks = tasks;
+                        if permission != "requires_approval" {
+                            return;
+                        }
+                    }
+                }
+            }
             let mut card = ToolCard::new(tool_id.clone(), tool_name, transcript::tool_summary(&args));
             if let Some(ep) = edit_proposal {
                 card.diff = Some(ep.unified_diff);

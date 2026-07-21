@@ -76,6 +76,10 @@ pub struct App {
     pub last_assistant: Option<String>,
     pub tools: Vec<ToolCard>,
     pub subagents: Vec<SubLive>,
+    /// Tarefas atuais (painel fixo acima do input), populadas a partir dos args
+    /// de `tasks_set`. Persistem no processo (inclusive no handoff Brain→Builder);
+    /// só resetam no /new.
+    pub tasks: Vec<claudinio_core::tasks::TaskItem>,
     pub question: Option<PendingQuestion>,
 
     pub editor: Editor,
@@ -218,6 +222,7 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         last_assistant: None,
         tools: Vec::new(),
         subagents: Vec::new(),
+        tasks: Vec::new(),
         question: None,
         editor: Editor::new(&theme),
         overlay: None,
@@ -894,6 +899,7 @@ async fn new_session(app: &mut App, chat: &ChatCtx) -> anyhow::Result<()> {
     app.assistant = None;
     app.tools.clear();
     app.subagents.clear();
+    app.tasks.clear();
     app.question = None;
     app.commit_notice("── new session ──", app.theme.dim);
     Ok(())
@@ -1172,6 +1178,7 @@ impl App {
             last_assistant: None,
             tools: Vec::new(),
             subagents: Vec::new(),
+            tasks: Vec::new(),
             question: None,
             editor: Editor::new(&theme),
             overlay: None,
@@ -1491,5 +1498,134 @@ mod tests {
         let s = screen(&app);
         assert!(s.contains("files"), "faltou título arquivos: {s:?}");
         assert!(s.contains("main.rs"), "faltou arquivo listado");
+    }
+
+    /// Monta um evento `tasks_set` com a lista de tarefas nos args (como o core
+    /// emite: a chamada carrega a lista completa de substituição).
+    fn tasks_set_event(tasks: serde_json::Value) -> AgentEvent {
+        AgentEvent::ToolCall {
+            session_id: "s1".into(),
+            tool_id: "tk1".into(),
+            tool_name: "tasks_set".into(),
+            args: serde_json::json!({ "tasks": tasks }),
+            permission: "auto".into(),
+            edit_proposal: None,
+        }
+    }
+
+    #[test]
+    fn tasks_set_fills_sticky_panel_and_suppresses_card() {
+        let mut app = App::for_test();
+        app.running = true;
+        event::apply(
+            &mut app,
+            tasks_set_event(serde_json::json!([
+                { "id": "task-0", "title": "Investigar exit_plan_mode", "description": "", "journal": [], "status": "done" },
+                { "id": "task-1", "title": "Ligar handoff do builder", "description": "", "journal": [], "status": "doing" },
+                { "id": "task-2", "title": "Ler run_to_completion", "description": "", "journal": [], "status": "todo" },
+            ])),
+        );
+        // O painel fixo passa a refletir as tarefas…
+        assert_eq!(app.tasks.len(), 3, "app.tasks deveria ter sido populado");
+        // …e NÃO vira um card de ferramenta (nem vivo, nem no scrollback).
+        assert!(app.tools.is_empty(), "tasks_set não deve empurrar um card");
+        let s = screen(&app);
+        assert!(s.contains("Tasks"), "faltou o header do painel: {s:?}");
+        assert!(s.contains("Ligar handoff do builder"), "faltou a tarefa em andamento no painel");
+        assert!(
+            s.contains("✓ 1") && s.contains("● 1") && s.contains("○ 1"),
+            "faltou a contagem por status: {s:?}"
+        );
+        assert!(!commits_text(&app).contains("tasks_set"), "o card de tasks_set não deveria commitar");
+    }
+
+    #[test]
+    fn tasks_panel_orders_doing_before_done() {
+        let mut app = App::for_test();
+        event::apply(
+            &mut app,
+            tasks_set_event(serde_json::json!([
+                { "id": "a", "title": "TAREFA_DONE", "description": "", "journal": [], "status": "done" },
+                { "id": "b", "title": "TAREFA_DOING", "description": "", "journal": [], "status": "doing" },
+            ])),
+        );
+        let s = screen(&app);
+        let doing = s.find("TAREFA_DOING").expect("tarefa doing ausente");
+        let done = s.find("TAREFA_DONE").expect("tarefa done ausente");
+        assert!(doing < done, "em-andamento deveria vir antes de concluída no painel");
+    }
+
+    #[test]
+    fn tasks_panel_caps_list_with_more_indicator() {
+        let mut app = App::for_test();
+        let many: Vec<_> = (0..9)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("t{i}"), "title": format!("tarefa {i}"),
+                    "description": "", "journal": [], "status": "todo"
+                })
+            })
+            .collect();
+        event::apply(&mut app, tasks_set_event(serde_json::json!(many)));
+        assert_eq!(app.tasks.len(), 9);
+        // 9 tarefas, cap 6 → mostra 6 + "+3 more".
+        let s = screen(&app);
+        assert!(s.contains("+3 more"), "faltou o indicador de overflow: {s:?}");
+    }
+
+    #[test]
+    fn golden_task_gets_marker() {
+        let mut app = App::for_test();
+        event::apply(
+            &mut app,
+            tasks_set_event(serde_json::json!([
+                { "id": "golden-0", "title": "Meta dourada", "description": "", "journal": [], "status": "doing" },
+            ])),
+        );
+        let s = screen(&app);
+        assert!(s.contains("★"), "tarefa golden deveria ter marcador ★: {s:?}");
+    }
+
+    #[test]
+    fn tasks_set_requiring_approval_keeps_card() {
+        // Defensivo: se algum dia tasks_set exigir aprovação, o painel ainda
+        // atualiza, mas o card (que carrega a aprovação) NÃO é suprimido.
+        let mut app = App::for_test();
+        app.running = true;
+        event::apply(
+            &mut app,
+            AgentEvent::ToolCall {
+                session_id: "s1".into(),
+                tool_id: "tk9".into(),
+                tool_name: "tasks_set".into(),
+                args: serde_json::json!({ "tasks": [
+                    { "id": "x", "title": "t", "description": "", "journal": [], "status": "todo" }
+                ]}),
+                permission: "requires_approval".into(),
+                edit_proposal: None,
+            },
+        );
+        assert_eq!(app.tasks.len(), 1, "o painel deveria atualizar mesmo exigindo aprovação");
+        assert_eq!(app.tools.len(), 1, "o card de aprovação não deve ser suprimido");
+    }
+
+    #[test]
+    fn malformed_tasks_set_falls_back_to_card() {
+        let mut app = App::for_test();
+        app.running = true;
+        // Sem a chave "tasks" → não parseia; cai no fluxo normal (card genérico).
+        event::apply(
+            &mut app,
+            AgentEvent::ToolCall {
+                session_id: "s1".into(),
+                tool_id: "tkbad".into(),
+                tool_name: "tasks_set".into(),
+                args: serde_json::json!({ "wrong": true }),
+                permission: "auto".into(),
+                edit_proposal: None,
+            },
+        );
+        assert!(app.tasks.is_empty(), "args inválidos não devem popular o painel");
+        assert_eq!(app.tools.len(), 1, "deveria cair no card genérico");
     }
 }

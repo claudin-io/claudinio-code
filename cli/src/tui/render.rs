@@ -15,12 +15,15 @@ use ratatui::Frame;
 
 const EDITOR_MAX: u16 = 4;
 const CONTENT_CAP: u16 = 12;
+/// Máximo de tarefas listadas no painel fixo antes de colapsar em "+N more".
+const TASKS_CAP: u16 = 6;
 
-/// Altura do "cromo" (fora do conteúdo): status + caixa do input + footer. É a
-/// altura do viewport quando ocioso — sem buraco.
+/// Altura do "cromo" (fora do conteúdo): painel de tarefas + status + caixa do
+/// input + footer. É a altura do viewport quando ocioso — sem buraco. O painel
+/// de tarefas entra aqui (não no conteúdo) pra ficar fixo, mesmo ocioso.
 pub fn chrome_height(app: &App) -> u16 {
     let editor = (app.editor.line_count() as u16).clamp(1, EDITOR_MAX);
-    1 + (editor + 2) + 2
+    1 + (editor + 2) + 2 + tasks_height(app)
 }
 
 /// Altura desejada do viewport inline: cromo + overlay + conteúdo ativo (capado).
@@ -83,11 +86,19 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         0
     };
-    let content_h = area.height.saturating_sub(footer_h + box_h + status_h + slash_h);
+    // Painel de tarefas: fixo logo acima do slash/status/input. Cede espaço a
+    // eles (e ao footer/box) e fica com o que sobra; o conteúdo cede ao painel.
+    let tasks_h = tasks_height(app)
+        .min(area.height.saturating_sub(footer_h + box_h + status_h + slash_h));
+    let content_h = area
+        .height
+        .saturating_sub(footer_h + box_h + status_h + slash_h + tasks_h);
 
     let mut y = area.y;
     let content = Rect::new(area.x, y, width, content_h);
     y += content_h;
+    let tasks = Rect::new(area.x, y, width, tasks_h);
+    y += tasks_h;
     let slash = Rect::new(area.x, y, width, slash_h);
     y += slash_h;
     let status = Rect::new(area.x, y, width, status_h);
@@ -106,6 +117,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         let total = para.line_count(width) as u16;
         let scroll = total.saturating_sub(content_h);
         f.render_widget(para.scroll((scroll, 0)), content);
+    }
+
+    // Painel fixo de tarefas (sem borda, sem wrap → clipa títulos longos, então
+    // a altura renderizada bate com `tasks_height`).
+    if tasks_h > 0 {
+        f.render_widget(Paragraph::new(tasks_panel_lines(app)), tasks);
     }
 
     // Paleta de comandos, logo acima da caixa.
@@ -204,6 +221,87 @@ fn status_line(app: &App) -> Line<'static> {
         "Enter send · Tab mode · / commands · @ files · Ctrl+C quit".to_string(),
         theme.dim_style(),
     ))
+}
+
+/// Altura do painel de tarefas: header (1) + até TASKS_CAP tarefas + "+N more".
+/// Zero quando não há tarefas (o painel some).
+fn tasks_height(app: &App) -> u16 {
+    let n = app.tasks.len() as u16;
+    if n == 0 {
+        return 0;
+    }
+    let overflow = if n > TASKS_CAP { 1 } else { 0 };
+    1 + n.min(TASKS_CAP) + overflow
+}
+
+/// Painel fixo de tarefas (acima do input): uma linha de contagem por status +
+/// até TASKS_CAP tarefas (em-andamento primeiro: doing → todo → done), com
+/// "+N more" no overflow. Renderizado sem wrap — títulos longos são clipados,
+/// então a altura bate com `tasks_height`. Cores espelham o TasksPanel do app:
+/// done=verde, doing=âmbar, todo=cinza; tarefas golden ganham um ★ de destaque.
+fn tasks_panel_lines(app: &App) -> Vec<Line<'static>> {
+    let theme = &app.theme;
+    if app.tasks.is_empty() {
+        return Vec::new();
+    }
+
+    let (mut done, mut doing, mut todo) = (0u16, 0u16, 0u16);
+    for t in &app.tasks {
+        match t.status.as_str() {
+            "done" => done += 1,
+            "doing" => doing += 1,
+            _ => todo += 1,
+        }
+    }
+
+    let header = Line::from(vec![
+        Span::styled("Tasks  ".to_string(), theme.muted_style()),
+        Span::styled(format!("✓ {done}"), theme.fg(theme.success)),
+        Span::styled("   ".to_string(), theme.dim_style()),
+        Span::styled(format!("● {doing}"), theme.fg(theme.warning)),
+        Span::styled("   ".to_string(), theme.dim_style()),
+        Span::styled(format!("○ {todo}"), theme.muted_style()),
+    ]);
+
+    // Em-andamento primeiro pra caber o acionável no cap; a ordenação estável
+    // preserva a ordem original dentro de cada status.
+    let rank = |s: &str| match s {
+        "doing" => 0u8,
+        "done" => 2,
+        _ => 1, // todo
+    };
+    let mut idx: Vec<usize> = (0..app.tasks.len()).collect();
+    idx.sort_by_key(|&i| rank(app.tasks[i].status.as_str()));
+
+    let mut lines = vec![header];
+    for &i in idx.iter().take(TASKS_CAP as usize) {
+        let t = &app.tasks[i];
+        let (glyph, glyph_style) = match t.status.as_str() {
+            "done" => ("✓", theme.fg(theme.success)),
+            "doing" => ("●", theme.fg(theme.warning)),
+            _ => ("○", theme.muted_style()),
+        };
+        let mut spans = vec![Span::styled(format!("  {glyph} "), glyph_style)];
+        if t.id.starts_with("golden-") {
+            spans.push(Span::styled("★ ".to_string(), theme.fg(theme.accent)));
+        }
+        let title_style = if t.status == "done" {
+            theme.dim_style()
+        } else {
+            theme.fg(theme.text)
+        };
+        spans.push(Span::styled(t.title.replace('\n', " "), title_style));
+        lines.push(Line::from(spans));
+    }
+
+    let n = app.tasks.len() as u16;
+    if n > TASKS_CAP {
+        lines.push(Line::from(Span::styled(
+            format!("  +{} more", n - TASKS_CAP),
+            theme.dim_style(),
+        )));
+    }
+    lines
 }
 
 /// Concatena o conteúdo em progresso para a área de conteúdo (sem borda):
