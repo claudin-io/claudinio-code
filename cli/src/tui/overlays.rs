@@ -18,6 +18,7 @@ pub const COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "mode", desc: "switch brain / builder" },
     SlashCmd { name: "theme", desc: "switch light / dark theme" },
     SlashCmd { name: "new", desc: "start a new session" },
+    SlashCmd { name: "sessions", desc: "reopen a previous session" },
     SlashCmd { name: "attach", desc: "attach a file/image (or drag the path)" },
     SlashCmd { name: "copy", desc: "copy last reply (OSC52)" },
     SlashCmd { name: "help", desc: "show shortcuts" },
@@ -30,6 +31,7 @@ pub enum SelectKind {
     Model,
     Effort,
     Theme,
+    Sessions,
     Help,
 }
 

@@ -35,6 +35,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 
+/// Como iniciar a sessão da TUI: nova, retomar a mais recente, ou uma específica
+/// (id, prefixo de id, ou caminho pro `.jsonl`).
+pub enum ResumeTarget {
+    None,
+    MostRecent,
+    Specific(String),
+}
+
 /// Pergunta pendente do `ask_user`, respondida via editor (ou dígitos p/ opções).
 pub struct PendingQuestion {
     pub key: String,
@@ -141,7 +149,7 @@ impl EventSink for ChannelSink {
     }
 }
 
-pub async fn run(path: Option<String>) -> anyhow::Result<()> {
+pub async fn run(path: Option<String>, resume: ResumeTarget) -> anyhow::Result<()> {
     let ws_root = model::resolve_workspace(path)?;
     let root = ws_root.to_string_lossy().to_string();
 
@@ -159,15 +167,34 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
     }
     let ws = Arc::new(WorkspaceState::open(ws_root.clone(), db_path.clone()).map_err(anyhow::Error::msg)?);
 
-    // Sessão nova.
-    let id = uuid::Uuid::new_v4().to_string();
-    let store = SessionStore::create(&id, Some(&root)).map_err(anyhow::Error::msg)?;
+    // Sessão: nova, ou retomar uma existente (a mais recente, ou uma específica).
+    let target_id: Option<String> = match &resume {
+        ResumeTarget::None => None,
+        ResumeTarget::MostRecent => persist::list_sessions(Some(&root))
+            .ok()
+            .and_then(|s| s.into_iter().next())
+            .map(|s| s.session_id),
+        ResumeTarget::Specific(v) => Some(resume_id_from_arg(v)),
+    };
+    let want_resume = !matches!(resume, ResumeTarget::None);
+    let resolved = target_id.and_then(|tid| persist::resolve_chain(Some(&root), &tid).ok());
+    let (id, store_path, initial_mode, resumed) = match resolved {
+        Some((tip_id, tip_path, records)) => {
+            let mode = records_mode(&records);
+            (tip_id, tip_path, mode, Some(records))
+        }
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let store = SessionStore::create(&id, Some(&root)).map_err(anyhow::Error::msg)?;
+            (id, store.path, SessionMode::Brain, None)
+        }
+    };
     *ws.active_session.lock().await = Some(SessionHandle {
         id: id.clone(),
-        store_path: store.path.clone(),
+        store_path: store_path.clone(),
     });
 
-    let mode_ctl = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human));
+    let mode_ctl = Arc::new(ModeCtl::new(initial_mode, ModeOrigin::Human));
     let steering_map: Arc<Mutex<HashMap<String, Arc<SteeringCtl>>>> = Arc::new(Mutex::new(HashMap::new()));
     let modes_map: Arc<Mutex<HashMap<String, Arc<ModeCtl>>>> = Arc::new(Mutex::new(HashMap::new()));
     modes_map.lock().await.insert(id.clone(), mode_ctl.clone());
@@ -201,7 +228,7 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
     let mut app = App {
         theme_kind: ThemeKind::Dark,
         theme,
-        mode: SessionMode::Brain,
+        mode: initial_mode,
         brain_model: config.brain_model.clone(),
         builder_model: config.builder_model.clone(),
         effort: config.thinking_effort.clone(),
@@ -236,6 +263,24 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         format!("claudinio chat — {root}   ·  Tab: mode · / commands · Ctrl+C: quit"),
         app.theme.dim,
     );
+
+    // Sessão retomada: replay do histórico + restauração de stats/rodapé. O modo
+    // já foi restaurado acima (initial_mode). O contexto do modelo é reconstruído
+    // do JSONL no próximo turno — o replay aqui é só visual.
+    if let Some(records) = &resumed {
+        restore_session_stats(&mut app, records);
+        for lines in replay_records(records, &app.theme) {
+            app.commit(lines);
+        }
+        let dim = app.theme.dim;
+        app.commit_notice(
+            format!("── resumed: {} · {} turns ──", session_title(records), count_user_turns(records)),
+            dim,
+        );
+    } else if want_resume {
+        let warn = app.theme.warning;
+        app.commit_notice("no session to resume — starting a new one", warn);
+    }
 
     // Terminal inline (sem alt-screen: preserva scrollback). Altura DINÂMICA: só
     // o cromo (input+status+footer) quando ocioso — SEM buraco — e cresce pra
@@ -579,6 +624,9 @@ async fn apply_overlay_action(app: &mut App, chat: &ChatCtx, action: OverlayActi
                 SelectKind::Theme => {
                     set_theme(app, &value);
                 }
+                SelectKind::Sessions => {
+                    resume_session(app, chat, &value).await?;
+                }
                 SelectKind::Help => {}
             }
             Ok(())
@@ -741,6 +789,29 @@ async fn run_command(app: &mut App, chat: &ChatCtx, name: &str, arg: &str) -> an
             app.overlay = Some(Overlay::Select(Select::new(SelectKind::Help, "shortcuts", help_items(), 0)));
         }
         "new" => new_session(app, chat).await?,
+        "sessions" | "resume" => {
+            let root = chat.ws.root.to_string_lossy().to_string();
+            match persist::list_sessions(Some(&root)) {
+                Ok(sessions) if !sessions.is_empty() => {
+                    let items: Vec<SelectItem> = sessions
+                        .iter()
+                        .map(|s| SelectItem {
+                            label: if s.title.is_empty() { "(untitled)".into() } else { s.title.clone() },
+                            desc: format!("{} · {} turns", rel_time(s.updated_at), s.turn_count),
+                            value: s.session_id.clone(),
+                        })
+                        .collect();
+                    app.overlay = Some(Overlay::Select(Select::new(
+                        SelectKind::Sessions,
+                        "sessions",
+                        items,
+                        0,
+                    )));
+                }
+                Ok(_) => app.commit_notice("no saved sessions", app.theme.muted),
+                Err(e) => app.commit_notice(format!("could not list sessions: {e}"), app.theme.warning),
+            }
+        }
         "copy" => {
             if let Some(text) = &app.last_assistant {
                 copy_to_clipboard(text);
@@ -950,6 +1021,227 @@ async fn new_session(app: &mut App, chat: &ChatCtx) -> anyhow::Result<()> {
     app.question = None;
     app.commit_notice("── new session ──", app.theme.dim);
     Ok(())
+}
+
+/// Extrai o id de sessão do argumento de `-c`: se for um caminho/`.jsonl`, usa o
+/// stem; senão, o valor cru (id ou prefixo, resolvido por `resolve_chain`).
+fn resume_id_from_arg(v: &str) -> String {
+    let p = std::path::Path::new(v);
+    if p.extension().and_then(|e| e.to_str()) == Some("jsonl") || v.contains('/') || v.contains('\\') {
+        p.file_stem().and_then(|s| s.to_str()).unwrap_or(v).to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+/// Modo salvo na sessão (último `Mode` record), com fallback pra Brain.
+fn records_mode(records: &[persist::SessionRecord]) -> SessionMode {
+    persist::last_mode(records)
+        .and_then(|(m, _)| SessionMode::parse(&m))
+        .unwrap_or(SessionMode::Brain)
+}
+
+/// Título da conversa: a primeira mensagem do usuário (truncada), como na lista.
+fn session_title(records: &[persist::SessionRecord]) -> String {
+    records
+        .iter()
+        .find_map(|r| match r {
+            persist::SessionRecord::User { text, .. } => Some(text.chars().take(60).collect()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "session".into())
+}
+
+fn count_user_turns(records: &[persist::SessionRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| matches!(r, persist::SessionRecord::User { .. }))
+        .count()
+}
+
+/// Restaura os contadores do rodapé (tokens/custo/contexto) da sessão carregada.
+fn restore_session_stats(app: &mut App, records: &[persist::SessionRecord]) {
+    let (in_tok, out_tok, cost, ..) = persist::cumulative_stats(records);
+    app.in_tok = in_tok;
+    app.out_tok = out_tok;
+    if cost.is_some() {
+        app.cost = cost;
+    }
+    if let Some(ctx) = persist::last_context_tokens(records) {
+        app.context_tokens = ctx;
+    }
+}
+
+/// Resultado de ferramenta que representa um erro (mesmo prefixo que o core grava
+/// em `session.rs`: `Error: …` / `Error applying: …`).
+fn result_is_error(content: &str) -> bool {
+    let t = content.trim_start();
+    t.starts_with("Error: ") || t.starts_with("Error applying: ")
+}
+
+/// Reconstrói o transcript de uma sessão carregada (records → lotes de linhas pro
+/// scrollback), reusando os renderizadores do caminho vivo. Edições ganham o diff
+/// completo (recomputado de old/new, independe do disco); erros de ferramenta são
+/// preservados; saídas bem-sucedidas ficam só no header (igual ao caminho vivo).
+fn replay_records(records: &[persist::SessionRecord], theme: &Theme) -> Vec<Vec<Line<'static>>> {
+    use super::transcript::{self, ToolState};
+
+    // Pré-indexa os resultados de ferramenta por tool_use_id.
+    let mut results: HashMap<String, String> = HashMap::new();
+    for rec in records {
+        if let persist::SessionRecord::Turn { message, .. } = rec {
+            for block in &message.content {
+                if let provider::ContentBlock::ToolResult { tool_use_id, content, .. } = block {
+                    results.insert(tool_use_id.clone(), content.clone());
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<Vec<Line<'static>>> = Vec::new();
+    for rec in records {
+        match rec {
+            persist::SessionRecord::User { text, .. } => {
+                out.push(transcript::render_user(text, theme));
+            }
+            persist::SessionRecord::Turn { message, .. } if message.role == "assistant" => {
+                for block in &message.content {
+                    match block {
+                        provider::ContentBlock::Text { text, .. } => {
+                            if !text.trim().is_empty() {
+                                out.push(transcript::render_assistant(text, theme));
+                            }
+                        }
+                        provider::ContentBlock::ToolUse { id, name, input, .. } => {
+                            let mut card =
+                                ToolCard::new(id.clone(), name.clone(), transcript::tool_summary(input));
+                            card.state = ToolState::Done;
+                            // Diff determinístico pra edições (independe do disco).
+                            if name == "edit_file" {
+                                if let (Some(old), Some(new)) = (
+                                    input.get("old_string").and_then(|v| v.as_str()),
+                                    input.get("new_string").and_then(|v| v.as_str()),
+                                ) {
+                                    card.diff =
+                                        Some(claudinio_core::agent::tools::diff_strings(old, new));
+                                }
+                            }
+                            if let Some(res) = results.get(id) {
+                                if result_is_error(res) {
+                                    card.is_error = true;
+                                    card.output = Some(res.clone());
+                                }
+                            }
+                            out.push(transcript::render_tool_card(&card, theme, 0));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            persist::SessionRecord::LinkedFrom { reason, .. } => {
+                out.push(transcript::render_notice(&format!("── linked ({reason}) ──"), theme.dim));
+            }
+            persist::SessionRecord::Handoff { .. } => {
+                out.push(transcript::render_notice("── handoff ──", theme.dim));
+            }
+            persist::SessionRecord::Compacted { .. } => {
+                out.push(transcript::render_notice("── context compacted ──", theme.dim));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Reabre uma sessão salva na TUI em execução (via `/sessions`): resolve a cadeia,
+/// aponta a sessão ativa pra ponta, restaura modo/stats, reseta o estado vivo e
+/// faz replay do histórico. Modelado em `new_session`.
+async fn resume_session(app: &mut App, chat: &ChatCtx, session_id: &str) -> anyhow::Result<()> {
+    let root = chat.ws.root.to_string_lossy().to_string();
+    let (tip_id, tip_path, records) = match persist::resolve_chain(Some(&root), session_id) {
+        Ok(t) => t,
+        Err(e) => {
+            let warn = app.theme.warning;
+            app.commit_notice(format!("could not open session: {e}"), warn);
+            return Ok(());
+        }
+    };
+
+    // Limpa a sessão atual se estiver vazia (evita órfãos "(empty session)").
+    cleanup_active_if_empty(chat).await;
+
+    *chat.ws.active_session.lock().await = Some(SessionHandle {
+        id: tip_id.clone(),
+        store_path: tip_path,
+    });
+
+    // Restaura o modo salvo.
+    let mode = records_mode(&records);
+    let mode_ctl = Arc::new(ModeCtl::new(mode, ModeOrigin::Human));
+    chat.maps.modes.lock().await.insert(tip_id, mode_ctl.clone());
+    app.mode_ctl = mode_ctl;
+    app.mode = mode;
+
+    // Reseta o estado vivo (como /new) e restaura os contadores do rodapé.
+    app.in_tok = 0;
+    app.out_tok = 0;
+    app.cost = None;
+    app.context_tokens = 0;
+    app.max_context_tokens = 0;
+    app.thinking = None;
+    app.assistant = None;
+    app.tools.clear();
+    app.subagents.clear();
+    app.tasks.clear();
+    app.question = None;
+    restore_session_stats(app, &records);
+
+    // Replay do histórico + divisor.
+    for lines in replay_records(&records, &app.theme) {
+        app.commit(lines);
+    }
+    let dim = app.theme.dim;
+    app.commit_notice(
+        format!("── resumed: {} · {} turns ──", session_title(&records), count_user_turns(&records)),
+        dim,
+    );
+    Ok(())
+}
+
+/// Se a sessão ativa não tem conteúdo real (só meta/mode), remove o arquivo pra
+/// não deixar um órfão "(empty session)" na lista.
+async fn cleanup_active_if_empty(chat: &ChatCtx) {
+    let path = {
+        let guard = chat.ws.active_session.lock().await;
+        let Some(h) = guard.as_ref() else { return };
+        let is_empty = load_records(&h.store_path)
+            .map(|recs| {
+                !recs.iter().any(|r| {
+                    matches!(r, persist::SessionRecord::User { .. } | persist::SessionRecord::Turn { .. })
+                })
+            })
+            .unwrap_or(false);
+        if !is_empty {
+            return;
+        }
+        h.store_path.clone()
+    };
+    let _ = std::fs::remove_file(&path);
+    persist::invalidate_cache(&path, &chat.maps.records_cache);
+}
+
+/// Formata um epoch-ms como tempo relativo curto ("2h ago") pra lista de sessões.
+fn rel_time(ts_ms: u64) -> String {
+    let secs = persist::now_ms().saturating_sub(ts_ms) / 1000;
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }
 
 /// Monta o `RunArgs` do turno com os overrides do App e spawna o driver.
@@ -1674,5 +1966,57 @@ mod tests {
         );
         assert!(app.tasks.is_empty(), "args inválidos não devem popular o painel");
         assert_eq!(app.tools.len(), 1, "deveria cair no card genérico");
+    }
+
+    fn batches_text(batches: &[Vec<Line<'static>>]) -> String {
+        batches
+            .iter()
+            .flat_map(|lines| lines.iter())
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn replay_reconstructs_transcript_with_edit_diff_and_error() {
+        use claudinio_core::agent::provider::{ContentBlock, Message};
+        let assistant = Message {
+            role: "assistant".into(),
+            content: vec![
+                ContentBlock::text("on it"),
+                ContentBlock::tool_use(
+                    "t1",
+                    "edit_file",
+                    serde_json::json!({
+                        "path": "src/x.rs",
+                        "old_string": "let foo = 1;",
+                        "new_string": "let bar = 2;",
+                    }),
+                ),
+                ContentBlock::tool_use("t2", "bash", serde_json::json!({ "command": "make" })),
+            ],
+        };
+        // Tool results live in the FOLLOWING user turn (t2 failed).
+        let results = Message {
+            role: "user".into(),
+            content: vec![
+                ContentBlock::tool_result("t1", "Edited src/x.rs"),
+                ContentBlock::tool_result("t2", "Error: command failed"),
+            ],
+        };
+        let records = vec![
+            persist::SessionRecord::User { text: "change x and build".into(), ts: 1 },
+            persist::SessionRecord::Turn { message: assistant, ts: 2 },
+            persist::SessionRecord::Turn { message: results, ts: 3 },
+        ];
+
+        let text = batches_text(&replay_records(&records, &Theme::dark()));
+        assert!(text.contains("change x and build"), "user turn replayed: {text}");
+        assert!(text.contains("on it"), "assistant text replayed");
+        assert!(text.contains("edit_file"), "edit tool header present");
+        assert!(text.contains("bar = 2"), "full-fidelity edit diff shows new content: {text}");
+        assert!(text.contains("bash"), "bash tool header present");
+        assert!(text.contains("command failed"), "failed tool result surfaced as error: {text}");
     }
 }

@@ -16,4 +16,4 @@ pub mod render;
 pub mod theme;
 pub mod transcript;
 
-pub use app::run;
+pub use app::{run, ResumeTarget};

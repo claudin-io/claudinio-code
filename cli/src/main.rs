@@ -15,6 +15,10 @@ use clap::{Parser, Subcommand};
     about = "Claudinio Code — agente de código no terminal (brain/builder, busca semântica)"
 )]
 struct Cli {
+    /// Retoma uma sessão: `-c` reabre a mais recente; `-c <id|caminho>` uma
+    /// específica (id, prefixo de id, ou caminho pro .jsonl).
+    #[arg(short = 'c', long = "continue", num_args = 0..=1, value_name = "SESSION", global = true)]
+    continue_session: Option<Option<String>>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -84,13 +88,19 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // `-c` ausente → sessão nova; `-c` sem valor → mais recente; `-c <v>` → específica.
+    let resume = match cli.continue_session {
+        None => tui::ResumeTarget::None,
+        Some(None) => tui::ResumeTarget::MostRecent,
+        Some(Some(v)) => tui::ResumeTarget::Specific(v),
+    };
     match cli.command.unwrap_or(Command::Chat { path: None }) {
         Command::Config { action } => commands::config::run(action),
         Command::Models => commands::config::run_models().await,
         Command::Index { path } => commands::index::run(path).await,
         Command::Search { query, path, limit } => commands::search::run(query, path, limit).await,
         Command::Run { message, mode, path, yes } => commands::run::run(message, mode, path, yes).await,
-        Command::Chat { path } => commands::chat::run(path).await,
+        Command::Chat { path } => commands::chat::run(path, resume).await,
         Command::Auth { action } => commands::auth::run(action).await,
         Command::Provider { action } => commands::provider::run(action).await,
         Command::Sessions { action } => commands::sessions::run(action),

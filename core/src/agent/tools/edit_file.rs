@@ -19,6 +19,14 @@ pub struct EditDiff {
     pub applied: bool,
 }
 
+/// Unified diff between two strings (thin wrapper over `diffy::create_patch`).
+/// Deterministic and disk-independent — used both to preview a pending edit
+/// (full-file before/after) and to reconstruct an edit's diff when replaying a
+/// saved session (old_string → new_string, without needing the file on disk).
+pub fn diff_strings(before: &str, after: &str) -> String {
+    diffy::create_patch(before, after).to_string()
+}
+
 pub fn preview(args: &EditFileArgs) -> Result<EditDiff, String> {
     let content = std::fs::read_to_string(&args.path)
         .map_err(|e| format!("cannot read {}: {e}", args.path))?;
@@ -30,11 +38,10 @@ pub fn preview(args: &EditFileArgs) -> Result<EditDiff, String> {
         ));
     }
 
-    let unified = diffy::create_patch(
+    let unified = diff_strings(
         &content,
         &content.replace(&args.old_string, &args.new_string),
-    )
-    .to_string();
+    );
 
     Ok(EditDiff {
         path: args.path.clone(),

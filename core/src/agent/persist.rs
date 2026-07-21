@@ -704,6 +704,89 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
     Ok(collapsed)
 }
 
+/// Resolve a session id (or unique id prefix) to the whole linked conversation.
+///
+/// The requested id is first followed FORWARD (`handoff_to`) to the chain tip —
+/// reopening a superseded link must never resume a stale session — then the
+/// tip's ancestry is walked BACKWARD (`linked_from`) and every predecessor's
+/// records are prepended, with the chain markers left in place as dividers.
+///
+/// Returns `(tip_id, tip_path, records)`: the chain tip's id, its file path (the
+/// session to make active), and the flattened record stream of the whole chain.
+pub fn resolve_chain(
+    workspace: Option<&str>,
+    session_id: &str,
+) -> Result<(String, PathBuf, Vec<SessionRecord>), String> {
+    let dir = sessions_dir(workspace)?;
+
+    // Resolve an id — or, as a convenience, a unique id prefix — to its file.
+    let start_path = {
+        let exact = dir.join(format!("{session_id}.jsonl"));
+        if exact.exists() {
+            exact
+        } else {
+            std::fs::read_dir(&dir)
+                .ok()
+                .and_then(|entries| {
+                    entries.flatten().find_map(|e| {
+                        let path = e.path();
+                        if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                            return None;
+                        }
+                        let stem = path.file_stem().and_then(|s| s.to_str())?;
+                        stem.starts_with(session_id).then_some(path)
+                    })
+                })
+                .ok_or_else(|| format!("session '{session_id}' not found"))?
+        }
+    };
+    let start_id = start_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(session_id)
+        .to_string();
+
+    const MAX_CHAIN_HOPS: usize = 64;
+
+    // Forward to the chain tip. Independent cycle guard: the backward pass must
+    // be free to re-traverse these same nodes (that is how it collects the
+    // ancestry when the caller starts from a non-tip id).
+    let mut fwd_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut tip_id = start_id;
+    let mut tip_path = start_path;
+    let mut tip_records = load_records(&tip_path)?;
+    fwd_seen.insert(tip_id.clone());
+    for _ in 0..MAX_CHAIN_HOPS {
+        let Some(next) = handoff_to(&tip_records) else { break };
+        if !fwd_seen.insert(next.clone()) {
+            break; // cycle guard
+        }
+        let next_path = dir.join(format!("{next}.jsonl"));
+        let Ok(next_records) = load_records(&next_path) else { break };
+        tip_id = next;
+        tip_path = next_path;
+        tip_records = next_records;
+    }
+
+    // Backward through the ancestry, prepending each predecessor.
+    let mut back_seen: std::collections::HashSet<String> =
+        std::collections::HashSet::from([tip_id.clone()]);
+    let mut chain: Vec<Vec<SessionRecord>> = vec![tip_records];
+    for _ in 0..MAX_CHAIN_HOPS {
+        let earliest = chain.first().map(|v| v.as_slice()).unwrap_or(&[]);
+        let Some(info) = linked_from(earliest) else { break };
+        if !back_seen.insert(info.prev_session_id.clone()) {
+            break; // cycle guard
+        }
+        let prev_path = dir.join(format!("{}.jsonl", info.prev_session_id));
+        let Ok(prev_records) = load_records(&prev_path) else { break };
+        chain.insert(0, prev_records);
+    }
+
+    let records: Vec<SessionRecord> = chain.into_iter().flatten().collect();
+    Ok((tip_id, tip_path, records))
+}
+
 pub fn load_records_cached(
     path: &Path,
     cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>
@@ -846,6 +929,53 @@ mod tests {
         assert_eq!(tip.turn_count, 3, "turn_count sums the whole chain");
         assert!(list.iter().any(|s| s.session_id == "solo"));
         assert!(!list.iter().any(|s| s.session_id == "root" || s.session_id == "mid"));
+    }
+
+    #[test]
+    fn resolve_chain_walks_to_tip_and_flattens() {
+        let dir = std::env::temp_dir().join(format!("claudinio-resolvechain-{}", std::process::id()));
+        let ws = dir.to_string_lossy().to_string();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Chain: root -> mid -> tip.
+        let root_store = SessionStore::create("aaa-root", Some(&ws)).unwrap();
+        root_store.append(&SessionRecord::User { text: "build the feature".into(), ts: 10 }).unwrap();
+        root_store.append(&SessionRecord::HandoffTo { next_session_id: "bbb-mid".into(), reason: "plan_execution".into(), ts: 20 }).unwrap();
+
+        let mid_store = SessionStore::create("bbb-mid", Some(&ws)).unwrap();
+        mid_store.append(&SessionRecord::LinkedFrom { prev_session_id: "aaa-root".into(), reason: "plan_execution".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 21 }).unwrap();
+        mid_store.append(&SessionRecord::User { text: "[system] execute".into(), ts: 22 }).unwrap();
+        mid_store.append(&SessionRecord::HandoffTo { next_session_id: "ccc-tip".into(), reason: "context_handoff".into(), ts: 30 }).unwrap();
+
+        let tip_store = SessionStore::create("ccc-tip", Some(&ws)).unwrap();
+        tip_store.append(&SessionRecord::LinkedFrom { prev_session_id: "bbb-mid".into(), reason: "context_handoff".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 31 }).unwrap();
+        tip_store.append(&SessionRecord::User { text: "[system] continue".into(), ts: 32 }).unwrap();
+
+        let user_count = |recs: &[SessionRecord]| recs.iter().filter(|r| matches!(r, SessionRecord::User { .. })).count();
+
+        // From the root: follow handoff_to forward to the tip; the flattened
+        // stream spans the whole chain (all 3 user turns), root first.
+        let (tip_id, tip_path, records) = resolve_chain(Some(&ws), "aaa-root").unwrap();
+        assert_eq!(tip_id, "ccc-tip", "forward walk lands on the chain tip");
+        assert!(tip_path.ends_with("ccc-tip.jsonl"));
+        assert_eq!(user_count(&records), 3, "flattened chain has every segment's turns");
+        let first_user = records.iter().find_map(|r| match r {
+            SessionRecord::User { text, .. } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(first_user, Some("build the feature"), "root's turn comes first in the flattened chain");
+
+        // From the tip: walk linked_from backward, prepending ancestry — same result.
+        let (tip_id, _, records) = resolve_chain(Some(&ws), "ccc-tip").unwrap();
+        assert_eq!(tip_id, "ccc-tip");
+        assert_eq!(user_count(&records), 3, "backward walk prepends the ancestry");
+
+        // Unique id prefix resolves, then still walks to the tip.
+        let (tip_id, ..) = resolve_chain(Some(&ws), "bbb").unwrap();
+        assert_eq!(tip_id, "ccc-tip", "prefix match resolves then follows the chain");
+
+        assert!(resolve_chain(Some(&ws), "nope").is_err(), "unknown id errors");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

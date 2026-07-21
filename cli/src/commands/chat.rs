@@ -3,6 +3,6 @@
 //! experiência com o app desktop). Este módulo só delega para preservar o
 //! ponto de despacho `commands::chat::run` usado pelo `main`.
 
-pub async fn run(path: Option<String>) -> anyhow::Result<()> {
-    crate::tui::run(path).await
+pub async fn run(path: Option<String>, resume: crate::tui::ResumeTarget) -> anyhow::Result<()> {
+    crate::tui::run(path, resume).await
 }

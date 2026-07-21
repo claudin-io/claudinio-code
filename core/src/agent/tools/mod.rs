@@ -8,6 +8,7 @@ pub mod tasks;
 mod web_search;
 pub mod write_plan;
 
+pub use edit_file::diff_strings;
 pub use finalize_plan::git_head;
 
 use crate::code_intel::db::IndexDb;

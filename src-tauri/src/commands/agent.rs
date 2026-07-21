@@ -294,48 +294,8 @@ pub async fn load_session(
 ) -> Result<Vec<SessionRecord>, String> {
     let ws = state.workspace(&workspace).await?;
     let root = ws.root.to_string_lossy().to_string();
-    let dir = persist::sessions_dir(Some(&root))?;
 
-    let load_one = |id: &str| -> Result<Vec<SessionRecord>, String> {
-        let path = dir.join(format!("{id}.jsonl"));
-        if !path.exists() {
-            return Err(format!("session '{id}' not found"));
-        }
-        load_records(&path)
-    };
-
-    const MAX_CHAIN_HOPS: usize = 64;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    // Forward to the chain tip.
-    let mut tip_id = session_id;
-    let mut tip_records = load_one(&tip_id)?;
-    seen.insert(tip_id.clone());
-    for _ in 0..MAX_CHAIN_HOPS {
-        let Some(next) = persist::handoff_to(&tip_records) else { break };
-        if !seen.insert(next.clone()) {
-            break; // cycle guard
-        }
-        let Ok(next_records) = load_one(&next) else { break };
-        tip_id = next;
-        tip_records = next_records;
-    }
-
-    // Backward through the ancestry, prepending each predecessor.
-    let mut chain: Vec<Vec<SessionRecord>> = vec![tip_records];
-    for _ in 0..MAX_CHAIN_HOPS {
-        let earliest = chain.first().map(|v| v.as_slice()).unwrap_or(&[]);
-        let Some(info) = persist::linked_from(earliest) else { break };
-        if !seen.insert(info.prev_session_id.clone()) {
-            break; // cycle guard
-        }
-        let Ok(prev_records) = load_one(&info.prev_session_id) else { break };
-        chain.insert(0, prev_records);
-    }
-
-    let records: Vec<SessionRecord> = chain.into_iter().flatten().collect();
-
-    let tip_path = dir.join(format!("{tip_id}.jsonl"));
+    let (tip_id, tip_path, records) = persist::resolve_chain(Some(&root), &session_id)?;
     {
         let mut guard = ws.active_session.lock().await;
         *guard = Some(SessionHandle {
