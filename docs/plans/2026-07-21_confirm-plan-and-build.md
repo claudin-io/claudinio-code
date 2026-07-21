@@ -265,3 +265,16 @@ No UI changes needed: the tool call result renders in the existing tool call UI,
 - Add confirm_plan_and_build handler in handle_mode_switch(): Full handler arm added with Brain mode validation; Persists Mode(Builder, Human) record; Auto-commits plan via git same as exit_plan_mode; Sets pending_handoff with PlanExecution reason and Human origin; Returns 'Plan approved. Handing off to Builder mode...'
 - Add to api_tools() in Brain mode: confirm_plan_and_build_def() added to Brain mode tool list; Tool becomes available only in Brain mode
 - Verify: build passes: cargo build passes with 0 new errors (only pre-existing warnings)
+
+
+## Implementation Log — 2026-07-21 11:31
+**Summary:** Eager MCP pre-warm eliminates first-message delay in TUI
+**Changed files:** M	cli/src/tui/app.rs
+**Commits:** 701305d perf(cli/tui): eager MCP pre-warm to eliminate first-message delay on Enter
+**Journal:** Root cause analysis: the first-message delay was a classic blocking-before-draw problem. `submit()` -> `app.commit()` only enqueues to a vector (stale draw), then `start_turn().await` blocks on `ensure_mcp_connected` which spawns actual stdio MCP processes on the first call. Only after `handle_event` returns does the main loop call `commit_and_draw()`.
+
+Fix: one line added right after ChatCtx creation — eagerly call `ensure_mcp_connected` before the terminal even starts. The stdio spawn cost shifts to startup time (while the user sees the welcome banner), so the first real submit finds a hot connection cache and returns instantly, eliminating the visual delay between pressing Enter and seeing the message appear.
+
+**Task journal:**
+- Investigate first-message delay in TUI chat area: Root cause: `start_turn()` é awaited dentro de `submit()`, que é awaited dentro de `handle_event()`, e `commit_and_draw()` (que efetivamente renderiza a mensagem do usuário no terminal) só roda no loop principal DEPOIS que handle_event retorna.; Na primeira mensagem, `ensure_mcp_connected` dentro de `start_turn()` faz a conexão real (spawn de processos stdio de MCP servers), que é o principal gargalo.; `app.commit(user_lines)` só enfileira no vetor `to_commit` — não desenha nada. O desenho real acontece em `commit_and_draw()`, chamado no loop main após handle_event retornar.
+- Add eager MCP pre-warm before terminal init: Added `chat.ws.ensure_mcp_connected(&chat.config).await;` right after ChatCtx creation, before terminal init. This pre-warms the MCP connection while the user is still seeing the welcome message, so by the time they type their first message, `start_turn()` finds the cache hot and returns instantly.; Compila sem erros em `claudinio-cli`.; Commit: 701305d perf(cli/tui): eager MCP pre-warm to eliminate first-message delay on Enter
