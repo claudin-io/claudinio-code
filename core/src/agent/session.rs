@@ -834,6 +834,7 @@ fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolD
         SessionMode::Brain => {
             defs.push(tools::write_plan_def());
             defs.push(tools::exit_plan_mode_def());
+            defs.push(tools::confirm_plan_and_build_def());
         }
     }
     defs.extend(mcp_defs.iter().cloned());
@@ -2265,7 +2266,10 @@ pub async fn run_workflow_with_profile(
             ));
 
             let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
-            let block = if tool_name == "enter_plan_mode" || tool_name == "exit_plan_mode" {
+            let block = if tool_name == "enter_plan_mode"
+                || tool_name == "exit_plan_mode"
+                || tool_name == "confirm_plan_and_build"
+            {
                 handle_mode_switch(
                     &tool_name,
                     &tool_use_id,
@@ -3138,6 +3142,67 @@ fn handle_mode_switch(
                 }
                 (
                     "Plan approved. Switching to Builder mode via new session... End your turn."
+                        .into(),
+                    None,
+                )
+            }
+        }
+        "confirm_plan_and_build" => {
+            if mode != SessionMode::Brain {
+                (
+                    "Not in Brain mode. confirm_plan_and_build can only be called from Brain mode."
+                        .into(),
+                    Some("invalid".into()),
+                )
+            } else {
+                store.try_append(&SessionRecord::Mode {
+                    mode: SessionMode::Builder.as_str().into(),
+                    origin: ModeOrigin::Human.as_str().into(),
+                    ts: now_ms(),
+                });
+                crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+                *pending_handoff = Some(HandoffSpec {
+                    reason: HandoffReason::PlanExecution,
+                    next_mode: SessionMode::Builder,
+                    next_origin: ModeOrigin::Human,
+                    first_message: "Plan approved. Read the plan and execute the tasks.".into(),
+                    golden_cycle: 0,
+                    golden_stalls: 0,
+                    golden_last_pending: vec![],
+                });
+                let auto_commit = ctx.agent_config.as_ref()
+                    .map(|c| c.auto_commit_plan)
+                    .unwrap_or(true);
+                if auto_commit {
+                    if let Some(root) = &ctx.workspace_root {
+                        let plan_save_path = ctx.plan_save_path.as_deref();
+                        if let Some(plan_path) = crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path) {
+                            let fname = plan_path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("plan");
+                            let slug = if fname.len() > 11 && &fname[4..5] == "-" {
+                                &fname[11..]
+                            } else {
+                                fname
+                            };
+                            let commit_msg = format!("docs(plan): {}", slug);
+                            let _ = std::process::Command::new("git")
+                                .arg("-C").arg(root)
+                                .arg("add")
+                                .arg(plan_path.to_string_lossy().as_ref())
+                                .output();
+                            let _ = std::process::Command::new("git")
+                                .arg("-C").arg(root)
+                                .arg("commit")
+                                .arg("-m")
+                                .arg(&commit_msg)
+                                .arg("--no-verify")
+                                .output();
+                        }
+                    }
+                }
+                (
+                    "Plan approved. Handing off to Builder mode in a new session. "
                         .into(),
                     None,
                 )

@@ -240,3 +240,28 @@ flowchart LR
 4. **Add handler arm in handle_mode_switch()**: implement the Brain→Builder handoff
 5. **Add to api_tools()**: expose in Brain mode
 6. **Verify**: confirm tool appears in Brain mode, succeeds with handoff, fails in Builder mode, and the new Builder session receives the plan
+
+
+## Implementation Log — 2026-07-21 11:19
+**Summary:** Add confirm_plan_and_build tool for agent-initiated Brain→Builder handoff
+**Changed files:** A	docs/plans/2026-07-21_confirm-plan-and-build.md
+**Commits:** cf72e75 docs(plan): confirm-plan-and-build
+**Journal:** Tool confirm_plan_and_build implemented. 5 source changes across 2 files, build compiles clean.
+
+Key design decisions:
+- next_origin: Human (matches "Continue with Builder" button semantics, user confirmed via ask_user)
+- HandoffReason::PlanExecution (same as exit_plan_mode)
+- Auto-commit logic duplicated from exit_plan_mode (cleaner than shared helper for this small block)
+- Tool only available in Brain mode; errors clearly if called from Builder
+
+Separated from exit_plan_mode because exit_plan_mode blocks when origin is Human (user-enabled Brain). confirm_plan_and_build is intentionally Human-origin — the user explicitly confirmed via ask_user — so it needs its own handler that skips that guard.
+
+No UI changes needed: the tool call result renders in the existing tool call UI, and the "Continue with Builder" button remains unchanged as a parallel path.
+
+**Task journal:**
+- Add confirm_plan_and_build_def() in tools/mod.rs: Added confirm_plan_and_build_def() after exit_plan_mode_def(); ToolDef defined with empty input_schema, description about plan confirmation and Builder handoff
+- Intercept confirm_plan_and_build in execute(): Pattern extended to match confirm_plan_and_build alongside enter_plan_mode and exit_plan_mode
+- Route confirm_plan_and_build to handle_mode_switch in run_workflow(): Routing condition extended to include confirm_plan_and_build; Now routes to handle_mode_switch() correctly
+- Add confirm_plan_and_build handler in handle_mode_switch(): Full handler arm added with Brain mode validation; Persists Mode(Builder, Human) record; Auto-commits plan via git same as exit_plan_mode; Sets pending_handoff with PlanExecution reason and Human origin; Returns 'Plan approved. Handing off to Builder mode...'
+- Add to api_tools() in Brain mode: confirm_plan_and_build_def() added to Brain mode tool list; Tool becomes available only in Brain mode
+- Verify: build passes: cargo build passes with 0 new errors (only pre-existing warnings)

@@ -476,6 +476,17 @@ pub fn exit_plan_mode_def() -> ToolDef {
     }
 }
 
+/// Definition of the confirm_plan_and_build tool. Only offered in Brain mode.
+/// The agent should call this after the user confirms via ask_user that they
+/// want to execute the plan. Triggers a handoff to a new Builder session.
+pub fn confirm_plan_and_build_def() -> ToolDef {
+    ToolDef {
+        name: "confirm_plan_and_build".into(),
+        description: "Confirm the plan is ready and hand off to Builder mode for execution. Call this AFTER the user confirmed via ask_user that they want to build. Only works in Brain mode — creates a new Builder session with the plan inlined and tasks carried over.".into(),
+        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
+    }
+}
+
 pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
     if name.starts_with("mcp__") {
         let mgr = ctx
@@ -693,7 +704,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "spawn_agents" => {
             Err("spawn_agents is handled by the session orchestrator".into())
         }
-        "enter_plan_mode" | "exit_plan_mode" => {
+        "enter_plan_mode" | "exit_plan_mode" | "confirm_plan_and_build" => {
             Err("mode switch tools are handled by the session orchestrator".into())
         }
         "agent" | "task" | "spawn_agent" | "subagent" => Err(format!(
