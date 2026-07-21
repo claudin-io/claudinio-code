@@ -87,15 +87,6 @@ pub fn render_assistant(src: &str, theme: &Theme) -> Vec<Line<'static>> {
     out
 }
 
-/// Bloco de "pensando": linhas dim, indentadas.
-pub fn render_thinking(text: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let style = Style::default().fg(theme.thinking).add_modifier(Modifier::DIM);
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| Line::from(Span::styled(format!("  {}", l.trim_end()), style)))
-        .collect()
-}
-
 /// Nota curta colorida (handoff, mudança de modo, golden, steering, erro).
 pub fn render_notice(text: &str, color: ratatui::style::Color) -> Vec<Line<'static>> {
     vec![Line::from(Span::styled(text.to_string(), Style::default().fg(color)))]
@@ -133,7 +124,8 @@ pub fn render_tool_card(card: &ToolCard, theme: &Theme, max_diff: usize) -> Vec<
         )));
     }
 
-    // Diff (se houver)
+    // Diff — só para edições. Demais ferramentas mostram apenas o header (que
+    // rodaram); a saída textual não é despejada (minimalista).
     if let Some(diff) = &card.diff {
         let (add, del) = diff_stats(diff);
         out.push(indent(
@@ -148,17 +140,6 @@ pub fn render_tool_card(card: &ToolCard, theme: &Theme, max_diff: usize) -> Vec<
             let mut spans = vec![Span::styled("  │ ".to_string(), theme.fg(gutter_color))];
             spans.extend(l.spans);
             out.push(Line::from(spans));
-        }
-    } else if let Some(out_text) = &card.output {
-        // Saída textual (primeiras linhas), dim.
-        for l in out_text.lines().take(8) {
-            if l.trim().is_empty() {
-                continue;
-            }
-            out.push(Line::from(Span::styled(
-                format!("  {}", truncate_line(l, 200)),
-                theme.dim_style(),
-            )));
         }
     }
 

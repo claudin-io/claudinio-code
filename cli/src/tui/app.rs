@@ -1225,6 +1225,10 @@ mod tests {
         let mut app = App::for_test();
         app.running = true;
         event::apply(&mut app, AgentEvent::Thinking("planejando…".into()));
+        // Enquanto pensa (antes de qualquer texto): indicador fixo, sem o texto cru.
+        let s_think = screen(&app);
+        assert!(s_think.contains("Thinking"), "faltou indicador fixo de thinking: {s_think:?}");
+        assert!(!s_think.contains("planejando"), "texto cru de thinking não deve aparecer");
         event::apply(
             &mut app,
             AgentEvent::TextDelta {
@@ -1249,8 +1253,8 @@ mod tests {
         assert!(s.contains("working"), "faltou status de spinner: {s:?}");
         assert!(s.contains("12%/200k"), "faltou % de contexto no footer");
         assert!(s.contains("claudius"), "faltou modelo no footer");
-        // O bloco de "pensando" foi commitado ao scrollback quando o texto começou.
-        assert!(commits_text(&app).contains("planejando"), "thinking não commitado");
+        // O texto de "pensando" NUNCA vai pro scrollback (só o indicador fixo na status line).
+        assert!(!commits_text(&app).contains("planejando"), "thinking não deve ser commitado");
         // O texto do assistente vai pro scrollback ao finalizar o passo (não é
         // desenhado na região viva, pra não redimensionar o viewport).
         event::apply(
@@ -1303,6 +1307,77 @@ mod tests {
         );
         assert!(app.tools.is_empty(), "card deveria ter finalizado");
         assert!(commits_text(&app).contains("edit_file"), "card não commitado");
+    }
+
+    #[test]
+    fn plain_tool_commits_header_without_output() {
+        let mut app = App::for_test();
+        app.running = true;
+        // Ferramenta comum (sem edit_proposal): roda e devolve saída textual.
+        event::apply(
+            &mut app,
+            AgentEvent::ToolCall {
+                session_id: "s1".into(),
+                tool_id: "t9".into(),
+                tool_name: "semantic_search".into(),
+                args: serde_json::json!({ "query": "release process" }),
+                permission: "auto".into(),
+                edit_proposal: None,
+            },
+        );
+        event::apply(
+            &mut app,
+            AgentEvent::ToolResult {
+                tool_id: "t9".into(),
+                tool_name: "semantic_search".into(),
+                output: "{\n  \"mode\": \"lexical-only\",\n  \"results\": []\n}".into(),
+                error: None,
+            },
+        );
+        assert!(app.tools.is_empty(), "card deveria ter finalizado");
+        let c = commits_text(&app);
+        // Só o header (nome + resumo da query) — a saída NÃO é despejada.
+        assert!(c.contains("semantic_search"), "faltou header da ferramenta: {c:?}");
+        assert!(c.contains("release process"), "faltou resumo da query no header");
+        assert!(!c.contains("lexical-only"), "a saída da ferramenta não deve ir pro scrollback");
+    }
+
+    #[test]
+    fn subagent_nested_calls_are_hidden() {
+        let mut app = App::for_test();
+        app.running = true;
+        event::apply(
+            &mut app,
+            AgentEvent::SubagentStarted {
+                subagent_id: "sub1".into(),
+                parent_tool_id: "pt1".into(),
+                name: "release-workflow-investigator".into(),
+                goal: "Inspect the release workflow files".into(),
+                mode: "builder".into(),
+            },
+        );
+        // Chamada de ferramenta aninhada: NÃO deve virar linha no scrollback.
+        event::apply(
+            &mut app,
+            AgentEvent::Subagent {
+                subagent_id: "sub1".into(),
+                event: Box::new(AgentEvent::ToolCall {
+                    session_id: "s1".into(),
+                    tool_id: "nt1".into(),
+                    tool_name: "read_file".into(),
+                    args: serde_json::json!({ "path": "/repo/.github/workflows/release.yml" }),
+                    permission: "auto".into(),
+                    edit_proposal: None,
+                }),
+            },
+        );
+        let c = commits_text(&app);
+        assert!(c.contains("release-workflow-investigator"), "faltou início do subagente: {c:?}");
+        assert!(!c.contains("read_file"), "chamada aninhada não deve aparecer no scrollback");
+        assert!(!c.contains("release.yml"), "caminho da chamada aninhada não deve aparecer");
+        // O subagente vivo é indicado na região viva ("está trabalhando").
+        let s = screen(&app);
+        assert!(s.contains("release-workflow-investigator"), "faltou indicador vivo do subagente: {s:?}");
     }
 
     #[test]

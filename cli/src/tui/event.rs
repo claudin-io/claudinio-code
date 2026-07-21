@@ -19,11 +19,11 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
         }
         AgentEvent::TextDelta { text } => {
             clear_retry(app);
-            commit_thinking(app);
+            clear_thinking(app);
             app.assistant = Some(text);
         }
         AgentEvent::TextStep { text } => {
-            commit_thinking(app);
+            clear_thinking(app);
             if !text.trim().is_empty() {
                 let lines = transcript::render_assistant(&text, &theme);
                 app.commit(lines);
@@ -40,7 +40,7 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
             permission,
             edit_proposal,
         } => {
-            commit_thinking(app);
+            clear_thinking(app);
             commit_assistant(app);
             let mut card = ToolCard::new(tool_id.clone(), tool_name, transcript::tool_summary(&args));
             if let Some(ep) = edit_proposal {
@@ -54,25 +54,15 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
             }
             app.tools.push(card);
         }
-        AgentEvent::ToolResult {
-            tool_id,
-            output,
-            error,
-            ..
-        } => {
+        AgentEvent::ToolResult { tool_id, error, .. } => {
             if let Some(pos) = app.tools.iter().position(|c| c.tool_id == tool_id) {
                 let mut card = app.tools.remove(pos);
                 card.state = ToolState::Done;
-                match error {
-                    Some(e) => {
-                        card.is_error = true;
-                        card.output = Some(e);
-                    }
-                    None => {
-                        if card.diff.is_none() {
-                            card.output = Some(output);
-                        }
-                    }
+                // Só o erro é preservado; ferramentas bem-sucedidas mostram
+                // apenas o header (ou o diff, no caso de edições).
+                if let Some(e) = error {
+                    card.is_error = true;
+                    card.output = Some(e);
                 }
                 let lines = transcript::render_tool_card(&card, &theme, 200);
                 app.commit(lines);
@@ -83,7 +73,7 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
             tool_id,
             questions,
         } => {
-            commit_thinking(app);
+            clear_thinking(app);
             commit_assistant(app);
             app.question = Some(PendingQuestion {
                 key: format!("{session_id}:{tool_id}"),
@@ -99,7 +89,7 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
             text_output,
             ..
         } => {
-            commit_thinking(app);
+            clear_thinking(app);
             commit_assistant(app);
             // Fallback: texto que só veio como delta / nenhum TextStep.
             if !app.saw_assistant && !text_output.trim().is_empty() {
@@ -157,14 +147,10 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
                 theme.subagent,
             );
         }
-        AgentEvent::Subagent { event, .. } => {
-            // Detalhe aninhado: só um traço dim para chamadas de ferramenta.
-            if let AgentEvent::ToolCall { tool_name, args, .. } = *event {
-                app.commit_notice(
-                    format!("  ⟳ ▸ {tool_name} {}", transcript::tool_summary(&args)),
-                    theme.dim,
-                );
-            }
+        AgentEvent::Subagent { .. } => {
+            // Minimalista: subagentes só indicam que estão trabalhando (linha de
+            // início + linha viva + resumo final). Não espelhamos as chamadas
+            // aninhadas de ferramenta.
         }
         AgentEvent::SubagentDone {
             subagent_id,
@@ -213,14 +199,10 @@ pub fn apply(app: &mut App, ev: AgentEvent) {
     }
 }
 
-fn commit_thinking(app: &mut App) {
-    let theme = app.theme;
-    if let Some(t) = app.thinking.take() {
-        if !t.trim().is_empty() {
-            let lines = transcript::render_thinking(&t, &theme);
-            app.commit(lines);
-        }
-    }
+/// Limpa o estado de "pensando". O texto NÃO vai para o scrollback: o thinking
+/// aparece só como um indicador fixo na status line (igual ao app desktop).
+fn clear_thinking(app: &mut App) {
+    app.thinking = None;
 }
 
 fn commit_assistant(app: &mut App) {

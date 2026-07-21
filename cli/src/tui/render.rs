@@ -187,9 +187,16 @@ fn status_line(app: &App) -> Line<'static> {
     }
     if app.running {
         let sp = spinner_frame(app.spinner_tick);
+        // Enquanto raciocina, o indicador fixo é "Thinking…" (igual à barra de
+        // thinking do app); depois vira "working…".
+        let (label, label_style) = if app.thinking.is_some() {
+            ("Thinking…", theme.fg(theme.thinking))
+        } else {
+            ("working…", theme.muted_style())
+        };
         return Line::from(vec![
             Span::styled(format!("{sp} "), theme.fg(theme.accent)),
-            Span::styled("working…".to_string(), theme.muted_style()),
+            Span::styled(label.to_string(), label_style),
             Span::styled("  (Ctrl+C interrupts · Enter queues)".to_string(), theme.dim_style()),
         ]);
     }
@@ -200,15 +207,14 @@ fn status_line(app: &App) -> Line<'static> {
 }
 
 /// Concatena o conteúdo em progresso para a área de conteúdo (sem borda):
-/// thinking/assistant em streaming, cards de ferramenta, subagentes em voo, o
-/// card de pergunta e as pílulas de anexo. Ancorado embaixo (tail) pelo `draw`.
+/// assistant em streaming, cards de ferramenta, subagentes em voo, o card de
+/// pergunta e as pílulas de anexo. (Thinking é um indicador fixo na status
+/// line, não entra aqui.) Ancorado embaixo (tail) pelo `draw`.
 fn build_active_lines(app: &App) -> Vec<Line<'static>> {
     let theme = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    if let Some(t) = &app.thinking {
-        lines.extend(transcript::render_thinking(t, theme));
-    }
+    // Thinking não entra no conteúdo — vira um indicador fixo na status line.
     if let Some(a) = &app.assistant {
         lines.extend(transcript::render_assistant(a, theme));
     }
