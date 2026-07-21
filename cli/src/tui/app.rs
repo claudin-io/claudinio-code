@@ -188,6 +188,9 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         agent_tx,
     };
 
+    // Pre-warm: connect MCP eagerly so the first turn doesn't block on stdio spawn.
+    chat.ws.ensure_mcp_connected(&chat.config).await;
+
     // Lista de arquivos do workspace (respeitando .gitignore) para o @-mention.
     let file_list = claudinio_core::code_intel::list_files(&root, 5000);
 
