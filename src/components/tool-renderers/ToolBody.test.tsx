@@ -196,6 +196,23 @@ describe("ToolBody", () => {
     dispose();
   });
 
+  it("renders object-shaped ask_user options without [object Object]", () => {
+    // Raw model args may carry {label, description} or description-only options.
+    const call = makeCall("ask_user", {
+      questions: [
+        {
+          question: "Proceed?",
+          options: [{ label: "Ship it", description: "tag and push" }, { description: "Cancel" }],
+        },
+      ],
+    });
+    const dispose = render(() => <ToolBody call={call} />, document.body);
+    expect(document.body.textContent).toContain("Ship it");
+    expect(document.body.textContent).toContain("Cancel");
+    expect(document.body.textContent).not.toContain("[object Object]");
+    dispose();
+  });
+
   it("renders tasks_set as a checklist with status icons", () => {
     const call = makeCall("tasks_set", {
       tasks: [

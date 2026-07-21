@@ -539,6 +539,16 @@ File tools take absolute paths inside this root."
                 "FULL content, adding `## Low-Level Design` and a Tasks summary) -> ",
                 "`tasks_set` -> handoff: if you yourself entered this mode (via `enter_plan_mode`), call `exit_plan_mode` and start ",
                 "building; if the user enabled it, do not try to exit - just say the plan and tasks are ready, and wait for them to flip the switch to Builder mode.\n",
+                "\n### Express ideas visually (Mermaid)\n",
+                "When anything would be clearer as a picture than as prose, include a Mermaid diagram (a ```mermaid fenced ",
+                "code block) - both in your chat replies AND inside the Solution Design / Low-Level Design. Drawing the ",
+                "diagram also sharpens your own reasoning. The app renders the FULL Mermaid catalog live, so do NOT limit ",
+                "yourself to sequence and UML - pick the most expressive type for each idea: `flowchart` for control flow/architecture, ",
+                "`sequenceDiagram` for interactions and message flows, `classDiagram` for UML/data models, `stateDiagram-v2` for state machines, ",
+                "`erDiagram` for data schemas, `gantt` for schedules/phases, `journey` for user journeys, `mindmap` for idea breakdowns, ",
+                "`timeline` for chronology, `gitGraph` for branching, and `quadrantChart`/`pie`/`xychart` for trade-offs and distributions - ",
+                "or any other Mermaid diagram type that fits. Keep each diagram focused; text-only is fine for trivial requests. ",
+                "This is encouraged, not a required deliverable. Diagram labels follow the LANGUAGE POLICY below.\n",
                 "\n# LANGUAGE POLICY\n",
                 "- User-facing replies: write in the language of the user's latest message. If unclear or mixed, default to English.\n",
                 "- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English.\n"
@@ -3190,6 +3200,141 @@ async fn await_user_answer(
 /// user's answers and return them to the model as compiled question/answer
 /// pairs. The ToolCall/ToolResult events keep the step visible in the timeline
 /// and the tool_result block persists the answers in the session history.
+/// Normalize and validate the `questions` payload for ask_user before surfacing
+/// it to the UI. Each option is normalized to a `{ label, description? }` object:
+/// plain strings become `{ label }`, and the richer AskUserQuestion object shape
+/// models naturally reach for (`{ label/value/title, description }`, sometimes
+/// description-only) is mapped onto that shape rather than rejected. Trims and
+/// de-duplicates on the label, and returns Err(detail) for anything the user
+/// could not answer sensibly (empty text, <2 options, blank/duplicate options, an
+/// object with no usable text) so the caller can hand the error back to the model
+/// to retry instead of rendering a broken card. On success it returns a cleaned
+/// `questions` array whose options are `{ label, description? }` objects.
+fn normalize_ask_user_questions(questions: &Value) -> Result<Value, String> {
+    let arr = questions
+        .as_array()
+        .ok_or_else(|| "'questions' must be an array".to_string())?;
+    if arr.is_empty() {
+        return Err("'questions' must contain at least one question".to_string());
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (qi, q) in arr.iter().enumerate() {
+        let at = |s: &str| format!("question {}: {s}", qi + 1);
+        let obj = q.as_object().ok_or_else(|| at("each question must be an object"))?;
+        let text = obj.get("question").and_then(|v| v.as_str()).unwrap_or("");
+        if text.trim().is_empty() {
+            return Err(at("'question' text must not be empty"));
+        }
+        let opts = obj
+            .get("options")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| at("'options' must be an array"))?;
+        if opts.len() < 2 {
+            return Err(at("provide at least 2 options"));
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut norm_opts = Vec::with_capacity(opts.len());
+        for opt in opts {
+            // Each option becomes { label, description? }. Models frequently reach
+            // for the richer AskUserQuestion object shape ({ label, description },
+            // sometimes description-only) — accept all of it instead of rejecting.
+            let (label, description): (String, Option<String>) = match opt {
+                Value::String(s) => (s.trim().to_string(), None),
+                Value::Object(o) => {
+                    let pick = |k: &str| {
+                        o.get(k)
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    };
+                    let short = pick("label")
+                        .or_else(|| pick("value"))
+                        .or_else(|| pick("title"))
+                        .or_else(|| pick("header"));
+                    let desc = pick("description").or_else(|| pick("text"));
+                    match (short, desc) {
+                        (Some(short), desc) => {
+                            // Drop a description that merely repeats the label.
+                            let desc =
+                                desc.filter(|d| d.to_lowercase() != short.to_lowercase());
+                            (short, desc)
+                        }
+                        // Description-only (the shape that used to be rejected):
+                        // fall back to it as the label so the button is still usable.
+                        (None, Some(desc)) => (desc, None),
+                        (None, None) => {
+                            return Err(at(
+                                "option objects must carry a 'label', 'value', 'title', or 'description' string",
+                            ))
+                        }
+                    }
+                }
+                _ => {
+                    return Err(at(
+                        "every option must be a string or a {label, description} object",
+                    ))
+                }
+            };
+            if label.is_empty() {
+                return Err(at("options must not be empty or blank"));
+            }
+            if !seen.insert(label.to_lowercase()) {
+                return Err(at(&format!(
+                    "duplicate option '{label}' — options must be distinct"
+                )));
+            }
+            let mut opt_obj = serde_json::Map::new();
+            opt_obj.insert("label".into(), Value::String(label));
+            if let Some(desc) = description {
+                opt_obj.insert("description".into(), Value::String(desc));
+            }
+            norm_opts.push(Value::Object(opt_obj));
+        }
+        let mut new_q = serde_json::Map::new();
+        new_q.insert("question".into(), Value::String(text.trim().to_string()));
+        if let Some(ms) = obj.get("multi_select") {
+            new_q.insert("multi_select".into(), ms.clone());
+        }
+        new_q.insert("options".into(), Value::Array(norm_opts));
+        out.push(Value::Object(new_q));
+    }
+    Ok(Value::Array(out))
+}
+
+/// Build a clear, actionable error for a rejected ask_user call: it states what
+/// was wrong (`detail`) and then shows a correct, copy-pasteable example that
+/// reuses the model's own question text, so the fix is concrete rather than
+/// abstract. Prevents the "retry the same broken call" loop.
+fn ask_user_error_with_example(detail: &str, raw_questions: &Value) -> String {
+    let question = raw_questions
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|q| q.get("question"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Your question here?");
+    let example = serde_json::json!({
+        "questions": [{
+            "question": question,
+            "options": ["First concrete choice", "Second concrete choice"],
+            "multi_select": false
+        }]
+    });
+    let example_str = serde_json::to_string_pretty(&example).unwrap_or_default();
+    format!(
+        "invalid ask_user input: {detail}.\n\n\
+         How to fix: provide 2-4 distinct, non-empty options. Each option is EITHER a plain \
+         string, OR an object {{ \"label\": \"concise choice\", \"description\": \"optional one-line detail\" }} \
+         (label required, description optional). Do NOT add an \"Other\" option — the UI always \
+         appends a free-text \"Other\" for you. If the answer is open-ended, still offer the most \
+         likely concrete choices.\n\n\
+         Example of a correct call for your question:\n{example_str}\n\n\
+         Replace the example option text with the real, distinct choices and call ask_user again."
+    )
+}
+
 async fn ask_user(
     tool_name: &str,
     tool_use_id: &str,
@@ -3207,17 +3352,20 @@ async fn ask_user(
         edit_proposal: None,
     });
 
-    let questions = tool_input.get("questions").cloned().unwrap_or(Value::Null);
-    if !questions.is_array() {
-        let msg = "invalid ask_user input: 'questions' must be an array".to_string();
-        let _ = event_tx.send(AgentEvent::ToolResult {
-            tool_id: tool_use_id.to_string(),
-            tool_name: tool_name.to_string(),
-            output: String::new(),
-            error: Some(msg.clone()),
-        });
-        return ContentBlock::tool_result(tool_use_id, &format!("Error: {msg}"));
-    }
+    let raw_questions = tool_input.get("questions").cloned().unwrap_or(Value::Null);
+    let questions = match normalize_ask_user_questions(&raw_questions) {
+        Ok(q) => q,
+        Err(detail) => {
+            let msg = ask_user_error_with_example(&detail, &raw_questions);
+            let _ = event_tx.send(AgentEvent::ToolResult {
+                tool_id: tool_use_id.to_string(),
+                tool_name: tool_name.to_string(),
+                output: String::new(),
+                error: Some(msg.clone()),
+            });
+            return ContentBlock::tool_result(tool_use_id, &format!("Error: {msg}"));
+        }
+    };
 
     let _ = event_tx.send(AgentEvent::AskUser {
         session_id: session_id.to_string(),
@@ -3580,6 +3728,102 @@ mod tests {
             }
             _ => panic!("expected AskUser"),
         }
+    }
+
+    #[test]
+    fn ask_user_normalizes_object_options_to_label_description() {
+        // The model often sends options as {label/value, description} objects
+        // instead of plain strings — those become { label, description? }, with
+        // plain strings promoted to { label } and the short key winning over
+        // description for the label.
+        let q = json!([{
+            "question": "Pick one",
+            "multi_select": false,
+            "options": [
+                {"value": "Integrar Mermaid", "description": "add support"},
+                {"label": "So gerar .md"},
+                "Plain string option"
+            ]
+        }]);
+        let out = normalize_ask_user_questions(&q).expect("should normalize");
+        let opts = out[0]["options"].as_array().unwrap();
+        assert_eq!(opts[0], json!({"label": "Integrar Mermaid", "description": "add support"}));
+        assert_eq!(opts[1], json!({"label": "So gerar .md"}));
+        assert_eq!(opts[2], json!({"label": "Plain string option"}));
+        assert_eq!(out[0]["question"], json!("Pick one"));
+        assert_eq!(out[0]["multi_select"], json!(false));
+    }
+
+    #[test]
+    fn ask_user_accepts_description_only_options() {
+        // Regression for session b024da97: the model sent options carrying ONLY a
+        // `description` (no label), which the old validator rejected 4× in a row
+        // until the agent gave up. They must now normalize to { label: <description> }.
+        let q = json!([{
+            "question": "O que voce quer dizer com \"lancar um novo patch em release\"?",
+            "multi_select": false,
+            "options": [
+                {"description": "Commitar as mudanças pendentes, criar branch release/patch-x.y.z, tag semver e push — fluxo completo de release."},
+                {"description": "Apenas criar/mover a tag de patch (ex.: v0.0.10 → v0.0.11) sem tocar nas mudanças não commitadas."},
+                {"description": "Apenas subir a branch de hotfix/release para o remoto, sem tag nem commit adicional."},
+                {"description": "Não é o Claudinio Code; você está no diretório errado. Cancele este patch."}
+            ]
+        }]);
+        let out = normalize_ask_user_questions(&q).expect("description-only options must normalize");
+        let opts = out[0]["options"].as_array().unwrap();
+        assert_eq!(opts.len(), 4);
+        assert_eq!(
+            opts[0],
+            json!({"label": "Commitar as mudanças pendentes, criar branch release/patch-x.y.z, tag semver e push — fluxo completo de release."})
+        );
+        assert_eq!(
+            opts[3],
+            json!({"label": "Não é o Claudinio Code; você está no diretório errado. Cancele este patch."})
+        );
+        // No stray `description` key when it was the source of the label.
+        assert!(opts[0].get("description").is_none());
+    }
+
+    #[test]
+    fn ask_user_rejects_empty_and_duplicate_options() {
+        // Blank option.
+        let blank = json!([{"question": "q", "options": ["ok", "  "]}]);
+        assert!(normalize_ask_user_questions(&blank).is_err());
+        // Duplicate options (case/whitespace-insensitive).
+        let dup = json!([{"question": "q", "options": ["Yes", " yes "]}]);
+        assert!(normalize_ask_user_questions(&dup).is_err());
+        // Fewer than 2 options.
+        let one = json!([{"question": "q", "options": ["only"]}]);
+        assert!(normalize_ask_user_questions(&one).is_err());
+        // Empty question text.
+        let noq = json!([{"question": "  ", "options": ["a", "b"]}]);
+        assert!(normalize_ask_user_questions(&noq).is_err());
+        // Object option with no usable text key (label/value/title/description).
+        let bad_obj = json!([{"question": "q", "options": [{"note": "x"}, "b"]}]);
+        assert!(normalize_ask_user_questions(&bad_obj).is_err());
+        // An empty object is likewise unusable.
+        let empty_obj = json!([{"question": "q", "options": [{}, "b"]}]);
+        assert!(normalize_ask_user_questions(&empty_obj).is_err());
+    }
+
+    #[test]
+    fn ask_user_error_includes_contextual_example() {
+        // Empty options should produce a clear error that echoes the model's own
+        // question and shows a corrected, plain-string example — so it can fix
+        // the call instead of looping on the same broken one.
+        let raw = json!([{
+            "question": "Rodar `claudinio` sem argumentos ja abre o Chat. O que voce quer?",
+            "multi_select": false,
+            "options": ["", "", ""]
+        }]);
+        let detail = normalize_ask_user_questions(&raw).unwrap_err();
+        let msg = ask_user_error_with_example(&detail, &raw);
+        assert!(msg.contains("options must not be empty"));
+        // Echoes the real question text.
+        assert!(msg.contains("O que voce quer?"));
+        // Shows a concrete corrected example with plain-string options.
+        assert!(msg.contains("First concrete choice"));
+        assert!(msg.to_lowercase().contains("example"));
     }
 
     #[test]
@@ -4037,6 +4281,20 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         assert!(
             sys.contains("code-gated"),
             "Brain prompt must state that tasks_set is gated on the LLD"
+        );
+    }
+
+    #[test]
+    fn brain_prompt_encourages_mermaid_diagrams() {
+        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        assert!(
+            sys.contains("mermaid"),
+            "Brain prompt must encourage expressing ideas with Mermaid diagrams"
+        );
+        // Must not restrict Brain to sequence/UML - the whole catalog is fair game.
+        assert!(
+            sys.contains("FULL Mermaid catalog"),
+            "Brain prompt must not limit diagrams to sequence/UML"
         );
     }
 

@@ -197,6 +197,7 @@ const dict: LocaleDict = {
 
   // ── ChatPanel - Messages ──────────────────────────────────────────
   "chat.message.you": "You",
+  "chat.message.renderError": "This message couldn't be displayed",
   "chat.message.agent": "Agent",
   "chat.message.failedToSend": "Failed to send: {0}",
   "chat.message.failedToReopen": "Failed to reopen: {0}",

@@ -3,6 +3,7 @@ import { marked } from "marked";
 import { commitAndPush, interruptSession, AgentEvent, ToolCallData, ToolResultData, AskUserData, UserAnswer, submitAnswers } from "../lib/ipc";
 import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
+import { ProseContent } from "./ProseContent";
 import QuestionCard from "./QuestionCard";
 
 interface TimelineStep {
@@ -251,9 +252,9 @@ const CommitPushModal: Component<{
                   </Show>
                   <Show when={step.type === "text" && step.text}>
                     <div class="rounded-md bg-surface-1 p-3">
-                      <div
+                      <ProseContent
                         class="prose-content text-[12px] leading-[1.6] text-ink-muted"
-                        innerHTML={marked.parse(step.text!, { async: false }) as string}
+                        html={marked.parse(step.text!, { async: false }) as string}
                       />
                     </div>
                   </Show>

@@ -186,6 +186,7 @@ const dict: LocaleDict = {
   "chat.budgetBanner.dismiss": "बंद करें",
   // ── ChatPanel - Messages ─────────────────────────────────────────
   "chat.message.you": "आप",
+  "chat.message.renderError": "यह संदेश प्रदर्शित नहीं किया जा सका",
   "chat.message.agent": "एजेंट",
   "chat.message.failedToSend": "भेजने में विफल: {0}",
   "chat.message.failedToReopen": "फिर से खोलने में विफल: {0}",

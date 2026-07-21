@@ -44,6 +44,7 @@ pub fn run() {
             commands::fs::list_dir,
             commands::fs::read_file,
             commands::fs::write_file,
+            commands::fs::write_file_bytes,
             commands::fs::read_attachment,
             commands::fs::walk_dir,
             commands::locale::get_os_locale,
