@@ -28,3 +28,6 @@ crossterm = "0.28"
 tui-textarea = "0.7"
 # auth: abrir o browser no fluxo OAuth (Fase 4/auth)
 open = "5"
+base64 = "0.22"
+sha2 = "0.10"
+rpassword = "7"

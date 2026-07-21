@@ -749,6 +749,53 @@ async fn run_command(app: &mut App, chat: &ChatCtx, name: &str, arg: &str) -> an
                 app.commit_notice("nothing to copy yet", app.theme.muted);
             }
         }
+        "provider" => {
+            let parts: Vec<&str> = arg.split_whitespace().collect();
+            let theme = app.theme;
+            match parts.first().copied() {
+                Some("list") => {
+                    let cfg = provider::load_config();
+                    if cfg.providers.is_empty() {
+                        app.commit_notice("Nenhum provider conectado.", theme.muted);
+                    } else {
+                        for (id, p) in &cfg.providers {
+                            let label = p.label.as_deref().unwrap_or(id);
+                            app.commit_notice(
+                                format!("  {label} ({id}) — {pr}", pr = p.protocol),
+                                theme.accent,
+                            );
+                        }
+                    }
+                }
+                Some("remove") => {
+                    let id = parts.get(1).copied().unwrap_or("");
+                    if id.is_empty() {
+                        app.commit_notice("Use: /provider remove <id>", theme.warning);
+                    } else {
+                        let mut cfg = provider::load_config();
+                        cfg.providers.remove(id);
+                        let prefix = format!("{id}/");
+                        if cfg.brain_model.starts_with(&prefix) {
+                            cfg.brain_model = "claudius".into();
+                        }
+                        if cfg.builder_model.starts_with(&prefix) {
+                            cfg.builder_model = "claudinio".into();
+                        }
+                        provider::save_config(&cfg);
+                        app.commit_notice(format!("Provider '{id}' removido."), theme.success);
+                    }
+                }
+                Some("add") => {
+                    app.commit_notice(
+                        "Use `claudinio provider add <id> --api-key ...` no terminal.",
+                        theme.warning,
+                    );
+                }
+                _ => {
+                    app.commit_notice("/provider: add | list | remove", theme.muted);
+                }
+            }
+        }
         "attach" => {
             if arg.is_empty() {
                 app.commit_notice(

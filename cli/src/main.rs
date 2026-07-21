@@ -69,6 +69,11 @@ enum Command {
         #[command(subcommand)]
         action: commands::auth::AuthAction,
     },
+    /// Adiciona/Lista/Remove providers externos (OpenRouter, DeepSeek, etc).
+    Provider {
+        #[command(subcommand)]
+        action: commands::provider::ProviderAction,
+    },
     /// Lista/inspeciona sessões salvas.
     Sessions {
         #[command(subcommand)]
@@ -87,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run { message, mode, path, yes } => commands::run::run(message, mode, path, yes).await,
         Command::Chat { path } => commands::chat::run(path).await,
         Command::Auth { action } => commands::auth::run(action).await,
+        Command::Provider { action } => commands::provider::run(action).await,
         Command::Sessions { action } => commands::sessions::run(action),
     }
 }

@@ -22,6 +22,7 @@ pub const COMMANDS: &[SlashCmd] = &[
     SlashCmd { name: "copy", desc: "copy last reply (OSC52)" },
     SlashCmd { name: "help", desc: "show shortcuts" },
     SlashCmd { name: "quit", desc: "quit" },
+    SlashCmd { name: "provider", desc: "add / list / remove external providers" },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
