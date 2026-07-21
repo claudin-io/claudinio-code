@@ -1,260 +1,384 @@
-# Conectar providers no TUI/CLI — Solução de Design
+# CLI/TUI — Connect External Providers (OpenRouter OAuth + Manual)
 
-## Contexto
+## Context
 
-O desktop (Tauri) já suporta 3 tiers de providers:
-1. **Claudinio** — nativo, "Recommended", OAuth via core
-2. **OpenRouter** — OAuth PKCE, badge "Experimental", implementado só no Tauri
-3. **Catálogo models.dev** — providers manuais via `connect_provider` Tauri command
+The desktop (Tauri) already supports 3 tiers of providers:
+1. **Claudinio** — native, "Recommended" badge, OAuth PKCE via `core::auth`
+2. **OpenRouter** — OAuth PKCE, "Experimental" badge — implemented ONLY in Tauri (`src-tauri/src/commands/providers.rs`)
+3. **Catalog providers** (models.dev) — manual connect via `connect_provider` Tauri command
 
-No CLI/TUI:
-- `claudinio auth login --provider claudinio` funciona (OAuth PKCE)
-- `claudinio auth login --provider openrouter` **baila** com `"ainda não implementado"`
-- **Não existe** comando para adicionar providers manuais
-- `/model` no TUI já lista providers conectados (se existirem em config.json) — mas não tem UI de conexão
+In the CLI/TUI:
+- `claudinio auth login --provider claudinio` works (OAuth PKCE via core)
+- `claudinio auth login --provider openrouter` **bails** with `"ainda não implementado; use o app por ora"`
+- **No command exists** to add manual providers
+- The TUI `/model` picker already lists connected providers from config — but has no connection UI
 
-O core (`claudinio_core::agent::provider::resolve_provider`, `ProviderEntry`, `save_config`) é **compartilhado** — o suporte a providers já existe no runtime, falta a CLI/TUI para conectá-los.
+The core (`claudinio_core::agent::provider::resolve_provider`, `ProviderEntry`, `save_config`, `load_config`) is **shared** between desktop and CLI — provider resolution already works at runtime. Only the CLI/TUI connection UX is missing.
 
-## Solução de Design
+## Solution Design
 
-### Hierarquia de prioridade (confirmada)
+### Priority hierarchy (confirmed by user)
 
-1. **Claudinio** — destaque visual "Recommended", OAuth PKCE, funcionalidades exclusivas (web_search, budget tracking). Já implementado.
-2. **OpenRouter** — OAuth PKCE via CLI, badge "Experimental". Hoje baila — será implementado.
-3. **Manual (provider add)** — providers do catálogo models.dev (DeepSeek, Anthropic, etc.) ou qualquer provider com API key + base_url. `provider add` via CLI + slash command no TUI.
+| Priority | Provider | Connection method | Status |
+|---|---|---|---|
+| 1st | **Claudinio** | OAuth PKCE (`core::auth::login_claudinio`) | ✅ Done |
+| 2nd | **OpenRouter** | OAuth PKCE (ported from Tauri) | ❌ Baila hoje |
+| 3rd | **Manual** | `provider add` CLI + TUI slash | ❌ Não existe |
 
-### Escopo
+### UX & CLI commands
 
-| Feature | CLI subcomando | TUI slash |
+| Feature | CLI subcommand | TUI slash command |
 |---|---|---|
-| OpenRouter OAuth | `auth login --provider openrouter` | N/a (OAuth abre browser, sai do TUI) |
-| Provider manual | `provider add <id>` (flags + interactive) | `/provider add` |
-| Listar conectados | `provider list` | `/provider list` |
-| Remover | `provider remove <id>` | `/provider remove` |
+| OpenRouter OAuth | `claudinio auth login --provider openrouter` | N/A (OAuth opens browser, exits TUI) |
+| Add manual provider | `claudinio provider add <id> [--api-key] [--base-url] [--protocol] [--label]` | `/provider add` (prompts inline) |
+| List connected | `claudinio provider list` | `/provider list` |
+| Remove provider | `claudinio provider remove <id>` | `/provider remove <id>` |
 
-### Como funciona (fluxo)
+### Auth login flow (OpenRouter, CLI)
 
-**Claudinio** → já existe em `core::auth::login_claudinio` + `cli/src/commands/auth.rs`
+Port the desktop PKCE flow exactly — no Tauri dependencies needed:
 
-**OpenRouter OAuth** → portar o mesmo PKCE do Tauri para o CLI:
-1. Bind TcpListener 127.0.0.1:0
-2. `random_hex(32)` verifier → base64url(SHA256) challenge
-3. Abrir `https://openrouter.ai/auth?callback_url=...&code_challenge=...&code_challenge_method=S256`
-4. `wait_for_callback(listener, None)` — captura o code
-5. POST `https://openrouter.ai/api/v1/auth/keys` com `{code, code_verifier, code_challenge_method:"S256"}`
-6. Salvar `config.providers["openrouter"] = ProviderEntry { ... }`
-7. Mostrar modelos disponíveis
+1. Bind `TcpListener` on `127.0.0.1:0`
+2. Generate verifier: `random_hex(32)` → SHA-256 → `base64url(SHA256)` challenge
+3. Open browser: `https://openrouter.ai/auth?callback_url=http%3A%2F%2F127.0.0.1%3A{port}%2Fcallback&code_challenge={challenge}&code_challenge_method=S256`
+4. `wait_for_callback(listener, None)` — captures code from loopback TCP (60s timeout)
+5. Exchange: POST `https://openrouter.ai/api/v1/auth/keys` with `{code, code_verifier, code_challenge_method:"S256"}`
+6. Parse `key` from response
+7. Save `config.providers["openrouter"] = ProviderEntry { api_key, base_url: "https://openrouter.ai/api/v1", protocol: "openai", label: "OpenRouter", ..default }`
 
-**Provider manual** → novo subcomando `provider`:
-- `provider add <id>`:
-  - Flags: `--api-key` (obrigatório), `--base-url` (opcional), `--protocol [openai|anthropic]` (opcional, default openai), `--label` (opcional)
-  - Se alguma flag faltar, prompt interativo pergunta
-  - Cria `ProviderEntry` com os dados fornecidos
-  - Chama `save_config(&cfg)` — mesma função que o desktop usa
-  - Sem dependência do catálogo models.dev (dados fornecidos pelo usuário)
-- `provider list`:
-  - Itera `config.providers` e exibe id, label, protocolo, nº modelos
-- `provider remove <id>`:
-  - Remove do map, fallback brain→claudius / builder→claudinio, save_config
+All building blocks exist in `core::auth` (wait_for_callback, random_hex) and `core::agent::provider` (ProviderEntry, save_config). Only challenge encoding differs (Claudinio uses hex, OpenRouter uses base64url) — need the `base64` crate.
 
-**TUI (slash commands)**:
-- `provider list` → commit_notice com tabela de providers
-- `provider add <id>` → prompt interativo inline (reusa sistema de `ask_user` ou editor input)
-- `provider remove <id>` → confirma e remove
+### Provider add flow (manual)
 
-### Não Escopo (Non-goals)
+```
+claudinio provider add deepseek --api-key sk-abc123 --base-url https://api.deepseek.com
+```
 
-- Catálogo models.dev navegável no TUI (seria fase futura)
-- Provider `edit` (trocar API key sem recriar) — pode ser `provider add` sobreescrevendo
-- Login provider no TUI via OAuth (não faz sentido — OAuth abre browser)
-- Mudanças no core (provider resolution, ProviderEntry, save_config) — já existe tudo
+- If `--api-key` omitted → prompt via `rpassword` (no echo)
+- If `--base-url` omitted → prompt interactive
+- Construct `ProviderEntry` directly (no catalog dependency)
+- `save_config(&cfg)` — same function desktop uses
+- On existing `id` → confirm overwrite
 
-## Risco e Mitigação
+### Data: no new schemas
 
-| Risco | Mitigação |
+ProviderEntry already serializes to config.json. No DB, no migrations, no new state.
+
+### Edge cases & failure states
+
+- **No browser in headless env**: Print URL as fallback (same pattern as Claudinio login)
+- **OpenRouter exchange fails**: Clear error with HTTP status + body
+- **Provider id already exists**: Confirm overwrite before proceeding
+- **Empty API key on add**: Reject with clear message
+- **Disconnect while provider_id is active brain/builder**: Fallback to claudius/claudinio (same as desktop)
+- **TUI `/provider add` without flags**: Redirect user to use the CLI subcommand (feasible: `/provider add deepseek --api-key ...` would need argument parsing that's awkward inline)
+
+### Non-goals
+
+- Browsable models.dev catalog in TUI (future phase)
+- Provider `edit` subcommand (can `add` overwrite)
+- OAuth in TUI itself (OAuth always leaves terminal for browser)
+- Core changes to provider resolution or config persistence
+
+## Risks
+
+| Risk | Mitigation |
 |---|---|
-| OpenRouter mudar endpoint OAuth | Mesmo endpoint usado no desktop — funcional hoje |
-| CLI sem `open::that()` em headless | Printar URL como fallback (mesmo pattern do login claudinio) |
-| Sem catálogo, modelos externos sem pricing no TUI | ProviderEntry aceita model_pricing vazio; custo só não aparece |
-| TUI `/provider add` interativo com prompts | Reusa o sistema `PendingQuestion` (já implementado) ou editor inline |
+| OpenRouter changes OAuth endpoint/schema | Same endpoint used by desktop today — stable surface |
+| CLI in headless/SSH without browser | Print URL + code fallback (same as claudinio login) |
+| Without catalog, no model pricing in TUI footer | ProviderEntry accepts empty model_pricing; cost just won't show |
+| `base64` or `sha2` not in workspace Cargo.toml for `cli` crate | Add as deps — they're already in the workspace for `src-tauri` |
+| Password input without `rpassword` crate | Add `rpassword` dep (or accept `--api-key` flag as mandatory — user decision was "both flags and interactive"; make flag optional with interactive fallback) |
 
 ## Low-Level Design
 
-### 1. `cli/src/commands/provider.rs` — novo comando
+### Files touched (8 files, 1 new)
 
 ```
-src/cli/commands/
-├── mod.rs         → pub mod provider;
-├── provider.rs    → NOVO
+cli/
+├── Cargo.toml                              # ADD deps: base64, sha2, rpassword
+├── src/
+│   ├── main.rs                             # ADD Provider subcommand + dispatch
+│   ├── commands/
+│   │   ├── mod.rs                          # ADD pub mod provider
+│   │   ├── auth.rs                         # MOD: implement OpenRouter OAuth
+│   │   └── provider.rs                     # NEW: add/list/remove subcommands
+│   └── tui/
+│       ├── overlays.rs                     # MOD: add "provider" to COMMANDS
+│       └── app.rs                          # MOD: add "provider" match arm in run_command
 ```
 
-**Subcomandos:**
-```rust
-#[derive(Subcommand)]
-pub enum ProviderAction {
-    /// Adiciona um provider manual (DeepSeek, Anthropic, etc.)
-    Add {
-        id: String,
-        #[arg(long)]
-        api_key: Option<String>,
-        #[arg(long)]
-        base_url: Option<String>,
-        #[arg(long, default_value = "openai")]
-        protocol: String,
-        #[arg(long)]
-        label: Option<String>,
-    },
-    /// Lista providers conectados
-    List,
-    /// Remove um provider conectado
-    Remove { id: String },
-}
+Core untouched.
+
+### 1. `cli/Cargo.toml` — dependencies
+
+```toml
+[dependencies]
+claudinio-core = { path = "../core" }
+# ... existing deps (tokio, clap, ratatui, crossterm, open, tui-textarea) ...
+base64 = "0.22"
+sha2 = "0.10"
+rpassword = "7"
 ```
 
-**Implementação:**
+Both `base64` and `sha2` are already used by `src-tauri` — they exist in the workspace lockfile.
 
-`run_add(id, api_key, base_url, protocol, label)`:
-- Se `api_key` for None, prompt interativo: `rpassword::read_password_from_stdin` ou `dialoguer::Password`
-- Se `base_url` for None, prompt: `dialoguer::Input`
-- Construir `ProviderEntry { api_key, base_url, protocol, label, ..default }`
-- `let mut cfg = provider::load_config(); cfg.providers.insert(id, entry); provider::save_config(&cfg);`
-- Printar sucesso
+### 2. `cli/src/commands/auth.rs` — OpenRouter OAuth
 
-`run_list()`:
-- `let cfg = provider::load_config();`
-- Se vazio: "Nenhum provider conectado."
-- Iterar, printar tabela: id | label | protocol | models
-
-`run_remove(id)`:
-- `let mut cfg = provider::load_config(); cfg.providers.remove(&id);`
-- Se brain_model ou builder_model starta com "{id}/", resetar para claudius/claudinio
-- `provider::save_config(&cfg);`
-
-**Flags de prompt interativo:**
-- `dialoguer` já é dependência transitiva via `clap` (basta adicionar)
-- Ou usar `rpassword` para API key (mais seguro)
-- Ou usar stdin simples como o resto do CLI faz
-
-Minimal: Para não adicionar deps novas, usar `std::io::stdin().read_line()` + `rpassword`. Rpassword já está no Cargo.lock? Vou verificar — se não, adicionar.
-
-**Falha segura:** Se `id` já existe no config, confirmar overwrite.
-
-### 2. `cli/src/commands/auth.rs` — desbloquear OpenRouter
-
-Trocar:
-```rust
-"openrouter" => {
-    anyhow::bail!("login openrouter pelo CLI ainda não implementado; use o app por ora.")
-}
-```
-Por implementação completa:
+**Replace the bail block** (line 58-60) with:
 
 ```rust
 "openrouter" => {
     println!("Abrindo browser para autorizar OpenRouter…");
-    let key = openrouter_login_cli().await?;
-    println!("✓ OpenRouter conectado. Chave: …{}", &key[key.len()-4..]);
-
-    // Buscar modelos (live ou vazio)
-    let models = list_openrouter_models_cli().await.unwrap_or_default();
-    println!("{} modelos disponíveis", models.len());
+    let key = openrouter_login_cli()
+        .await
+        .map_err(|e| anyhow::anyhow!("OpenRouter login falhou: {e}"))?;
+    println!("✓ Chave OpenRouter obtida: sk-or-…{}", &key[key.len()-4..]);
 
     let mut cfg = provider::load_config();
-    cfg.providers.insert("openrouter".into(), ProviderEntry {
-        api_key: key,
-        base_url: "https://openrouter.ai/api/v1".into(),
-        protocol: "openai".into(),
-        enabled_models: Vec::new(),
-        label: Some("OpenRouter".into()),
-        model_pricing: HashMap::new(),  // sem catalog
-        model_output_limits: HashMap::new(),
-    });
+    cfg.providers.insert(
+        "openrouter".to_string(),
+        ProviderEntry {
+            api_key: key,
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            protocol: "openai".into(),
+            enabled_models: Vec::new(),
+            label: Some("OpenRouter".into()),
+            model_pricing: std::collections::HashMap::new(),
+            model_output_limits: std::collections::HashMap::new(),
+        },
+    );
     provider::save_config(&cfg);
-    println!("✓ Provider OpenRouter salvo em config.json");
+    println!("✓ OpenRouter configurado e salvo. Use `claudinio chat` e `/model openrouter/...`.");
 }
 ```
 
-`openrouter_login_cli()` — port do Tauri para CLI:
+**New function** `openrouter_login_cli()` in the same file:
+
 ```rust
+use base64::Engine;
+use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
+use claudinio_core::auth::{random_hex, wait_for_callback};
+
 async fn openrouter_login_cli() -> Result<String, String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-    let port = listener.local_addr()?.port();
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| format!("falha ao iniciar listener local: {e}"))?;
+    let port = listener.local_addr()
+        .map_err(|e| format!("falha ao ler porta: {e}"))?
+        .port();
+
     let verifier = random_hex(32);
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
+
     let authorize_url = format!(
         "https://openrouter.ai/auth?callback_url=http%3A%2F%2F127.0.0.1%3A{port}%2Fcallback&code_challenge={challenge}&code_challenge_method=S256"
     );
-    println!("Abrindo browser… Se não abrir, acesse:\n  {authorize_url}");
+
+    println!("Se o browser não abrir, acesse:\n  {authorize_url}");
     open::that(&authorize_url).map_err(|e| format!("falha ao abrir browser: {e}"))?;
+
     let code = wait_for_callback(listener, None).await?;
-    // key exchange POST
+
     let client = claudinio_core::http::default_client();
-    let resp = client.post("https://openrouter.ai/api/v1/auth/keys")
-        .json(&serde_json::json!({"code": code, "code_verifier": verifier, "code_challenge_method": "S256"}))
-        .send().await?;
-    // parse key from response
-    let parsed: Value = resp.json().await?;
-    let key = parsed["key"].as_str()...;
-    Ok(key.to_string())
+    let resp = client
+        .post("https://openrouter.ai/api/v1/auth/keys")
+        .json(&serde_json::json!({
+            "code": code,
+            "code_verifier": verifier,
+            "code_challenge_method": "S256",
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("troca de chave OpenRouter falhou: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("OpenRouter key exchange falhou (HTTP {status}): {body}"));
+    }
+
+    let parsed: serde_json::Value = resp.json().await
+        .map_err(|e| format!("resposta inválida do OpenRouter: {e}"))?;
+    let key = parsed
+        .get("key")
+        .and_then(|k| k.as_str())
+        .ok_or("resposta OpenRouter não contém 'key'")?
+        .to_string();
+
+    Ok(key)
 }
 ```
 
-**Dependências adicionar em `cli/Cargo.toml`:**
-- `base64` (já existe em `src-tauri`, verificar no workspace)
-- `sha2` (já existe em `core`)
-- `claudinio_core::http` (já exportado)
-- `serde_json::Value` (já em core)
-
-### 3. `cli/src/tui/app.rs` — slash command `/provider`
-
-Adicionar em `overlays.rs::COMMANDS`:
+**Imports to add** at top of auth.rs:
 ```rust
-SlashCmd { name: "provider", desc: "add / list / remove external providers" },
+use claudinio_core::agent::provider::ProviderEntry;
+use serde_json::Value;
 ```
 
-Adicionar match arm em `app.rs::run_command`:
+### 3. `cli/src/commands/provider.rs` — NEW
+
+Full subcommand dispatch:
+
 ```rust
-"provider" => {
-    let parts: Vec<&str> = arg.split_whitespace().collect();
-    match parts.first().copied() {
-        Some("list") => {
-            let cfg = provider::load_config();
-            if cfg.providers.is_empty() {
-                app.commit_notice("Nenhum provider conectado.", theme.muted);
-            } else {
-                for (id, p) in &cfg.providers {
-                    let label = p.label.as_deref().unwrap_or(id);
-                    app.commit_notice(format!("  {label} ({id}) — {protocol}", protocol = p.protocol), theme.accent);
-                }
-            }
+use claudinio_core::agent::provider::{self, ProviderEntry};
+use clap::Subcommand;
+
+#[derive(Subcommand)]
+pub enum ProviderAction {
+    /// Add a manual provider (DeepSeek, Anthropic, etc.) via API key.
+    Add {
+        /// Provider id (e.g. "deepseek", "my-custom")
+        id: String,
+        /// API key (omit for interactive prompt without echo)
+        #[arg(long)]
+        api_key: Option<String>,
+        /// API base URL (omit for interactive prompt)
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Wire protocol: "openai" (default) or "anthropic"
+        #[arg(long, default_value = "openai")]
+        protocol: String,
+        /// Display label (defaults to provider id if omitted)
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List connected providers.
+    List,
+    /// Remove a connected provider; model slots fall back to Claudinio defaults.
+    Remove { id: String },
+}
+
+pub async fn run(action: ProviderAction) -> anyhow::Result<()> {
+    match action {
+        ProviderAction::List => run_list().await,
+        ProviderAction::Remove { id } => run_remove(&id).await,
+        ProviderAction::Add { id, api_key, base_url, protocol, label } => {
+            run_add(&id, api_key, base_url, &protocol, label).await
         }
-        Some("add") => {
-            // Tentar parsear flags do próprio arg
-            // Se faltar info, abrir prompt inline similar a ask_user
-            // Ou simplesmente: "use `claudinio provider add <id>` no terminal"
-            app.commit_notice("Use `claudinio provider add <id> --api-key ...` no terminal", theme.warning);
-        }
-        Some("remove") => {
-            let id = parts.get(1).unwrap_or(&"");
-            if id.is_empty() { app.commit_notice("Use: /provider remove <id>", theme.warning); return; }
-            let mut cfg = provider::load_config();
-            cfg.providers.remove(*id);
-            // fallback
-            provider::save_config(&cfg);
-            app.commit_notice(format!("Provider {id} removido."), theme.success);
-        }
-        _ => { app.commit_notice("/provider: add | list | remove", theme.muted); }
     }
 }
+
+async fn run_list() -> anyhow::Result<()> {
+    let cfg = provider::load_config();
+    if cfg.providers.is_empty() {
+        println!("Nenhum provider conectado.");
+        return Ok(());
+    }
+    println!("Providers conectados:");
+    for (id, p) in &cfg.providers {
+        let label = p.label.as_deref().unwrap_or(id);
+        let models = p.model_pricing.len();
+        println!("  {label} ({id}) — {protocol} · {models} modelos", protocol = p.protocol);
+    }
+    Ok(())
+}
+
+async fn run_remove(id: &str) -> anyhow::Result<()> {
+    let mut cfg = provider::load_config();
+    if !cfg.providers.contains_key(id) {
+        anyhow::bail!("Provider '{id}' não encontrado.");
+    }
+    cfg.providers.remove(id);
+    let prefix = format!("{id}/");
+    if cfg.brain_model.starts_with(&prefix) {
+        cfg.brain_model = "claudius".into();
+    }
+    if cfg.builder_model.starts_with(&prefix) {
+        cfg.builder_model = "claudinio".into();
+    }
+    provider::save_config(&cfg);
+    println!("Provider '{id}' removido.");
+    Ok(())
+}
+
+async fn run_add(
+    id: &str,
+    api_key_opt: Option<String>,
+    base_url_opt: Option<String>,
+    protocol: &str,
+    label_opt: Option<String>,
+) -> anyhow::Result<()> {
+    // Resolve API key: flag ou prompt
+    let api_key = match api_key_opt {
+        Some(k) => k,
+        None => {
+            eprint!("API key para '{id}': ");
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            buf.trim().to_string()
+        }
+    };
+    if api_key.trim().is_empty() {
+        anyhow::bail!("API key é obrigatória.");
+    }
+
+    // Resolve base URL: flag ou prompt
+    let base_url = match base_url_opt {
+        Some(u) => u,
+        None => {
+            eprint!("Base URL (ex: https://api.deepseek.com): ");
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            buf.trim().to_string()
+        }
+    };
+    if base_url.trim().is_empty() {
+        anyhow::bail!("Base URL é obrigatória.");
+    }
+
+    // Validar protocolo
+    match protocol {
+        "openai" | "anthropic" => {}
+        other => anyhow::bail!("Protocolo inválido: {other} (use openai ou anthropic)"),
+    }
+
+    let label = label_opt.filter(|l| !l.is_empty()).unwrap_or_else(|| id.to_string());
+
+    let mut cfg = provider::load_config();
+
+    // Se já existe, confirmar overwrite
+    if cfg.providers.contains_key(id) {
+        eprint!("Provider '{id}' já existe. Sobrescrever? [s/N]: ");
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        if !buf.trim().eq_ignore_ascii_case("s") {
+            println!("Abortado.");
+            return Ok(());
+        }
+    }
+
+    cfg.providers.insert(
+        id.to_string(),
+        ProviderEntry {
+            api_key: api_key.trim().to_string(),
+            base_url: base_url.trim().to_string(),
+            protocol: protocol.to_string(),
+            enabled_models: Vec::new(),
+            label: Some(label),
+            model_pricing: std::collections::HashMap::new(),
+            model_output_limits: std::collections::HashMap::new(),
+        },
+    );
+    provider::save_config(&cfg);
+    println!("✓ Provider '{id}' adicionado. Use `claudinio chat` e modelos com prefixo '{id}/'.");
+    Ok(())
+}
 ```
 
-### 4. `cli/src/commands/mod.rs` — adicionar `pub mod provider`
+Note: For API key input without echo, ideally use `rpassword`. But the plan says try stdin first (minimal deps). If `rpassword` is added: replace the manual stdin for api_key with `rpassword::read_password()`.
 
-Adicionar: `pub mod provider;`
+### 4. `cli/src/commands/mod.rs` — add module
 
-### 5. `cli/src/main.rs` — adicionar subcomando
+```rust
+pub mod provider;
+```
 
+### 5. `cli/src/main.rs` — register subcommand
+
+In the `Command` enum:
 ```rust
 /// Adiciona/Lista/Remove providers externos (OpenRouter, DeepSeek, etc).
 Provider {
@@ -263,38 +387,93 @@ Provider {
 },
 ```
 
-E no match: `Command::Provider { action } => commands::provider::run(action).await,`
-
-### 6. Dependências
-
-Verificar se `base64` e `sha2` estão disponíveis para o crate `cli`:
-- `sha2` — já disponível via `claudinio_core` (re-export ou dep direta)
-- `base64` — verificar workspace Cargo.toml
-
-Se não disponíveis, adicionar ao `cli/Cargo.toml`:
-```toml
-base64 = "0.22"
-sha2 = "0.10"
-rpassword = "7"  # para input de API key sem echo
+In the match block:
+```rust
+Command::Provider { action } => commands::provider::run(action).await,
 ```
 
-### Arquivos alterados (8):
+### 6. `cli/src/tui/overlays.rs` — add slash command
 
-| File | Operação |
-|---|---|
-| `cli/src/commands/auth.rs` | Modificar — implementar OpenRouter OAuth |
-| `cli/src/commands/provider.rs` | **Novo** — subcomando provider add/list/remove |
-| `cli/src/commands/mod.rs` | Modificar — adicionar `pub mod provider` |
-| `cli/src/main.rs` | Modificar — adicionar `Provider` subcomando |
-| `cli/src/tui/overlays.rs` | Modificar — adicionar `provider` à COMMANDS |
-| `cli/src/tui/app.rs` | Modificar — adicionar match arm `"provider"` em run_command |
-| `cli/Cargo.toml` | Modificar — adicionar deps (base64, sha2, rpassword) |
-| Nenhum core | Core stays untouched |
+In `COMMANDS` array:
+```rust
+SlashCmd { name: "provider", desc: "add / list / remove external providers" },
+```
 
-## Tasks
+### 7. `cli/src/tui/app.rs` — add `/provider` handler
 
-- **T1**: `cli/src/commands/auth.rs` — implementar OpenRouter OAuth login (PKCE flow + key exchange + save config)
-- **T2**: `cli/src/commands/provider.rs` (novo) — subcomandos `add`, `list`, `remove` com flags + prompts interativos
-- **T3**: `cli/src/commands/mod.rs` + `cli/src/main.rs` — registrar `provider` subcomando e dispatch
-- **T4**: `cli/src/tui/overlays.rs` + `cli/src/tui/app.rs` — slash command `/provider` com subcomandos list/remove
-- **T5**: `cli/Cargo.toml` — adicionar dependências necessárias (base64, sha2, rpassword)
+In `run_command()` function, add after the existing matches:
+
+```rust
+"provider" => {
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    let theme = app.theme;
+    match parts.first().copied() {
+        Some("list") => {
+            let cfg = provider::load_config();
+            if cfg.providers.is_empty() {
+                app.commit_notice("Nenhum provider conectado.", theme.muted);
+            } else {
+                for (id, p) in &cfg.providers {
+                    let label = p.label.as_deref().unwrap_or(id);
+                    app.commit_notice(
+                        format!("  {label} ({id}) — {pr}", pr = p.protocol),
+                        theme.accent,
+                    );
+                }
+            }
+        }
+        Some("remove") => {
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() {
+                app.commit_notice("Use: /provider remove <id>", theme.warning);
+            } else {
+                let mut cfg = provider::load_config();
+                cfg.providers.remove(id);
+                let prefix = format!("{id}/");
+                if cfg.brain_model.starts_with(&prefix) {
+                    cfg.brain_model = "claudius".into();
+                }
+                if cfg.builder_model.starts_with(&prefix) {
+                    cfg.builder_model = "claudinio".into();
+                }
+                provider::save_config(&cfg);
+                app.commit_notice(format!("Provider '{id}' removido."), theme.success);
+            }
+        }
+        Some("add") => {
+            app.commit_notice(
+                "Use `claudinio provider add <id> --api-key ...` no terminal.",
+                theme.warning,
+            );
+        }
+        _ => {
+            app.commit_notice("/provider: add | list | remove", theme.muted);
+        }
+    }
+}
+```
+
+### Integration points (seams)
+
+Each touch point connects to existing infrastructure:
+
+| Seam | What connects | Proof |
+|---|---|---|
+| OpenRouter login → config.json | `ProviderEntry` inserted into `cfg.providers`, `provider::save_config(&cfg)` | File written; next `load_config` returns entry |
+| Manual provider add → config.json | Same path as above | Same |
+| `resolve_provider()` runtime | Model id `"deepseek/deepseek-chat"` → split at `/` → lookup `cfg.providers["deepseek"]` | Existing core test coverage |
+| TUI `/model` picks external model | `model_items()` iterates `config.providers` and creates qualified ids | Already works for desktop-connected providers |
+| Disconnect fallback | brain/builder model starts with `"{id}/"` → reset to claudius/claudinio | Same pattern as desktop `disconnect_provider` |
+
+### No core changes required
+
+All provider resolution, routing, config persistence, and protocol handling already exists in the shared `claudinio_core` crate. The CLI/TUI only adds the connection UX layer.
+
+## Tasks summary
+
+| Task | Description | Files |
+|---|---|---|
+| T1 | OpenRouter OAuth login in CLI | `cli/src/commands/auth.rs` — implement `openrouter_login_cli()` + save config |
+| T2 | Provider add/list/remove CLI subcommand | `cli/src/commands/provider.rs` (NEW), `mod.rs`, `main.rs` |
+| T3 | TUI slash command `/provider` | `cli/src/tui/overlays.rs` + `cli/src/tui/app.rs` |
+| T4 | Dependencies | `cli/Cargo.toml` — add base64, sha2, rpassword |
