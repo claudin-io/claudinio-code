@@ -14,6 +14,49 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 const EDITOR_MAX: u16 = 4;
+const CONTENT_CAP: u16 = 12;
+
+/// Altura do "cromo" (fora do conteúdo): status + caixa do input + footer. É a
+/// altura do viewport quando ocioso — sem buraco.
+pub fn chrome_height(app: &App) -> u16 {
+    let editor = (app.editor.line_count() as u16).clamp(1, EDITOR_MAX);
+    1 + (editor + 2) + 2
+}
+
+/// Altura desejada do viewport inline: cromo + overlay + conteúdo ativo (capado).
+/// O loop redimensiona o viewport pra bater com isso.
+pub fn desired_height(app: &App, width: u16) -> u16 {
+    let overlay_h = match &app.overlay {
+        Some(o @ (Overlay::Slash(_) | Overlay::Mention(_))) => o.height() as u16,
+        _ => 0,
+    };
+    let content_h = match &app.overlay {
+        Some(o @ Overlay::Select(_)) => o.height() as u16,
+        _ => {
+            let lines = build_active_lines(app);
+            if lines.is_empty() {
+                0
+            } else {
+                let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+                (para.line_count(width.max(1)) as u16).min(CONTENT_CAP)
+            }
+        }
+    };
+    chrome_height(app) + overlay_h + content_h
+}
+
+/// Verdadeiro quando NADA precisa de espaço extra — o viewport encolhe pro cromo
+/// (sem buraco). Só encolhe fora de um turno pra não piscar no meio do streaming.
+pub fn is_idle(app: &App) -> bool {
+    !app.running
+        && app.overlay.is_none()
+        && app.thinking.is_none()
+        && app.assistant.is_none()
+        && app.tools.is_empty()
+        && app.subagents.is_empty()
+        && app.question.is_none()
+        && app.attachments.is_empty()
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     let theme = &app.theme;
@@ -27,9 +70,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     let editor_lines = (app.editor.line_count() as u16).clamp(1, EDITOR_MAX);
     let box_h = (editor_lines + 2).min(area.height.saturating_sub(footer_h));
 
-    // A paleta de slash aparece logo acima da caixa (e esconde a linha de status);
-    // os seletores (Select) aparecem na área de conteúdo, no topo.
-    let slash_open = matches!(app.overlay, Some(Overlay::Slash(_)));
+    // A paleta de slash e o autocomplete de @ aparecem logo acima da caixa (e
+    // escondem a linha de status); os seletores (Select) aparecem no conteúdo.
+    let slash_open = matches!(app.overlay, Some(Overlay::Slash(_)) | Some(Overlay::Mention(_)));
     let status_h = if slash_open {
         0
     } else {
@@ -151,12 +194,14 @@ fn status_line(app: &App) -> Line<'static> {
         ]);
     }
     Line::from(Span::styled(
-        "Enter enviar · Tab modo · / comandos · Ctrl+C sair".to_string(),
+        "Enter enviar · Tab modo · / comandos · @ arquivos · Ctrl+C sair".to_string(),
         theme.dim_style(),
     ))
 }
 
-/// Concatena o conteúdo em progresso para a área de conteúdo (sem borda).
+/// Concatena o conteúdo em progresso para a área de conteúdo (sem borda):
+/// thinking/assistant em streaming, cards de ferramenta, subagentes em voo, o
+/// card de pergunta e as pílulas de anexo. Ancorado embaixo (tail) pelo `draw`.
 fn build_active_lines(app: &App) -> Vec<Line<'static>> {
     let theme = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();

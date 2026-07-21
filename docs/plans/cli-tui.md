@@ -304,3 +304,14 @@ registrar o nome antes do primeiro publish. Se estiver ocupado, fallback para
   `+crt-static` — regressão aqui quebra o link do ORT no MSVC.
 - ONNX via `ort download-binaries`: o CLI herda o download em build-time de graça;
   runtime resolve/baixa o MiniLM.
+
+
+## Implementation Log — 2026-07-20 22:33
+**Summary:** Commit 2 changes: extract attachments to core, add interactive TUI module
+**Changed files:** M	Cargo.lock, M	cli/Cargo.toml, M	cli/src/commands/chat.rs, M	cli/src/main.rs, A	cli/src/tui/app.rs, A	cli/src/tui/diff.rs, A	cli/src/tui/editor.rs, A	cli/src/tui/event.rs, A	cli/src/tui/footer.rs, A	cli/src/tui/markdown.rs, A	cli/src/tui/mod.rs, A	cli/src/tui/overlays.rs, A	cli/src/tui/render.rs, A	cli/src/tui/theme.rs, A	cli/src/tui/transcript.rs, A	core/src/agent/attachments.rs, M	core/src/agent/mod.rs, M	src-tauri/src/commands/agent.rs
+**Commits:** fb58594 feat(cli/tui): add inline-render interactive chat TUI, 59214e7 refactor(attachments): move attachment building from Tauri layer to core
+**Journal:** Split into two atomic commits: (1) refactor extracting attachment processing from Tauri layer into core::agent::attachments — the shared function means CLI/TUI and desktop app build identical content blocks, no duplicated logic. (2) feat adding the full TUI module (11 new files) replacing inline chat.rs with delegation, adding tui-textarea dep, defaulting to Chat when no subcommand given. Build verified clean before both commits, working tree clean after.
+
+**Task journal:**
+- Commit attachment extraction to core: Commit 59214e7 — 3 files changed, +221/-143
+- Commit new TUI module + deps: Commit fb58594 — 15 files changed, +3144/-468 (11 new TUI module files)

@@ -5,7 +5,8 @@
 
 use super::editor::Editor;
 use super::overlays::{
-    effort_items, help_items, theme_items, Overlay, Select, SelectItem, SelectKind, Slash, SlashCmd,
+    effort_items, help_items, rank_files, theme_items, Mention, Overlay, Select, SelectItem,
+    SelectKind, Slash, SlashCmd,
 };
 use super::theme::{Theme, ThemeKind};
 use super::transcript::{Status, SubLive, ToolCard};
@@ -81,6 +82,8 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Anexos pendentes (caminhos) que vão no próximo envio.
     pub attachments: Vec<String>,
+    /// Arquivos do workspace (relativos), para o `@`-mention.
+    pub file_list: Vec<String>,
 
     pub to_commit: Vec<Vec<Line<'static>>>,
 
@@ -185,6 +188,9 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         agent_tx,
     };
 
+    // Lista de arquivos do workspace (respeitando .gitignore) para o @-mention.
+    let file_list = claudinio_core::code_intel::list_files(&root, 5000);
+
     let mut app = App {
         theme_kind: ThemeKind::Dark,
         theme,
@@ -213,6 +219,7 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         editor: Editor::new(&theme),
         overlay: None,
         attachments: Vec::new(),
+        file_list,
         to_commit: Vec::new(),
         mode_ctl,
         quit: false,
@@ -222,31 +229,50 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
         app.theme.dim,
     );
 
-    // Terminal inline (sem alt-screen: preserva scrollback). Altura compacta: a
-    // borda envolve só o input; conteúdo/status/footer ficam fora dela.
-    let rows = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
-    let vh = (rows / 3).clamp(9, 12);
+    // Terminal inline (sem alt-screen: preserva scrollback). Altura DINÂMICA: só
+    // o cromo (input+status+footer) quando ocioso — SEM buraco — e cresce pra
+    // caber conteúdo/overlays (o loop redimensiona recriando o viewport).
+    let init_vh = render::chrome_height(&app);
     let mut terminal = ratatui::try_init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(vh),
+        viewport: Viewport::Inline(init_vh),
     })
     .map_err(|e| {
         anyhow::anyhow!("não foi possível inicializar a TUI (é preciso um terminal interativo): {e}")
     })?;
+    let mut current_vh = init_vh;
 
-    // Thread bloqueante de stdin → canal.
+    // Gate de stdin: redimensionar recria o viewport, que re-consulta a posição
+    // do cursor (DSR `ESC[6n`). A thread leitora não pode estar lendo o stdin
+    // nesse instante (senão rouba a resposta → "cursor position could not be
+    // read"). O gate garante acesso exclusivo durante o resize.
+    let stdin_gate = std::sync::Arc::new(std::sync::Mutex::new(()));
+
+    // Thread leitora de stdin: poll curto segurando o gate, solta entre ciclos.
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Event>();
-    std::thread::spawn(move || {
-        while let Ok(ev) = crossterm::event::read() {
-            if input_tx.send(ev).is_err() {
-                break;
+    let gate_r = stdin_gate.clone();
+    std::thread::spawn(move || loop {
+        let ev = {
+            let _g = gate_r.lock().unwrap();
+            match crossterm::event::poll(Duration::from_millis(5)) {
+                Ok(true) => crossterm::event::read().ok(),
+                Ok(false) => None,
+                Err(_) => break,
             }
+        };
+        match ev {
+            Some(ev) => {
+                if input_tx.send(ev).is_err() {
+                    break;
+                }
+            }
+            None => std::thread::sleep(Duration::from_millis(3)),
         }
     });
 
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let res = commit_and_draw(&mut terminal, &mut app);
+    let res = commit_and_draw(&mut terminal, &mut app, &mut current_vh, &stdin_gate);
     if let Err(e) = res {
         ratatui::restore();
         return Err(e.into());
@@ -260,18 +286,18 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
                 while let Ok(ev) = agent_rx.try_recv() {
                     event::apply(&mut app, ev);
                 }
-                commit_and_draw(&mut terminal, &mut app)?;
+                commit_and_draw(&mut terminal, &mut app, &mut current_vh, &stdin_gate)?;
             }
             Some(inp) = input_rx.recv() => {
                 handle_event(&mut app, &chat, inp).await?;
                 if app.quit { break; }
-                commit_and_draw(&mut terminal, &mut app)?;
+                commit_and_draw(&mut terminal, &mut app, &mut current_vh, &stdin_gate)?;
             }
             _ = tick.tick() => {
                 if app.running {
                     app.spinner_tick = app.spinner_tick.wrapping_add(1);
                     refresh_retry(&mut app);
-                    commit_and_draw(&mut terminal, &mut app)?;
+                    commit_and_draw(&mut terminal, &mut app, &mut current_vh, &stdin_gate)?;
                 }
             }
         }
@@ -285,13 +311,46 @@ pub async fn run(path: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drena a fila de commits (→ scrollback) e redesenha a região viva.
-fn commit_and_draw(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
+/// Recria o terminal com uma nova altura de viewport inline. `Terminal::drop` é
+/// no-op aqui (não escondemos o cursor), então trocar é seguro.
+fn reinit_terminal(vh: u16) -> std::io::Result<ratatui::DefaultTerminal> {
+    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+    ratatui::Terminal::with_options(backend, TerminalOptions { viewport: Viewport::Inline(vh) })
+}
+
+/// Drena a fila de commits (→ scrollback), ajusta a altura do viewport pra caber
+/// a região viva (cresce pra caber, encolhe pro cromo quando ocioso) e redesenha.
+fn commit_and_draw(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    current_vh: &mut u16,
+    gate: &std::sync::Mutex<()>,
+) -> std::io::Result<()> {
     let width = terminal.size()?.width.max(1);
     for lines in std::mem::take(&mut app.to_commit) {
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         let h = para.line_count(width).max(1) as u16;
         terminal.insert_before(h, |buf| para.render(buf.area, buf))?;
+    }
+
+    let full_rows = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+    let chrome = render::chrome_height(app);
+    let want =
+        render::desired_height(app, width).clamp(chrome, full_rows.saturating_sub(1).max(chrome));
+    let target = if want > *current_vh {
+        want
+    } else if render::is_idle(app) {
+        chrome
+    } else {
+        *current_vh
+    };
+    if target != *current_vh {
+        // Resize = recriar o viewport (re-consulta o cursor via DSR). Segura o
+        // gate pra a thread leitora não roubar a resposta do DSR.
+        let _g = gate.lock().unwrap();
+        terminal.clear()?;
+        *terminal = reinit_terminal(target)?;
+        *current_vh = target;
     }
     terminal.draw(|f| render::draw(f, app))?;
     Ok(())
@@ -375,24 +434,57 @@ async fn handle_key(app: &mut App, chat: &ChatCtx, k: KeyEvent) -> anyhow::Resul
         }
         _ => {
             app.editor.input(k);
-            refresh_slash(app);
+            refresh_overlays(app);
         }
     }
     Ok(())
 }
 
-/// Reabre/atualiza a paleta de slash conforme o texto do editor.
-fn refresh_slash(app: &mut App) {
+/// Reabre/atualiza a paleta de slash OU o autocomplete de `@`-mention conforme
+/// o texto do editor.
+fn refresh_overlays(app: &mut App) {
     let text = app.editor.text();
+    // Slash: "/comando" no início (uma palavra, sem "/" — não confundir com path).
     if let Some(rest) = text.strip_prefix('/') {
-        if !rest.contains(' ') && app.editor.is_single_line() {
+        if !rest.contains(' ') && !rest.contains('/') && app.editor.is_single_line() {
             app.overlay = Some(Overlay::Slash(Slash::build(rest)));
             return;
         }
     }
-    if matches!(app.overlay, Some(Overlay::Slash(_))) {
+    // Mention: último "@" sem espaço depois → lista de arquivos filtrada.
+    if let Some(q) = mention_query(&text) {
+        let matches = rank_files(&q, &app.file_list, 20);
+        app.overlay = Some(Overlay::Mention(Mention {
+            query: q,
+            matches,
+            idx: 0,
+        }));
+        return;
+    }
+    if matches!(app.overlay, Some(Overlay::Slash(_)) | Some(Overlay::Mention(_))) {
         app.overlay = None;
     }
+}
+
+/// Extrai a query do `@`-mention em curso (após o último `@`, sem espaço).
+/// Exige ao menos 1 caractere após o `@` (o `@` puro não abre o overlay).
+fn mention_query(text: &str) -> Option<String> {
+    let at = text.rfind('@')?;
+    let after = &text[at + 1..];
+    if after.is_empty() || after.chars().any(|c| c.is_whitespace()) {
+        None
+    } else {
+        Some(after.to_string())
+    }
+}
+
+/// Substitui o `@query` em curso pelo caminho selecionado (+ espaço).
+fn insert_mention(app: &mut App, path: &str) {
+    let text = app.editor.text();
+    if let Some(at) = text.rfind('@') {
+        app.editor.set_text(&format!("{}{} ", &text[..at], path));
+    }
+    app.overlay = None;
 }
 
 async fn handle_overlay_key(app: &mut App, chat: &ChatCtx, k: KeyEvent) -> anyhow::Result<()> {
@@ -410,21 +502,34 @@ async fn handle_overlay_key(app: &mut App, chat: &ChatCtx, k: KeyEvent) -> anyho
                 o.move_down();
             }
         }
-        KeyCode::Tab => {
-            if let Some(Overlay::Slash(s)) = &app.overlay {
+        KeyCode::Tab => match &app.overlay {
+            Some(Overlay::Slash(s)) => {
                 if let Some(cmd) = s.selected() {
                     app.editor.set_text(&format!("/{} ", cmd.name));
                     app.overlay = None;
                 }
             }
-        }
+            Some(Overlay::Mention(m)) => {
+                if let Some(p) = m.selected().cloned() {
+                    insert_mention(app, &p);
+                }
+            }
+            _ => {}
+        },
         KeyCode::Enter => {
+            if let Some(Overlay::Mention(m)) = &app.overlay {
+                match m.selected().cloned() {
+                    Some(p) => insert_mention(app, &p),
+                    None => app.overlay = None,
+                }
+                return Ok(());
+            }
             let action = match &app.overlay {
                 Some(Overlay::Slash(s)) => s.selected().map(OverlayAction::Slash),
                 Some(Overlay::Select(s)) => s
                     .selected()
                     .map(|it| OverlayAction::Select(s.kind, it.value.clone())),
-                None => None,
+                _ => None,
             };
             app.overlay = None;
             if let Some(a) = action {
@@ -432,10 +537,10 @@ async fn handle_overlay_key(app: &mut App, chat: &ChatCtx, k: KeyEvent) -> anyho
             }
         }
         _ => {
-            // Digitação filtra a paleta de slash; seletores ignoram.
-            if matches!(app.overlay, Some(Overlay::Slash(_))) {
+            // Digitação filtra slash/mention; seletores ignoram.
+            if matches!(app.overlay, Some(Overlay::Slash(_)) | Some(Overlay::Mention(_))) {
                 app.editor.input(k);
-                refresh_slash(app);
+                refresh_overlays(app);
             }
         }
     }
@@ -1068,6 +1173,7 @@ impl App {
             editor: Editor::new(&theme),
             overlay: None,
             attachments: Vec::new(),
+            file_list: Vec::new(),
             to_commit: Vec::new(),
             mode_ctl: Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human)),
             quit: false,
@@ -1140,13 +1246,21 @@ mod tests {
             },
         );
         let s = screen(&app);
-        assert!(s.contains("resposta"), "faltou texto do assistente: {s:?}");
-        assert!(s.contains("forte"), "faltou trecho em negrito");
-        assert!(s.contains("trabalhando"), "faltou status de spinner");
+        assert!(s.contains("trabalhando"), "faltou status de spinner: {s:?}");
         assert!(s.contains("12%/200k"), "faltou % de contexto no footer");
         assert!(s.contains("claudius"), "faltou modelo no footer");
         // O bloco de "pensando" foi commitado ao scrollback quando o texto começou.
         assert!(commits_text(&app).contains("planejando"), "thinking não commitado");
+        // O texto do assistente vai pro scrollback ao finalizar o passo (não é
+        // desenhado na região viva, pra não redimensionar o viewport).
+        event::apply(
+            &mut app,
+            AgentEvent::TextStep {
+                text: "resposta **forte**".into(),
+            },
+        );
+        let c = commits_text(&app);
+        assert!(c.contains("resposta") && c.contains("forte"), "assistente não commitado: {c:?}");
     }
 
     #[test]
@@ -1264,5 +1378,40 @@ mod tests {
         let s = screen(&app);
         assert!(s.contains("anexos:"), "faltou rótulo de anexos: {s:?}");
         assert!(s.contains("bar.png"), "faltou nome do anexo");
+    }
+
+    #[test]
+    fn mention_query_detects_at_token() {
+        assert_eq!(mention_query("olha @Chat"), Some("Chat".into()));
+        assert_eq!(mention_query("@"), None, "@ puro não abre o overlay");
+        assert_eq!(mention_query("olha @Chat depois"), None);
+        assert_eq!(mention_query("sem arroba"), None);
+    }
+
+    #[test]
+    fn rank_files_prefers_basename() {
+        let files = vec![
+            "src/lib.rs".to_string(),
+            "src/components/ChatPanel.tsx".to_string(),
+            "docs/chat.md".to_string(),
+        ];
+        let r = rank_files("chat", &files, 10);
+        assert_eq!(r[0], "docs/chat.md", "basename curto começando com a query vem 1º");
+        assert!(r.contains(&"src/components/ChatPanel.tsx".to_string()));
+        assert!(!r.contains(&"src/lib.rs".to_string()), "sem match não aparece");
+    }
+
+    #[test]
+    fn mention_overlay_lists_files() {
+        let mut app = App::for_test();
+        app.file_list = vec!["src/main.rs".into(), "README.md".into()];
+        app.overlay = Some(Overlay::Mention(Mention {
+            query: String::new(),
+            matches: rank_files("", &app.file_list, 20),
+            idx: 0,
+        }));
+        let s = screen(&app);
+        assert!(s.contains("arquivos"), "faltou título arquivos: {s:?}");
+        assert!(s.contains("main.rs"), "faltou arquivo listado");
     }
 }
