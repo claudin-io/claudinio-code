@@ -1019,6 +1019,9 @@ async fn new_session(app: &mut App, chat: &ChatCtx) -> anyhow::Result<()> {
     app.subagents.clear();
     app.tasks.clear();
     app.question = None;
+    app.attachments.clear();
+    app.running = false;
+    app.status = Status::Idle;
     app.commit_notice("── new session ──", app.theme.dim);
     Ok(())
 }

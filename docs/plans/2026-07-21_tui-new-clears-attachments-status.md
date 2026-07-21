@@ -39,3 +39,14 @@ app.status = Status::Idle;
 
 1. Edit `new_session` in `cli/src/tui/app.rs` — add `attachments.clear()`, `running = false`, `status = Status::Idle`.
 2. `cargo build -p cli` to verify.
+
+
+## Implementation Log — 2026-07-21 14:24
+**Summary:** Add attachments.clear(), running=false, status=Idle to new_session()
+**Changed files:** A	docs/plans/2026-07-21_tui-new-clears-attachments-status.md
+**Commits:** 2ba5e12 docs(plan): tui-new-clears-attachments-status
+**Journal:** Straightforward 3-line addition in `new_session()`. The tricky part was locating the exact insertion point — right before `commit_notice`, after `question = None`. The existing function already cleared in_tok/out_tok, tools, subagents, tasks, and question, but was missing attachments (Vec<String>), running (bool), and status (Status). These three fields are what made `/new` feel broken: stale attachments persisted from the old session, the spinner kept running, and the status bar stayed yellow/Working. All three are now reset before the "── new session ──" notice is committed. No imports or struct changes needed — `Status` was already imported and `attachments`/`running`/`status` are plain fields on `App`.
+
+**Task journal:**
+- Limpar attachments, running e status em new_session(): Adicionadas 3 linhas em new_session(): app.attachments.clear(), app.running = false, app.status = Status::Idle — entre app.question = None e app.commit_notice().
+- Verificar compilação: Compilou sem erros. Warnings não relacionados no claudinio-core (imports não usados).
