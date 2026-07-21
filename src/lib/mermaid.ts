@@ -66,7 +66,19 @@ export async function renderMermaid(container: HTMLElement): Promise<void> {
   });
   if (pending.length === 0) return;
 
-  const mermaid = await ensureMermaid();
+  // Loading the (lazy, ~2-3 MB) module can fail — a chunk load error offline,
+  // for instance. Swallow it: the `.mermaid-src` fallback already shows the
+  // source, and a diagram must never break the surrounding message.
+  let mermaid: MermaidModule;
+  try {
+    mermaid = await ensureMermaid();
+  } catch {
+    pending.forEach((node) => {
+      node.dataset.mermaidTheme = theme;
+      node.classList.add("mermaid-error");
+    });
+    return;
+  }
 
   for (const node of pending) {
     const encoded = node.dataset.mermaid ?? "";

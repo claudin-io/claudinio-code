@@ -186,6 +186,7 @@ const dict: LocaleDict = {
   "chat.budgetBanner.dismiss": "닫기",
   // ── ChatPanel - Messages ─────────────────────────────────────────
   "chat.message.you": "나",
+  "chat.message.renderError": "이 메시지를 표시할 수 없습니다",
   "chat.message.agent": "에이전트",
   "chat.message.failedToSend": "전송 실패: {0}",
   "chat.message.failedToReopen": "재시작 실패: {0}",
