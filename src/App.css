@@ -753,6 +753,62 @@ body,
   font-size: inherit;
 }
 
+/* Mermaid diagrams. Before hydration (and on error/streaming) the block shows
+   its source via .mermaid-src; once rendered it holds an <svg>. */
+.prose-content .mermaid-block {
+  margin: 0.75em 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  padding: 0.85em;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.prose-content .mermaid-block.mermaid-rendered {
+  padding: 1em 0.85em;
+  position: relative;
+  cursor: zoom-in;
+}
+
+/* Hover hint that the diagram opens in the fullscreen zoom/pan viewer. */
+.prose-content .mermaid-block.mermaid-rendered::after {
+  content: "⤢";
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 14px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface-2);
+  color: var(--ink-faint);
+  border: 1px solid var(--border-subtle);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+
+.prose-content .mermaid-block.mermaid-rendered:hover::after {
+  opacity: 1;
+}
+
+.prose-content .mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.prose-content .mermaid-src {
+  margin: 0;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--ink-muted);
+  white-space: pre;
+  overflow-x: auto;
+}
+
 .prose-content ul,
 .prose-content ol {
   margin: 0.4em 0 0.75em;

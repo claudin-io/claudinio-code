@@ -23,7 +23,7 @@ const singleAsk: AskUserData = {
   questions: [
     {
       question: "What is your favorite color?",
-      options: ["Red", "Blue", "Green"],
+      options: [{ label: "Red" }, { label: "Blue" }, { label: "Green" }],
       multi_select: false,
     },
   ],
@@ -35,7 +35,7 @@ const multiAsk: AskUserData = {
   questions: [
     {
       question: "Select all that apply",
-      options: ["Option A", "Option B", "Option C"],
+      options: [{ label: "Option A" }, { label: "Option B" }, { label: "Option C" }],
       multi_select: true,
     },
   ],
@@ -47,13 +47,29 @@ const multiQuestionAsk: AskUserData = {
   questions: [
     {
       question: "First question?",
-      options: ["Yes", "No"],
+      options: [{ label: "Yes" }, { label: "No" }],
       multi_select: false,
     },
     {
       question: "Second question?",
-      options: ["Option 1", "Option 2", "Option 3"],
+      options: [{ label: "Option 1" }, { label: "Option 2" }, { label: "Option 3" }],
       multi_select: true,
+    },
+  ],
+};
+
+// Options carrying a `description` — the richer AskUserQuestion shape.
+const describedAsk: AskUserData = {
+  sessionId: "test-session",
+  toolId: "test-tool",
+  questions: [
+    {
+      question: "How should the patch ship?",
+      options: [
+        { label: "Full release", description: "Commit, tag semver, and push" },
+        { label: "Tag only", description: "Move the tag without touching the tree" },
+      ],
+      multi_select: false,
     },
   ],
 };
@@ -95,6 +111,39 @@ describe("QuestionCard", () => {
     expect(document.body.textContent).toContain("Red");
     expect(document.body.textContent).toContain("Blue");
     expect(document.body.textContent).toContain("Green");
+    dispose();
+  });
+
+  it("renders both the option label and its description", () => {
+    const dispose = render(
+      () => <QuestionCard ask={describedAsk} onSubmit={vi.fn()} />,
+      document.body,
+    );
+    expect(document.body.textContent).toContain("Full release");
+    expect(document.body.textContent).toContain("Commit, tag semver, and push");
+    expect(document.body.textContent).toContain("Tag only");
+    dispose();
+  });
+
+  it("submits the option label (not the description) as the answer", () => {
+    const onSubmit = vi.fn();
+    const dispose = render(
+      () => <QuestionCard ask={describedAsk} onSubmit={onSubmit} />,
+      document.body,
+    );
+    const buttons = document.body.querySelectorAll("button");
+    const fullRelease = Array.from(buttons).find((b) =>
+      b.textContent?.includes("Full release"),
+    )!;
+    fullRelease.click();
+
+    const allButtons = document.body.querySelectorAll("button");
+    const submitBtn = allButtons[allButtons.length - 1] as HTMLButtonElement;
+    submitBtn.click();
+
+    expect(onSubmit).toHaveBeenCalledWith([
+      { question: "How should the patch ship?", answer: "Full release" },
+    ]);
     dispose();
   });
 
@@ -489,7 +538,7 @@ describe("QuestionCard", () => {
       questions: [
         {
           question: "Pick colors",
-          options: ["Red", "Blue"],
+          options: [{ label: "Red" }, { label: "Blue" }],
           multi_select: true,
         },
       ],

@@ -196,7 +196,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "grep".into(),
-            description: "Search for a regex pattern across files in the project workspace using ripgrep.".into(),
+            description: "Search for a regex pattern across files in the project workspace using ripgrep. LAST RESORT for search — prefer the indexed tools first: semantic_search for behavior/concepts, code_search/symbol_lookup for known names. Reach for grep only when those come up empty or you need a literal regex over raw file text.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -208,7 +208,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit_file".into(),
-            description: "Propose a change to a file in the project workspace. Replaces the FIRST occurrence of old_string with new_string. NOT applied until you approve. IMPORTANT: You MUST call read_file on the file first (or at least the line range containing the edit) before using edit_file — otherwise the edit will be rejected with an error.".into(),
+            description: "Propose a change to a file in the project workspace. Replaces the FIRST occurrence of old_string with new_string, so old_string MUST uniquely identify the target — include enough surrounding lines that it matches exactly one place (a bare, repeated snippet will edit the wrong spot). NOT applied until you approve. IMPORTANT: You MUST call read_file on the file first (or at least the line range containing the edit) before using edit_file — otherwise the edit will be rejected with an error.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -255,26 +255,26 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "go_to_definition".into(),
-            description: "Find where a symbol is defined at a specific position. Uses LSP (precise) or indexed fallback. Prefer over grep for finding definitions.".into(),
+            description: "Find where a symbol is defined at a specific position. Uses LSP (precise) or indexed fallback. Prefer over grep for finding definitions. NOTE: line and character are 0-BASED (first line/column = 0) — unlike read_file's 1-based start_line/end_line, so subtract 1 from a line number you saw in read_file/grep output. Point at the symbol's own position.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "Absolute path to the file" },
-                    "line": { "type": "integer", "description": "0-based line number" },
-                    "character": { "type": "integer", "description": "0-based character offset" }
+                    "line": { "type": "integer", "description": "0-based line number (first line = 0; subtract 1 from read_file's 1-based numbers)" },
+                    "character": { "type": "integer", "description": "0-based character offset within the line (first column = 0)" }
                 },
                 "required": ["file_path", "line", "character"]
             }),
         },
         ToolDef {
             name: "find_references".into(),
-            description: "Find all references to a symbol at a specific position. Uses LSP (precise) or index. Prefer over grep for finding usages.".into(),
+            description: "Find all references to a symbol at a specific position. Uses LSP (precise) or index. Prefer over grep for finding usages. NOTE: line and character are 0-BASED (first line/column = 0) — unlike read_file's 1-based start_line/end_line, so subtract 1 from a line number you saw in read_file/grep output. Point at the symbol's own position.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "Absolute path to the file" },
-                    "line": { "type": "integer", "description": "0-based line number" },
-                    "character": { "type": "integer", "description": "0-based character offset" }
+                    "line": { "type": "integer", "description": "0-based line number (first line = 0; subtract 1 from read_file's 1-based numbers)" },
+                    "character": { "type": "integer", "description": "0-based character offset within the line (first column = 0)" }
                 },
                 "required": ["file_path", "line", "character"]
             }),
@@ -319,7 +319,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text ends the turn unanswered and stalls the task.\n\nEach question can have:\n- `multi_select: false` (default): radio buttons, user picks exactly ONE option. Best for mutually exclusive decisions.\n- `multi_select: true`: checkboxes, user can pick SEVERAL options. The UI shows square indicators instead of circles.\n\nThe UI automatically appends an \"Other\" option with a free-text input field to EVERY question (single and multi). When the user types in \"Other\", their text is appended to the chosen options. So NEVER add an \"Other\" option manually to your options list — it's always there automatically.\n\nBlocks until answered and returns the compiled question/answer pairs.".into(),
+            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text (including pasting the questions JSON into your reply) ends the turn unanswered and stalls the task.\n\nSHAPE: each question is { \"question\": string, \"options\": Option[], \"multi_select\"?: bool }. Each option is EITHER a plain string, OR an object { \"label\": string, \"description\"?: string } where `label` is the concise choice shown on the button and `description` is an optional one-line explanation rendered under it. Mix the two freely. Right: \"options\": [\"Keep `chat` subcommand\", \"Make it the default\"]. Also right: \"options\": [{\"label\": \"Keep `chat`\", \"description\": \"Runs the interactive chat as a subcommand\"}, {\"label\": \"Make it default\", \"description\": \"`claudinio` with no args opens chat\"}].\n\nEach question can have:\n- `multi_select: false` (default): radio buttons, user picks exactly ONE option. Best for mutually exclusive decisions.\n- `multi_select: true`: checkboxes, user can pick SEVERAL options. The UI shows square indicators instead of circles.\n\nThe UI automatically appends an \"Other\" option with a free-text input field to EVERY question (single and multi). When the user types in \"Other\", their text is appended to the chosen options. So NEVER add an \"Other\" option manually to your options list — it's always there automatically.\n\nProvide 2-4 options; their labels must be non-empty and distinct (no blank or duplicated entries). Blocks until answered and returns the compiled question/answer pairs.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -330,7 +330,23 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                             "type": "object",
                             "properties": {
                                 "question": { "type": "string", "description": "The full question, ending with a question mark" },
-                                "options": { "type": "array", "items": { "type": "string" }, "description": "2-4 concise options for the user to choose from. Do NOT include an 'Other' option — the UI adds it automatically." },
+                                "options": {
+                                    "type": "array",
+                                    "description": "2-4 distinct, non-empty choices. Each is EITHER a plain string, OR an object { \"label\": string, \"description\"?: string } — label is the concise choice, description an optional one-line detail shown under it. Do NOT include an 'Other' option — the UI adds it automatically.",
+                                    "items": {
+                                        "oneOf": [
+                                            { "type": "string" },
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "label": { "type": "string", "description": "Concise choice shown on the button" },
+                                                    "description": { "type": "string", "description": "Optional one-line explanation shown under the label" }
+                                                },
+                                                "required": ["label"]
+                                            }
+                                        ]
+                                    }
+                                },
                                 "multi_select": { "type": "boolean", "description": "false (default) = radio buttons, user picks one. true = checkboxes, user picks several plus the auto-added 'Other' free-text field." }
                             },
                             "required": ["question", "options"]

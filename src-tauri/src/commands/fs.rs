@@ -188,3 +188,15 @@ pub fn read_file(path: String) -> Result<String, String> {
 pub fn write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, &content).map_err(|e| format!("cannot write {path}: {e}"))
 }
+
+/// Write binary content (base64-encoded) to disk. Used to save exported images
+/// such as a rasterized PNG of a Mermaid diagram, which cannot go through the
+/// text-only `write_file`.
+#[tauri::command]
+pub fn write_file_bytes(path: String, base64_data: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_data.as_bytes())
+        .map_err(|e| format!("invalid base64: {e}"))?;
+    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write {path}: {e}"))
+}

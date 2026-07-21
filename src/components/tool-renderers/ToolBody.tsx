@@ -23,6 +23,7 @@ hljs.registerLanguage("markdown", langMarkdown);
 import type { ToolCallData, ToolResultData } from "../../lib/ipc";
 import { Icon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
+import { ProseContent } from "../ProseContent";
 import { t } from "../../lib/grill-me";
 import { detectLanguageFromPath } from "./toolPresentation";
 
@@ -95,9 +96,24 @@ const ReadFileBody: Component<{ path: string; startLine?: number; result?: ToolR
 );
 
 // ── ask_user ────────────────────────────────────────────────────────
+// Options come from the RAW model args, so they may be plain strings or any of
+// the object shapes the model reaches for ({label,description}, description-only,
+// {value,…}). Coerce each to a display string so history never shows [object Object].
 interface AskUserQuestion {
   question: string;
-  options: string[];
+  options: unknown[];
+}
+
+function optionLabel(opt: unknown): string {
+  if (typeof opt === "string") return opt;
+  if (opt && typeof opt === "object") {
+    const o = opt as Record<string, unknown>;
+    for (const key of ["label", "value", "title", "description", "text"]) {
+      const v = o[key];
+      if (typeof v === "string" && v.trim()) return v;
+    }
+  }
+  return "";
 }
 
 const AskUserBody: Component<{ questions: AskUserQuestion[]; result?: ToolResultData }> = (props) => {
@@ -127,7 +143,7 @@ const AskUserBody: Component<{ questions: AskUserQuestion[]; result?: ToolResult
                   <For each={q.options}>
                     {(opt) => (
                       <span class="rounded border border-border-subtle bg-surface-0 px-1.5 py-0.5 text-[11px] text-ink-faint">
-                        {opt}
+                        {optionLabel(opt)}
                       </span>
                     )}
                   </For>
@@ -215,7 +231,7 @@ const TasksBody: Component<{ argsTasks?: unknown; result?: ToolResultData }> = (
 // ── write_plan / finalize_plan ─────────────────────────────────────
 const PlanBody: Component<{ markdown: string; planFile?: string }> = (props) => (
   <div>
-    <div class="prose-content text-[12px] leading-[1.6] text-ink-muted" innerHTML={marked.parse(props.markdown, { async: false }) as string} />
+    <ProseContent class="prose-content text-[12px] leading-[1.6] text-ink-muted" html={marked.parse(props.markdown, { async: false }) as string} />
     <Show when={props.planFile}>
       <div class="mt-2 flex items-center gap-1.5 text-[11px] text-ink-faint">
         <Icon name="file-text" class="h-3 w-3" />
