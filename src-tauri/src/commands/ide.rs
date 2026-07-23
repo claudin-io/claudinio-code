@@ -33,10 +33,10 @@ pub async fn detect_ides() -> Result<Vec<String>, String> {
     #[cfg(target_os = "linux")]
     {
         let login_path = crate::agent::tools::bash::login_path();
-        if which_in_path("code", &login_path).is_some() {
+        if which_in_path("code", login_path).is_some() {
             found.push("vscode".into());
         }
-        if which_in_path("cursor", &login_path).is_some() {
+        if which_in_path("cursor", login_path).is_some() {
             found.push("cursor".into());
         }
     }
@@ -82,7 +82,7 @@ fn open_ide(cli: &str, app_name: &str, path: &str, goto_line: Option<u32>) -> Re
         {
             let login_path = crate::agent::tools::bash::login_path();
             let mut cmd = Command::new(cli);
-            cmd.env("PATH", &login_path).arg(path);
+            cmd.env("PATH", login_path).arg(path);
             crate::procutil::no_window(&mut cmd);
             cmd.spawn()
                 .map_err(|e| format!("Failed to open {app_name}: {e}"))?;

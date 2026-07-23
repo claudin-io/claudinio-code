@@ -51,10 +51,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         _ => {}
     }
 
-    let ext = match p.extension() {
-        Some(e) => e.to_str()?,
-        None => return None,
-    };
+    let ext = p.extension()?.to_str()?;
 
     match ext {
         // Ada
@@ -230,10 +227,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
 /// Detect the language for documentation/text files.
 pub fn detect_doc_language(path: &str) -> Option<&'static str> {
     let p = std::path::Path::new(path);
-    let ext = match p.extension() {
-        Some(e) => e.to_str()?,
-        None => return None,
-    };
+    let ext = p.extension()?.to_str()?;
     match ext {
         "md" | "mdx" => Some("markdown"),
         "txt" => Some("text"),
