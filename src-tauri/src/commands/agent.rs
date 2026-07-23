@@ -3,20 +3,20 @@ use crate::agent::persist::{
 };
 use crate::agent::provider::{save_config, ContentBlock};
 use crate::agent::session::{self, AgentEvent, SteeringEntry};
-use crate::agent::transition;
 use crate::agent::tools::{ReadTracker, ToolContext};
+use crate::agent::transition;
 use crate::commands::tasks as tasks_cmd;
 use crate::state::{AppState, SessionHandle};
+use base64::Engine;
+use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::Mutex;
-use base64::Engine;
-use std::io::Cursor;
-use image::GenericImageView;
 
 /// Compress an image to reduce its token footprint before base64-encoding.
 ///
@@ -37,7 +37,10 @@ fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String
     let max_dim = 1568u32;
     let (new_w, new_h) = if w > max_dim || h > max_dim {
         let ratio = (w as f64).max(h as f64) / max_dim as f64;
-        ((w as f64 / ratio).round() as u32, (h as f64 / ratio).round() as u32)
+        (
+            (w as f64 / ratio).round() as u32,
+            (h as f64 / ratio).round() as u32,
+        )
     } else {
         (w, h)
     };
@@ -49,14 +52,28 @@ fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String
     let final_w = resized.width();
     let final_h = resized.height();
     let encode_as_jpeg = ext == "png" || ext == "bmp";
-    let out_type = if encode_as_jpeg { "image/jpeg" } else { media_type };
+    let out_type = if encode_as_jpeg {
+        "image/jpeg"
+    } else {
+        media_type
+    };
     let mut out = Vec::new();
     let result = if out_type == "image/jpeg" {
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
-        enc.encode(&resized.to_rgb8(), resized.width(), resized.height(), image::ColorType::Rgb8.into())
+        enc.encode(
+            &resized.to_rgb8(),
+            resized.width(),
+            resized.height(),
+            image::ColorType::Rgb8.into(),
+        )
     } else if out_type == "image/webp" {
         let enc = image::codecs::webp::WebPEncoder::new_lossless(&mut out);
-        enc.encode(&resized.to_rgba8(), resized.width(), resized.height(), image::ColorType::Rgba8.into())
+        enc.encode(
+            &resized.to_rgba8(),
+            resized.width(),
+            resized.height(),
+            image::ColorType::Rgba8.into(),
+        )
     } else {
         resized.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
     };
@@ -72,9 +89,7 @@ fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String
 /// Returns a vector of (ContentBlock, AttachmentMeta) pairs so the caller can
 /// forward the content blocks to the workflow and persist the metadata for
 /// UI display (timeline pills).
-pub fn process_attachments(
-    atts: &[AttachmentInput],
-) -> Vec<(ContentBlock, AttachmentMeta)> {
+pub fn process_attachments(atts: &[AttachmentInput]) -> Vec<(ContentBlock, AttachmentMeta)> {
     let mut results = Vec::new();
     for att in atts {
         let file_path = Path::new(&att.path);
@@ -93,13 +108,36 @@ pub fn process_attachments(
             .to_string();
         let file_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
 
-        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp");
+        let is_image = matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+        );
         let is_text = matches!(
             ext.as_str(),
-            "txt" | "md" | "csv" | "json" | "yaml" | "yml" | "toml"
-                | "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "swift"
-                | "go" | "rb" | "html" | "htm" | "css" | "sh" | "bash"
-                | "sql" | "xml" | "log"
+            "txt"
+                | "md"
+                | "csv"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "rs"
+                | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "swift"
+                | "go"
+                | "rb"
+                | "html"
+                | "htm"
+                | "css"
+                | "sh"
+                | "bash"
+                | "sql"
+                | "xml"
+                | "log"
         );
 
         let media_type = if is_image {
@@ -135,9 +173,13 @@ pub fn process_attachments(
                 "bmp" => "image/bmp",
                 _ => "image/png",
             };
-            let (compressed_bytes, final_media_type, img_w, img_h) = compress_image(&bytes, &media_type, &ext);
+            let (compressed_bytes, final_media_type, img_w, img_h) =
+                compress_image(&bytes, &media_type, &ext);
             let data = base64::engine::general_purpose::STANDARD.encode(&compressed_bytes);
-            results.push((ContentBlock::image(&final_media_type, &data, img_w, img_h), meta));
+            results.push((
+                ContentBlock::image(&final_media_type, &data, img_w, img_h),
+                meta,
+            ));
         } else if is_text {
             let text = match std::fs::read_to_string(file_path) {
                 Ok(t) => t,
@@ -153,8 +195,7 @@ pub fn process_attachments(
             } else {
                 format!("{file_size} B")
             };
-            let block_text =
-                format!("[Arquivo anexado: `{file_name}` ({size_str}) — tipo: {ext}]");
+            let block_text = format!("[Arquivo anexado: `{file_name}` ({size_str}) — tipo: {ext}]");
             results.push((ContentBlock::text(block_text), meta));
         }
     }
@@ -238,7 +279,9 @@ pub async fn send_message(
     if let Some(m) = mode.as_deref().and_then(session::SessionMode::parse) {
         if mode_ctl.get().0 != m {
             mode_ctl.set(m, session::ModeOrigin::Human);
-            let store = SessionStore { path: handle.store_path.clone() };
+            let store = SessionStore {
+                path: handle.store_path.clone(),
+            };
             store.try_append(&SessionRecord::Mode {
                 mode: m.as_str().into(),
                 origin: session::ModeOrigin::Human.as_str().into(),
@@ -411,8 +454,18 @@ fn spawn_run_loop(args: RunLoopArgs) {
             let msg = std::mem::take(&mut message);
             let atts = std::mem::take(&mut attachment_blocks);
             match session::run_workflow(
-                &cfg, &mut history, msg, atts, &chan, &appr, &answ, &handle.id, &ctx, &store,
-                &steering, &mode_ctl,
+                &cfg,
+                &mut history,
+                msg,
+                atts,
+                &chan,
+                &appr,
+                &answ,
+                &handle.id,
+                &ctx,
+                &store,
+                &steering,
+                &mode_ctl,
             )
             .await
             {
@@ -484,10 +537,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
 /// Start a new conversation in a workspace: the next `send_message` opens a
 /// fresh JSONL session there.
 #[tauri::command]
-pub async fn new_session(
-    workspace: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn new_session(workspace: String, state: State<'_, AppState>) -> Result<(), String> {
     let ws = state.workspace(&workspace).await?;
     let mut guard = ws.active_session.lock().await;
     if let Some(h) = guard.as_ref() {
@@ -498,9 +548,9 @@ pub async fn new_session(
         // instead of leaving an "(empty session)" orphan in the list.
         let is_empty = persist::load_records(&h.store_path)
             .map(|recs| {
-                !recs.iter().any(|r| {
-                    matches!(r, SessionRecord::User { .. } | SessionRecord::Turn { .. })
-                })
+                !recs
+                    .iter()
+                    .any(|r| matches!(r, SessionRecord::User { .. } | SessionRecord::Turn { .. }))
             })
             .unwrap_or(false);
         if is_empty {
@@ -558,11 +608,15 @@ pub async fn load_session(
     let mut tip_records = load_one(&tip_id)?;
     seen.insert(tip_id.clone());
     for _ in 0..MAX_CHAIN_HOPS {
-        let Some(next) = persist::handoff_to(&tip_records) else { break };
+        let Some(next) = persist::handoff_to(&tip_records) else {
+            break;
+        };
         if !seen.insert(next.clone()) {
             break; // cycle guard
         }
-        let Ok(next_records) = load_one(&next) else { break };
+        let Ok(next_records) = load_one(&next) else {
+            break;
+        };
         tip_id = next;
         tip_records = next_records;
     }
@@ -571,11 +625,15 @@ pub async fn load_session(
     let mut chain: Vec<Vec<SessionRecord>> = vec![tip_records];
     for _ in 0..MAX_CHAIN_HOPS {
         let earliest = chain.first().map(|v| v.as_slice()).unwrap_or(&[]);
-        let Some(info) = persist::linked_from(earliest) else { break };
+        let Some(info) = persist::linked_from(earliest) else {
+            break;
+        };
         if !seen.insert(info.prev_session_id.clone()) {
             break; // cycle guard
         }
-        let Ok(prev_records) = load_one(&info.prev_session_id) else { break };
+        let Ok(prev_records) = load_one(&info.prev_session_id) else {
+            break;
+        };
         chain.insert(0, prev_records);
     }
 
@@ -600,28 +658,26 @@ pub struct ApproveArgs {
 }
 
 #[tauri::command]
-pub async fn approve_tool(
-    args: ApproveArgs,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn approve_tool(args: ApproveArgs, state: State<'_, AppState>) -> Result<(), String> {
     let key = format!("{}:{}", args.session_id, args.tool_id);
     let mut map = state.approvals.lock().await;
     if let Some(sender) = map.remove(&key) {
-        sender.send(true).map_err(|_| "session already closed".into())
+        sender
+            .send(true)
+            .map_err(|_| "session already closed".into())
     } else {
         Err("approval request not found or already handled".into())
     }
 }
 
 #[tauri::command]
-pub async fn reject_tool(
-    args: ApproveArgs,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn reject_tool(args: ApproveArgs, state: State<'_, AppState>) -> Result<(), String> {
     let key = format!("{}:{}", args.session_id, args.tool_id);
     let mut map = state.approvals.lock().await;
     if let Some(sender) = map.remove(&key) {
-        sender.send(false).map_err(|_| "session already closed".into())
+        sender
+            .send(false)
+            .map_err(|_| "session already closed".into())
     } else {
         Err("approval request not found or already handled".into())
     }
@@ -679,10 +735,7 @@ pub struct SetConfigArgs {
 }
 
 #[tauri::command]
-pub async fn set_config(
-    args: SetConfigArgs,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Result<(), String> {
     let mut cfg = state.config.lock().await;
     if let Some(url) = args.base_url {
         cfg.base_url = url;
@@ -821,9 +874,7 @@ pub async fn get_config(
 /// Fetch available models from the API. Calls GET {base_url}/v1/models and
 /// parses the response, falling back to ["claudinio", "claudius"] on any error.
 #[tauri::command]
-pub async fn list_models(
-    state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
+pub async fn list_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let cfg = state.config.lock().await;
     let base_url = cfg.base_url.trim_end_matches('/').to_string();
     let api_key = cfg.api_key.clone();
@@ -835,12 +886,7 @@ pub async fn list_models(
         "/v1/models",
     );
     let client = crate::http::default_client();
-    let response = match client
-        .get(&url)
-        .header("x-api-key", &api_key)
-        .send()
-        .await
-    {
+    let response = match client.get(&url).header("x-api-key", &api_key).send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return Ok(vec!["claudinio".into(), "claudius".into()]),
     };
@@ -855,7 +901,11 @@ pub async fn list_models(
     if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
         let models: Vec<String> = data
             .iter()
-            .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+            .filter_map(|item| {
+                item.get("id")
+                    .and_then(|id| id.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         if !models.is_empty() {
             return Ok(models);
@@ -1011,7 +1061,10 @@ pub async fn set_session_mode(
             None => {
                 let id = uuid::Uuid::new_v4().to_string();
                 let store = SessionStore::create(&id, Some(&workspace_root))?;
-                let h = SessionHandle { id, store_path: store.path };
+                let h = SessionHandle {
+                    id,
+                    store_path: store.path,
+                };
                 *guard = Some(h.clone());
                 h
             }
@@ -1021,14 +1074,18 @@ pub async fn set_session_mode(
     let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
     if mode_ctl.get().0 != m {
         mode_ctl.set(m, session::ModeOrigin::Human);
-        let store = SessionStore { path: handle.store_path.clone() };
+        let store = SessionStore {
+            path: handle.store_path.clone(),
+        };
         store.try_append(&SessionRecord::Mode {
             mode: m.as_str().into(),
             origin: session::ModeOrigin::Human.as_str().into(),
             ts: now_ms(),
         });
     }
-    Ok(SessionStarted { session_id: handle.id })
+    Ok(SessionStarted {
+        session_id: handle.id,
+    })
 }
 
 /// Approve the Brain's plan and continue in a NEW linked Builder session whose
@@ -1203,13 +1260,9 @@ pub async fn check_plan_exists(
 
     let has_md = std::fs::read_dir(&dir)
         .map(|entries| {
-            entries.flatten().any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    == Some("md")
-            })
+            entries
+                .flatten()
+                .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("md"))
         })
         .unwrap_or(false);
 
@@ -1258,13 +1311,7 @@ pub async fn list_plans(
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        == Some("md")
-                })
+                .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("md"))
                 .filter_map(|entry| {
                     let path = entry.path();
                     let name = path
@@ -1423,9 +1470,7 @@ pub async fn commit_and_push(
         map.remove(&sid);
     });
 
-    Ok(SessionStarted {
-        session_id: id,
-    })
+    Ok(SessionStarted { session_id: id })
 }
 
 /// Write a value to the workspace-level `.claudinio.json` config file.
@@ -1456,7 +1501,6 @@ pub async fn set_workspace_config(
     }
     let json = serde_json::to_string_pretty(&cfg)
         .map_err(|e| format!("serialize .claudinio.json: {e}"))?;
-    std::fs::write(&config_path, json)
-        .map_err(|e| format!("write .claudinio.json: {e}"))?;
+    std::fs::write(&config_path, json).map_err(|e| format!("write .claudinio.json: {e}"))?;
     Ok(())
 }

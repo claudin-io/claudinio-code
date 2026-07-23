@@ -74,7 +74,11 @@ impl Summary {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let flags: Vec<&String> = args.iter().filter(|a| a.starts_with("--")).collect();
-    let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
+    let positional: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
     if positional.len() != 3 {
         eprintln!("usage: semantic_eval <model_dir> <workspace_root> <queries.json> [--sweep] [--no-vector]");
         std::process::exit(1);
@@ -83,10 +87,9 @@ fn main() {
     let sweep = flags.iter().any(|f| *f == "--sweep");
     let no_vector = flags.iter().any(|f| *f == "--no-vector");
 
-    let eval: EvalSet = serde_json::from_str(
-        &std::fs::read_to_string(queries_path).expect("read queries.json"),
-    )
-    .expect("parse queries.json");
+    let eval: EvalSet =
+        serde_json::from_str(&std::fs::read_to_string(queries_path).expect("read queries.json"))
+            .expect("parse queries.json");
 
     let mut embedder = if no_vector {
         None
@@ -102,18 +105,29 @@ fn main() {
     let t = std::time::Instant::now();
     let (files, symbols) =
         indexer::scan_workspace(&db, root, None, embedder.as_mut(), None, None).expect("scan");
-    eprintln!("indexed {files} files, {symbols} symbols in {:.1}s", t.elapsed().as_secs_f32());
+    eprintln!(
+        "indexed {files} files, {symbols} symbols in {:.1}s",
+        t.elapsed().as_secs_f32()
+    );
 
     // Encode every query once — the sweep re-runs search, not the model.
     let pos_vecs: Vec<Option<Vec<f32>>> = eval
         .positive
         .iter()
-        .map(|c| embedder.as_mut().map(|e| e.encode_query(&c.query).expect("encode query")))
+        .map(|c| {
+            embedder
+                .as_mut()
+                .map(|e| e.encode_query(&c.query).expect("encode query"))
+        })
         .collect();
     let neg_vecs: Vec<Option<Vec<f32>>> = eval
         .negative
         .iter()
-        .map(|c| embedder.as_mut().map(|e| e.encode_query(&c.query).expect("encode query")))
+        .map(|c| {
+            embedder
+                .as_mut()
+                .map(|e| e.encode_query(&c.query).expect("encode query"))
+        })
         .collect();
 
     if sweep {
@@ -134,7 +148,11 @@ fn main() {
                         };
                         let s = run_eval(&db, &eval, &pos_vecs, &neg_vecs, &params, false);
                         let o = s.overall();
-                        let exact = s.per_class.get("exact-identifier").cloned().unwrap_or_default();
+                        let exact = s
+                            .per_class
+                            .get("exact-identifier")
+                            .cloned()
+                            .unwrap_or_default();
                         println!(
                             "{:5} {:8} {:7} {:8} | {:4}% {:4}% {:5}% {:2}/{} | {:3}%",
                             rrf_k,
@@ -156,11 +174,26 @@ fn main() {
         let params = HybridParams::default();
         let s = run_eval(&db, &eval, &pos_vecs, &neg_vecs, &params, true);
         let o = s.overall();
-        println!("\n=== SUMMARY ({}) ===", if no_vector { "BM25-only" } else { "hybrid" });
+        println!(
+            "\n=== SUMMARY ({}) ===",
+            if no_vector { "BM25-only" } else { "hybrid" }
+        );
         println!("positive queries: {}", o.n);
-        println!("  top-1 (unique file): {} ({}%)", o.top1, 100 * o.top1 / o.n.max(1));
-        println!("  top-3 (unique file): {} ({}%)", o.top3, 100 * o.top3 / o.n.max(1));
-        println!("  anywhere in top-15:  {} ({}%)", o.top15, 100 * o.top15 / o.n.max(1));
+        println!(
+            "  top-1 (unique file): {} ({}%)",
+            o.top1,
+            100 * o.top1 / o.n.max(1)
+        );
+        println!(
+            "  top-3 (unique file): {} ({}%)",
+            o.top3,
+            100 * o.top3 / o.n.max(1)
+        );
+        println!(
+            "  anywhere in top-15:  {} ({}%)",
+            o.top15,
+            100 * o.top15 / o.n.max(1)
+        );
         println!("negative queries empty: {}/{}", s.neg_empty, s.neg_total);
         println!("\nper class (top1/top3/top15 of n):");
         for (class, c) in &s.per_class {
@@ -225,7 +258,8 @@ fn run_eval(
             // title names it (e.g. "6. Frontend: `src/App.tsx` — Settings
             // modal") — the agent follows that pointer just the same.
             let is_hit = case.expected.iter().any(|e| e == &base)
-                || (r.kind == "doc_section" && case.expected.iter().any(|e| r.name.contains(e.as_str())));
+                || (r.kind == "doc_section"
+                    && case.expected.iter().any(|e| r.name.contains(e.as_str())));
             if is_hit {
                 if rank.is_none() {
                     rank = Some(file_rank);
@@ -253,7 +287,10 @@ fn run_eval(
                 .map(|r| {
                     format!(
                         "{}:{} ({:.3}/{})",
-                        Path::new(&r.file_path).file_name().unwrap_or_default().to_string_lossy(),
+                        Path::new(&r.file_path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
                         r.name,
                         r.score,
                         &r.match_type[..1],
@@ -286,7 +323,10 @@ fn run_eval(
                 if results.is_empty() { "OK  " } else { "LEAK" },
                 truncate(&case.query, 58),
                 results.len(),
-                results.first().map(|r| format!("{:.3}", r.score)).unwrap_or_else(|| "-".into())
+                results
+                    .first()
+                    .map(|r| format!("{:.3}", r.score))
+                    .unwrap_or_else(|| "-".into())
             );
         }
     }
@@ -316,6 +356,9 @@ fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
     } else {
-        format!("{}…", &s[..s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())])
+        format!(
+            "{}…",
+            &s[..s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())]
+        )
     }
 }

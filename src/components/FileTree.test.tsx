@@ -66,6 +66,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -89,6 +91,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -114,6 +118,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -153,6 +159,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -190,6 +198,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -219,6 +229,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={onDblClickFile}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -246,6 +258,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={onDblClickFile}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -276,6 +290,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -311,6 +327,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={onDblClickFile}
           selectedPath={() => null}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -346,6 +364,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => "/test/workspace/main.ts"}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -370,6 +390,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={() => "/test/workspace/src"}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,
@@ -396,6 +418,8 @@ describe("FileTree", () => {
           onOpenExternal={vi.fn()}
           onDblClickFile={vi.fn()}
           selectedPath={selectedPath}
+          availableIdes={[]}
+          activeEditorCursor={() => null}
         />
       ),
       document.body,

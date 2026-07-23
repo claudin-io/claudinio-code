@@ -406,7 +406,9 @@ impl AgentConfig {
 }
 
 pub fn config_path() -> Result<std::path::PathBuf, String> {
-    let dir = dirs::config_dir().ok_or("no config dir")?.join("claudinio-code");
+    let dir = dirs::config_dir()
+        .ok_or("no config dir")?
+        .join("claudinio-code");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
     Ok(dir.join("config.json"))
 }
@@ -588,7 +590,12 @@ impl ContentBlock {
         }
     }
 
-    pub fn image(media_type: impl Into<String>, data: impl Into<String>, width: u32, height: u32) -> Self {
+    pub fn image(
+        media_type: impl Into<String>,
+        data: impl Into<String>,
+        width: u32,
+        height: u32,
+    ) -> Self {
         ContentBlock::Image {
             type_: "image".into(),
             source: ImageSource {
@@ -729,7 +736,8 @@ pub struct StreamOutput {
 /// sentinel token so the caller never has to parse natural language — this is
 /// what keeps the mechanism language-agnostic (the judged text may be in any
 /// language the UI supports, but the answer is always CONTINUE / DONE).
-const COMPLETION_JUDGE_SYSTEM: &str = "You are a strict classifier inside an agentic coding harness. \
+const COMPLETION_JUDGE_SYSTEM: &str =
+    "You are a strict classifier inside an agentic coding harness. \
 You are given the assistant's final message of a turn that ended WITHOUT calling any tool. \
 Decide whether the turn is genuinely complete, or whether the assistant merely announced or \
 implied an immediate next step (e.g. said it would ask the user a question, spawn subagents, \
@@ -761,10 +769,8 @@ pub async fn classify_turn_completion(
         )
         .await;
     }
-    let _net_guard = crate::net_activity::NetGuard::begin(
-        crate::net_activity::NetSource::LlmClassify,
-        model,
-    );
+    let _net_guard =
+        crate::net_activity::NetGuard::begin(crate::net_activity::NetSource::LlmClassify, model);
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(45))
@@ -851,10 +857,8 @@ pub async fn one_shot(
         )
         .await;
     }
-    let _net_guard = crate::net_activity::NetGuard::begin(
-        crate::net_activity::NetSource::LlmOneShot,
-        model,
-    );
+    let _net_guard =
+        crate::net_activity::NetGuard::begin(crate::net_activity::NetSource::LlmOneShot, model);
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(90))
@@ -926,7 +930,9 @@ fn maybe_emit_text_delta(
     {
         return;
     }
-    let _ = event_tx.send(AgentEvent::TextDelta { text: assistant_text.to_string() });
+    let _ = event_tx.send(AgentEvent::TextDelta {
+        text: assistant_text.to_string(),
+    });
     *last_sent_len = assistant_text.len();
     *last_flush = std::time::Instant::now();
 }
@@ -983,7 +989,11 @@ pub async fn stream_message(
         max_tokens,
         stream: true,
         messages: messages.to_vec(),
-        tools: if tools.is_empty() { None } else { Some(tools.to_vec()) },
+        tools: if tools.is_empty() {
+            None
+        } else {
+            Some(tools.to_vec())
+        },
         system: system.map(|s| s.to_string()),
         thinking: Some(ThinkingConfig {
             kind: "enabled",
@@ -1019,14 +1029,13 @@ pub async fn stream_message(
     // Registered only after a successful response: from here the SSE stream
     // stays open for the whole turn, which is exactly what the network
     // indicator must surface. Dropped on every exit path (RAII).
-    let net_guard = crate::net_activity::NetGuard::begin(
-        crate::net_activity::NetSource::LlmStream,
-        net_detail,
-    );
+    let net_guard =
+        crate::net_activity::NetGuard::begin(crate::net_activity::NetSource::LlmStream, net_detail);
     net_guard.set_status(response.status().as_u16());
 
     let mut dump = if std::env::var("CLAUDINIO_DEBUG_DUMP").is_ok() {
-        let dump_path = std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));
+        let dump_path =
+            std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));
         std::fs::File::create(&dump_path)
             .map(|f| std::io::BufWriter::new(f))
             .ok()
@@ -1047,7 +1056,8 @@ pub async fn stream_message(
     let mut text_deltas: Vec<String> = Vec::new();
     let mut thinking_text: String = String::new();
     let mut tool_uses: Vec<Value> = Vec::new();
-    let mut tool_inputs: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut tool_inputs: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
     let mut stop_reason: Option<String> = None;
     let mut usage: Option<Usage> = None;
 
@@ -1071,7 +1081,9 @@ pub async fn stream_message(
         let chunk_result = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
             Ok(Some(r)) => r,
             Ok(None) => break,
-            Err(_) => return Err("stream error: no data received for 90s, connection stalled".into()),
+            Err(_) => {
+                return Err("stream error: no data received for 90s, connection stalled".into())
+            }
         };
 
         let chunk = chunk_result.map_err(|e| format!("stream error: {e}"))?;
@@ -1155,7 +1167,9 @@ pub async fn stream_message(
     // carry the authoritative text, so this just lets the live preview close
     // the gap before it's replaced, ignoring the throttle interval.
     if emit_text_deltas && assistant_text.len() != last_sent_len {
-        let _ = event_tx.send(AgentEvent::TextDelta { text: assistant_text.clone() });
+        let _ = event_tx.send(AgentEvent::TextDelta {
+            text: assistant_text.clone(),
+        });
     }
 
     if !buf.is_empty() {
@@ -1166,10 +1180,12 @@ pub async fn stream_message(
                         if let Some(input) = block.get("input") {
                             if !input.is_null() {
                                 let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                                let _name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                if let Some(existing) = tool_uses.iter_mut().find(|t| {
-                                    t.get("id").and_then(|i| i.as_str()) == Some(id)
-                                }) {
+                                let _name =
+                                    block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                if let Some(existing) = tool_uses
+                                    .iter_mut()
+                                    .find(|t| t.get("id").and_then(|i| i.as_str()) == Some(id))
+                                {
                                     if let Some(obj) = existing.as_object_mut() {
                                         obj.insert("input".into(), input.clone());
                                     }
@@ -1199,7 +1215,12 @@ pub async fn stream_message(
 
     if let Some(ref mut f) = dump {
         use std::io::Write;
-        let _ = writeln!(f, "--- END --- tool_uses={} text_deltas={}", tool_uses.len(), text_deltas.len());
+        let _ = writeln!(
+            f,
+            "--- END --- tool_uses={} text_deltas={}",
+            tool_uses.len(),
+            text_deltas.len()
+        );
     }
 
     // Blocks still in tool_inputs never got their content_block_stop — the
@@ -1248,10 +1269,13 @@ fn process_line(
     stop_reason: &mut Option<String>,
     usage: &mut Option<Usage>,
 ) -> Result<(), String> {
-    let value: Value = serde_json::from_str(data)
-        .map_err(|e| format!("json parse: {e} data: {data:.100}"))?;
+    let value: Value =
+        serde_json::from_str(data).map_err(|e| format!("json parse: {e} data: {data:.100}"))?;
 
-    let index = value.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
+    let index = value
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .map(|i| i as usize);
 
     match event_type {
         "content_block_start" => {
@@ -1308,7 +1332,8 @@ fn process_line(
                     match serde_json::from_str::<Value>(&accumulated) {
                         Ok(parsed) => {
                             if let Some(tool) = tool_uses.iter_mut().find(|t| {
-                                t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize) == Some(idx)
+                                t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize)
+                                    == Some(idx)
                             }) {
                                 if let Some(obj) = tool.as_object_mut() {
                                     obj.insert("input".into(), parsed);
@@ -1556,10 +1581,16 @@ mod tests {
             messages: vec![],
             tools: None,
             system: None,
-            thinking: Some(ThinkingConfig { kind: "enabled", budget_tokens: 8_192 }),
+            thinking: Some(ThinkingConfig {
+                kind: "enabled",
+                budget_tokens: 8_192,
+            }),
         };
         let v = serde_json::to_value(&base).unwrap();
-        assert_eq!(v["thinking"], json!({"type": "enabled", "budget_tokens": 8192}));
+        assert_eq!(
+            v["thinking"],
+            json!({"type": "enabled", "budget_tokens": 8192})
+        );
 
         let without = RequestBody {
             model: "claudinio".into(),
@@ -1571,7 +1602,10 @@ mod tests {
             thinking: None,
         };
         let v = serde_json::to_value(&without).unwrap();
-        assert!(v.get("thinking").is_none(), "thinking must be omitted when None");
+        assert!(
+            v.get("thinking").is_none(),
+            "thinking must be omitted when None"
+        );
     }
 
     #[test]
@@ -1614,7 +1648,10 @@ mod tests {
             &mut usage,
             &json!({"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}),
         );
-        merge_usage(&mut usage, &json!({"input_tokens": 15, "output_tokens": 64}));
+        merge_usage(
+            &mut usage,
+            &json!({"input_tokens": 15, "output_tokens": 64}),
+        );
         let u = usage.unwrap();
         assert_eq!(u.input_tokens, 15);
         assert_eq!(u.output_tokens, 64);
@@ -1708,16 +1745,20 @@ mod tests {
         process_line(
             "content_block_stop",
             r#"{"type":"content_block_stop","index":0}"#,
-    &chan, "s1", &mut assistant_text, &mut thinking_text,
-        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
-            &mut stop_reason, &mut usage,
-        ).unwrap();
+            &chan,
+            "s1",
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_uses,
+            &mut tool_inputs,
+            &mut stop_reason,
+            &mut usage,
+        )
+        .unwrap();
 
         // The tool_use must now have the complete parsed input
-        assert_eq!(
-            tool_uses[0]["input"],
-            json!({"path": "/home/user/project"})
-        );
+        assert_eq!(tool_uses[0]["input"], json!({"path": "/home/user/project"}));
     }
 
     #[test]
@@ -1752,10 +1793,17 @@ mod tests {
         process_line(
             "content_block_stop",
             r#"{"type":"content_block_stop","index":0}"#,
-            &chan, "s1", &mut assistant_text, &mut thinking_text,
-            &mut text_deltas, &mut tool_uses, &mut tool_inputs,
-            &mut stop_reason, &mut usage,
-        ).unwrap();
+            &chan,
+            "s1",
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_uses,
+            &mut tool_inputs,
+            &mut stop_reason,
+            &mut usage,
+        )
+        .unwrap();
 
         // The half-written tool call must not survive to execution.
         assert!(tool_uses.is_empty());
@@ -1786,16 +1834,20 @@ mod tests {
         process_line(
             "content_block_stop",
             r#"{"type":"content_block_stop","index":0}"#,
-    &chan, "s1", &mut assistant_text, &mut thinking_text,
-        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
-            &mut stop_reason, &mut usage,
-        ).unwrap();
+            &chan,
+            "s1",
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_uses,
+            &mut tool_inputs,
+            &mut stop_reason,
+            &mut usage,
+        )
+        .unwrap();
 
         // Input should still be the original complete value
-        assert_eq!(
-            tool_uses[0]["input"],
-            json!({"path": "/workspace/main.rs"})
-        );
+        assert_eq!(tool_uses[0]["input"], json!({"path": "/workspace/main.rs"}));
     }
 
     #[test]
@@ -1846,10 +1898,17 @@ mod tests {
         process_line(
             "content_block_stop",
             r#"{"type":"content_block_stop","index":0}"#,
-    &chan, "s1", &mut assistant_text, &mut thinking_text,
-        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
-            &mut stop_reason, &mut usage,
-        ).unwrap();
+            &chan,
+            "s1",
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_uses,
+            &mut tool_inputs,
+            &mut stop_reason,
+            &mut usage,
+        )
+        .unwrap();
 
         // Now simulate what session.rs does: deserialize the input
         let input = tool_uses[0].get("input").unwrap();
@@ -1909,10 +1968,17 @@ mod tests {
         process_line(
             "content_block_stop",
             r#"{"type":"content_block_stop","index":0}"#,
-    &chan, "s1", &mut assistant_text, &mut thinking_text,
-        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
-            &mut stop_reason, &mut usage,
-        ).unwrap();
+            &chan,
+            "s1",
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_uses,
+            &mut tool_inputs,
+            &mut stop_reason,
+            &mut usage,
+        )
+        .unwrap();
 
         // More tool input
         process_line(
@@ -1936,22 +2002,29 @@ mod tests {
         process_line(
             "content_block_stop",
             r#"{"type":"content_block_stop","index":1}"#,
-    &chan, "s1", &mut assistant_text, &mut thinking_text,
-        &mut text_deltas, &mut tool_uses, &mut tool_inputs,
-            &mut stop_reason, &mut usage,
-        ).unwrap();
+            &chan,
+            "s1",
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_uses,
+            &mut tool_inputs,
+            &mut stop_reason,
+            &mut usage,
+        )
+        .unwrap();
 
         // Text: content_block_start for text isn't accumulated, only deltas are
         assert_eq!(assistant_text, "the source");
 
         // Tool should have complete input
         assert_eq!(tool_uses.len(), 1);
-        assert_eq!(
-            tool_uses[0]["input"],
-            json!({"path": "/src"})
-        );
+        assert_eq!(tool_uses[0]["input"], json!({"path": "/src"}));
 
         // Text block stop at index 0 must NOT clear tool input at index 1
-        assert!(tool_inputs.get(&1).is_none(), "tool_inputs should be empty after content_block_stop");
+        assert!(
+            tool_inputs.get(&1).is_none(),
+            "tool_inputs should be empty after content_block_stop"
+        );
     }
 }

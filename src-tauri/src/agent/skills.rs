@@ -64,7 +64,11 @@ pub struct RemoteSkill {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum SkillSource {
-    GitHub { owner: String, repo: String, path: String },
+    GitHub {
+        owner: String,
+        repo: String,
+        path: String,
+    },
     Url(String),
 }
 
@@ -75,7 +79,11 @@ pub enum SkillSource {
 
 pub const SKILL_DIR_NAMES: &[&str] = &[".agents", ".claudinio", ".claude"];
 
-fn scan_for_skills(root: &Path, scope: SkillScope, skills: &mut HashMap<String, (SkillEntry, SkillScope)>) {
+fn scan_for_skills(
+    root: &Path,
+    scope: SkillScope,
+    skills: &mut HashMap<String, (SkillEntry, SkillScope)>,
+) {
     for dir_name in SKILL_DIR_NAMES {
         let skills_dir = root.join(dir_name).join("skills");
         if !skills_dir.exists() {
@@ -176,9 +184,7 @@ When the user asks about doing something that sounds like a common development t
 Note: If the user asks about customizing opencode itself (config, agents, subagents, MCP servers, permission rules), do NOT use this skill — refer them to the customize-opencode skill instead.";
 
 /// All built-in skills shipped with the binary.
-const BUILTIN_SKILLS: &[(&str, &str)] = &[
-    ("find-skills", BUILTIN_FIND_SKILLS),
-];
+const BUILTIN_SKILLS: &[(&str, &str)] = &[("find-skills", BUILTIN_FIND_SKILLS)];
 
 // ─── Skill Manager ────────────────────────────────────────────────────────────
 
@@ -238,7 +244,13 @@ impl SkillManager {
                 if let Ok(entries) = std::fs::read_dir(pkg_root) {
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if path.is_dir() && !path.file_name().and_then(|n| n.to_str()).unwrap_or("").starts_with('.') {
+                        if path.is_dir()
+                            && !path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .starts_with('.')
+                        {
                             scan_for_skills(&path, SkillScope::Subfolder, &mut all);
                         }
                     }
@@ -258,13 +270,16 @@ impl SkillManager {
 
     /// Parse a SKILL.md file into its frontmatter metadata and body content.
     pub fn parse_skill_md(path: &Path) -> Result<(SkillMeta, String), String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("read {}: {}", path.display(), e))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
         Self::parse_skill_md_from_str(&content, path)
     }
 
     /// Parse SKILL.md content from a string (used for remote skills too).
-    pub fn parse_skill_md_from_str(content: &str, _source: &Path) -> Result<(SkillMeta, String), String> {
+    pub fn parse_skill_md_from_str(
+        content: &str,
+        _source: &Path,
+    ) -> Result<(SkillMeta, String), String> {
         let content = content.trim();
 
         if !content.starts_with("---") {
@@ -272,14 +287,15 @@ impl SkillManager {
         }
 
         let rest = &content[3..];
-        let end = rest.find("\n---")
+        let end = rest
+            .find("\n---")
             .ok_or_else::<String, _>(|| "missing closing frontmatter delimiter".into())?;
 
         let yaml_str = &rest[..end];
         let body = rest[end + 4..].trim().to_string();
 
-        let meta: SkillMeta = serde_yaml::from_str(yaml_str)
-            .map_err(|e| format!("yaml parse error: {e}"))?;
+        let meta: SkillMeta =
+            serde_yaml::from_str(yaml_str).map_err(|e| format!("yaml parse error: {e}"))?;
 
         if meta.name.is_empty() {
             return Err("skill name cannot be empty".into());
@@ -330,7 +346,8 @@ impl SkillManager {
 
 // ─── Remote Skill Registry ────────────────────────────────────────────────────
 
-const REMOTE_INDEX_URL: &str = "https://raw.githubusercontent.com/vercel-labs/skills/refs/heads/main/llms.txt";
+const REMOTE_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/vercel-labs/skills/refs/heads/main/llms.txt";
 
 /// Find skills from the remote registry by querying the centralized index.
 pub async fn find_remote_skills(query: Option<&str>) -> Result<Vec<RemoteSkill>, String> {
@@ -413,7 +430,9 @@ fn parse_markdown_link_line(line: &str) -> Option<RemoteSkill> {
 
     // Clean up the description: strip "colon dash" separators
     let description = desc_part
-        .trim_start_matches(|c: char| c == ':' || c == '—' || c == '-' || c == ' ' || c == '\u{2014}')
+        .trim_start_matches(|c: char| {
+            c == ':' || c == '—' || c == '-' || c == ' ' || c == '\u{2014}'
+        })
         .trim()
         .to_string();
 
@@ -469,10 +488,8 @@ fn infer_source_from_url(url: &str) -> Option<SkillSource> {
 
 /// Download a remote SKILL.md and return its parsed metadata + body.
 pub async fn fetch_remote_skill_meta(url: &str) -> Result<(SkillMeta, String), String> {
-    let _net_guard = crate::net_activity::NetGuard::begin(
-        crate::net_activity::NetSource::SkillFetch,
-        url,
-    );
+    let _net_guard =
+        crate::net_activity::NetGuard::begin(crate::net_activity::NetSource::SkillFetch, url);
     let client = crate::http::default_client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -498,21 +515,18 @@ pub async fn install_remote_skill(remote: &RemoteSkill) -> Result<SkillEntry, St
 
     let home = dirs::home_dir().ok_or("no home directory")?;
     let install_dir = home.join(".claudinio").join("skills").join(&meta.name);
-    std::fs::create_dir_all(&install_dir)
-        .map_err(|e| format!("create install dir: {e}"))?;
+    std::fs::create_dir_all(&install_dir).map_err(|e| format!("create install dir: {e}"))?;
 
     let skill_path = install_dir.join("SKILL.md");
 
     // Rebuild SKILL.md from parsed data so it's normalized
-    let yaml = serde_yaml::to_string(&meta)
-        .map_err(|e| format!("serialize yaml: {e}"))?;
+    let yaml = serde_yaml::to_string(&meta).map_err(|e| format!("serialize yaml: {e}"))?;
     // serde_yaml may append trailing "..."
     let yaml = yaml.trim_end_matches("...\n").trim_end().to_string();
 
     let skill_content = format!("---\n{}---\n\n{}", yaml, body);
 
-    std::fs::write(&skill_path, &skill_content)
-        .map_err(|e| format!("write skill file: {e}"))?;
+    std::fs::write(&skill_path, &skill_content).map_err(|e| format!("write skill file: {e}"))?;
 
     Ok(SkillEntry {
         name: meta.name.clone(),
@@ -553,16 +567,20 @@ pub fn build_skills_system_prompt_section(mgr: &SkillManager) -> Option<String> 
         return None;
     }
 
-    let mut xml = String::from(
-        "\n\n<available_skills>\n"
-    );
+    let mut xml = String::from("\n\n<available_skills>\n");
 
     let mut has_builtin = false;
     for skill in &catalog {
         xml.push_str("  <skill>\n");
         xml.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
-        xml.push_str(&format!("    <description>{}</description>\n", escape_xml(&skill.description)));
-        xml.push_str(&format!("    <location>{}</location>\n", escape_xml(&skill.location)));
+        xml.push_str(&format!(
+            "    <description>{}</description>\n",
+            escape_xml(&skill.description)
+        ));
+        xml.push_str(&format!(
+            "    <location>{}</location>\n",
+            escape_xml(&skill.location)
+        ));
 
         // Built-in skills have their body inlined so the AI doesn't need read_file
         if skill.scope == SkillScope::Builtin {
@@ -583,13 +601,13 @@ pub fn build_skills_system_prompt_section(mgr: &SkillManager) -> Option<String> 
          When a task matches a skill's description, use your read_file tool to load\n\
          the SKILL.md at the listed location before proceeding.\n\
          When a skill references relative paths, resolve them against the skill's\n\
-         directory (the parent of SKILL.md) and use absolute paths in tool calls.\n"
+         directory (the parent of SKILL.md) and use absolute paths in tool calls.\n",
     );
 
     if has_builtin {
         xml.push_str(
             "Built-in skills (location \"<built-in>\") have their full content inlined\n\
-             above inside a <body> tag — no read_file call is needed for them.\n"
+             above inside a <body> tag — no read_file call is needed for them.\n",
         );
     }
 
@@ -648,7 +666,10 @@ mod tests {
         assert!(catalog.len() <= 500, "sanity: catalog shouldn't be huge");
         // If there are skills, they should be sorted
         for pair in catalog.windows(2) {
-            assert!(pair[0].name <= pair[1].name, "catalog must be sorted by name");
+            assert!(
+                pair[0].name <= pair[1].name,
+                "catalog must be sorted by name"
+            );
         }
     }
 
@@ -712,6 +733,9 @@ mod tests {
     #[test]
     fn test_priority_project_over_user() {
         assert!(has_higher_priority(&SkillScope::Project, &SkillScope::User));
-        assert!(!has_higher_priority(&SkillScope::User, &SkillScope::Project));
+        assert!(!has_higher_priority(
+            &SkillScope::User,
+            &SkillScope::Project
+        ));
     }
 }

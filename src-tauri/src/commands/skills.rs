@@ -1,6 +1,4 @@
-use crate::agent::skills::{
-    self, build_skills_system_prompt_section, RemoteSkill, SkillEntry,
-};
+use crate::agent::skills::{self, build_skills_system_prompt_section, RemoteSkill, SkillEntry};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -77,9 +75,7 @@ pub async fn rescan_skills(
 
 /// Find remote skills from the registry, optionally filtered by query.
 #[tauri::command]
-pub async fn find_remote_skills(
-    query: Option<String>,
-) -> Result<Vec<RemoteSkill>, String> {
+pub async fn find_remote_skills(query: Option<String>) -> Result<Vec<RemoteSkill>, String> {
     skills::find_remote_skills(query.as_deref()).await
 }
 

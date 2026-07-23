@@ -18,8 +18,8 @@ use lru::LruCache;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -68,7 +68,9 @@ pub struct ToolContext {
     pub index_progress: Option<Arc<std::sync::Mutex<Option<IndexProgress>>>>,
     /// LRU cache for the session's persisted records, so load_records in the
     /// hot loop skips the filesystem when the file hasn't changed (800 ms TTL).
-    pub records_cache: std::sync::Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<crate::agent::persist::SessionRecord>, Instant)>>>,
+    pub records_cache: std::sync::Arc<
+        std::sync::Mutex<LruCache<PathBuf, (Vec<crate::agent::persist::SessionRecord>, Instant)>>,
+    >,
 }
 
 impl ToolContext {
@@ -107,7 +109,9 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     } else {
         // Fallback: lexical check. Reject paths with `..` components since
         // they can't be resolved safely without canonicalize.
-        if !req_effective.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        if !req_effective
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
             && req_effective.starts_with(root_clean)
         {
             return Ok(());
@@ -136,7 +140,11 @@ pub fn validate_read_path(requested: &str, ctx: &ToolContext) -> Result<(), Stri
             Ok(c) => c,
             // Uncanonicalizable path: refuse '..' components so a lexical
             // prefix match can't be escaped via traversal.
-            Err(_) if req.components().any(|c| matches!(c, std::path::Component::ParentDir)) => {
+            Err(_)
+                if req
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)) =>
+            {
                 return Err(workspace_err);
             }
             Err(_) => req.to_path_buf(),
@@ -164,8 +172,15 @@ pub struct ToolDef {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum ToolOutput {
-    Text { content: String },
-    EditProposal { path: String, old_string: String, new_string: String, unified_diff: String },
+    Text {
+        content: String,
+    },
+    EditProposal {
+        path: String,
+        old_string: String,
+        new_string: String,
+        unified_diff: String,
+    },
 }
 
 pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
@@ -412,8 +427,6 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     ]
 }
 
-
-
 /// Definition of the write_plan tool. Only offered in Brain mode — it is
 /// the one write the planning mode is allowed to perform, and its target path
 /// is confined to `<workspace>/.claudinio/plans/`.
@@ -487,7 +500,8 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
     }
     match name {
         "read_file" => {
-            let a: read_file::ReadFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: read_file::ReadFileArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             validate_read_path(&a.path, ctx)?;
             let path = a.path.clone();
             let start_line = a.start_line;
@@ -501,25 +515,37 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::Text { content })
         }
         "list_dir" => {
-            let a: list_dir::ListDirArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: list_dir::ListDirArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             validate_read_path(&a.path, ctx)?;
             let entries = list_dir::execute(a)?;
-            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&entries).unwrap_or_default() })
+            Ok(ToolOutput::Text {
+                content: serde_json::to_string_pretty(&entries).unwrap_or_default(),
+            })
         }
         "grep" => {
-            let a: grep::GrepArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: grep::GrepArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             if let Some(ref path) = a.path {
                 validate_read_path(path, ctx)?;
             } else if let Some(ref root) = ctx.workspace_root {
-                let a2 = grep::GrepArgs { pattern: a.pattern.clone(), path: Some(root.clone()) };
+                let a2 = grep::GrepArgs {
+                    pattern: a.pattern.clone(),
+                    path: Some(root.clone()),
+                };
                 let matches = grep::execute(a2)?;
-                return Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&matches).unwrap_or_default() });
+                return Ok(ToolOutput::Text {
+                    content: serde_json::to_string_pretty(&matches).unwrap_or_default(),
+                });
             }
             let matches = grep::execute(a)?;
-            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&matches).unwrap_or_default() })
+            Ok(ToolOutput::Text {
+                content: serde_json::to_string_pretty(&matches).unwrap_or_default(),
+            })
         }
         "edit_file" => {
-            let a: edit_file::EditFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: edit_file::EditFileArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             validate_path(&a.path, ctx)?;
             // Enforce read-before-edit
             {
@@ -527,35 +553,66 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 tracker.check_can_edit(&a.path, &a.old_string)?;
             }
             let diff = edit_file::preview(&a)?;
-            Ok(ToolOutput::EditProposal { path: diff.path, old_string: diff.old_string, new_string: diff.new_string, unified_diff: diff.unified_diff })
+            Ok(ToolOutput::EditProposal {
+                path: diff.path,
+                old_string: diff.old_string,
+                new_string: diff.new_string,
+                unified_diff: diff.unified_diff,
+            })
         }
         "code_search" => {
             check_index_ready(ctx)?;
             let db = open_db(&ctx.db_path)?;
-            let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
             let results = db.search_symbols(query, limit)?;
-            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
+            Ok(ToolOutput::Text {
+                content: serde_json::to_string_pretty(&results).unwrap_or_default(),
+            })
         }
         "symbol_lookup" => {
             check_index_ready(ctx)?;
             let db = open_db(&ctx.db_path)?;
-            let name = args.get("name").and_then(|v| v.as_str()).ok_or("missing name")?;
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or("missing name")?;
             let results = db.lookup_symbols_exact(name, 20)?;
-            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
+            Ok(ToolOutput::Text {
+                content: serde_json::to_string_pretty(&results).unwrap_or_default(),
+            })
         }
         "file_outline" => {
             check_index_ready(ctx)?;
             let db = open_db(&ctx.db_path)?;
-            let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
+            let file_path = args
+                .get("file_path")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .ok_or("missing file_path")?;
             validate_read_path(file_path, ctx)?;
             let results = db.symbols_in_file(file_path)?;
-            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&results).unwrap_or_default() })
+            Ok(ToolOutput::Text {
+                content: serde_json::to_string_pretty(&results).unwrap_or_default(),
+            })
         }
         "go_to_definition" => {
-            let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
-            let line = args.get("line").and_then(|v| v.as_u64()).ok_or("missing line")?;
-            let character = args.get("character").and_then(|v| v.as_u64()).ok_or("missing character")?;
+            let file_path = args
+                .get("file_path")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .ok_or("missing file_path")?;
+            let line = args
+                .get("line")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing line")?;
+            let character = args
+                .get("character")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing character")?;
 
             if let Some(ref lsp) = ctx.lsp_manager {
                 let mut mgr = lsp.lock().await;
@@ -571,9 +628,19 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             heuristically_find_definition(file_path, line, character, &ctx.db_path)
         }
         "find_references" => {
-            let file_path = args.get("file_path").or_else(|| args.get("path")).and_then(|v| v.as_str()).ok_or("missing file_path")?;
-            let line = args.get("line").and_then(|v| v.as_u64()).ok_or("missing line")?;
-            let character = args.get("character").and_then(|v| v.as_u64()).ok_or("missing character")?;
+            let file_path = args
+                .get("file_path")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .ok_or("missing file_path")?;
+            let line = args
+                .get("line")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing line")?;
+            let character = args
+                .get("character")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing character")?;
 
             if let Some(ref lsp) = ctx.lsp_manager {
                 let mut mgr = lsp.lock().await;
@@ -590,7 +657,10 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         }
         "semantic_search" => {
             check_index_ready(ctx)?;
-            let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(15);
             let db = open_db(&ctx.db_path)?;
 
@@ -616,7 +686,8 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                     let query_owned = query.to_string();
                     Some(
                         tokio::task::spawn_blocking(move || {
-                            let mut model = model.lock().map_err(|e| format!("embedder lock: {e}"))?;
+                            let mut model =
+                                model.lock().map_err(|e| format!("embedder lock: {e}"))?;
                             model.encode_query(&query_owned)
                         })
                         .await
@@ -630,7 +701,11 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             attach_snippets(&mut results);
 
             let pending = db.embedding_pending_files().unwrap_or(0);
-            let mode = if query_vec.is_some() { "hybrid" } else { "lexical-only" };
+            let mode = if query_vec.is_some() {
+                "hybrid"
+            } else {
+                "lexical-only"
+            };
             let note = if query_vec.is_none() {
                 Some(if pending > 0 {
                     format!(
@@ -652,10 +727,13 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             if let Some(n) = note {
                 envelope["note"] = serde_json::json!(n);
             }
-            Ok(ToolOutput::Text { content: serde_json::to_string_pretty(&envelope).unwrap_or_default() })
+            Ok(ToolOutput::Text {
+                content: serde_json::to_string_pretty(&envelope).unwrap_or_default(),
+            })
         }
         "bash" => {
-            let mut a: bash::BashArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let mut a: bash::BashArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             if a.workdir.is_none() {
                 a.workdir = ctx.workspace_root.clone();
             }
@@ -667,22 +745,26 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::Text { content })
         }
         "tasks_set" => {
-            let a: tasks::SetTasksArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: tasks::SetTasksArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             let content = tasks::execute_set(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
         "write_plan" => {
-            let a: write_plan::WritePlanArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: write_plan::WritePlanArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             let content = write_plan::execute(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
         "finalize_plan" => {
-            let a: finalize_plan::FinalizePlanArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: finalize_plan::FinalizePlanArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             let content = finalize_plan::execute(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
         "web_search" => {
-            let a: web_search::WebSearchArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let a: web_search::WebSearchArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             let config = ctx
                 .agent_config
                 .as_ref()
@@ -690,9 +772,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = web_search::execute(a, config).await?;
             Ok(ToolOutput::Text { content })
         }
-        "spawn_agents" => {
-            Err("spawn_agents is handled by the session orchestrator".into())
-        }
+        "spawn_agents" => Err("spawn_agents is handled by the session orchestrator".into()),
         "enter_plan_mode" | "exit_plan_mode" => {
             Err("mode switch tools are handled by the session orchestrator".into())
         }
@@ -706,7 +786,8 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 }
 
 pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<String, String> {
-    let a: edit_file::EditFileArgs = serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+    let a: edit_file::EditFileArgs =
+        serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
     validate_path(&a.path, ctx)?;
     // Enforce read-before-edit
     {
@@ -726,7 +807,9 @@ const SNIPPET_MAX_CHARS: usize = 2400;
 
 fn attach_snippets(results: &mut [crate::code_intel::db::SemanticSearchResult]) {
     for r in results.iter_mut().take(SNIPPET_TOP_HITS) {
-        let Ok(content) = std::fs::read_to_string(&r.file_path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&r.file_path) else {
+            continue;
+        };
         // start_line/end_line are 1-based (inclusive), lines() is 0-based.
         let start = r.start_line.max(1) as usize;
         let end = (r.end_line.max(r.start_line)) as usize;
@@ -753,7 +836,9 @@ fn attach_snippets(results: &mut [crate::code_intel::db::SemanticSearchResult]) 
 }
 
 fn open_db(db_path: &Option<String>) -> Result<IndexDb, String> {
-    let path = db_path.as_ref().ok_or("index not available — open a workspace first")?;
+    let path = db_path
+        .as_ref()
+        .ok_or("index not available — open a workspace first")?;
     IndexDb::open(Path::new(path))
 }
 
@@ -761,7 +846,9 @@ fn open_db(db_path: &Option<String>) -> Result<IndexDb, String> {
 /// with a human-readable progress message if indexing is still in progress.
 fn check_index_ready(ctx: &ToolContext) -> Result<(), String> {
     if let Some(ref progress) = ctx.index_progress {
-        let guard = progress.lock().map_err(|e| format!("index progress lock: {e}"))?;
+        let guard = progress
+            .lock()
+            .map_err(|e| format!("index progress lock: {e}"))?;
         if let Some(ref prog) = *guard {
             if prog.status == "indexing" && prog.total_files > 0 {
                 return Err(format!(
@@ -782,28 +869,42 @@ fn heuristically_find_definition(
     _character: u64,
     db_path: &Option<String>,
 ) -> Result<ToolOutput, String> {
-    let content = std::fs::read_to_string(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
+    let content =
+        std::fs::read_to_string(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
     let lines: Vec<&str> = content.lines().collect();
     let line_idx = _line as usize;
     if line_idx >= lines.len() {
-        return Ok(ToolOutput::Text { content: "line out of range".into() });
+        return Ok(ToolOutput::Text {
+            content: "line out of range".into(),
+        });
     }
 
     let line_text = lines[line_idx];
     let col = _character as usize;
     if col >= line_text.len() {
-        return Ok(ToolOutput::Text { content: "character out of range".into() });
+        return Ok(ToolOutput::Text {
+            content: "character out of range".into(),
+        });
     }
 
     let cursor_text = &line_text[col..];
-    let word: String = cursor_text.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let word: String = cursor_text
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     if word.is_empty() {
-        return Ok(ToolOutput::Text { content: "no symbol at cursor".into() });
+        return Ok(ToolOutput::Text {
+            content: "no symbol at cursor".into(),
+        });
     }
 
     let db = match open_db(db_path) {
         Ok(d) => d,
-        Err(_) => return Ok(ToolOutput::Text { content: format!("LSP unavailable; symbol at cursor: {word}") }),
+        Err(_) => {
+            return Ok(ToolOutput::Text {
+                content: format!("LSP unavailable; symbol at cursor: {word}"),
+            })
+        }
     };
 
     let results = db.search_symbols(&word, 10).unwrap_or_default();
@@ -817,28 +918,42 @@ fn heuristically_find_references(
     _character: u64,
     db_path: &Option<String>,
 ) -> Result<ToolOutput, String> {
-    let content = std::fs::read_to_string(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
+    let content =
+        std::fs::read_to_string(file_path).map_err(|e| format!("read {file_path}: {e}"))?;
     let lines: Vec<&str> = content.lines().collect();
     let line_idx = _line as usize;
     if line_idx >= lines.len() {
-        return Ok(ToolOutput::Text { content: "line out of range".into() });
+        return Ok(ToolOutput::Text {
+            content: "line out of range".into(),
+        });
     }
 
     let col = _character as usize;
     let line_text = lines[line_idx];
     if col >= line_text.len() {
-        return Ok(ToolOutput::Text { content: "character out of range".into() });
+        return Ok(ToolOutput::Text {
+            content: "character out of range".into(),
+        });
     }
 
     let cursor_text = &line_text[col..];
-    let word: String = cursor_text.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let word: String = cursor_text
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     if word.is_empty() {
-        return Ok(ToolOutput::Text { content: "no symbol at cursor".into() });
+        return Ok(ToolOutput::Text {
+            content: "no symbol at cursor".into(),
+        });
     }
 
     let db = match open_db(db_path) {
         Ok(d) => d,
-        Err(_) => return Ok(ToolOutput::Text { content: format!("LSP unavailable; checking references for {word}") }),
+        Err(_) => {
+            return Ok(ToolOutput::Text {
+                content: format!("LSP unavailable; checking references for {word}"),
+            })
+        }
     };
 
     let results = db.callers_of(&word, file_path).unwrap_or_default();
@@ -895,12 +1010,10 @@ impl ReadTracker {
     /// earlier match, making the gate impossible to satisfy no matter which
     /// range the model reads.
     pub fn check_can_edit(&self, path: &str, old_string: &str) -> Result<(), String> {
-        let entry = self.files.get(path).ok_or_else(|| {
-            format!(
-                "read_file must be called on {} before editing it",
-                path
-            )
-        })?;
+        let entry = self
+            .files
+            .get(path)
+            .ok_or_else(|| format!("read_file must be called on {} before editing it", path))?;
 
         if entry.full_read {
             return Ok(());
@@ -959,7 +1072,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        }
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        }
     }
 
     /// Write a temp file with 20 numbered lines, return its path.
@@ -987,7 +1106,11 @@ mod tests {
         }];
         attach_snippets(&mut results);
         let snip = results[0].snippet.as_deref().expect("snippet attached");
-        assert_eq!(snip.lines().next(), Some("line1"), "must include the signature line");
+        assert_eq!(
+            snip.lines().next(),
+            Some("line1"),
+            "must include the signature line"
+        );
         assert_eq!(snip.lines().count(), 3);
     }
 
@@ -1045,7 +1168,10 @@ mod tests {
             "new_string": "line7_edited",
         });
         let result = futures::executor::block_on(execute("edit_file", args, &ctx));
-        assert!(result.is_err(), "edit_file should be rejected without read_file");
+        assert!(
+            result.is_err(),
+            "edit_file should be rejected without read_file"
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("read_file must be called"),
@@ -1071,7 +1197,10 @@ mod tests {
             "new_string": "line7_edited",
         });
         let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
-        assert!(result.is_ok(), "edit_file should be accepted after full read");
+        assert!(
+            result.is_ok(),
+            "edit_file should be accepted after full read"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1096,7 +1225,10 @@ mod tests {
             "new_string": "line4_edited",
         });
         let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
-        assert!(result.is_ok(), "edit at line 4 (within range 3-5) should be accepted");
+        assert!(
+            result.is_ok(),
+            "edit at line 4 (within range 3-5) should be accepted"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1121,7 +1253,10 @@ mod tests {
             "new_string": "line10_edited",
         });
         let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
-        assert!(result.is_err(), "edit at line 10 (outside range 3-5) should be rejected");
+        assert!(
+            result.is_err(),
+            "edit at line 10 (outside range 3-5) should be rejected"
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("you have not read the exact text") && err.contains("line 10"),
@@ -1186,7 +1321,10 @@ mod tests {
             "new_string": "line18_edited",
         });
         let result = futures::executor::block_on(execute("edit_file", edit_args, &ctx));
-        assert!(result.is_ok(), "edit at line 18 should be accepted (within 15-20)");
+        assert!(
+            result.is_ok(),
+            "edit at line 18 should be accepted (within 15-20)"
+        );
 
         // Edit at line 3 (within first range)
         let edit2 = serde_json::json!({
@@ -1195,7 +1333,10 @@ mod tests {
             "new_string": "line3_edited",
         });
         let result2 = futures::executor::block_on(execute("edit_file", edit2, &ctx));
-        assert!(result2.is_ok(), "edit at line 3 should be accepted (within 1-5)");
+        assert!(
+            result2.is_ok(),
+            "edit at line 3 should be accepted (within 1-5)"
+        );
 
         // Edit at line 10 (outside both)
         let edit3 = serde_json::json!({
@@ -1204,7 +1345,10 @@ mod tests {
             "new_string": "line10_edited",
         });
         let result3 = futures::executor::block_on(execute("edit_file", edit3, &ctx));
-        assert!(result3.is_err(), "edit at line 10 (outside both ranges) should be rejected");
+        assert!(
+            result3.is_err(),
+            "edit at line 10 (outside both ranges) should be rejected"
+        );
 
         let _ = std::fs::remove_file(&p);
     }
@@ -1224,7 +1368,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         assert!(validate_path("/home/user/project/src/main.ts", &ctx).is_ok());
         assert!(validate_path("/home/user/project", &ctx).is_ok());
         assert!(validate_path("/home/user/project/src", &ctx).is_ok());
@@ -1245,7 +1395,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         assert!(validate_path("/etc/passwd", &ctx).is_err());
         assert!(validate_path("/home/user/other", &ctx).is_err());
         assert!(validate_path("/", &ctx).is_err());
@@ -1266,7 +1422,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
     }
@@ -1285,7 +1447,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let home = dirs::home_dir().unwrap();
         for dir_name in crate::agent::skills::SKILL_DIR_NAMES {
             let p = home.join(dir_name).join("skills/typeset/SKILL.md");
@@ -1330,7 +1498,9 @@ mod tests {
             mcp: None,
             mode_ctl: None,
             index_progress: None,
-            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
         };
 
         // Relative path within workspace — should be allowed
@@ -1363,7 +1533,9 @@ mod tests {
             mcp: None,
             mode_ctl: None,
             index_progress: None,
-            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
         };
 
         // ".." traversal from root should escape the workspace
@@ -1397,7 +1569,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let args = serde_json::json!({"path": "/etc"});
         let result = futures::executor::block_on(execute("list_dir", args, &ctx));
         assert!(result.is_err());
@@ -1419,7 +1597,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let args = serde_json::json!({"path": "/etc/passwd"});
         let result = futures::executor::block_on(execute("read_file", args, &ctx));
         assert!(result.is_err());
@@ -1441,7 +1625,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let args = serde_json::json!({"pattern": "foo"});
         let result = futures::executor::block_on(execute("grep", args, &ctx));
         assert!(result.is_err(), "rg likely not installed in test env");
@@ -1462,7 +1652,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let args = serde_json::json!({"command": "echo hello"});
         let result = rt.block_on(execute("bash", args, &ctx));
         let output = result.expect("bash should succeed");
@@ -1486,7 +1682,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let args = serde_json::json!({"command": "echo"});
         let result = futures::executor::block_on(execute("nonexistent_tool", args, &ctx));
         assert!(result.is_err());
@@ -1514,7 +1716,10 @@ mod tests {
         match output {
             ToolOutput::Text { content } => {
                 assert_eq!(content.lines().count(), 20, "should return all 20 lines");
-                assert!(!content.contains("FILE SIZE WARNING"), "should NOT have truncation warning");
+                assert!(
+                    !content.contains("FILE SIZE WARNING"),
+                    "should NOT have truncation warning"
+                );
             }
             _ => panic!("expected Text variant"),
         }
@@ -1572,8 +1777,15 @@ mod tests {
         let output = result.expect("read_file should succeed");
         match output {
             ToolOutput::Text { content } => {
-                assert_eq!(content.lines().count(), 10, "should return exactly 10 lines");
-                assert!(!content.contains("FILE SIZE WARNING"), "should NOT have truncation warning");
+                assert_eq!(
+                    content.lines().count(),
+                    10,
+                    "should return exactly 10 lines"
+                );
+                assert!(
+                    !content.contains("FILE SIZE WARNING"),
+                    "should NOT have truncation warning"
+                );
             }
             _ => panic!("expected Text variant"),
         }

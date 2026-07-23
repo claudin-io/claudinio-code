@@ -1,6 +1,8 @@
 use crate::agent::persist::SessionRecord;
 use crate::agent::provider::AgentConfig;
-use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, SteeringCtl};
+use crate::agent::session::{
+    AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, SteeringCtl,
+};
 use crate::agent::skills::SkillManager;
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
@@ -104,7 +106,8 @@ pub struct AppState {
     /// so the UI can abort instead of sitting out the 120s callback timeout.
     pub oauth_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
-    pub records_cache: std::sync::Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>,
+    pub records_cache:
+        std::sync::Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>,
 }
 
 impl AppState {
@@ -118,7 +121,9 @@ impl AppState {
             modes: Arc::new(Mutex::new(HashMap::new())),
             oauth_cancel: Mutex::new(None),
             embedding_model: Arc::new(Mutex::new(None)),
-            records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap()))),
+            records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(64).unwrap(),
+            ))),
         }
     }
 
@@ -158,7 +163,11 @@ impl AppState {
                         SessionMode::parse(&m).map(|m| {
                             (
                                 m,
-                                if o == "agent" { ModeOrigin::Agent } else { ModeOrigin::Human },
+                                if o == "agent" {
+                                    ModeOrigin::Agent
+                                } else {
+                                    ModeOrigin::Human
+                                },
                             )
                         })
                     })

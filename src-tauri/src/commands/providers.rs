@@ -159,7 +159,10 @@ async fn list_openrouter_models_live() -> Result<Vec<String>, String> {
         .map_err(|e| format!("OpenRouter model list failed: {e}"))?;
     _net_guard.set_status(resp.status().as_u16());
     if !resp.status().is_success() {
-        return Err(format!("OpenRouter model list failed: HTTP {}", resp.status()));
+        return Err(format!(
+            "OpenRouter model list failed: HTTP {}",
+            resp.status()
+        ));
     }
     let body: Value = resp
         .json()

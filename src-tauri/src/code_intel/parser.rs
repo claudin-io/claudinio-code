@@ -64,8 +64,8 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         // Assembly
         "asm" | "s" | "S" => Some("asm"),
         // Bash / Shell
-        "sh" | "bash" | "zsh" | "ksh" | "dash" | "bashrc" | "profile" | "env" |
-        "aliases" | "zshrc" | "zprofile" | "zshenv" | "zlogin" | "zlogout" => Some("bash"),
+        "sh" | "bash" | "zsh" | "ksh" | "dash" | "bashrc" | "profile" | "env" | "aliases"
+        | "zshrc" | "zprofile" | "zshenv" | "zlogin" | "zlogout" => Some("bash"),
         // Bicep
         "bicep" => Some("bicep"),
         // C
@@ -77,8 +77,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         // Common Lisp
         "lisp" | "cl" | "lsp" => Some("commonlisp"),
         // C++
-        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "ixx" =>
-            Some("cpp"),
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "ixx" => Some("cpp"),
         // C#
         "cs" => Some("c-sharp"),
         // CSS
@@ -111,8 +110,8 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         // Gleam
         "gleam" => Some("gleam"),
         // GLSL
-        "glsl" | "vert" | "frag" | "geom" | "comp" | "tesc" | "tese" | "rgen" |
-        "rchit" | "rmiss" | "rahit" | "rint" | "call" => Some("glsl"),
+        "glsl" | "vert" | "frag" | "geom" | "comp" | "tesc" | "tese" | "rgen" | "rchit"
+        | "rmiss" | "rahit" | "rint" | "call" => Some("glsl"),
         // Go
         "go" => Some("go"),
         // GraphQL
@@ -175,8 +174,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         // Perl
         "pl" | "pm" | "t" => Some("perl"),
         // PHP
-        "php" | "phtml" | "php3" | "php4" | "php5" | "php7" | "phps" =>
-            Some("php"),
+        "php" | "phtml" | "php3" | "php4" | "php5" | "php7" | "phps" => Some("php"),
         // PowerShell
         "ps1" | "psm1" | "psd1" | "ps1xml" => Some("powershell"),
         // Prisma
@@ -217,8 +215,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         // VHDL
         "vhd" | "vhdl" => Some("vhdl"),
         // XML
-        "xml" | "xsd" | "xslt" | "svg" | "plist" | "rss" | "atom" |
-        "xaml" => Some("xml"),
+        "xml" | "xsd" | "xslt" | "svg" | "plist" | "rss" | "atom" | "xaml" => Some("xml"),
         // YAML
         "yaml" | "yml" => Some("yaml"),
         // Zig
@@ -274,10 +271,7 @@ pub fn parse_doc_file(path: &str, content: &str) -> Vec<ParsedSymbol> {
             .unwrap_or("document")
             .to_string();
 
-        let body: String = content
-            .chars()
-            .take(MAX_BODY)
-            .collect();
+        let body: String = content.chars().take(MAX_BODY).collect();
 
         let total_lines = content.lines().count() as i64;
 
@@ -301,7 +295,10 @@ pub fn parse_doc_file(path: &str, content: &str) -> Vec<ParsedSymbol> {
 
     for (idx, &(heading_line, ref heading_name)) in headings.iter().enumerate() {
         // Determine where this section ends: either the next heading or EOF
-        let next_heading_line = headings.get(idx + 1).map(|&(l, _)| l).unwrap_or(total_lines);
+        let next_heading_line = headings
+            .get(idx + 1)
+            .map(|&(l, _)| l)
+            .unwrap_or(total_lines);
 
         // Body is everything between heading line (exclusive) and next heading line (exclusive)
         let body_start = heading_line + 1;
@@ -437,13 +434,9 @@ fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
         // que linka contra uma versão diferente do nativo tree-sitter, causando conflito
         // de `links = "tree-sitter"`. Impedidas de compilar junto com 0.25.x.
         // Mantemos a detecção de linguagem, mas retornamos erro no parsing.
-        "dot"
-        | "fish"
-        | "gleam"
-        | "kotlin"
-        | "less"
-        | "org"
-        | "scss" => Err(format!("{lang} grammar uses old tree-sitter API incompatible with 0.25")),
+        "dot" | "fish" | "gleam" | "kotlin" | "less" | "org" | "scss" => Err(format!(
+            "{lang} grammar uses old tree-sitter API incompatible with 0.25"
+        )),
 
         _ => Err(format!("unknown language: {lang}")),
     }
@@ -586,10 +579,7 @@ const DECLARATION_KINDS: &[&str] = &[
 ];
 
 /// Node kinds that represent function/method call expressions.
-const CALL_EXPRESSION_KINDS: &[&str] = &[
-    "call_expression",
-    "method_invocation",
-];
+const CALL_EXPRESSION_KINDS: &[&str] = &["call_expression", "method_invocation"];
 
 /// Node kinds that represent import / use / require statements.
 const IMPORT_KINDS: &[&str] = &[
@@ -771,11 +761,7 @@ fn get_node_text<'a>(content: &'a str, node: &tree_sitter::Node, max_len: usize)
     }
 }
 
-fn extract_declaration_name(
-    node: &tree_sitter::Node,
-    kind: &str,
-    content: &str,
-) -> Option<String> {
+fn extract_declaration_name(node: &tree_sitter::Node, kind: &str, content: &str) -> Option<String> {
     // First try the standard "name" field
     if let Some(name_node) = node.child_by_field_name("name") {
         let name = name_node.utf8_text(content.as_bytes()).ok()?;
@@ -827,9 +813,7 @@ fn extract_declaration_name(
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             let child_kind = child.kind();
-            if child_kind == "type_identifier"
-                || child_kind == "identifier"
-                || child_kind == "name"
+            if child_kind == "type_identifier" || child_kind == "identifier" || child_kind == "name"
             {
                 if let Ok(text) = child.utf8_text(content.as_bytes()) {
                     if !text.trim().is_empty() {
@@ -1013,7 +997,10 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                 .map(|v| {
                     matches!(
                         v.kind(),
-                        "arrow_function" | "function_expression" | "function" | "generator_function"
+                        "arrow_function"
+                            | "function_expression"
+                            | "function"
+                            | "generator_function"
                     )
                 })
                 .unwrap_or(false);
@@ -1147,24 +1134,23 @@ fn collect_parent_context(node: &tree_sitter::Node, content: &str) -> Option<Str
 
             if let Some(n) = name {
                 let short_kind = match k {
-                    "class_declaration"
-                    | "class_definition"
-                    | "class_specifier"
-                    | "class" => "class",
+                    "class_declaration" | "class_definition" | "class_specifier" | "class" => {
+                        "class"
+                    }
                     "struct_item" | "struct_declaration" | "struct_specifier"
-                    | "struct_definition" =>
-                        "struct",
-                    "enum_item" | "enum_declaration" | "enum_specifier"
-                    | "enum_definition" =>
-                        "enum",
-                    "trait_item" | "trait_definition" | "trait_declaration" =>
-                        "trait",
+                    | "struct_definition" => "struct",
+                    "enum_item" | "enum_declaration" | "enum_specifier" | "enum_definition" => {
+                        "enum"
+                    }
+                    "trait_item" | "trait_definition" | "trait_declaration" => "trait",
                     "impl_item" | "impl_declaration" => "impl",
                     "interface_declaration" => "interface",
                     "protocol_declaration" => "protocol",
-                    "module" | "mod_item" | "module_definition"
-                    | "namespace_definition" | "namespace_declaration" =>
-                        "module",
+                    "module"
+                    | "mod_item"
+                    | "module_definition"
+                    | "namespace_definition"
+                    | "namespace_declaration" => "module",
                     "object_definition" | "object_declaration" => "object",
                     "extension_declaration" => "extension",
                     "record_declaration" => "record",
@@ -1189,10 +1175,7 @@ fn collect_parent_context(node: &tree_sitter::Node, content: &str) -> Option<Str
     }
 }
 
-fn find_containing_function_name(
-    node: &tree_sitter::Node,
-    content: &str,
-) -> Option<String> {
+fn find_containing_function_name(node: &tree_sitter::Node, content: &str) -> Option<String> {
     let mut current = node.parent()?;
     loop {
         let k = current.kind();
@@ -1251,34 +1234,62 @@ Call the function with options.
 Deep details here.
 ";
         let symbols = parse_doc_file("test.md", content);
-        assert_eq!(symbols.len(), 4, "should create 4 symbols for #, ##, ## and ###");
+        assert_eq!(
+            symbols.len(),
+            4,
+            "should create 4 symbols for #, ##, ## and ###"
+        );
 
         // H1 title captures the preamble before the first H2.
         assert_eq!(symbols[0].name, "Title");
         assert_eq!(symbols[0].kind, "doc_section");
-        assert!(symbols[0].body_text.as_ref().unwrap().contains("intro text"));
+        assert!(symbols[0]
+            .body_text
+            .as_ref()
+            .unwrap()
+            .contains("intro text"));
 
         assert_eq!(symbols[1].name, "Installation");
         assert_eq!(symbols[1].kind, "doc_section");
-        assert!(symbols[1].body_text.as_ref().unwrap().contains("npm install"));
+        assert!(symbols[1]
+            .body_text
+            .as_ref()
+            .unwrap()
+            .contains("npm install"));
         assert_eq!(symbols[1].start_line, 4);
         assert_eq!(symbols[1].parent_context.as_deref(), Some("test.md"));
 
         assert_eq!(symbols[2].name, "Usage");
-        assert!(symbols[2].body_text.as_ref().unwrap().contains("Call the function"));
+        assert!(symbols[2]
+            .body_text
+            .as_ref()
+            .unwrap()
+            .contains("Call the function"));
 
         assert_eq!(symbols[3].name, "Advanced");
-        assert!(symbols[3].body_text.as_ref().unwrap().contains("Deep details"));
+        assert!(symbols[3]
+            .body_text
+            .as_ref()
+            .unwrap()
+            .contains("Deep details"));
     }
 
     #[test]
     fn parse_doc_file_no_headings() {
         let content = "Just a plain text file with no markdown headings.\nSecond line.";
         let symbols = parse_doc_file("README.txt", content);
-        assert_eq!(symbols.len(), 1, "should create 1 symbol when no headings found");
+        assert_eq!(
+            symbols.len(),
+            1,
+            "should create 1 symbol when no headings found"
+        );
         assert_eq!(symbols[0].name, "README");
         assert_eq!(symbols[0].kind, "doc_section");
-        assert!(symbols[0].body_text.as_ref().unwrap().contains("plain text"));
+        assert!(symbols[0]
+            .body_text
+            .as_ref()
+            .unwrap()
+            .contains("plain text"));
         assert_eq!(symbols[0].start_line, 1);
         assert_eq!(symbols[0].parent_context.as_deref(), Some("README.txt"));
     }
@@ -1364,7 +1375,10 @@ name = \"main\"
         assert!(result.error.is_none());
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&".button-primary"), "rule found: {names:?}");
-        assert!(result.symbols.len() >= 2, "mixin + rule expected: {names:?}");
+        assert!(
+            result.symbols.len() >= 2,
+            "mixin + rule expected: {names:?}"
+        );
         // .sass routes to the same scanner instead of being invisible.
         assert_eq!(detect_language("styles/app.sass"), Some("scss"));
     }
@@ -1380,8 +1394,12 @@ Has content.
         let symbols = parse_doc_file("test.md", content);
         assert_eq!(symbols.len(), 2);
         // Empty section should have no body
-        assert!(symbols[0].body_text.is_none() || symbols[0].body_text.as_ref().unwrap().is_empty());
+        assert!(
+            symbols[0].body_text.is_none() || symbols[0].body_text.as_ref().unwrap().is_empty()
+        );
         // Next section should have content
-        assert!(symbols[1].body_text.is_some() && !symbols[1].body_text.as_ref().unwrap().is_empty());
+        assert!(
+            symbols[1].body_text.is_some() && !symbols[1].body_text.as_ref().unwrap().is_empty()
+        );
     }
 }

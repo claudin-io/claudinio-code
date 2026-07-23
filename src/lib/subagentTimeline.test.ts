@@ -23,6 +23,7 @@ function createSubagent(overrides: Partial<SubagentNode> = {}): SubagentNode {
     rounds: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cost: 0,
     steps: [],
     ...overrides,
   };
@@ -158,6 +159,7 @@ describe("applySubagentDone", () => {
       rounds: 5,
       inputTokens: 1000,
       outputTokens: 2000,
+      cost: 0,
       report: "All done.",
     };
 
@@ -180,6 +182,7 @@ describe("applySubagentDone", () => {
       rounds: 0,
       inputTokens: 0,
       outputTokens: 0,
+      cost: 0,
     };
 
     const result = applySubagentDone(map, input, now);
@@ -195,6 +198,7 @@ describe("applySubagentDone", () => {
       rounds: 0,
       inputTokens: 0,
       outputTokens: 0,
+      cost: 0,
     };
 
     const result = applySubagentDone(map, input, now);
@@ -213,6 +217,7 @@ describe("applySubagentDone", () => {
       rounds: 3,
       inputTokens: 500,
       outputTokens: 750,
+      cost: 0,
     };
 
     const result = applySubagentDone(map, input, now);
@@ -230,6 +235,7 @@ describe("applySubagentDone", () => {
       rounds: 0,
       inputTokens: 0,
       outputTokens: 0,
+      cost: 0,
     };
 
     const result = applySubagentDone(map, input, now);
@@ -246,6 +252,7 @@ describe("applySubagentDone", () => {
       rounds: 1,
       inputTokens: 100,
       outputTokens: 200,
+      cost: 0,
     };
 
     const result = applySubagentDone(map, input, now);

@@ -1,235 +1,187 @@
-# Claudinio Code 🧠⚡
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Claudinio Code" width="128">
+</p>
 
-**Claudinio Code** é um IDE agentivo — um aplicativo desktop nativo (Tauri v2) que integra um **agente de IA** diretamente no seu editor de código, com inteligência de código rica (busca semântica, LSP, indexação tree-sitter) e uma interface de chat com timeline visual, aprovação de ferramentas e suporte a subagentes paralelos.
+<h1 align="center">Claudinio Code</h1>
 
-> Stack: [Tauri v2](https://v2.tauri.app) + [SolidJS](https://www.solidjs.com) + [TypeScript](https://www.typescriptlang.org) + [Rust](https://www.rust-lang.org)
+<p align="center">
+  <strong>A native desktop harness for AI coding agents.</strong><br>
+  Real code intelligence, a visible reasoning timeline, and approval gates on everything that touches your machine.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://github.com/claudin-io/claudinio-code/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/claudin-io/claudinio-code/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/claudin-io/claudinio-code-releases/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/claudin-io/claudinio-code-releases?label=download"></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey">
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.pt-BR.md">Português</a>
+</p>
 
 ---
 
-## Sumário
+Claudinio Code is a desktop application — not a terminal wrapper, not a browser
+tab, not an extension bolted onto someone else's editor. It runs an agent loop
+in Rust, indexes your workspace with tree-sitter and local ONNX embeddings, and
+renders every thought, tool call and subagent in a timeline you can inspect.
 
-- [Funcionalidades](#funcionalidades)
-  - [Interface do Agente de IA](#interface-do-agente-de-ia)
-  - [Gerenciamento de Projetos](#gerenciamento-de-projetos)
-  - [Inteligência de Código](#inteligência-de-código)
-  - [Sistema de Agentes](#sistema-de-agentes)
-  - [Ferramentas do Agente](#ferramentas-do-agente)
-  - [Tema e Design](#tema-e-design)
-- [Arquitetura](#arquitetura)
-- [Começando](#começando)
-- [Como Usar](#como-usar)
-- [Tecnologias](#tecnologias)
-- [Licença](#licença)
+It talks to any Anthropic-compatible Messages API. [claudin.io](https://claudin.io)
+is the default; Anthropic, OpenRouter, DeepSeek and anything else in the
+[models.dev](https://models.dev) catalog work too.
 
----
+## Install
 
-## Funcionalidades
+Download the installer for your platform from
+[**Releases**](https://github.com/claudin-io/claudinio-code-releases/releases/latest):
 
-### Interface do Agente de IA
-
-- **Chat com timeline visual** — Cada resposta do assistente mostra uma **linha do tempo colapsável** com fases (Planejamento → Execução → Sumário), steps de texto, pensamentos, chamadas de ferramenta e resultados.
-- **Streaming em tempo real** — O agente transmite texto, pensamento e ferramentas via SSE (Server-Sent Events) — você vê o raciocínio acontecer.
-- **Aprovação de ferramentas** — Comandos `bash` e edições de arquivo exigem aprovação do usuário. O diff é exibido no Monaco Editor antes de aplicar.
-- **Ask User** — O agente pode fazer perguntas interativas com opções de seleção única/múltipla e campo "Outra resposta".
-- **Steering (orientação em tempo real)** — Enquanto o agente pensa, você pode digitar mensagens que são enfileiradas e injetadas como orientação no meio do raciocínio.
-- **Interrupção** — Pressione `Esc` para interromper o agente a qualquer momento.
-- **Subagentes** — O agente principal pode delegar tarefas para **até 4 subagentes paralelos**, cada um com seu próprio contexto e timeline. Você pode clicar em um subagente para ver sua timeline completa em um modal.
-- **Histórico de sessões** — Todas as conversas são persistidas em JSONL. Você pode listar, reabrir e continuar sessões anteriores.
-- **Markdown completo** — As respostas são renderizadas com Markdown (`marked` + `highlight.js`), incluindo tabelas, listas, citações, imagens e blocos de código com syntax highlighting.
-
-### Gerenciamento de Projetos
-
-- **Abrir workspace** — Selecione uma pasta do sistema via seletor nativo. O projeto é automaticamente indexado.
-- **Explorador de arquivos** — Árvore de diretórios lazy-loaded (expansão sob demanda) com ícones e seleção.
-- **Projetos recentes** — Até 10 projetos recentes persistidos no `localStorage`, exibidos na tela inicial e na sidebar.
-- **Barra de progresso de indexação** — Mostra status em tempo real: carregamento do modelo, arquivos indexados, símbolos extraídos, embeddings gerados.
-
-### Inteligência de Código
-
-- **Busca textual de símbolos (FTS5)** — Busca full-text sobre nomes e assinaturas de símbolos usando SQLite FTS5.
-- **Busca semântica (CodeBERT)** — Busca por conceito usando o modelo **LateOn-Code-edge** (ColBERT-style, ONNX INT8). Entenda o que o código *faz*, não apenas como se chama.
-- **Lookup exato de símbolo** — Encontre um símbolo pelo nome exato.
-- **Outline de arquivo** — Lista todos os símbolos definidos em um arquivo com posições.
-- **Go to Definition** (LSP) — Navegue para a definição de um símbolo via LSP (TypeScript/JavaScript e Rust).
-- **Find References** (LSP) — Encontre todas as referências a um símbolo.
-- **Hover Info** (LSP) — Obtenha informações detalhadas sobre um símbolo sob o cursor.
-- **Indexação tree-sitter** — Parsers para TypeScript/JS, Rust e Python extraem símbolos, assinaturas, doc comments e relações de chamada.
-- **Watcher de arquivos** — O workspace é monitorado em tempo real. Arquivos alterados são reindexados automaticamente.
-- **Relações entre símbolos** — A tabela `relations` armazena chamadas de função (quem chama quem).
-
-### Sistema de Agentes
-
-O núcleo do Claudinio Code é um **loop agente-ferramenta** completo implementado em Rust:
-
-| Componente | Descrição |
+| Platform | Artifact |
 |---|---|
-| **Provider** | Conecta-se a uma API compatível com Anthropic Messages API (SSE streaming), com fallback, parsing de `content_block_delta` para tool calls parciais, e suporte a interrupção atômica. |
-| **Session Loop** | Até 30 rounds de agente-ferramenta com injeção de steering, verificação de interrupção, merging de roles de usuário e persistência JSONL. |
-| **Subagentes** | Até 4 agentes paralelos (modos `explore` — só leitura, ou `code` — pode editar). Cada um tem contexto fresco e limite de 15 rounds. |
-| **Persistência** | Sessões salvas em `.claudinio/sessions/<id>.jsonl` (JSONL). Cada registro é um `SessionRecord` com kind (meta, user, turn, steering, phase, done, error). |
-| **Permissões** | Três níveis: `Auto` (leitura), `RequiresApproval` (bash, edit), `Denied` (blacklist de comandos perigosos). Bash tem allowlist para comandos read-only. |
+| macOS (Apple Silicon) | `Claudinio-Code-macOS-arm64-*.dmg` |
+| Windows (x64) | `Claudinio-Code-Windows-x64-*.exe` / `*.msi` |
+| Windows (ARM64) | `Claudinio-Code-Windows-arm64-*.exe` |
+| Linux (x64) | `Claudinio-Code-Linux-x64-*.AppImage` / `*.deb` |
+| Linux (ARM64) | `Claudinio-Code-Linux-arm64-*.AppImage` / `*.deb` |
 
-### Ferramentas do Agente
+The app updates itself: release artifacts are signed and the built-in updater
+verifies the signature before installing.
 
-O agente tem acesso a **13 ferramentas** integradas:
+Building from source is covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-| Ferramenta | Permissão | Descrição |
+## Quickstart
+
+1. **Open a folder.** Indexing starts immediately — keyword search is available
+   right away, semantic ranking joins as soon as embeddings finish.
+2. **Connect a provider.** Settings → API key and base URL (defaults to
+   `https://api.claudin.io`), or sign in to OpenRouter via OAuth.
+3. **Describe the task.** The agent plans, calls tools and streams its reasoning
+   into the timeline.
+4. **Approve what matters.** Shell commands and file edits stop for your
+   approval; edits show a Monaco diff before anything is written.
+
+## What makes it different
+
+### Brain and Builder
+
+Two modes with different tool surfaces. **Brain** explores read-only, interviews
+you about requirements and writes a plan. **Builder** executes it — writing code,
+running commands, verifying. The handoff between them starts a fresh session
+seeded with the plan, so execution never inherits a context window full of
+exploration.
+
+### It actually reads your codebase
+
+Not just grep:
+
+- **Tree-sitter indexing** across **77 languages** — symbols, signatures, doc
+  comments and call relations, in SQLite.
+- **Hybrid search** — BM25 keyword matching over code, docs and paths, fused
+  with MiniLM semantic embeddings via reciprocal rank fusion. Finds a message
+  queue by describing what it does, and finds `TOKENIZERS_PARALLELISM` by its
+  exact spelling.
+- **Embeddings run locally.** `all-MiniLM-L6-v2` ships inside the installer as
+  an ONNX resource. Your code is never sent anywhere to be indexed.
+- **LSP** — go-to-definition, find-references and hover through
+  `typescript-language-server` and `rust-analyzer`.
+- **Live reindexing** — a file watcher keeps the index in sync as you work.
+
+### Parallel subagents
+
+The main agent delegates to parallel subagents (4 by default, configurable),
+each with a fresh context and its own timeline you can open and read. Modes are
+`explore` (read-only) or `code`.
+
+### Nothing is a black box
+
+Every assistant turn renders as a collapsible timeline — phases, thinking, tool
+calls, results, subagents, token counts and cost. Sessions persist as JSONL in
+`.claudinio/sessions/`, so you can reopen and continue any conversation.
+
+### Steering, not just interrupting
+
+Type while the agent is working and your message is queued and injected as
+guidance mid-reasoning. `Esc` interrupts outright.
+
+### Extensible
+
+- **Skills** — drop a `SKILL.md` into `.agents/skills/`, `.claudinio/skills/` or
+  `.claude/skills/` and the agent discovers it.
+- **MCP** — connect Model Context Protocol servers over stdio or HTTP.
+- **18 UI locales**, with the system language detected on first run.
+
+## The tools the model can call
+
+| Tool | Approval | What it does |
 |---|---|---|
-| `read_file` | ✅ Auto | Lê arquivo de texto (max 2MB, workspace apenas) |
-| `list_dir` | ✅ Auto | Lista diretório (respeita .gitignore) |
-| `grep` | ✅ Auto | Busca regex com ripgrep |
-| `edit_file` | 🛡️ Requer aprovação | Proposta de diff com visualização no Monaco |
-| `bash` | 🛡️ Requer aprovação | Comando shell (allowlist para leitura) |
-| `code_search` | ✅ Auto | Busca textual FTS5 |
-| `symbol_lookup` | ✅ Auto | Lookup exato de símbolo |
-| `file_outline` | ✅ Auto | Outline de símbolos de um arquivo |
-| `go_to_definition` | ✅ Auto | LSP go-to-definition |
-| `find_references` | ✅ Auto | LSP find references |
-| `semantic_search` | ✅ Auto | Busca semântica (CodeBERT) |
-| `ask_user` | ✅ Auto | Perguntas interativas ao usuário |
-| `spawn_agents` | ✅ Auto | Dispara subagentes paralelos |
+| `read_file` | auto | Read a text file inside the workspace |
+| `list_dir` | auto | List a directory, honouring `.gitignore` |
+| `grep` | auto | Regex search (ripgrep) |
+| `code_search` | auto | Full-text symbol search (SQLite FTS5) |
+| `semantic_search` | auto | Hybrid BM25 + embedding search |
+| `symbol_lookup` | auto | Exact symbol lookup |
+| `file_outline` | auto | Symbols defined in a file |
+| `go_to_definition` | auto | LSP definition |
+| `find_references` | auto | LSP references |
+| `web_search` | auto | Search the web |
+| `ask_user` | auto | Ask you a question, with options |
+| `tasks_get` / `tasks_set` | auto | Read and update the task list |
+| `write_plan` / `finalize_plan` | auto | Author and close out a plan document |
+| `enter_plan_mode` / `exit_plan_mode` | auto | Switch between Brain and Builder |
+| `spawn_agents` | auto | Launch parallel subagents |
+| **`edit_file`** | **requires approval** | Propose an edit, shown as a diff |
+| **`bash`** | **requires approval** | Run a shell command (read-only commands are allowlisted) |
 
-### Tema e Design
+File tools are confined to the opened workspace by a path guard that rejects
+traversal. A denylist blocks known-destructive commands outright. See
+[SECURITY.md](SECURITY.md) for the full threat model, including what the
+project explicitly does *not* defend against.
 
-- **Tema dark/light** — Detecta automaticamente a preferência do sistema operacional. Tema claro com fundo bege/warm, tema escuro com fundo `#141210`.
-- **Design system completo** — 4 níveis de superfície, 3 níveis de tinta, cores de accent (laranja quente), success (verde) e danger (vermelho), sombras arredondadas.
-- **Monaco Editor customizado** — Temas `claudinio-dark` e `claudinio-light` combinando com o design system.
-- **Fontes auto-hospedadas** — Inter Variable (sans) e JetBrains Mono (mono).
-- **Animações suaves** — `prefers-reduced-motion` respeitado, animações de entrada, pulso de status, cursor piscante.
-- **Integração macOS** — Padding para botões de tráfego (`pl-[78px]`), `data-tauri-drag-region` para arrastar janela.
-
----
-
-## Arquitetura
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Frontend (SolidJS)                 │
-│  ┌───────────┐ ┌──────────────┐ ┌────────────────┐ │
-│  │ ChatPanel  │ │  App Shell   │ │  DiffViewer    │ │
-│  │ (agent UI) │ │ (sidebar,    │ │  (Monaco diff) │ │
-│  │ timeline,  │ │  config,     │ │                │ │
-│  │ approvals) │ │  file tree)  │ │                │ │
-│  └─────┬─────┘ └──────┬───────┘ └────────────────┘ │
-│        │              │                             │
-│        └──────┬───────┘                             │
-│               │ IPC (Tauri commands)                 │
-└───────────────┼─────────────────────────────────────┘
-                │
-┌───────────────┼─────────────────────────────────────┐
-│    Backend (Rust / Tauri v2)                        │
-│               │                                     │
-│  ┌────────────▼──────────────────────────────┐      │
-│  │         AppState (state.rs)               │      │
-│  │  config, index_db, lsp_manager,           │      │
-│  │  active_session, steering, embeddings     │      │
-│  └───┬──────────┬──────────┬──────────┬──────┘      │
-│      │          │          │          │              │
-│  ┌───▼──┐ ┌─────▼────┐ ┌──▼───┐ ┌───▼────────┐     │
-│  │Agent │ │Code Intel│ │ LSP  │ │ File System │     │
-│  │system│ │ FTS5 +   │ │ TS + │ │ read/write/ │     │
-│  │      │ │Semantic  │ │ Rust │ │ list        │     │
-│  │      │ │Embeddings│ │ Analy│ │             │     │
-│  │      │ │(ONNX)    │ │zer   │ │             │     │
-│  └──────┘ └──────────┘ └──────┘ └─────────────┘     │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Frontend — SolidJS + TypeScript + Tailwind              │
+│  chat timeline · approvals · Monaco diffs · file tree    │
+└───────────────────────────┬──────────────────────────────┘
+                            │ Tauri IPC
+┌───────────────────────────┴──────────────────────────────┐
+│  Backend — Rust / Tauri v2                               │
+│                                                          │
+│  agent/        loop, providers (SSE), tools, subagents,  │
+│                permissions, skills, MCP, persistence     │
+│  code_intel/   tree-sitter → SQLite FTS5 + ONNX vectors  │
+│  lsp/          typescript-language-server, rust-analyzer │
+│  commands/     IPC surface exposed to the frontend       │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Fluxo de uma mensagem
+A message flows: IPC `send_message` → session loop → provider SSE stream →
+`AgentEvent`s over a channel → timeline renders live → approval gates resolve
+over oneshot channels → tool results feed the next round → `Done`, persisted to
+JSONL.
 
-```
-1. Usuário digita → Tauri command `send_message`
-2. `session::run_workflow()` inicia
-3. → Provider faz streaming SSE da API
-4. → Eventos (texto, pensamento, tool calls) enviados via Channel<AgentEvent>
-5. → Frontend renderiza timeline em tempo real
-6. → Se tool call requer aprovação: frontend mostra modal, aguarda
-7. → Usuário aprova/rejeita → oneshot channel resolve
-8. → Resultado volta para o modelo → próximo round
-9. → Quando turno terminal: Done emitido, sessão persistida
-```
+## Built with
 
----
+[Tauri v2](https://v2.tauri.app) ·
+[Rust](https://www.rust-lang.org) ·
+[SolidJS](https://www.solidjs.com) ·
+[TypeScript](https://www.typescriptlang.org) ·
+[Tailwind CSS v4](https://tailwindcss.com) ·
+[Monaco Editor](https://microsoft.github.io/monaco-editor/) ·
+[tree-sitter](https://tree-sitter.github.io/tree-sitter/) ·
+[SQLite / rusqlite](https://github.com/rusqlite/rusqlite) ·
+[ONNX Runtime](https://github.com/pykeio/ort) ·
+[tokio](https://tokio.rs)
 
-## Começando
+## Contributing
 
-### Pré-requisitos
+Issues and pull requests are welcome — start with
+[CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and the checks CI runs.
+Security issues go through [SECURITY.md](SECURITY.md), never a public issue.
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-- [Node.js](https://nodejs.org/) (v18+)
-- [pnpm](https://pnpm.io/) (v9+)
-- [Rust](https://rustup.rs/) (edição stable 2024+)
-- [Tauri CLI](https://v2.tauri.app/start/cli/) (`cargo install tauri-cli`)
+## License
 
-### Instalação
-
-```bash
-# Clone o repositório
-git clone <url-do-repositorio>
-cd claudinio-code
-
-# Instale dependências do frontend
-pnpm install
-
-# Execute em modo de desenvolvimento
-pnpm tauri dev
-```
-
-### Build
-
-```bash
-# Baixa o modelo de embeddings (uma vez; sha256 pinado) para ser
-# empacotado como resource — a busca semântica funciona 100% offline.
-python3 scripts/fetch_embedding_model.py
-
-pnpm tauri build
-```
-
----
-
-## Como Usar
-
-1. **Abra um projeto** — Clique em "Abrir pasta" na tela inicial ou selecione um projeto recente.
-2. **Aguarde a indexação** — O Claudinio Code vai escanear, extrair símbolos (tree-sitter) e gerar embeddings (all-MiniLM-L6-v2 ONNX, 100% local). A busca por palavra-chave (BM25) funciona imediatamente; o ranking semântico entra assim que os embeddings terminam.
-3. **Configure a API** — Clique no ícone de engrenagem e configure sua API Key e Base URL (padrão: `https://api.claudin.io`).
-4. **Converse com o agente** — Digite sua tarefa em linguagem natural. O agente planeja, executa ferramentas e mostra tudo na timeline.
-5. **Aprove ações** — Comandos bash e edições de arquivo aparecem para aprovação. Veja o diff e decida.
-6. **Use subagentes** — Para tarefas complexas, o agente pode disparar subagentes — acompanhe cada um em seu próprio modal.
-7. **Retome sessões** — O histórico fica salvo. Clique em "Histórico" para reabrir conversas passadas.
-
----
-
-## Tecnologias
-
-### Frontend
-
-| Tecnologia | Uso |
-|---|---|
-| [SolidJS](https://www.solidjs.com) | UI reativa (sem Virtual DOM) |
-| [TypeScript](https://www.typescriptlang.org) | Tipagem estática |
-| [Tailwind CSS v4](https://tailwindcss.com) | Estilização utility-first |
-| [Monaco Editor](https://microsoft.github.io/monaco-editor/) | Diffs e visualização de código |
-| [highlight.js](https://highlightjs.org) | Syntax highlighting |
-| [marked](https://marked.js.org) | Renderização Markdown |
-| [Vite](https://vitejs.dev) | Build tool |
-
-### Backend
-
-| Tecnologia | Uso |
-|---|---|
-| [Tauri v2](https://v2.tauri.app) | Framework desktop nativo |
-| [Rust](https://www.rust-lang.org) | Linguagem do backend |
-| [SQLite (rusqlite)](https://github.com/rusqlite/rusqlite) | Banco de índice (FTS5) |
-| [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) | Parsers de código (TS, JS, RS, PY) |
-| [ONNX Runtime (ort)](https://github.com/pykeio/ort) | Inferência do modelo de embeddings |
-| [LateOn-Code-edge](https://huggingface.co/lightonai/LateOn-Code-edge) | Modelo de embeddings semânticos (ColBERT-style) |
-| [tokio](https://tokio.rs) | Runtime assíncrono |
-| [reqwest](https://docs.rs/reqwest) | Cliente HTTP (API do provedor + download) |
-| [ripgrep (através de grep)](https://github.com/BurntSushi/ripgrep) | Busca regex |
-| [notify](https://github.com/notify-rs/notify) | Watcher de arquivos |
-| [diffy](https://github.com/notify-rs/diffy) | Geração de diffs textuais |
-
----
-
-## Licença
-
-MIT
+[MIT](LICENSE) © Victor Carvalho Tavernari

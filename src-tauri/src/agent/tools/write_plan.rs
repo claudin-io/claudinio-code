@@ -111,11 +111,16 @@ pub fn plans_dir(workspace_root: &str, plan_save_path: Option<&str>) -> PathBuf 
                 PathBuf::from(workspace_root).join(path)
             }
         }
-        _ => PathBuf::from(workspace_root).join(".claudinio").join("plans"),
+        _ => PathBuf::from(workspace_root)
+            .join(".claudinio")
+            .join("plans"),
     }
 }
 
-pub fn execute(args: WritePlanArgs, ctx: &crate::agent::tools::ToolContext) -> Result<String, String> {
+pub fn execute(
+    args: WritePlanArgs,
+    ctx: &crate::agent::tools::ToolContext,
+) -> Result<String, String> {
     let root = ctx
         .workspace_root
         .as_ref()
@@ -139,7 +144,10 @@ pub fn execute(args: WritePlanArgs, ctx: &crate::agent::tools::ToolContext) -> R
         .filter(|h| !has_nonempty_section(&args.content, h))
         .collect();
     if !missing.is_empty() {
-        msg.push_str(&format!(" Note: expected section(s) missing: {}.", missing.join(", ")));
+        msg.push_str(&format!(
+            " Note: expected section(s) missing: {}.",
+            missing.join(", ")
+        ));
     }
     if !has_nonempty_section(&args.content, LLD_HEADING) {
         msg.push_str(
@@ -149,7 +157,9 @@ pub fn execute(args: WritePlanArgs, ctx: &crate::agent::tools::ToolContext) -> R
     }
     // Auto-commit the plan file if configured and this is the final version (has LLD)
     let has_lld = has_nonempty_section(&args.content, LLD_HEADING);
-    let auto_commit = ctx.agent_config.as_ref()
+    let auto_commit = ctx
+        .agent_config
+        .as_ref()
         .map(|c| c.auto_commit_plan)
         .unwrap_or(true); // default true when config is absent
 
@@ -159,15 +169,18 @@ pub fn execute(args: WritePlanArgs, ctx: &crate::agent::tools::ToolContext) -> R
             let commit_msg = format!("docs(plan): {slug}");
             // git add only the plan file (NOT -A)
             let add = std::process::Command::new("git")
-                .arg("-C").arg(root)
+                .arg("-C")
+                .arg(root)
                 .arg("add")
                 .arg(path.to_string_lossy().as_ref())
                 .output();
             if add.is_ok() {
                 let commit = std::process::Command::new("git")
-                    .arg("-C").arg(root)
+                    .arg("-C")
+                    .arg(root)
                     .arg("commit")
-                    .arg("-m").arg(&commit_msg)
+                    .arg("-m")
+                    .arg(&commit_msg)
                     .output();
                 match commit {
                     Ok(out) if out.status.success() => {
@@ -193,7 +206,10 @@ mod tests {
 
     #[test]
     fn slugify_basic() {
-        assert_eq!(slugify("Modo Pensador / Constructor"), "modo-pensador-constructor");
+        assert_eq!(
+            slugify("Modo Pensador / Constructor"),
+            "modo-pensador-constructor"
+        );
         assert_eq!(slugify("  weird__name!! "), "weird-name");
         assert_eq!(slugify("///"), "plan");
     }
@@ -321,7 +337,9 @@ mod tests {
             mcp: None,
             mode_ctl: None,
             index_progress: None,
-            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
         }
     }
 
@@ -339,7 +357,10 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        assert!(sd_only.contains("no '## Low-Level Design' section yet"), "got: {sd_only}");
+        assert!(
+            sd_only.contains("no '## Low-Level Design' section yet"),
+            "got: {sd_only}"
+        );
 
         let full = execute(
             WritePlanArgs {

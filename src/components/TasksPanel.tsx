@@ -10,7 +10,8 @@ export const TasksPanel: Component<{
   onTasksChange?: (count: number) => void;
 }> = (props) => {
   const [tasks, setTasksState] = createSignal<TaskItem[]>([]);
-  const [hoveredId, setHoveredId] = createSignal<string | null>(null);
+  // Only the setter is used: the tooltip renders from hoveredTaskSnapshot.
+  const [, setHoveredId] = createSignal<string | null>(null);
   const [hoveredTaskSnapshot, setHoveredTaskSnapshot] = createSignal<TaskItem | null>(null);
   const [hoveredElement, setHoveredElement] = createSignal<HTMLElement | null>(null);
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -99,11 +100,6 @@ export const TasksPanel: Component<{
       clearTimeout(closeTimer);
       closeTimer = null;
     }
-  };
-
-  const hoveredTask = () => {
-    const id = hoveredId();
-    return id ? tasks().find((t) => t.id === id) ?? null : null;
   };
 
   return (

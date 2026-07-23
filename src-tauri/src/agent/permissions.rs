@@ -92,7 +92,12 @@ pub fn bash_writes_files(command: &str) -> bool {
         && [" -c ", " -e ", " <<"].iter().any(|f| lower.contains(f));
     if inline_script {
         for pat in [
-            "open(", "write(", "json.dump", "writefile", "write_text", "file.write",
+            "open(",
+            "write(",
+            "json.dump",
+            "writefile",
+            "write_text",
+            "file.write",
         ] {
             if lower.contains(pat) {
                 return true;
@@ -140,53 +145,98 @@ mod tests {
 
     #[test]
     fn bash_allowlist_ls() {
-        assert!(matches!(bash_permission("ls", false), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("ls -la", false), PermissionLevel::Auto));
+        assert!(matches!(
+            bash_permission("ls", false),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("ls -la", false),
+            PermissionLevel::Auto
+        ));
     }
 
     #[test]
     fn bash_allowlist_git_status() {
-        assert!(matches!(bash_permission("git status", false), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("git status --short", false), PermissionLevel::Auto));
+        assert!(matches!(
+            bash_permission("git status", false),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git status --short", false),
+            PermissionLevel::Auto
+        ));
     }
 
     #[test]
     fn bash_allowlist_git_diff() {
-        assert!(matches!(bash_permission("git diff", false), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("git diff --cached", false), PermissionLevel::Auto));
+        assert!(matches!(
+            bash_permission("git diff", false),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("git diff --cached", false),
+            PermissionLevel::Auto
+        ));
     }
 
     #[test]
     fn bash_allowlist_pnpm_dev() {
-        assert!(matches!(bash_permission("pnpm dev", false), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("pnpm run dev", false), PermissionLevel::Auto));
+        assert!(matches!(
+            bash_permission("pnpm dev", false),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("pnpm run dev", false),
+            PermissionLevel::Auto
+        ));
     }
 
     #[test]
     fn bash_allowlist_pnpm_run() {
-        assert!(matches!(bash_permission("pnpm run build", false), PermissionLevel::Auto));
+        assert!(matches!(
+            bash_permission("pnpm run build", false),
+            PermissionLevel::Auto
+        ));
     }
 
     #[test]
     fn bash_allowlist_cargo_build() {
-        assert!(matches!(bash_permission("cargo build", false), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("cargo build --release", false), PermissionLevel::Auto));
+        assert!(matches!(
+            bash_permission("cargo build", false),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("cargo build --release", false),
+            PermissionLevel::Auto
+        ));
     }
 
     #[test]
     fn bash_blacklist_rm_rf_root() {
-        assert!(matches!(bash_permission("rm -rf /", false), PermissionLevel::Denied));
-        assert!(matches!(bash_permission("rm -rf /*", false), PermissionLevel::Denied));
+        assert!(matches!(
+            bash_permission("rm -rf /", false),
+            PermissionLevel::Denied
+        ));
+        assert!(matches!(
+            bash_permission("rm -rf /*", false),
+            PermissionLevel::Denied
+        ));
     }
 
     #[test]
     fn bash_blacklist_sudo_rm() {
-        assert!(matches!(bash_permission("sudo rm -rf /tmp", false), PermissionLevel::Denied));
+        assert!(matches!(
+            bash_permission("sudo rm -rf /tmp", false),
+            PermissionLevel::Denied
+        ));
     }
 
     #[test]
     fn bash_blacklist_chmod_777() {
-        assert!(matches!(bash_permission("chmod 777 /etc", false), PermissionLevel::Denied));
+        assert!(matches!(
+            bash_permission("chmod 777 /etc", false),
+            PermissionLevel::Denied
+        ));
     }
 
     #[test]
@@ -215,8 +265,14 @@ mod tests {
 
     #[test]
     fn bash_whitespace_trimmed_before_check() {
-        assert!(matches!(bash_permission("  ls  ", false), PermissionLevel::Auto));
-        assert!(matches!(bash_permission("  rm -rf /  ", false), PermissionLevel::Denied));
+        assert!(matches!(
+            bash_permission("  ls  ", false),
+            PermissionLevel::Auto
+        ));
+        assert!(matches!(
+            bash_permission("  rm -rf /  ", false),
+            PermissionLevel::Denied
+        ));
     }
 
     // ── auto_approve_git tests ──
@@ -335,7 +391,9 @@ mod tests {
     #[test]
     fn writes_files_detects_redirection() {
         assert!(bash_writes_files("echo hi > file.txt"));
-        assert!(bash_writes_files("cat a.json | python3 -m json.tool >> out.json"));
+        assert!(bash_writes_files(
+            "cat a.json | python3 -m json.tool >> out.json"
+        ));
         assert!(!bash_writes_files("cargo test 2>&1"));
         assert!(!bash_writes_files("ls > /dev/null"));
         assert!(!bash_writes_files("cargo build 2>/dev/null"));
@@ -354,9 +412,13 @@ mod tests {
         assert!(bash_writes_files(
             "python3 -c \"import json; d=json.load(open('c.json')); json.dump(d, open('c.json','w'))\""
         ));
-        assert!(bash_writes_files("node -e \"require('fs').writeFile('a', 'b', ()=>{})\""));
+        assert!(bash_writes_files(
+            "node -e \"require('fs').writeFile('a', 'b', ()=>{})\""
+        ));
         // Read-only inline scripts pass.
-        assert!(!bash_writes_files("python3 -c \"import json,sys; print(len(json.load(sys.stdin)))\""));
+        assert!(!bash_writes_files(
+            "python3 -c \"import json,sys; print(len(json.load(sys.stdin)))\""
+        ));
     }
 
     #[test]
@@ -369,11 +431,17 @@ mod tests {
 
     #[test]
     fn tool_permission_bash_is_requires_approval() {
-        assert!(matches!(tool_permission("bash"), PermissionLevel::RequiresApproval));
+        assert!(matches!(
+            tool_permission("bash"),
+            PermissionLevel::RequiresApproval
+        ));
     }
 
     #[test]
     fn tool_permission_read_file_is_auto() {
-        assert!(matches!(tool_permission("read_file"), PermissionLevel::Auto));
+        assert!(matches!(
+            tool_permission("read_file"),
+            PermissionLevel::Auto
+        ));
     }
 }

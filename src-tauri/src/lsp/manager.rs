@@ -20,10 +20,7 @@ impl LspManager {
         }
     }
 
-    pub fn start_for_workspace(
-        &mut self,
-        workspace_root: &str,
-    ) -> Result<(), String> {
+    pub fn start_for_workspace(&mut self, workspace_root: &str) -> Result<(), String> {
         let root = Path::new(workspace_root);
         // TypeScript server: only if a JS/TS project marker exists at root
         if root.join("package.json").exists()
@@ -46,10 +43,8 @@ impl LspManager {
         let uri = path_to_uri(workspace_root);
         match LspClient::spawn(TSSERVER, &uri) {
             Ok(client) => {
-                self.servers.insert(
-                    "typescript".into(),
-                    LspServerInstance { client },
-                );
+                self.servers
+                    .insert("typescript".into(), LspServerInstance { client });
                 Ok(())
             }
             Err(e) => {
@@ -66,10 +61,8 @@ impl LspManager {
         let uri = path_to_uri(workspace_root);
         match LspClient::spawn(RUST_ANALYZER, &uri) {
             Ok(client) => {
-                self.servers.insert(
-                    "rust".into(),
-                    LspServerInstance { client },
-                );
+                self.servers
+                    .insert("rust".into(), LspServerInstance { client });
                 Ok(())
             }
             Err(e) => {

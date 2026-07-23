@@ -26,9 +26,13 @@ pub fn execute(args: GrepArgs) -> Result<Vec<GrepMatch>, String> {
     // "rg failed: No such file or directory" and the agent is forced to fall
     // back to bash-grep, defeating the smart-tool ordering.
     cmd.env("PATH", crate::agent::tools::bash::login_path());
-    cmd.arg("--line-number").arg("--no-heading")
-        .arg("--with-filename").arg("--color").arg("never")
-        .arg("-g").arg("!.git")
+    cmd.arg("--line-number")
+        .arg("--no-heading")
+        .arg("--with-filename")
+        .arg("--color")
+        .arg("never")
+        .arg("-g")
+        .arg("!.git")
         .arg(&args.pattern);
 
     if let Some(ref path) = args.path {

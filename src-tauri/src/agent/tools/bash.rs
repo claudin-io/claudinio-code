@@ -1,9 +1,9 @@
 use serde::Deserialize;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::num::NonZeroUsize;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -122,8 +122,16 @@ pub struct BashArgs {
 }
 
 pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String> {
-    let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-    let shell_flag = if cfg!(target_os = "windows") { "/c" } else { "-c" };
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let shell_flag = if cfg!(target_os = "windows") {
+        "/c"
+    } else {
+        "-c"
+    };
 
     let timeout_secs = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
@@ -303,8 +311,13 @@ mod tests {
                 plan_save_path: None,
                 base_commit: None,
                 auto_approve_git: false,
-                mcp: None, mode_ctl: None,
-            index_progress: None,            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),            },
+                mcp: None,
+                mode_ctl: None,
+                index_progress: None,
+                records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                    std::num::NonZeroUsize::new(1).unwrap(),
+                ))),
+            },
         ))
     }
 
@@ -331,7 +344,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let out = rt.block_on(execute(
             BashArgs {
                 command: "cat".to_string(),
@@ -370,7 +389,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let out = rt.block_on(execute(
             BashArgs {
                 command: "pwd".to_string(),
@@ -408,7 +433,13 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None, index_progress: None,        records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        };
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
         let result = rt.block_on(execute(
             BashArgs {
                 command: "sleep 60".to_string(),
@@ -421,7 +452,10 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_err(), "expected timeout error, got: {result:?}");
         let err = result.unwrap_err();
-        assert!(err.contains("timed out"), "expected timeout message, got: {err}");
+        assert!(
+            err.contains("timed out"),
+            "expected timeout message, got: {err}"
+        );
         assert!(elapsed.as_secs() < 10, "timeout took too long: {elapsed:?}");
     }
 
@@ -443,7 +477,8 @@ mod tests {
                 "should report command not found, got empty"
             ),
             Err(e) => assert!(
-                e.contains("not found") || e.contains("No such file")
+                e.contains("not found")
+                    || e.contains("No such file")
                     || e.contains("failed to spawn"),
                 "unexpected error: {e}"
             ),
@@ -462,6 +497,10 @@ mod tests {
     fn multiline_output() {
         let out = run("echo line1 && echo line2 && echo line3").unwrap();
         let lines: Vec<&str> = out.lines().collect();
-        assert!(lines.len() >= 3, "expected 3+ lines, got {}: {out:?}", lines.len());
+        assert!(
+            lines.len() >= 3,
+            "expected 3+ lines, got {}: {out:?}",
+            lines.len()
+        );
     }
 }

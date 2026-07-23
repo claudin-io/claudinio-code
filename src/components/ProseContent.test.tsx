@@ -7,7 +7,6 @@ import { render } from "solid-js/web";
 // that used to blank the whole chat — see the resilience guards below.
 beforeAll(() => {
   if (!window.matchMedia) {
-    // @ts-expect-error minimal test polyfill
     window.matchMedia = (q: string) => ({
       matches: false, media: q, onchange: null,
       addEventListener() {}, removeEventListener() {},
@@ -19,7 +18,7 @@ beforeAll(() => {
 // Control the (otherwise ~2-3 MB, lazily imported) mermaid runtime so these
 // tests stay fast and can simulate a broken diagram / broken runtime.
 const renderSpy = vi.fn(async (_id: string, _src: string) => ({ svg: "<svg><g/></svg>" }));
-const initializeSpy = vi.fn(() => {});
+const initializeSpy = vi.fn((..._a: unknown[]) => {});
 vi.mock("mermaid", () => ({
   default: {
     initialize: (...a: unknown[]) => initializeSpy(...a),

@@ -33,7 +33,9 @@ fn build_messages(messages: &[Message], system: Option<&str>) -> Vec<Value> {
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text: t, .. } => text.push_str(t),
-                        ContentBlock::ToolUse { id, name, input, .. } => {
+                        ContentBlock::ToolUse {
+                            id, name, input, ..
+                        } => {
                             tool_calls.push(json!({
                                 "id": id,
                                 "type": "function",
@@ -61,7 +63,11 @@ fn build_messages(messages: &[Message], system: Option<&str>) -> Vec<Value> {
                 let mut only_text: Option<String> = Some(String::new());
                 for block in &msg.content {
                     match block {
-                        ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
                             out.push(json!({
                                 "role": "tool",
                                 "tool_call_id": tool_use_id,
@@ -224,7 +230,9 @@ fn accumulate_tool_calls(
     acc: &mut std::collections::BTreeMap<usize, ToolCallAcc>,
     tool_calls: &Value,
 ) {
-    let Some(items) = tool_calls.as_array() else { return };
+    let Some(items) = tool_calls.as_array() else {
+        return;
+    };
     for item in items {
         let idx = item.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
         let entry = acc.entry(idx).or_default();
@@ -337,10 +345,8 @@ pub async fn stream_message(
         return Err(shape_http_error(status, &body));
     }
 
-    let net_guard = crate::net_activity::NetGuard::begin(
-        crate::net_activity::NetSource::LlmStream,
-        net_detail,
-    );
+    let net_guard =
+        crate::net_activity::NetGuard::begin(crate::net_activity::NetSource::LlmStream, net_detail);
     net_guard.set_status(status.as_u16());
 
     let mut dump = if std::env::var("CLAUDINIO_DEBUG_DUMP").is_ok() {
@@ -407,7 +413,9 @@ pub async fn stream_message(
 
             // OpenAI streams carry only `data:` lines; OpenRouter interleaves
             // ": OPENROUTER PROCESSING" comment keep-alives — skip those.
-            let Some(data) = line.strip_prefix("data: ") else { continue };
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
             if data.trim() == "[DONE]" {
                 done = true;
                 break 'outer;
@@ -500,7 +508,11 @@ fn process_chunk(
         return Err(format!("API error: {msg}"));
     }
 
-    if let Some(choice) = value.get("choices").and_then(|c| c.as_array()).and_then(|c| c.first()) {
+    if let Some(choice) = value
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+    {
         if let Some(delta) = choice.get("delta") {
             if let Some(text) = delta.get("content").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
@@ -555,7 +567,9 @@ pub async fn complete(
         .timeout(std::time::Duration::from_secs(90))
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-    let max_tokens = rp.max_output_tokens.map_or(max_tokens, |m| m.min(max_tokens));
+    let max_tokens = rp
+        .max_output_tokens
+        .map_or(max_tokens, |m| m.min(max_tokens));
     let body = json!({
         "model": rp.model,
         "max_tokens": max_tokens,
@@ -616,7 +630,11 @@ mod tests {
                 role: "assistant".into(),
                 content: vec![
                     ContentBlock::text("Let me read it."),
-                    ContentBlock::tool_use("call_1", "read_file", serde_json::json!({"path": "a.rs"})),
+                    ContentBlock::tool_use(
+                        "call_1",
+                        "read_file",
+                        serde_json::json!({"path": "a.rs"}),
+                    ),
                 ],
             },
             Message {
@@ -660,10 +678,7 @@ mod tests {
         let parts = out[0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["type"], "text");
         assert_eq!(parts[1]["type"], "image_url");
-        assert_eq!(
-            parts[1]["image_url"]["url"],
-            "data:image/png;base64,QUJD"
-        );
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
     }
 
     #[test]
@@ -687,7 +702,10 @@ mod tests {
         let body = build_request(&rp, &cfg, &[], &[], None, true, 32_000);
         assert_eq!(body["usage"], serde_json::json!({"include": true}));
         assert_eq!(body["reasoning"]["effort"], "medium");
-        assert_eq!(body["stream_options"], serde_json::json!({"include_usage": true}));
+        assert_eq!(
+            body["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
 
         let mut generic = test_rp();
         generic.provider_id = "deepseek".into();
@@ -753,14 +771,26 @@ mod tests {
 
         process_chunk(
             r#"{"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#,
-            &rp, &chan, &mut assistant_text, &mut thinking_text,
-            &mut text_deltas, &mut tool_acc, &mut stop_reason, &mut usage,
+            &rp,
+            &chan,
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_acc,
+            &mut stop_reason,
+            &mut usage,
         )
         .unwrap();
         process_chunk(
             r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
-            &rp, &chan, &mut assistant_text, &mut thinking_text,
-            &mut text_deltas, &mut tool_acc, &mut stop_reason, &mut usage,
+            &rp,
+            &chan,
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_acc,
+            &mut stop_reason,
+            &mut usage,
         )
         .unwrap();
         process_chunk(
@@ -794,8 +824,14 @@ mod tests {
 
         process_chunk(
             r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.1234}}"#,
-            &rp, &chan, &mut assistant_text, &mut thinking_text,
-            &mut text_deltas, &mut tool_acc, &mut stop_reason, &mut usage,
+            &rp,
+            &chan,
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_acc,
+            &mut stop_reason,
+            &mut usage,
         )
         .unwrap();
         assert_eq!(usage.unwrap().cost, Some(0.1234));
@@ -814,14 +850,26 @@ mod tests {
 
         process_chunk(
             r#"{"choices":[{"delta":{"reasoning":"hmm, "}}]}"#,
-            &rp, &chan, &mut assistant_text, &mut thinking_text,
-            &mut text_deltas, &mut tool_acc, &mut stop_reason, &mut usage,
+            &rp,
+            &chan,
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_acc,
+            &mut stop_reason,
+            &mut usage,
         )
         .unwrap();
         process_chunk(
             r#"{"choices":[{"delta":{"reasoning_content":"let me check"}}]}"#,
-            &rp, &chan, &mut assistant_text, &mut thinking_text,
-            &mut text_deltas, &mut tool_acc, &mut stop_reason, &mut usage,
+            &rp,
+            &chan,
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_acc,
+            &mut stop_reason,
+            &mut usage,
         )
         .unwrap();
         assert_eq!(thinking_text, "hmm, let me check");
@@ -841,8 +889,14 @@ mod tests {
 
         let err = process_chunk(
             r#"{"error":{"message":"Provider overloaded","code":502}}"#,
-            &rp, &chan, &mut assistant_text, &mut thinking_text,
-            &mut text_deltas, &mut tool_acc, &mut stop_reason, &mut usage,
+            &rp,
+            &chan,
+            &mut assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_acc,
+            &mut stop_reason,
+            &mut usage,
         )
         .unwrap_err();
         assert!(err.contains("Provider overloaded"));

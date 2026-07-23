@@ -50,7 +50,11 @@ pub enum SessionRecord {
         ts: u64,
     },
     /// The text a phase produced (the plan, or the final summary).
-    PhaseResult { phase: String, text: String, ts: u64 },
+    PhaseResult {
+        phase: String,
+        text: String,
+        ts: u64,
+    },
     /// End of a workflow run.
     Done {
         input_tokens: u32,
@@ -60,7 +64,12 @@ pub enum SessionRecord {
     /// A run failed.
     Error { message: String, ts: u64 },
     /// A steering message injected mid-run.
-    Steering { text: String, #[serde(skip_serializing_if = "Option::is_none")] attachments: Option<Vec<AttachmentMeta>>, ts: u64 },
+    Steering {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<AttachmentMeta>>,
+        ts: u64,
+    },
     /// Context was compacted: earlier turns replaced by a summary.
     /// The frontend renders this as a collapsible archive block.
     /// `tail_turns` Turn records immediately BEFORE this marker stay live
@@ -83,7 +92,11 @@ pub enum SessionRecord {
     /// or "constructor" (execution). `origin` records who switched:
     /// "human" (UI toggle) or "agent" (enter_plan_mode/exit_plan_mode tools).
     #[serde(rename = "mode")]
-    Mode { mode: String, origin: String, ts: u64 },
+    Mode {
+        mode: String,
+        origin: String,
+        ts: u64,
+    },
     /// Periodic status snapshot: cumulative tokens and estimated cost.
     /// Written after every Done record. `context_tokens` is the size of the
     /// context for the NEXT request (drops after compaction), as opposed to
@@ -222,7 +235,9 @@ pub fn linked_from(records: &[SessionRecord]) -> Option<LinkedFromInfo> {
 /// The successor session id when this session was superseded by a handoff.
 pub fn handoff_to(records: &[SessionRecord]) -> Option<String> {
     records.iter().rev().find_map(|r| match r {
-        SessionRecord::HandoffTo { next_session_id, .. } => Some(next_session_id.clone()),
+        SessionRecord::HandoffTo {
+            next_session_id, ..
+        } => Some(next_session_id.clone()),
         _ => None,
     })
 }
@@ -231,7 +246,11 @@ pub fn handoff_to(records: &[SessionRecord]) -> Option<String> {
 /// (cycle, stalls, last_pending). All zeros/empty when not linked.
 pub fn linked_golden_state(records: &[SessionRecord]) -> (u32, u32, Vec<String>) {
     match linked_from(records) {
-        Some(info) => (info.golden_cycle, info.golden_stalls, info.golden_last_pending),
+        Some(info) => (
+            info.golden_cycle,
+            info.golden_stalls,
+            info.golden_last_pending,
+        ),
         None => (0, 0, Vec::new()),
     }
 }
@@ -284,10 +303,7 @@ pub struct SessionStore {
 impl SessionStore {
     /// Create (or attach to) the file for `session_id`, writing the `Meta`
     /// header when the file is new.
-    pub fn create(
-        session_id: &str,
-        workspace: Option<&str>,
-    ) -> Result<Self, String> {
+    pub fn create(session_id: &str, workspace: Option<&str>) -> Result<Self, String> {
         let dir = sessions_dir(workspace)?;
         let path = dir.join(format!("{session_id}.jsonl"));
         let is_new = !path.exists();
@@ -346,15 +362,19 @@ pub fn load_records(path: &Path) -> Result<Vec<SessionRecord>, String> {
 /// opening user message so the model retains context of earlier work.
 pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
     // Find the last compaction point
-    let compact_idx = records.iter().rposition(|r| matches!(r, SessionRecord::Compacted { .. }));
+    let compact_idx = records
+        .iter()
+        .rposition(|r| matches!(r, SessionRecord::Compacted { .. }));
 
     let mut out: Vec<Message> = Vec::new();
     match compact_idx {
         Some(idx) => {
             let (summary, tail_turns) = match &records[idx] {
-                SessionRecord::Compacted { summary, tail_turns, .. } => {
-                    (summary.clone(), *tail_turns)
-                }
+                SessionRecord::Compacted {
+                    summary,
+                    tail_turns,
+                    ..
+                } => (summary.clone(), *tail_turns),
                 _ => (String::new(), 0),
             };
             if !summary.is_empty() {
@@ -378,16 +398,15 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
 
 /// Fold Turn/Steering records into a message history, merging steering text
 /// into the last user turn (mirrors push_user_blocks in session.rs).
-fn fold_into_history<'a>(
-    out: &mut Vec<Message>,
-    records: impl Iterator<Item = &'a SessionRecord>,
-) {
+fn fold_into_history<'a>(out: &mut Vec<Message>, records: impl Iterator<Item = &'a SessionRecord>) {
     for rec in records {
         match rec {
             SessionRecord::Turn { message, .. } => {
                 out.push(message.clone());
             }
-            SessionRecord::Steering { text, attachments, .. } => {
+            SessionRecord::Steering {
+                text, attachments, ..
+            } => {
                 let mut blocks = vec![crate::agent::provider::ContentBlock::text(text)];
                 if let Some(atts) = attachments {
                     for att in atts {
@@ -398,9 +417,10 @@ fn fold_into_history<'a>(
                         } else {
                             format!("{} B", att.size)
                         };
-                        blocks.push(crate::agent::provider::ContentBlock::text(
-                            format!("[Anexo do steering: `{}` ({}) — tipo: {}]", att.name, size_str, att.media_type)
-                        ));
+                        blocks.push(crate::agent::provider::ContentBlock::text(format!(
+                            "[Anexo do steering: `{}` ({}) — tipo: {}]",
+                            att.name, size_str, att.media_type
+                        )));
                     }
                 }
                 if let Some(last) = out.last_mut() {
@@ -463,7 +483,10 @@ pub fn tail_start_index(records: &[SessionRecord], compact_idx: usize, tail_turn
         if is_real_user_turn(&records[start]) {
             return start;
         }
-        match (0..start).rev().find(|&i| matches!(records[i], SessionRecord::Turn { .. })) {
+        match (0..start)
+            .rev()
+            .find(|&i| matches!(records[i], SessionRecord::Turn { .. }))
+        {
             Some(prev) => start = prev,
             None => return compact_idx, // no user turn found — drop the tail
         }
@@ -536,9 +559,21 @@ pub fn cumulative_stats(
         total_in,
         total_out,
         if has_cost { Some(total_cost) } else { None },
-        if has_cost_input { Some(cost_input) } else { None },
-        if has_cost_output { Some(cost_output) } else { None },
-        if has_cost_cache_read { Some(cost_cache_read) } else { None },
+        if has_cost_input {
+            Some(cost_input)
+        } else {
+            None
+        },
+        if has_cost_output {
+            Some(cost_output)
+        } else {
+            None
+        },
+        if has_cost_cache_read {
+            Some(cost_cache_read)
+        } else {
+            None
+        },
     )
 }
 
@@ -632,7 +667,10 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
             .iter()
             .any(|r| matches!(r, SessionRecord::User { .. } | SessionRecord::Turn { .. }));
         let in_chain = records.iter().any(|r| {
-            matches!(r, SessionRecord::LinkedFrom { .. } | SessionRecord::HandoffTo { .. })
+            matches!(
+                r,
+                SessionRecord::LinkedFrom { .. } | SessionRecord::HandoffTo { .. }
+            )
         });
         if !has_content && !in_chain {
             continue;
@@ -706,7 +744,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
 
 pub fn load_records_cached(
     path: &Path,
-    cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>
+    cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>,
 ) -> Result<Vec<SessionRecord>, String> {
     let mut cache = cache.lock().unwrap();
     if let Some((records, cached_at)) = cache.get(path) {
@@ -721,7 +759,7 @@ pub fn load_records_cached(
 
 pub fn invalidate_cache(
     path: &Path,
-    cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>
+    cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>,
 ) {
     let mut cache = cache.lock().unwrap();
     cache.pop(path);
@@ -746,7 +784,12 @@ mod tests {
         assert!(matches!(back, SessionRecord::GoldenCycle { cycle: 2, .. }));
 
         let recs = vec![
-            SessionRecord::GoldenCycle { cycle: 1, mode: "brain".into(), goals: vec![], ts: 1 },
+            SessionRecord::GoldenCycle {
+                cycle: 1,
+                mode: "brain".into(),
+                goals: vec![],
+                ts: 1,
+            },
             rec,
         ];
         assert_eq!(golden_cycle_count(&recs), 2);
@@ -766,7 +809,13 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"kind\":\"linked_from\""), "got: {json}");
         let back: SessionRecord = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, SessionRecord::LinkedFrom { golden_cycle: 3, .. }));
+        assert!(matches!(
+            back,
+            SessionRecord::LinkedFrom {
+                golden_cycle: 3,
+                ..
+            }
+        ));
 
         let rec = SessionRecord::HandoffTo {
             next_session_id: "s2".into(),
@@ -776,7 +825,10 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"kind\":\"handoff_to\""), "got: {json}");
 
-        let rec = SessionRecord::Handoff { text: "## Purpose\ncontinue".into(), ts: 9 };
+        let rec = SessionRecord::Handoff {
+            text: "## Purpose\ncontinue".into(),
+            ts: 9,
+        };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"kind\":\"handoff\""), "got: {json}");
     }
@@ -784,7 +836,11 @@ mod tests {
     #[test]
     fn linked_golden_state_reads_linked_from() {
         let recs = vec![
-            SessionRecord::Meta { session_id: "s2".into(), created_at: 1, workspace: None },
+            SessionRecord::Meta {
+                session_id: "s2".into(),
+                created_at: 1,
+                workspace: None,
+            },
             SessionRecord::LinkedFrom {
                 prev_session_id: "s1".into(),
                 reason: "golden_flip".into(),
@@ -804,9 +860,15 @@ mod tests {
     #[test]
     fn linked_from_missing_golden_fields_defaults_to_zero() {
         // Records written by an older build (or hand-edited) must still load.
-        let line = r#"{"kind":"linked_from","prev_session_id":"s1","reason":"plan_execution","ts":1}"#;
+        let line =
+            r#"{"kind":"linked_from","prev_session_id":"s1","reason":"plan_execution","ts":1}"#;
         match serde_json::from_str::<SessionRecord>(line).unwrap() {
-            SessionRecord::LinkedFrom { golden_cycle, golden_stalls, golden_last_pending, .. } => {
+            SessionRecord::LinkedFrom {
+                golden_cycle,
+                golden_stalls,
+                golden_last_pending,
+                ..
+            } => {
                 assert_eq!(golden_cycle, 0);
                 assert_eq!(golden_stalls, 0);
                 assert!(golden_last_pending.is_empty());
@@ -822,30 +884,88 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Chain: root -> mid -> tip; plus one standalone session.
         let root_store = SessionStore::create("root", Some(&ws)).unwrap();
-        root_store.append(&SessionRecord::User { text: "build the feature".into(), ts: 10 }).unwrap();
-        root_store.append(&SessionRecord::HandoffTo { next_session_id: "mid".into(), reason: "plan_execution".into(), ts: 20 }).unwrap();
+        root_store
+            .append(&SessionRecord::User {
+                text: "build the feature".into(),
+                ts: 10,
+            })
+            .unwrap();
+        root_store
+            .append(&SessionRecord::HandoffTo {
+                next_session_id: "mid".into(),
+                reason: "plan_execution".into(),
+                ts: 20,
+            })
+            .unwrap();
 
         let mid_store = SessionStore::create("mid", Some(&ws)).unwrap();
-        mid_store.append(&SessionRecord::LinkedFrom { prev_session_id: "root".into(), reason: "plan_execution".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 21 }).unwrap();
-        mid_store.append(&SessionRecord::User { text: "[system] execute".into(), ts: 22 }).unwrap();
-        mid_store.append(&SessionRecord::HandoffTo { next_session_id: "tip".into(), reason: "context_handoff".into(), ts: 30 }).unwrap();
+        mid_store
+            .append(&SessionRecord::LinkedFrom {
+                prev_session_id: "root".into(),
+                reason: "plan_execution".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 21,
+            })
+            .unwrap();
+        mid_store
+            .append(&SessionRecord::User {
+                text: "[system] execute".into(),
+                ts: 22,
+            })
+            .unwrap();
+        mid_store
+            .append(&SessionRecord::HandoffTo {
+                next_session_id: "tip".into(),
+                reason: "context_handoff".into(),
+                ts: 30,
+            })
+            .unwrap();
 
         let tip_store = SessionStore::create("tip", Some(&ws)).unwrap();
-        tip_store.append(&SessionRecord::LinkedFrom { prev_session_id: "mid".into(), reason: "context_handoff".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 31 }).unwrap();
-        tip_store.append(&SessionRecord::User { text: "[system] continue".into(), ts: 32 }).unwrap();
+        tip_store
+            .append(&SessionRecord::LinkedFrom {
+                prev_session_id: "mid".into(),
+                reason: "context_handoff".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 31,
+            })
+            .unwrap();
+        tip_store
+            .append(&SessionRecord::User {
+                text: "[system] continue".into(),
+                ts: 32,
+            })
+            .unwrap();
 
         let solo_store = SessionStore::create("solo", Some(&ws)).unwrap();
-        solo_store.append(&SessionRecord::User { text: "hello".into(), ts: 5 }).unwrap();
+        solo_store
+            .append(&SessionRecord::User {
+                text: "hello".into(),
+                ts: 5,
+            })
+            .unwrap();
 
         let list = list_sessions(Some(&ws)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(list.len(), 2, "chain must collapse to one entry: {list:?}");
-        let tip = list.iter().find(|s| s.session_id == "tip").expect("tip entry");
-        assert_eq!(tip.title, "build the feature", "tip inherits the root's title");
+        let tip = list
+            .iter()
+            .find(|s| s.session_id == "tip")
+            .expect("tip entry");
+        assert_eq!(
+            tip.title, "build the feature",
+            "tip inherits the root's title"
+        );
         assert_eq!(tip.turn_count, 3, "turn_count sums the whole chain");
         assert!(list.iter().any(|s| s.session_id == "solo"));
-        assert!(!list.iter().any(|s| s.session_id == "root" || s.session_id == "mid"));
+        assert!(!list
+            .iter()
+            .any(|s| s.session_id == "root" || s.session_id == "mid"));
     }
 
     #[test]
@@ -922,14 +1042,8 @@ mod tests {
         assert_eq!(history[2].role, "user");
         // steer1 text block + steer2 text block + attachment reference block
         assert_eq!(history[2].content.len(), 3);
-        assert_eq!(
-            history[2].content[0].get_text().unwrap(),
-            "steer1"
-        );
-        assert_eq!(
-            history[2].content[1].get_text().unwrap(),
-            "steer2"
-        );
+        assert_eq!(history[2].content[0].get_text().unwrap(), "steer1");
+        assert_eq!(history[2].content[1].get_text().unwrap(), "steer2");
     }
 
     #[test]
@@ -952,10 +1066,7 @@ mod tests {
         let history = history_from_records(&recs);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content.len(), 2);
-        assert_eq!(
-            history[0].content[1].get_text().unwrap(),
-            "steer"
-        );
+        assert_eq!(history[0].content[1].get_text().unwrap(), "steer");
     }
 
     #[test]
@@ -983,8 +1094,15 @@ mod tests {
         // Round-trip
         let back: SessionRecord = serde_json::from_str(&json).unwrap();
         match back {
-            SessionRecord::Compacted { summary, tail_turns, ts } => {
-                assert_eq!(summary, "User asked to implement feature X. Files changed: src/foo.rs.");
+            SessionRecord::Compacted {
+                summary,
+                tail_turns,
+                ts,
+            } => {
+                assert_eq!(
+                    summary,
+                    "User asked to implement feature X. Files changed: src/foo.rs."
+                );
                 assert_eq!(tail_turns, 0);
                 assert_eq!(ts, 100);
             }
@@ -1003,13 +1121,21 @@ mod tests {
             ts: 42,
         };
         let json = serde_json::to_string(&rec).unwrap();
-        assert!(json.contains("\"kind\":\"continuation_judge\""), "got: {json}");
+        assert!(
+            json.contains("\"kind\":\"continuation_judge\""),
+            "got: {json}"
+        );
         assert!(json.contains("\"verdict\":\"continue\""), "got: {json}");
         assert!(json.contains("\"nudged\":true"), "got: {json}");
 
         let back: SessionRecord = serde_json::from_str(&json).unwrap();
         match back {
-            SessionRecord::ContinuationJudge { verdict, nudged, streak, ts } => {
+            SessionRecord::ContinuationJudge {
+                verdict,
+                nudged,
+                streak,
+                ts,
+            } => {
                 assert_eq!(verdict, "continue");
                 assert!(nudged);
                 assert_eq!(streak, 1);
@@ -1038,7 +1164,12 @@ mod tests {
 
         let back: SessionRecord = serde_json::from_str(&json).unwrap();
         match back {
-            SessionRecord::Status { total_input_tokens, total_output_tokens, total_cost, .. } => {
+            SessionRecord::Status {
+                total_input_tokens,
+                total_output_tokens,
+                total_cost,
+                ..
+            } => {
                 assert_eq!(total_input_tokens, 1500);
                 assert_eq!(total_output_tokens, 300);
                 assert_eq!(total_cost, Some(0.0045));
@@ -1052,7 +1183,11 @@ mod tests {
         // Lines written before tail_turns / context_tokens existed must load.
         let old_compacted = r#"{"kind":"compacted","summary":"old summary","ts":1}"#;
         match serde_json::from_str::<SessionRecord>(old_compacted).unwrap() {
-            SessionRecord::Compacted { summary, tail_turns, .. } => {
+            SessionRecord::Compacted {
+                summary,
+                tail_turns,
+                ..
+            } => {
                 assert_eq!(summary, "old summary");
                 assert_eq!(tail_turns, 0);
             }
@@ -1060,7 +1195,11 @@ mod tests {
         }
         let old_status = r#"{"kind":"status","session_id":"s1","total_input_tokens":10,"total_output_tokens":5,"total_cost":0.01,"ts":2}"#;
         match serde_json::from_str::<SessionRecord>(old_status).unwrap() {
-            SessionRecord::Status { context_tokens, total_input_tokens, .. } => {
+            SessionRecord::Status {
+                context_tokens,
+                total_input_tokens,
+                ..
+            } => {
                 assert_eq!(context_tokens, None);
                 assert_eq!(total_input_tokens, 10);
             }
@@ -1100,14 +1239,20 @@ mod tests {
 
     fn user_turn(text: &str, ts: u64) -> SessionRecord {
         SessionRecord::Turn {
-            message: Message { role: "user".into(), content: vec![ContentBlock::text(text)] },
+            message: Message {
+                role: "user".into(),
+                content: vec![ContentBlock::text(text)],
+            },
             ts,
         }
     }
 
     fn assistant_turn(text: &str, ts: u64) -> SessionRecord {
         SessionRecord::Turn {
-            message: Message { role: "assistant".into(), content: vec![ContentBlock::text(text)] },
+            message: Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::text(text)],
+            },
             ts,
         }
     }
@@ -1129,13 +1274,20 @@ mod tests {
             assistant_turn("old answer", 2),
             user_turn("recent question", 3),
             assistant_turn("recent answer", 4),
-            SessionRecord::Compacted { summary: "S".into(), tail_turns: 2, ts: 5 },
+            SessionRecord::Compacted {
+                summary: "S".into(),
+                tail_turns: 2,
+                ts: 5,
+            },
             user_turn("post-compact", 6),
         ];
         let history = history_from_records(&recs);
         // summary + 2 tail turns + 1 post-compact
         assert_eq!(history.len(), 4);
-        assert!(history[0].content[0].get_text().unwrap().starts_with("[Contexto anterior compactado]"));
+        assert!(history[0].content[0]
+            .get_text()
+            .unwrap()
+            .starts_with("[Contexto anterior compactado]"));
         assert_eq!(history[1].content[0].get_text().unwrap(), "recent question");
         assert_eq!(history[2].content[0].get_text().unwrap(), "recent answer");
         assert_eq!(history[3].content[0].get_text().unwrap(), "post-compact");
@@ -1150,7 +1302,11 @@ mod tests {
             assistant_turn("calling tool", 2),
             tool_result_turn(3),
             assistant_turn("final answer", 4),
-            SessionRecord::Compacted { summary: "S".into(), tail_turns: 2, ts: 5 },
+            SessionRecord::Compacted {
+                summary: "S".into(),
+                tail_turns: 2,
+                ts: 5,
+            },
         ];
         let start = tail_start_index(&recs, 4, 2);
         assert_eq!(start, 0, "tail must expand back to the real user turn q1");
@@ -1163,9 +1319,17 @@ mod tests {
     fn tail_dropped_when_no_user_turn_exists() {
         let recs = vec![
             assistant_turn("orphan assistant", 1),
-            SessionRecord::Compacted { summary: "S".into(), tail_turns: 1, ts: 2 },
+            SessionRecord::Compacted {
+                summary: "S".into(),
+                tail_turns: 1,
+                ts: 2,
+            },
         ];
-        assert_eq!(tail_start_index(&recs, 1, 1), 1, "no user turn — tail dropped");
+        assert_eq!(
+            tail_start_index(&recs, 1, 1),
+            1,
+            "no user turn — tail dropped"
+        );
         let history = history_from_records(&recs);
         assert_eq!(history.len(), 1, "only the summary message");
     }
@@ -1174,11 +1338,17 @@ mod tests {
     fn history_from_records_with_compacted_returns_only_messages_after() {
         let recs = vec![
             SessionRecord::Turn {
-                message: Message { role: "user".into(), content: vec![ContentBlock::text("hello")] },
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("hello")],
+                },
                 ts: 1,
             },
             SessionRecord::Turn {
-                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("hi there")] },
+                message: Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text("hi there")],
+                },
                 ts: 2,
             },
             SessionRecord::Compacted {
@@ -1187,17 +1357,27 @@ mod tests {
                 ts: 3,
             },
             SessionRecord::Turn {
-                message: Message { role: "user".into(), content: vec![ContentBlock::text("new question")] },
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("new question")],
+                },
                 ts: 4,
             },
             SessionRecord::Turn {
-                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("new answer")] },
+                message: Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text("new answer")],
+                },
                 ts: 5,
             },
         ];
         let history = history_from_records(&recs);
         // Should have: 1 summary user message + 2 turns after compacted
-        assert_eq!(history.len(), 3, "should have summary + 2 post-compact messages");
+        assert_eq!(
+            history.len(),
+            3,
+            "should have summary + 2 post-compact messages"
+        );
         assert_eq!(
             history[0].content[0].get_text().unwrap(),
             "[Contexto anterior compactado]\nUser greeted the agent."
@@ -1212,11 +1392,17 @@ mod tests {
     fn history_from_records_without_compacted_returns_all() {
         let recs = vec![
             SessionRecord::Turn {
-                message: Message { role: "user".into(), content: vec![ContentBlock::text("q1")] },
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("q1")],
+                },
                 ts: 1,
             },
             SessionRecord::Turn {
-                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("a1")] },
+                message: Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text("a1")],
+                },
                 ts: 2,
             },
         ];
@@ -1231,19 +1417,36 @@ mod tests {
         let recs = vec![
             // Before first compact
             SessionRecord::Turn {
-                message: Message { role: "user".into(), content: vec![ContentBlock::text("old")] },
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("old")],
+                },
                 ts: 1,
             },
-            SessionRecord::Compacted { summary: "First compact".into(), tail_turns: 0, ts: 2 },
+            SessionRecord::Compacted {
+                summary: "First compact".into(),
+                tail_turns: 0,
+                ts: 2,
+            },
             // Between compacts
             SessionRecord::Turn {
-                message: Message { role: "user".into(), content: vec![ContentBlock::text("middle")] },
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("middle")],
+                },
                 ts: 3,
             },
-            SessionRecord::Compacted { summary: "Second compact".into(), tail_turns: 0, ts: 4 },
+            SessionRecord::Compacted {
+                summary: "Second compact".into(),
+                tail_turns: 0,
+                ts: 4,
+            },
             // After last compact
             SessionRecord::Turn {
-                message: Message { role: "user".into(), content: vec![ContentBlock::text("recent")] },
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("recent")],
+                },
                 ts: 5,
             },
         ];
@@ -1251,7 +1454,10 @@ mod tests {
         // Summary from last compact + the turn after it
         assert_eq!(history.len(), 2, "should use LAST compact's summary");
         assert!(
-            history[0].content[0].get_text().unwrap().contains("Second compact"),
+            history[0].content[0]
+                .get_text()
+                .unwrap()
+                .contains("Second compact"),
             "summary should be from the last compact"
         );
         assert_eq!(history[1].content[0].get_text().unwrap(), "recent");
@@ -1291,9 +1497,11 @@ mod tests {
 
     #[test]
     fn cumulative_stats_no_status_records() {
-        let recs = vec![
-            SessionRecord::Meta { session_id: "s1".into(), created_at: 1, workspace: None },
-        ];
+        let recs = vec![SessionRecord::Meta {
+            session_id: "s1".into(),
+            created_at: 1,
+            workspace: None,
+        }];
         let (input, output, cost, ..) = cumulative_stats(&recs);
         assert_eq!(input, 0);
         assert_eq!(output, 0);
@@ -1302,19 +1510,17 @@ mod tests {
 
     #[test]
     fn cumulative_stats_without_cost_returns_none() {
-        let recs = vec![
-            SessionRecord::Status {
-                session_id: "s1".into(),
-                total_input_tokens: 500,
-                total_output_tokens: 100,
-                context_tokens: None,
-                total_cost: None,
-                total_cost_input: None,
-                total_cost_output: None,
-                total_cost_cache_read: None,
-                ts: 5,
-            },
-        ];
+        let recs = vec![SessionRecord::Status {
+            session_id: "s1".into(),
+            total_input_tokens: 500,
+            total_output_tokens: 100,
+            context_tokens: None,
+            total_cost: None,
+            total_cost_input: None,
+            total_cost_output: None,
+            total_cost_cache_read: None,
+            ts: 5,
+        }];
         let (_, _, cost, ..) = cumulative_stats(&recs);
         assert_eq!(cost, None);
     }
@@ -1354,7 +1560,11 @@ mod tests {
     #[test]
     fn linked_from_helpers() {
         let recs = vec![
-            SessionRecord::Meta { session_id: "s1".into(), created_at: 1, workspace: None },
+            SessionRecord::Meta {
+                session_id: "s1".into(),
+                created_at: 1,
+                workspace: None,
+            },
             SessionRecord::LinkedFrom {
                 prev_session_id: "parent".into(),
                 reason: "golden_flip".into(),
@@ -1390,16 +1600,21 @@ mod tests {
 
     #[test]
     fn handoff_to_helper() {
-        let recs = vec![
-            SessionRecord::HandoffTo { next_session_id: "next-id".into(), reason: "context_handoff".into(), ts: 42 },
-        ];
+        let recs = vec![SessionRecord::HandoffTo {
+            next_session_id: "next-id".into(),
+            reason: "context_handoff".into(),
+            ts: 42,
+        }];
         assert_eq!(handoff_to(&recs), Some("next-id".into()));
         assert_eq!(handoff_to(&[]), None);
     }
 
     #[test]
     fn handoff_record_roundtrip() {
-        let rec = SessionRecord::Handoff { text: "## Purpose\nDo X".into(), ts: 99 };
+        let rec = SessionRecord::Handoff {
+            text: "## Purpose\nDo X".into(),
+            ts: 99,
+        };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"handoff\""));
         let back: SessionRecord = serde_json::from_str(&json).unwrap();
@@ -1414,11 +1629,32 @@ mod tests {
         // Verify the match arms also handle LinkedFrom, HandoffTo, Handoff
         // at the new timestamp arms (line ~584).
         let recs = vec![
-            SessionRecord::Meta { session_id: "sx".into(), created_at: 1, workspace: Some("/tmp/test".into()) },
-            SessionRecord::User { text: "test".into(), ts: 2 },
-            SessionRecord::LinkedFrom { prev_session_id: "p".into(), reason: "plan_execution".into(), golden_cycle: 0, golden_stalls: 0, golden_last_pending: vec![], ts: 3 },
-            SessionRecord::HandoffTo { next_session_id: "n".into(), reason: "context_handoff".into(), ts: 4 },
-            SessionRecord::Handoff { text: "doc".into(), ts: 5 },
+            SessionRecord::Meta {
+                session_id: "sx".into(),
+                created_at: 1,
+                workspace: Some("/tmp/test".into()),
+            },
+            SessionRecord::User {
+                text: "test".into(),
+                ts: 2,
+            },
+            SessionRecord::LinkedFrom {
+                prev_session_id: "p".into(),
+                reason: "plan_execution".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 3,
+            },
+            SessionRecord::HandoffTo {
+                next_session_id: "n".into(),
+                reason: "context_handoff".into(),
+                ts: 4,
+            },
+            SessionRecord::Handoff {
+                text: "doc".into(),
+                ts: 5,
+            },
         ];
         // Simulate what list_sessions does: iterate and extract ts. If any arm
         // panics we'd catch it here.

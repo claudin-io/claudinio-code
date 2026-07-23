@@ -19,8 +19,7 @@ use tokio::sync::Mutex;
 
 /// Shared LRU cache of parsed session records (same shape as
 /// `AppState.records_cache`).
-pub type RecordsCache =
-    Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>;
+pub type RecordsCache = Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>;
 
 /// The `AppState` maps a transition needs, cloned before `tokio::spawn` so the
 /// driver loop can link sessions without borrowing Tauri state.
@@ -45,9 +44,8 @@ pub async fn link_session(
     let new_id = uuid::Uuid::new_v4().to_string();
 
     // Load old records once for copying tasks and base_commit.
-    let old_records =
-        persist::load_records_cached(&old_handle.store_path, &maps.records_cache)
-            .unwrap_or_default();
+    let old_records = persist::load_records_cached(&old_handle.store_path, &maps.records_cache)
+        .unwrap_or_default();
 
     // 1. Append HandoffTo on the old session (superseded).
     let old_store = SessionStore {
@@ -153,19 +151,14 @@ pub fn resolve_first_message(
             let content = plan.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
             compose_builder_kickoff(path.as_deref(), content.as_deref())
         }
-        HandoffReason::GoldenFlip | HandoffReason::ContextHandoff => {
-            spec.first_message.clone()
-        }
+        HandoffReason::GoldenFlip | HandoffReason::ContextHandoff => spec.first_message.clone(),
     }
 }
 
 /// The first message for a Builder session kicked off from a Brain plan.
 /// Carries the plan inline (the plan is the handoff document) plus the
 /// execution contract.
-pub fn compose_builder_kickoff(
-    plan_file: Option<&str>,
-    plan_content: Option<&str>,
-) -> String {
+pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&str>) -> String {
     let mut msg = String::from(
         "[system] You are in Builder mode, in a fresh session that continues a \
          planning session. The plan below and the carried-over task list are your \

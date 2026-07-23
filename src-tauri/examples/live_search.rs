@@ -27,10 +27,15 @@ fn main() {
         let qvec = embedder
             .as_mut()
             .map(|e| e.encode_query(query).expect("encode query"));
-        let results = db.search_hybrid(query, qvec.as_deref(), 10).expect("search");
+        let results = db
+            .search_hybrid(query, qvec.as_deref(), 10)
+            .expect("search");
         println!("query: {query} -> {} results", results.len());
         for r in results.iter().take(5) {
-            println!("  {:.3} [{}]  {}  {}", r.score, r.match_type, r.file_path, r.name);
+            println!(
+                "  {:.3} [{}]  {}  {}",
+                r.score, r.match_type, r.file_path, r.name
+            );
         }
     }
 }

@@ -504,7 +504,7 @@ describe("ContentViewerModal", () => {
 
   it("creates editor with sepia monaco theme when theme is sepia", async () => {
     vi.mocked(readFile).mockResolvedValue("code");
-    vi.mocked(theme).mockReturnValue("sepia");
+    vi.mocked(theme).mockReturnValue("claudinio-sepia");
 
     const onClose = vi.fn();
     render(
@@ -529,7 +529,7 @@ describe("ContentViewerModal", () => {
 
   it("creates editor with light monaco theme when theme is light", async () => {
     vi.mocked(readFile).mockResolvedValue("code");
-    vi.mocked(theme).mockReturnValue("light");
+    vi.mocked(theme).mockReturnValue("claudinio-light");
 
     const onClose = vi.fn();
     render(

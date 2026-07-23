@@ -114,13 +114,28 @@ mod tests {
 
     #[test]
     fn split_identifier_words_camel_snake_kebab_acronym_digits() {
-        assert_eq!(split_identifier_words("getUserSettings"), vec!["get", "user", "settings"]);
+        assert_eq!(
+            split_identifier_words("getUserSettings"),
+            vec!["get", "user", "settings"]
+        );
         assert_eq!(split_identifier_words("HTTPServer"), vec!["http", "server"]);
         assert_eq!(split_identifier_words("v2Handler"), vec!["v2", "handler"]);
-        assert_eq!(split_identifier_words("delete_symbols_for_file"), vec!["delete", "symbols", "for", "file"]);
-        assert_eq!(split_identifier_words("kebab-case-name"), vec!["kebab", "case", "name"]);
-        assert_eq!(split_identifier_words("dotted.key.path"), vec!["dotted", "key", "path"]);
-        assert_eq!(split_identifier_words("base64Encode"), vec!["base64", "encode"]);
+        assert_eq!(
+            split_identifier_words("delete_symbols_for_file"),
+            vec!["delete", "symbols", "for", "file"]
+        );
+        assert_eq!(
+            split_identifier_words("kebab-case-name"),
+            vec!["kebab", "case", "name"]
+        );
+        assert_eq!(
+            split_identifier_words("dotted.key.path"),
+            vec!["dotted", "key", "path"]
+        );
+        assert_eq!(
+            split_identifier_words("base64Encode"),
+            vec!["base64", "encode"]
+        );
         assert_eq!(split_identifier_words("parseJSON"), vec!["parse", "json"]);
         // 1-char words dropped, duplicates removed.
         assert_eq!(split_identifier_words("x_y_data_data"), vec!["data"]);

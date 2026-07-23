@@ -6,7 +6,10 @@ use crate::commands::tasks::TaskItem;
 
 /// Return the current list of tasks from the session JSONL.
 pub fn execute_get(ctx: &crate::agent::tools::ToolContext) -> Result<String, String> {
-    let path = ctx.session_store_path.as_ref().ok_or("session_store_path not set")?;
+    let path = ctx
+        .session_store_path
+        .as_ref()
+        .ok_or("session_store_path not set")?;
     let tasks = crate::commands::tasks::load_last_tasks(Path::new(path))?;
     Ok(serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "[]".into()))
 }
@@ -22,7 +25,10 @@ pub fn execute_set(
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
     check_brain_lld_gate(ctx)?;
-    let path = ctx.session_store_path.as_ref().ok_or("session_store_path not set")?;
+    let path = ctx
+        .session_store_path
+        .as_ref()
+        .ok_or("session_store_path not set")?;
     let prev = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
@@ -42,7 +48,11 @@ pub fn execute_set(
             preserved
         ));
     }
-    Ok(format!("Tasks updated: {} task(s) saved.{}", merged.len(), note))
+    Ok(format!(
+        "Tasks updated: {} task(s) saved.{}",
+        merged.len(),
+        note
+    ))
 }
 
 /// Brain-mode gate: tasks may only be created once the most recent plan file
@@ -59,11 +69,13 @@ fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext) -> Result<(), St
         None => return Ok(()),
     };
     match latest_plan_path(root, ctx.plan_save_path.as_deref()) {
-        None => Err("tasks_set rejected: no plan file exists yet. In Brain mode tasks may only \
+        None => Err(
+            "tasks_set rejected: no plan file exists yet. In Brain mode tasks may only \
                      be created after the plan is complete: write the Solution Design via \
                      write_plan, then call write_plan again with the full content plus a \
                      '## Low-Level Design' section, then retry tasks_set."
-            .into()),
+                .into(),
+        ),
         Some(path) => {
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| format!("tasks_set: cannot read plan {}: {e}", path.display()))?;
@@ -91,13 +103,20 @@ fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext) -> Result<(), St
 /// Returns the sanitized list and how many ids were renamed.
 fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<TaskItem>, usize) {
     use std::collections::HashSet;
-    let known_golden: HashSet<&str> = prev.iter().filter(|t| is_golden(t)).map(|t| t.id.as_str()).collect();
+    let known_golden: HashSet<&str> = prev
+        .iter()
+        .filter(|t| is_golden(t))
+        .map(|t| t.id.as_str())
+        .collect();
     let mut renamed = 0;
     let sanitized = incoming
         .into_iter()
         .map(|mut t| {
             if is_golden(&t) && !known_golden.contains(t.id.as_str()) {
-                t.id = format!("task-{}", &t.id[crate::agent::session::GOLDEN_TASK_PREFIX.len()..]);
+                t.id = format!(
+                    "task-{}",
+                    &t.id[crate::agent::session::GOLDEN_TASK_PREFIX.len()..]
+                );
                 renamed += 1;
             }
             t
@@ -112,7 +131,10 @@ fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<T
 /// Golden tasks the model *did* include pass through unchanged, so status
 /// updates (todo→doing→done) still work. Returns the merged list and the
 /// number of golden tasks that had to be re-injected.
-pub fn merge_preserving_golden(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<TaskItem>, usize) {
+pub fn merge_preserving_golden(
+    prev: &[TaskItem],
+    incoming: Vec<TaskItem>,
+) -> (Vec<TaskItem>, usize) {
     use std::collections::HashSet;
     let incoming_ids: HashSet<&str> = incoming.iter().map(|t| t.id.as_str()).collect();
     let missing: Vec<TaskItem> = prev
@@ -157,22 +179,30 @@ pub fn create_golden_tasks(goals: &[String]) -> Vec<TaskItem> {
 
 /// Check if a task is a golden task (id starts with the golden prefix).
 pub fn is_golden(task: &TaskItem) -> bool {
-    task.id.starts_with(crate::agent::session::GOLDEN_TASK_PREFIX)
+    task.id
+        .starts_with(crate::agent::session::GOLDEN_TASK_PREFIX)
 }
 
 /// Get all golden tasks that are not yet 'done'.
 pub fn golden_tasks_remaining(tasks: &[TaskItem]) -> Vec<&TaskItem> {
-    tasks.iter().filter(|t| is_golden(t) && t.status != "done").collect()
+    tasks
+        .iter()
+        .filter(|t| is_golden(t) && t.status != "done")
+        .collect()
 }
 
 /// Get IDs of golden tasks that are not yet 'done'.
 pub fn golden_pending_ids(tasks: &[TaskItem]) -> Vec<String> {
-    golden_tasks_remaining(tasks).into_iter().map(|t| t.id.clone()).collect()
+    golden_tasks_remaining(tasks)
+        .into_iter()
+        .map(|t| t.id.clone())
+        .collect()
 }
 
 /// Create a simple slug from a string: lowercase, replace non-alphanumeric with hyphens, truncate to 40 chars.
 pub fn slugify(s: &str) -> String {
-    let slug: String = s.to_lowercase()
+    let slug: String = s
+        .to_lowercase()
         .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
@@ -212,7 +242,10 @@ mod lld_gate_tests {
     use std::sync::Arc;
 
     /// Tempdir workspace with a session JSONL; `mode` = None disables the gate.
-    fn ctx_for(name: &str, mode: Option<SessionMode>) -> (crate::agent::tools::ToolContext, std::path::PathBuf) {
+    fn ctx_for(
+        name: &str,
+        mode: Option<SessionMode>,
+    ) -> (crate::agent::tools::ToolContext, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("lld-gate-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let store = root.join("session.jsonl");
@@ -223,7 +256,9 @@ mod lld_gate_tests {
             workspace_root: Some(root.to_string_lossy().to_string()),
             embedding_model: Arc::new(tokio::sync::Mutex::new(None)),
             session_store_path: Some(store.to_string_lossy().to_string()),
-            read_tracker: Arc::new(tokio::sync::Mutex::new(crate::agent::tools::ReadTracker::default())),
+            read_tracker: Arc::new(tokio::sync::Mutex::new(
+                crate::agent::tools::ReadTracker::default(),
+            )),
             interrupt: None,
             agent_config: None,
             plan_save_path: None,
@@ -232,7 +267,9 @@ mod lld_gate_tests {
             mcp: None,
             mode_ctl: mode.map(|m| Arc::new(ModeCtl::new(m, ModeOrigin::Human))),
             index_progress: None,
-            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
         };
         (ctx, root)
     }
@@ -275,7 +312,10 @@ mod lld_gate_tests {
     #[test]
     fn brain_plan_with_lld_accepted() {
         let (ctx, root) = ctx_for("with-lld", Some(SessionMode::Brain));
-        write_plan_file(&root, "# Plan\n## Solution Design\nagreed\n## Low-Level Design\nsrc/foo.rs: add bar()\n");
+        write_plan_file(
+            &root,
+            "# Plan\n## Solution Design\nagreed\n## Low-Level Design\nsrc/foo.rs: add bar()\n",
+        );
         let res = execute_set(one_task(), &ctx);
         assert!(res.is_ok(), "unexpected error: {res:?}");
         std::fs::remove_dir_all(&root).ok();
@@ -316,8 +356,20 @@ mod golden_tests {
 
     #[test]
     fn test_is_golden() {
-        let golden = TaskItem { id: "golden-test-0".into(), title: "test".into(), description: "".into(), journal: vec![], status: "todo".into() };
-        let normal = TaskItem { id: "normal-task".into(), title: "test".into(), description: "".into(), journal: vec![], status: "todo".into() };
+        let golden = TaskItem {
+            id: "golden-test-0".into(),
+            title: "test".into(),
+            description: "".into(),
+            journal: vec![],
+            status: "todo".into(),
+        };
+        let normal = TaskItem {
+            id: "normal-task".into(),
+            title: "test".into(),
+            description: "".into(),
+            journal: vec![],
+            status: "todo".into(),
+        };
         assert!(is_golden(&golden));
         assert!(!is_golden(&normal));
     }
@@ -325,9 +377,27 @@ mod golden_tests {
     #[test]
     fn test_golden_tasks_remaining() {
         let tasks = vec![
-            TaskItem { id: "golden-a-0".into(), title: "test".into(), description: "".into(), journal: vec![], status: "todo".into() },
-            TaskItem { id: "golden-a-1".into(), title: "test".into(), description: "".into(), journal: vec![], status: "done".into() },
-            TaskItem { id: "normal-task".into(), title: "test".into(), description: "".into(), journal: vec![], status: "todo".into() },
+            TaskItem {
+                id: "golden-a-0".into(),
+                title: "test".into(),
+                description: "".into(),
+                journal: vec![],
+                status: "todo".into(),
+            },
+            TaskItem {
+                id: "golden-a-1".into(),
+                title: "test".into(),
+                description: "".into(),
+                journal: vec![],
+                status: "done".into(),
+            },
+            TaskItem {
+                id: "normal-task".into(),
+                title: "test".into(),
+                description: "".into(),
+                journal: vec![],
+                status: "todo".into(),
+            },
         ];
         let remaining = golden_tasks_remaining(&tasks);
         assert_eq!(remaining.len(), 1);
@@ -338,11 +408,21 @@ mod golden_tests {
     fn test_slugify() {
         assert_eq!(slugify("Code Coverage in 80%"), "code-coverage-in-80");
         assert_eq!(slugify("Hello World"), "hello-world");
-        assert!(slugify("a very long string with many many characters that exceeds forty chars total").len() <= 40);
+        assert!(
+            slugify("a very long string with many many characters that exceeds forty chars total")
+                .len()
+                <= 40
+        );
     }
 
     fn task(id: &str, status: &str) -> TaskItem {
-        TaskItem { id: id.into(), title: "t".into(), description: "".into(), journal: vec![], status: status.into() }
+        TaskItem {
+            id: id.into(),
+            title: "t".into(),
+            description: "".into(),
+            journal: vec![],
+            status: status.into(),
+        }
     }
 
     #[test]
@@ -402,8 +482,20 @@ mod golden_tests {
     #[test]
     fn test_golden_pending_ids() {
         let tasks = vec![
-            TaskItem { id: "golden-x-0".into(), title: "t".into(), description: "".into(), journal: vec![], status: "todo".into() },
-            TaskItem { id: "golden-x-1".into(), title: "t".into(), description: "".into(), journal: vec![], status: "done".into() },
+            TaskItem {
+                id: "golden-x-0".into(),
+                title: "t".into(),
+                description: "".into(),
+                journal: vec![],
+                status: "todo".into(),
+            },
+            TaskItem {
+                id: "golden-x-1".into(),
+                title: "t".into(),
+                description: "".into(),
+                journal: vec![],
+                status: "done".into(),
+            },
         ];
         let ids = golden_pending_ids(&tasks);
         assert_eq!(ids, vec!["golden-x-0"]);

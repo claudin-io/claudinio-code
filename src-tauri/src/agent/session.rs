@@ -103,7 +103,9 @@ fn compute_tail_turns(records: &[SessionRecord]) -> usize {
     let mut tokens = 0u64;
     let mut best = 0usize;
     for rec in records[start..].iter().rev() {
-        let SessionRecord::Turn { message, .. } = rec else { continue };
+        let SessionRecord::Turn { message, .. } = rec else {
+            continue;
+        };
         turns += 1;
         tokens += estimate_message_tokens(message);
         if tokens > TAIL_MAX_TOKENS {
@@ -135,7 +137,8 @@ pub async fn compact_history(
     steering: &Arc<SteeringCtl>,
 ) -> Result<String, String> {
     let jsonl_path = store.path.to_string_lossy().to_string();
-    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
+    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+        .unwrap_or_default();
     let tail_turns = compute_tail_turns(&records);
 
     let summary = subagent::run_summary_agent(
@@ -164,11 +167,23 @@ pub async fn compact_history(
     // Record the post-compaction context size so the UI meter drops even for
     // manual compaction (no run in flight). The estimate excludes the system
     // prompt/tools; the next run's Status corrects it with the real number.
-    let new_recs = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
+    let new_recs = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+        .unwrap_or_default();
     let new_history = crate::agent::persist::history_from_records(&new_recs);
     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(&new_recs);
     let new_context = estimate_tokens(&new_history, "", &[]);
-    write_status(store, ctx, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
+    write_status(
+        store,
+        ctx,
+        session_id,
+        ci,
+        co,
+        cc,
+        cci,
+        cco,
+        ccc,
+        Some(new_context),
+    );
 
     Ok(summary)
 }
@@ -602,21 +617,15 @@ File tools take absolute paths inside this root."
     }
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data")]
 pub enum AgentEvent {
     #[serde(rename = "TextStep")]
-    TextStep {
-        text: String,
-    },
+    TextStep { text: String },
     /// Live, accumulated snapshot of the assistant text currently streaming.
     /// Superseded by the next `TextStep`/`Done` for the same block; never persisted.
     #[serde(rename = "TextDelta")]
-    TextDelta {
-        text: String,
-    },
+    TextDelta { text: String },
     #[serde(rename = "Thinking")]
     Thinking(String),
     #[serde(rename = "ToolCall")]
@@ -790,7 +799,12 @@ pub type AnswerMap = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserAnswer>>>
 /// gets the full registry plus enter_plan_mode; Brain drops edit_file and
 /// gains write_plan + exit_plan_mode (bash stays but is gated to read-only
 /// commands in run_workflow).
-fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolDef], config: &AgentConfig) -> Vec<ToolDescription> {
+fn api_tools(
+    mode: SessionMode,
+    profile: PromptProfile,
+    mcp_defs: &[tools::ToolDef],
+    config: &AgentConfig,
+) -> Vec<ToolDescription> {
     let maxp = crate::agent::subagent::effective_max_parallel(config);
     if profile == PromptProfile::GitSync {
         return tools::get_defs(maxp)
@@ -830,7 +844,12 @@ fn api_tools(mode: SessionMode, profile: PromptProfile, mcp_defs: &[tools::ToolD
 }
 
 /// Push a message onto history and persist it as a Turn record.
-fn push_turn(history: &mut Vec<Message>, store: &SessionStore, ctx: &ToolContext, message: Message) {
+fn push_turn(
+    history: &mut Vec<Message>,
+    store: &SessionStore,
+    ctx: &ToolContext,
+    message: Message,
+) {
     store.try_append(&SessionRecord::Turn {
         message: message.clone(),
         ts: now_ms(),
@@ -844,7 +863,12 @@ fn push_turn(history: &mut Vec<Message>, store: &SessionStore, ctx: &ToolContext
 /// prevents two consecutive user turns (which can happen when the model returns
 /// nothing). Merges are intentionally not persisted as a new Turn record,
 /// keeping the JSONL history alternating on reopen as well.
-fn push_user_blocks(history: &mut Vec<Message>, store: &SessionStore, ctx: &ToolContext, blocks: Vec<ContentBlock>) {
+fn push_user_blocks(
+    history: &mut Vec<Message>,
+    store: &SessionStore,
+    ctx: &ToolContext,
+    blocks: Vec<ContentBlock>,
+) {
     if let Some(last) = history.last_mut() {
         if last.role == "user" {
             last.content.extend(blocks);
@@ -964,10 +988,18 @@ pub(crate) struct Pricing {
 
 pub(crate) fn model_pricing(model: &str) -> Pricing {
     if model.contains("claudius") {
-        Pricing { input: 3.00, cache_read: 0.90, output: 8.00 }
+        Pricing {
+            input: 3.00,
+            cache_read: 0.90,
+            output: 8.00,
+        }
     } else {
         // claudinio and unknown models: balanced tier
-        Pricing { input: 0.50, cache_read: 0.15, output: 2.00 }
+        Pricing {
+            input: 0.50,
+            cache_read: 0.15,
+            output: 2.00,
+        }
     }
 }
 
@@ -980,7 +1012,12 @@ pub(crate) struct CostBreakdown {
 
 /// Estimate cost breakdown for provider calls when the provider does not
 /// report a real cost breakdown.
-pub(crate) fn cost_breakdown_for(model: &str, input: u32, cache_read: u32, output: u32) -> CostBreakdown {
+pub(crate) fn cost_breakdown_for(
+    model: &str,
+    input: u32,
+    cache_read: u32,
+    output: u32,
+) -> CostBreakdown {
     let p = model_pricing(model);
     CostBreakdown {
         input: input as f64 * p.input / 1_000_000.0,
@@ -1032,8 +1069,13 @@ fn roll_cost(
     cumul_cost_cache: &mut Option<f64>,
 ) {
     let (ci, co, cc) = cost_or_estimate(
-        model, total_in, total_cache, total_out,
-        run_cost_input, run_cost_output, run_cost_cache,
+        model,
+        total_in,
+        total_cache,
+        total_out,
+        run_cost_input,
+        run_cost_output,
+        run_cost_cache,
     );
     *cumul_cost = Some(cumul_cost.unwrap_or(0.0) + ci + co + cc + subagent_cost);
     *cumul_cost_input = Some(cumul_cost_input.unwrap_or(0.0) + ci);
@@ -1144,13 +1186,24 @@ async fn stream_message_with_retry(
     interrupt: &AtomicBool,
     net_detail: &str,
 ) -> Result<provider::StreamOutput, String> {
-    const BACKOFFS_MS: [u64; 8] = [2_000, 5_000, 15_000, 30_000, 60_000, 120_000, 180_000, 300_000];
+    const BACKOFFS_MS: [u64; 8] = [
+        2_000, 5_000, 15_000, 30_000, 60_000, 120_000, 180_000, 300_000,
+    ];
     let mut attempt = 0usize;
     loop {
         assistant_text.clear();
         let result = provider::stream_message(
-            config, model, messages, tools, system, event_tx, session_id, assistant_text, interrupt,
-            true, net_detail,
+            config,
+            model,
+            messages,
+            tools,
+            system,
+            event_tx,
+            session_id,
+            assistant_text,
+            interrupt,
+            true,
+            net_detail,
         )
         .await;
         match result {
@@ -1333,8 +1386,8 @@ async fn maybe_context_handoff(
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-    let records =
-        crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
+    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+        .unwrap_or_default();
     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(&records);
     write_status(
         store,
@@ -1397,8 +1450,19 @@ pub async fn run_workflow(
     mode_ctl: &Arc<ModeCtl>,
 ) -> Result<RunOutcome, String> {
     run_workflow_with_profile(
-        config, history, user_message, attachment_blocks, event_tx, approvals, answers,
-        session_id, ctx, store, steering, mode_ctl, PromptProfile::Standard,
+        config,
+        history,
+        user_message,
+        attachment_blocks,
+        event_tx,
+        approvals,
+        answers,
+        session_id,
+        ctx,
+        store,
+        steering,
+        mode_ctl,
+        PromptProfile::Standard,
     )
     .await
 }
@@ -1433,29 +1497,41 @@ pub async fn run_workflow_with_profile(
     push_user_blocks(history, store, ctx, blocks);
 
     let skill_mgr = crate::agent::skills::SkillManager::new(
-        ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
+        ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let (mut cur_mode, _) = mode_ctl.get();
-    let mut system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile, subagent::effective_max_parallel(config));
+    let mut system = system_prompt(
+        ctx.workspace_root.as_deref(),
+        skills_section.as_deref(),
+        ctx.plan_save_path.as_deref(),
+        cur_mode,
+        profile,
+        subagent::effective_max_parallel(config),
+    );
     // MCP tool discovery already happened before `run_workflow` was called
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
     // snapshot read, not a fresh connection attempt.
-    let mcp_defs = ctx.mcp.as_ref().map(|m| m.cached_defs()).unwrap_or_default();
+    let mcp_defs = ctx
+        .mcp
+        .as_ref()
+        .map(|m| m.cached_defs())
+        .unwrap_or_default();
     let mut tools = api_tools(cur_mode, profile, &mcp_defs, config);
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
     // estimate is the fallback (take the max of the two for safety).
-    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default();
+    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+        .unwrap_or_default();
     let estimated = estimate_tokens(history, &system, &tools)
         .max(crate::agent::persist::last_context_tokens(&records).unwrap_or(0));
     // Context-handoff first (Standard sessions): the model compresses its own
     // context and the run continues in a fresh linked session. Compaction
     // below stays as the safety net when generation fails or doesn't apply.
     if let Some(outcome) = maybe_context_handoff(
-        config, profile, estimated, history, &system, store, ctx, event_tx, session_id,
-        steering, mode_ctl, 0, 0,
+        config, profile, estimated, history, &system, store, ctx, event_tx, session_id, steering,
+        mode_ctl, 0, 0,
     )
     .await
     {
@@ -1469,19 +1545,36 @@ pub async fn run_workflow_with_profile(
                 MAX_CONTEXT_TOKENS / 1000
             ),
         });
-        match compact_history(config, store, ctx, event_tx, approvals, answers, session_id, steering).await {
+        match compact_history(
+            config, store, ctx, event_tx, approvals, answers, session_id, steering,
+        )
+        .await
+        {
             Ok(_) => {
                 // Rebuild the history exactly as a session reload would:
                 // summary + kept-verbatim tail (which already contains the
                 // just-persisted user message) + nothing else.
                 *history = crate::agent::persist::history_from_records(
-                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                        .unwrap_or_default(),
                 );
                 let new_context = estimate_tokens(history, &system, &tools);
                 let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
-                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                        .unwrap_or_default(),
                 );
-                write_status(store, ctx, session_id, ci, co, cc, cci, cco, ccc, Some(new_context));
+                write_status(
+                    store,
+                    ctx,
+                    session_id,
+                    ci,
+                    co,
+                    cc,
+                    cci,
+                    cco,
+                    ccc,
+                    Some(new_context),
+                );
                 let _ = event_tx.send(AgentEvent::SessionStats {
                     input_tokens: ci as u32,
                     output_tokens: co as u32,
@@ -1513,10 +1606,13 @@ pub async fn run_workflow_with_profile(
     // exceeds the real model limit, return a friendly error instead of
     // calling the API and wasting tokens on a guaranteed failure.
     {
-        let post_compact = estimate_tokens(history, &system, &tools)
-            .max(crate::agent::persist::last_context_tokens(
-                &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
-            ).unwrap_or(0));
+        let post_compact = estimate_tokens(history, &system, &tools).max(
+            crate::agent::persist::last_context_tokens(
+                &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                    .unwrap_or_default(),
+            )
+            .unwrap_or(0),
+        );
         if post_compact >= MAX_CONTEXT_TOKENS {
             return Err(
                 "A mensagem excede o limite de contexto do modelo (200k tokens). \
@@ -1528,7 +1624,8 @@ pub async fn run_workflow_with_profile(
 
     // Load cumulative totals from the last Status record
     let cumul = crate::agent::persist::cumulative_stats(
-        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default()
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+            .unwrap_or_default(),
     );
     let mut cumul_in: u64 = cumul.0;
     let mut cumul_out: u64 = cumul.1;
@@ -1545,10 +1642,13 @@ pub async fn run_workflow_with_profile(
     let mut run_cost_output: Option<f64> = None;
     let mut run_cost_cache: Option<f64> = None;
     let mut subagent_cost: f64 = 0.0;
-    let emit_final_stats = |cumul_in: u64, cumul_out: u64, cumul_cost: Option<f64>,
-                            cumul_cost_input: Option<f64>, cumul_cost_output: Option<f64>,
-                            cumul_cost_cache: Option<f64>, last_context: u64|
-    {
+    let emit_final_stats = |cumul_in: u64,
+                            cumul_out: u64,
+                            cumul_cost: Option<f64>,
+                            cumul_cost_input: Option<f64>,
+                            cumul_cost_output: Option<f64>,
+                            cumul_cost_cache: Option<f64>,
+                            last_context: u64| {
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: cumul_in as u32,
             output_tokens: cumul_out as u32,
@@ -1575,10 +1675,12 @@ pub async fn run_workflow_with_profile(
     // the cycle/stall caps never reset across handoffs — without this every
     // golden flip would mint a fresh budget and the loop could run forever.
     let (linked_cycle, linked_stalls, linked_pending) = crate::agent::persist::linked_golden_state(
-        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+            .unwrap_or_default(),
     );
     let mut golden_cycle: u32 = crate::agent::persist::golden_cycle_count(
-        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+            .unwrap_or_default(),
     )
     .max(linked_cycle);
     let mut golden_last_pending: Vec<String> = linked_pending;
@@ -1602,7 +1704,8 @@ pub async fn run_workflow_with_profile(
     // changed file / commit since planning began, even across resumed runs.
     if let Some(sha) = ctx.base_commit.as_deref() {
         let already = crate::agent::persist::has_base_commit(
-            &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+            &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                .unwrap_or_default(),
         );
         if !already {
             store.try_append(&SessionRecord::BaseCommit {
@@ -1621,7 +1724,14 @@ pub async fn run_workflow_with_profile(
         let (mode_now, _) = mode_ctl.get();
         if mode_now != cur_mode {
             cur_mode = mode_now;
-            system = system_prompt(ctx.workspace_root.as_deref(), skills_section.as_deref(), ctx.plan_save_path.as_deref(), cur_mode, profile, subagent::effective_max_parallel(config));
+            system = system_prompt(
+                ctx.workspace_root.as_deref(),
+                skills_section.as_deref(),
+                ctx.plan_save_path.as_deref(),
+                cur_mode,
+                profile,
+                subagent::effective_max_parallel(config),
+            );
             tools = api_tools(cur_mode, profile, &mcp_defs, config);
         }
 
@@ -1644,10 +1754,18 @@ pub async fn run_workflow_with_profile(
                     MAX_CONTEXT_TOKENS / 1000
                 ),
             });
-            match compact_history(config, store, ctx, event_tx, approvals, answers, session_id, steering).await {
+            match compact_history(
+                config, store, ctx, event_tx, approvals, answers, session_id, steering,
+            )
+            .await
+            {
                 Ok(_) => {
                     *history = crate::agent::persist::history_from_records(
-                        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+                        &crate::agent::persist::load_records_cached(
+                            &store.path,
+                            &ctx.records_cache,
+                        )
+                        .unwrap_or_default(),
                     );
                     // Mode/system/tools may have changed mid-compact, refresh.
                     let (mode_now2, _) = mode_ctl.get();
@@ -1665,9 +1783,24 @@ pub async fn run_workflow_with_profile(
                     }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
-                        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
+                        &crate::agent::persist::load_records_cached(
+                            &store.path,
+                            &ctx.records_cache,
+                        )
+                        .unwrap_or_default(),
                     );
-                    write_status(store, ctx, session_id, ci, co, cc, cci, cco, ccc, Some(new_ctx));
+                    write_status(
+                        store,
+                        ctx,
+                        session_id,
+                        ci,
+                        co,
+                        cc,
+                        cci,
+                        cco,
+                        ccc,
+                        Some(new_ctx),
+                    );
                     let _ = event_tx.send(AgentEvent::SessionStats {
                         input_tokens: ci as u32,
                         output_tokens: co as u32,
@@ -1680,11 +1813,7 @@ pub async fn run_workflow_with_profile(
                         compact_threshold: COMPACT_THRESHOLD,
                     });
                     let _ = event_tx.send(AgentEvent::TextStep {
-                        text: format!(
-                            "__compact_done__:{}/{}",
-                            pre_tokens / 1000,
-                            new_ctx / 1000
-                        ),
+                        text: format!("__compact_done__:{}/{}", pre_tokens / 1000, new_ctx / 1000),
                     });
                 }
                 Err(e) => {
@@ -1698,10 +1827,13 @@ pub async fn run_workflow_with_profile(
         // Pre-flight guard (per-round): if compaction failed or context still
         // exceeds the limit, return friendly error.
         {
-            let cur_ctx = estimate_tokens(history, &system, &tools)
-                .max(crate::agent::persist::last_context_tokens(
-                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache).unwrap_or_default(),
-                ).unwrap_or(0));
+            let cur_ctx = estimate_tokens(history, &system, &tools).max(
+                crate::agent::persist::last_context_tokens(
+                    &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                        .unwrap_or_default(),
+                )
+                .unwrap_or(0),
+            );
             if cur_ctx >= MAX_CONTEXT_TOKENS {
                 return Err(
                     "A mensagem excede o limite de contexto do modelo (200k tokens). \
@@ -1768,8 +1900,13 @@ pub async fn run_workflow_with_profile(
 
         // Live stats for the context bar
         let (round_ci, round_co, round_cc) = cost_or_estimate(
-            resolved_model, total_in, total_cache, total_out,
-            run_cost_input, run_cost_output, run_cost_cache,
+            resolved_model,
+            total_in,
+            total_cache,
+            total_out,
+            run_cost_input,
+            run_cost_output,
+            run_cost_cache,
         );
         let live_cost_input = cumul_cost_input.unwrap_or(0.0) + round_ci;
         let live_cost_output = cumul_cost_output.unwrap_or(0.0) + round_co;
@@ -1777,7 +1914,9 @@ pub async fn run_workflow_with_profile(
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: total_in + cumul_in as u32,
             output_tokens: total_out + cumul_out as u32,
-            cumulative_cost: Some(cumul_cost.unwrap_or(0.0) + round_ci + round_co + round_cc + subagent_cost),
+            cumulative_cost: Some(
+                cumul_cost.unwrap_or(0.0) + round_ci + round_co + round_cc + subagent_cost,
+            ),
             cost_input: Some(live_cost_input),
             cost_output: Some(live_cost_output),
             cost_cache_read: Some(live_cost_cache),
@@ -1817,17 +1956,40 @@ pub async fn run_workflow_with_profile(
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
-                resolved_model, total_in, total_cache, total_out,
-                run_cost_input, run_cost_output, run_cost_cache,
+                resolved_model,
+                total_in,
+                total_cache,
+                total_out,
+                run_cost_input,
+                run_cost_output,
+                run_cost_cache,
                 subagent_cost,
-                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+                &mut cumul_cost,
+                &mut cumul_cost_input,
+                &mut cumul_cost_output,
+                &mut cumul_cost_cache,
             );
             write_status(
-                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+                store,
+                ctx,
+                session_id,
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                Some(last_context),
             );
-            emit_final_stats(cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
+            emit_final_stats(
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                last_context,
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -1892,17 +2054,40 @@ pub async fn run_workflow_with_profile(
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
-                resolved_model, total_in, total_cache, total_out,
-                run_cost_input, run_cost_output, run_cost_cache,
+                resolved_model,
+                total_in,
+                total_cache,
+                total_out,
+                run_cost_input,
+                run_cost_output,
+                run_cost_cache,
                 subagent_cost,
-                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+                &mut cumul_cost,
+                &mut cumul_cost_input,
+                &mut cumul_cost_output,
+                &mut cumul_cost_cache,
             );
             write_status(
-                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+                store,
+                ctx,
+                session_id,
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                Some(last_context),
             );
-            emit_final_stats(cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
+            emit_final_stats(
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                last_context,
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "max_tokens".into(),
                 text_output: last_text,
@@ -2009,14 +2194,16 @@ pub async fn run_workflow_with_profile(
             let golden_pending: Vec<String> = ctx
                 .session_store_path
                 .as_deref()
-                .and_then(|p| {
-                    crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok()
-                })
+                .and_then(|p| crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok())
                 .map(|t| crate::agent::tools::tasks::golden_pending_ids(&t))
                 .unwrap_or_default();
             if !golden_pending.is_empty() {
-                let max_cycles = config.max_golden_cycles.unwrap_or(DEFAULT_MAX_GOLDEN_CYCLES);
-                let max_stalls = config.max_golden_stalls.unwrap_or(DEFAULT_MAX_GOLDEN_STALLS);
+                let max_cycles = config
+                    .max_golden_cycles
+                    .unwrap_or(DEFAULT_MAX_GOLDEN_CYCLES);
+                let max_stalls = config
+                    .max_golden_stalls
+                    .unwrap_or(DEFAULT_MAX_GOLDEN_STALLS);
                 if golden_pending == golden_last_pending {
                     golden_stalls += 1;
                 } else {
@@ -2047,14 +2234,30 @@ pub async fn run_workflow_with_profile(
                     cumul_in += total_in as u64;
                     cumul_out += total_out as u64;
                     roll_cost(
-                        resolved_model, total_in, total_cache, total_out,
-                        run_cost_input, run_cost_output, run_cost_cache,
+                        resolved_model,
+                        total_in,
+                        total_cache,
+                        total_out,
+                        run_cost_input,
+                        run_cost_output,
+                        run_cost_cache,
                         subagent_cost,
-                        &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+                        &mut cumul_cost,
+                        &mut cumul_cost_input,
+                        &mut cumul_cost_output,
+                        &mut cumul_cost_cache,
                     );
                     write_status(
-                        store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
-                        cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+                        store,
+                        ctx,
+                        session_id,
+                        cumul_in,
+                        cumul_out,
+                        cumul_cost,
+                        cumul_cost_input,
+                        cumul_cost_output,
+                        cumul_cost_cache,
+                        Some(last_context),
                     );
                     let _ = event_tx.send(AgentEvent::GoldenLoop {
                         cycle: golden_cycle,
@@ -2109,9 +2312,7 @@ pub async fn run_workflow_with_profile(
                         crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok()
                     })
                     .unwrap_or_default();
-                let had_golden = tasks
-                    .iter()
-                    .any(crate::agent::tools::tasks::is_golden);
+                let had_golden = tasks.iter().any(crate::agent::tools::tasks::is_golden);
                 let plan_exists =
                     crate::agent::tools::finalize_plan::latest_plan_file(ctx).is_some();
                 if had_golden && plan_exists {
@@ -2132,9 +2333,7 @@ pub async fn run_workflow_with_profile(
                         continue;
                     }
                     // The model still skipped it — record the log ourselves.
-                    if let Some(outcome) =
-                        crate::agent::tools::finalize_plan::auto_finalize(ctx)
-                    {
+                    if let Some(outcome) = crate::agent::tools::finalize_plan::auto_finalize(ctx) {
                         let _ = event_tx.send(AgentEvent::TextStep {
                             text: format!(
                                 "📝 Implementation Log recorded to {}",
@@ -2159,17 +2358,40 @@ pub async fn run_workflow_with_profile(
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
-                resolved_model, total_in, total_cache, total_out,
-                run_cost_input, run_cost_output, run_cost_cache,
+                resolved_model,
+                total_in,
+                total_cache,
+                total_out,
+                run_cost_input,
+                run_cost_output,
+                run_cost_cache,
                 subagent_cost,
-                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+                &mut cumul_cost,
+                &mut cumul_cost_input,
+                &mut cumul_cost_output,
+                &mut cumul_cost_cache,
             );
             write_status(
-                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+                store,
+                ctx,
+                session_id,
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                Some(last_context),
             );
-            emit_final_stats(cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
+            emit_final_stats(
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                last_context,
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: stop_reason.into(),
                 text_output: last_text,
@@ -2303,7 +2525,10 @@ pub async fn run_workflow_with_profile(
             } else if !in_brain
                 && tool_name == "bash"
                 && permissions::bash_writes_files(
-                    tool_input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                    tool_input
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
                 )
             {
                 deny_tool(
@@ -2320,7 +2545,10 @@ pub async fn run_workflow_with_profile(
             } else if in_brain
                 && tool_name == "bash"
                 && permissions::bash_writes_files(
-                    tool_input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                    tool_input
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
                 )
             {
                 deny_tool(
@@ -2336,7 +2564,10 @@ pub async fn run_workflow_with_profile(
                 && tool_name == "bash"
                 && !matches!(
                     permissions::bash_permission(
-                        tool_input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                        tool_input
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
                         false
                     ),
                     PermissionLevel::Auto
@@ -2408,17 +2639,40 @@ pub async fn run_workflow_with_profile(
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
-                resolved_model, total_in, total_cache, total_out,
-                run_cost_input, run_cost_output, run_cost_cache,
+                resolved_model,
+                total_in,
+                total_cache,
+                total_out,
+                run_cost_input,
+                run_cost_output,
+                run_cost_cache,
                 subagent_cost,
-                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+                &mut cumul_cost,
+                &mut cumul_cost_input,
+                &mut cumul_cost_output,
+                &mut cumul_cost_cache,
             );
             write_status(
-                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+                store,
+                ctx,
+                session_id,
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                Some(last_context),
             );
-            emit_final_stats(cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
+            emit_final_stats(
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                last_context,
+            );
             // No AgentEvent::Done: the conversation continues in the linked
             // successor session — SessionLinked (emitted by link_session) is
             // what the UI reacts to.
@@ -2430,9 +2684,16 @@ pub async fn run_workflow_with_profile(
         let is_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
         if is_brain {
             let explore_tools = [
-                "spawn_agents", "semantic_search", "code_search", "grep",
-                "read_file", "file_outline", "list_dir", "symbol_lookup",
-                "go_to_definition", "find_references",
+                "spawn_agents",
+                "semantic_search",
+                "code_search",
+                "grep",
+                "read_file",
+                "file_outline",
+                "list_dir",
+                "symbol_lookup",
+                "go_to_definition",
+                "find_references",
             ];
             let is_explore_only = tool_uses.iter().all(|t| {
                 let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -2487,17 +2748,40 @@ pub async fn run_workflow_with_profile(
             cumul_in += total_in as u64;
             cumul_out += total_out as u64;
             roll_cost(
-                resolved_model, total_in, total_cache, total_out,
-                run_cost_input, run_cost_output, run_cost_cache,
+                resolved_model,
+                total_in,
+                total_cache,
+                total_out,
+                run_cost_input,
+                run_cost_output,
+                run_cost_cache,
                 subagent_cost,
-                &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+                &mut cumul_cost,
+                &mut cumul_cost_input,
+                &mut cumul_cost_output,
+                &mut cumul_cost_cache,
             );
             write_status(
-                store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+                store,
+                ctx,
+                session_id,
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                Some(last_context),
             );
-            emit_final_stats(cumul_in, cumul_out, cumul_cost,
-                cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
+            emit_final_stats(
+                cumul_in,
+                cumul_out,
+                cumul_cost,
+                cumul_cost_input,
+                cumul_cost_output,
+                cumul_cost_cache,
+                last_context,
+            );
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -2525,17 +2809,40 @@ pub async fn run_workflow_with_profile(
     cumul_in += total_in as u64;
     cumul_out += total_out as u64;
     roll_cost(
-        config.model_for_mode(cur_mode.as_str()), total_in, total_cache, total_out,
-        run_cost_input, run_cost_output, run_cost_cache,
+        config.model_for_mode(cur_mode.as_str()),
+        total_in,
+        total_cache,
+        total_out,
+        run_cost_input,
+        run_cost_output,
+        run_cost_cache,
         subagent_cost,
-        &mut cumul_cost, &mut cumul_cost_input, &mut cumul_cost_output, &mut cumul_cost_cache,
+        &mut cumul_cost,
+        &mut cumul_cost_input,
+        &mut cumul_cost_output,
+        &mut cumul_cost_cache,
     );
     write_status(
-        store, ctx, session_id, cumul_in, cumul_out, cumul_cost,
-        cumul_cost_input, cumul_cost_output, cumul_cost_cache, Some(last_context),
+        store,
+        ctx,
+        session_id,
+        cumul_in,
+        cumul_out,
+        cumul_cost,
+        cumul_cost_input,
+        cumul_cost_output,
+        cumul_cost_cache,
+        Some(last_context),
     );
-    emit_final_stats(cumul_in, cumul_out, cumul_cost,
-        cumul_cost_input, cumul_cost_output, cumul_cost_cache, last_context);
+    emit_final_stats(
+        cumul_in,
+        cumul_out,
+        cumul_cost,
+        cumul_cost_input,
+        cumul_cost_output,
+        cumul_cost_cache,
+        last_context,
+    );
     let _ = event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
@@ -2565,7 +2872,15 @@ pub(crate) async fn run_tool(
     // ask_user is inherently interactive: it never executes anything, it blocks
     // until the user answers in the UI (or the request is dropped).
     if tool_name == "ask_user" {
-        return ask_user(tool_name, tool_use_id, tool_input, event_tx, answers, session_id).await;
+        return ask_user(
+            tool_name,
+            tool_use_id,
+            tool_input,
+            event_tx,
+            answers,
+            session_id,
+        )
+        .await;
     }
 
     // YOLO mode: auto-approve tools not on the blacklist, treating
@@ -2612,7 +2927,12 @@ pub(crate) async fn run_tool(
                     });
                     tool_result_block(tool_use_id, &content)
                 }
-                Ok(ToolOutput::EditProposal { path, old_string, new_string, unified_diff }) => {
+                Ok(ToolOutput::EditProposal {
+                    path,
+                    old_string,
+                    new_string,
+                    unified_diff,
+                }) => {
                     let proposal = EditProposalData {
                         path: path.clone(),
                         old_string: old_string.clone(),
@@ -2740,38 +3060,40 @@ pub(crate) async fn run_tool(
                     });
 
                     match approve_rx.await {
-                        Ok(true) => match tools::execute(tool_name, tool_input.clone(), ctx).await {
-                            Ok(ToolOutput::Text { content }) => {
-                                let truncated = truncate(&content, 2000);
-                                let _ = event_tx.send(AgentEvent::ToolResult {
-                                    tool_id: tool_use_id.to_string(),
-                                    tool_name: tool_name.to_string(),
-                                    output: truncated,
-                                    error: None,
-                                });
-                                tool_result_block(tool_use_id, &content)
+                        Ok(true) => {
+                            match tools::execute(tool_name, tool_input.clone(), ctx).await {
+                                Ok(ToolOutput::Text { content }) => {
+                                    let truncated = truncate(&content, 2000);
+                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                        tool_id: tool_use_id.to_string(),
+                                        tool_name: tool_name.to_string(),
+                                        output: truncated,
+                                        error: None,
+                                    });
+                                    tool_result_block(tool_use_id, &content)
+                                }
+                                Ok(ToolOutput::EditProposal { .. }) => {
+                                    let err_msg: String =
+                                        "bash should not produce edit proposals".into();
+                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                        tool_id: tool_use_id.to_string(),
+                                        tool_name: tool_name.to_string(),
+                                        output: err_msg.clone(),
+                                        error: Some("unexpected output type".into()),
+                                    });
+                                    ContentBlock::tool_result(tool_use_id, &err_msg)
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                        tool_id: tool_use_id.to_string(),
+                                        tool_name: tool_name.to_string(),
+                                        output: String::new(),
+                                        error: Some(e.clone()),
+                                    });
+                                    ContentBlock::tool_result(tool_use_id, &format!("Error: {e}"))
+                                }
                             }
-                            Ok(ToolOutput::EditProposal { .. }) => {
-                                let err_msg: String =
-                                    "bash should not produce edit proposals".into();
-                                let _ = event_tx.send(AgentEvent::ToolResult {
-                                    tool_id: tool_use_id.to_string(),
-                                    tool_name: tool_name.to_string(),
-                                    output: err_msg.clone(),
-                                    error: Some("unexpected output type".into()),
-                                });
-                                ContentBlock::tool_result(tool_use_id, &err_msg)
-                            }
-                            Err(e) => {
-                                let _ = event_tx.send(AgentEvent::ToolResult {
-                                    tool_id: tool_use_id.to_string(),
-                                    tool_name: tool_name.to_string(),
-                                    output: String::new(),
-                                    error: Some(e.clone()),
-                                });
-                                ContentBlock::tool_result(tool_use_id, &format!("Error: {e}"))
-                            }
-                        },
+                        }
                         Ok(false) => {
                             let msg = "Command rejected by user".to_string();
                             let _ = event_tx.send(AgentEvent::ToolResult {
@@ -2782,9 +3104,7 @@ pub(crate) async fn run_tool(
                             });
                             ContentBlock::tool_result(tool_use_id, &msg)
                         }
-                        Err(_) => {
-                            ContentBlock::tool_result(tool_use_id, "Approval channel closed")
-                        }
+                        Err(_) => ContentBlock::tool_result(tool_use_id, "Approval channel closed"),
                     }
                 }
             }
@@ -2913,7 +3233,10 @@ pub(crate) async fn run_tool(
                                     output: String::new(),
                                     error: Some(e.clone()),
                                 });
-                                ContentBlock::tool_result(tool_use_id, &format!("Error applying: {e}"))
+                                ContentBlock::tool_result(
+                                    tool_use_id,
+                                    &format!("Error applying: {e}"),
+                                )
                             }
                         },
                         Ok(false) => {
@@ -3087,14 +3410,19 @@ fn handle_mode_switch(
                     golden_last_pending: vec![],
                 });
                 // Auto-commit the latest plan when exiting Brain mode
-                let auto_commit = ctx.agent_config.as_ref()
+                let auto_commit = ctx
+                    .agent_config
+                    .as_ref()
                     .map(|c| c.auto_commit_plan)
                     .unwrap_or(true);
                 if auto_commit {
                     if let Some(root) = &ctx.workspace_root {
                         let plan_save_path = ctx.plan_save_path.as_deref();
-                        if let Some(plan_path) = crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path) {
-                            let fname = plan_path.file_stem()
+                        if let Some(plan_path) =
+                            crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path)
+                        {
+                            let fname = plan_path
+                                .file_stem()
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("plan");
                             // filename format: YYYY-MM-DD_slug.md — strip date prefix
@@ -3105,15 +3433,18 @@ fn handle_mode_switch(
                             };
                             let commit_msg = format!("docs(plan): {}", slug);
                             let add = std::process::Command::new("git")
-                                .arg("-C").arg(root)
+                                .arg("-C")
+                                .arg(root)
                                 .arg("add")
                                 .arg(plan_path.to_string_lossy().as_ref())
                                 .output();
                             if add.is_ok() {
                                 let _ = std::process::Command::new("git")
-                                    .arg("-C").arg(root)
+                                    .arg("-C")
+                                    .arg(root)
                                     .arg("commit")
-                                    .arg("-m").arg(&commit_msg)
+                                    .arg("-m")
+                                    .arg(&commit_msg)
                                     .output();
                             }
                         }
@@ -3142,11 +3473,7 @@ fn handle_mode_switch(
 /// Se o sender for dropado (task abortada, lifecycle), recria o canal até
 /// o limite de tentativas — o gating deve ser quebrado apenas por uma
 /// resposta real do usuário ou por exaustão de retries.
-async fn await_user_answer(
-    answers: &AnswerMap,
-    session_id: &str,
-    tool_use_id: &str,
-) -> String {
+async fn await_user_answer(answers: &AnswerMap, session_id: &str, tool_use_id: &str) -> String {
     let key = format!("{session_id}:{tool_use_id}");
     let mut retries = 10usize;
     loop {
@@ -3203,7 +3530,9 @@ fn normalize_ask_user_questions(questions: &Value) -> Result<Value, String> {
     let mut out = Vec::with_capacity(arr.len());
     for (qi, q) in arr.iter().enumerate() {
         let at = |s: &str| format!("question {}: {s}", qi + 1);
-        let obj = q.as_object().ok_or_else(|| at("each question must be an object"))?;
+        let obj = q
+            .as_object()
+            .ok_or_else(|| at("each question must be an object"))?;
         let text = obj.get("question").and_then(|v| v.as_str()).unwrap_or("");
         if text.trim().is_empty() {
             return Err(at("'question' text must not be empty"));
@@ -3407,9 +3736,9 @@ mod tests {
 
     fn dummy_ctx() -> ToolContext {
         ToolContext {
-            records_cache: std::sync::Arc::new(std::sync::Mutex::new(
-                LruCache::new(NonZeroUsize::new(8).unwrap()),
-            )),
+            records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(8).unwrap(),
+            ))),
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
@@ -3466,13 +3795,21 @@ mod tests {
         // ("502 Bad Gateway"), which the old whole-string parse rejected —
         // the exact bug that aborted runs during claudin.io failover.
         assert!(is_retryable_error("API error: HTTP 502 Bad Gateway"));
-        assert!(is_retryable_error("API error: HTTP 503 Service Unavailable"));
-        assert!(is_retryable_error("API error: HTTP 529 <unknown status code>"));
+        assert!(is_retryable_error(
+            "API error: HTTP 503 Service Unavailable"
+        ));
+        assert!(is_retryable_error(
+            "API error: HTTP 529 <unknown status code>"
+        ));
         assert!(is_retryable_error("API error: HTTP 429 Too Many Requests"));
         // openai-protocol shape appends the body message after the status
-        assert!(is_retryable_error("API error: HTTP 502 Bad Gateway — upstream connect error"));
+        assert!(is_retryable_error(
+            "API error: HTTP 502 Bad Gateway — upstream connect error"
+        ));
         // mid-stream SSE overload errors are the same transient class
-        assert!(is_retryable_error("API error: overloaded_error — Overloaded"));
+        assert!(is_retryable_error(
+            "API error: overloaded_error — Overloaded"
+        ));
         // non-transient statuses must NOT retry
         assert!(!is_retryable_error("API error: HTTP 400 Bad Request"));
         assert!(!is_retryable_error("API error: HTTP 404 Not Found"));
@@ -3486,7 +3823,12 @@ mod tests {
             role: "user".into(),
             content: vec![ContentBlock::text("a")],
         }];
-        push_user_blocks(&mut history, &store, &dummy_ctx(), vec![ContentBlock::text("b")]);
+        push_user_blocks(
+            &mut history,
+            &store,
+            &dummy_ctx(),
+            vec![ContentBlock::text("b")],
+        );
         assert_eq!(history.len(), 1, "second user turn must merge, not append");
         assert_eq!(history[0].content.len(), 2);
         let _ = std::fs::remove_file(&store.path);
@@ -3499,7 +3841,12 @@ mod tests {
             role: "assistant".into(),
             content: vec![ContentBlock::text("a")],
         }];
-        push_user_blocks(&mut history, &store, &dummy_ctx(), vec![ContentBlock::text("b")]);
+        push_user_blocks(
+            &mut history,
+            &store,
+            &dummy_ctx(),
+            vec![ContentBlock::text("b")],
+        );
         assert_eq!(history.len(), 2, "user turn after assistant must append");
         assert_eq!(history[1].role, "user");
         let _ = std::fs::remove_file(&store.path);
@@ -3509,15 +3856,26 @@ mod tests {
     fn user_turn_carries_only_the_raw_message_no_injected_directive() {
         let store = tmp_store();
         let mut history: Vec<Message> = Vec::new();
-        push_user_blocks(&mut history, &store, &dummy_ctx(), vec![ContentBlock::text("O que este projeto faz?")]);
+        push_user_blocks(
+            &mut history,
+            &store,
+            &dummy_ctx(),
+            vec![ContentBlock::text("O que este projeto faz?")],
+        );
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].content.len(), 1, "no phase directive should be folded in");
+        assert_eq!(
+            history[0].content.len(),
+            1,
+            "no phase directive should be folded in"
+        );
         let _ = std::fs::remove_file(&store.path);
     }
 
     #[test]
     fn agent_event_round_trip_text_step() {
-        let ev = AgentEvent::TextStep { text: "hello".into() };
+        let ev = AgentEvent::TextStep {
+            text: "hello".into(),
+        };
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         assert!(matches!(back, AgentEvent::TextStep { text } if text == "hello"));
@@ -3525,7 +3883,9 @@ mod tests {
 
     #[test]
     fn agent_event_round_trip_text_delta() {
-        let ev = AgentEvent::TextDelta { text: "partial".into() };
+        let ev = AgentEvent::TextDelta {
+            text: "partial".into(),
+        };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["event"], "TextDelta");
         let back: AgentEvent = serde_json::from_value(json).unwrap();
@@ -3553,7 +3913,12 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         match back {
-            AgentEvent::ToolCall { session_id, tool_id, tool_name, .. } => {
+            AgentEvent::ToolCall {
+                session_id,
+                tool_id,
+                tool_name,
+                ..
+            } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(tool_id, "t1");
                 assert_eq!(tool_name, "read_file");
@@ -3586,7 +3951,12 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         match back {
-            AgentEvent::Done { stop_reason, input_tokens, output_tokens, .. } => {
+            AgentEvent::Done {
+                stop_reason,
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
                 assert_eq!(stop_reason, "end_turn");
                 assert_eq!(input_tokens, 10);
                 assert_eq!(output_tokens, 20);
@@ -3607,7 +3977,9 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         match back {
-            AgentEvent::SubagentStarted { subagent_id, name, .. } => {
+            AgentEvent::SubagentStarted {
+                subagent_id, name, ..
+            } => {
                 assert_eq!(subagent_id, "sa1");
                 assert_eq!(name, "explorer");
             }
@@ -3629,7 +4001,12 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         match back {
-            AgentEvent::SubagentDone { subagent_id, status, rounds, .. } => {
+            AgentEvent::SubagentDone {
+                subagent_id,
+                status,
+                rounds,
+                ..
+            } => {
                 assert_eq!(subagent_id, "sa1");
                 assert_eq!(status, "completed");
                 assert_eq!(rounds, 5);
@@ -3666,7 +4043,10 @@ mod tests {
 
     #[test]
     fn agent_event_round_trip_steering_injected() {
-        let ev = AgentEvent::SteeringInjected { text: "steer".into(), attachments: None };
+        let ev = AgentEvent::SteeringInjected {
+            text: "steer".into(),
+            attachments: None,
+        };
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         assert!(matches!(back, AgentEvent::SteeringInjected { text, .. } if text == "steer"));
@@ -3705,7 +4085,11 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         match back {
-            AgentEvent::AskUser { session_id, tool_id, .. } => {
+            AgentEvent::AskUser {
+                session_id,
+                tool_id,
+                ..
+            } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(tool_id, "t1");
             }
@@ -3730,7 +4114,10 @@ mod tests {
         }]);
         let out = normalize_ask_user_questions(&q).expect("should normalize");
         let opts = out[0]["options"].as_array().unwrap();
-        assert_eq!(opts[0], json!({"label": "Integrar Mermaid", "description": "add support"}));
+        assert_eq!(
+            opts[0],
+            json!({"label": "Integrar Mermaid", "description": "add support"})
+        );
         assert_eq!(opts[1], json!({"label": "So gerar .md"}));
         assert_eq!(opts[2], json!({"label": "Plain string option"}));
         assert_eq!(out[0]["question"], json!("Pick one"));
@@ -3752,7 +4139,8 @@ mod tests {
                 {"description": "Não é o Claudinio Code; você está no diretório errado. Cancele este patch."}
             ]
         }]);
-        let out = normalize_ask_user_questions(&q).expect("description-only options must normalize");
+        let out =
+            normalize_ask_user_questions(&q).expect("description-only options must normalize");
         let opts = out[0]["options"].as_array().unwrap();
         assert_eq!(opts.len(), 4);
         assert_eq!(
@@ -3859,7 +4247,9 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         match back {
-            AgentEvent::SessionStats { cumulative_cost, .. } => {
+            AgentEvent::SessionStats {
+                cumulative_cost, ..
+            } => {
                 assert_eq!(cumulative_cost, None);
             }
             _ => panic!("expected SessionStats"),
@@ -3898,17 +4288,26 @@ mod tests {
     #[test]
     fn compute_tail_turns_covers_last_two_exchanges() {
         let user = |t: &str| SessionRecord::Turn {
-            message: Message { role: "user".into(), content: vec![ContentBlock::text(t)] },
+            message: Message {
+                role: "user".into(),
+                content: vec![ContentBlock::text(t)],
+            },
             ts: 0,
         };
         let asst = |t: &str| SessionRecord::Turn {
-            message: Message { role: "assistant".into(), content: vec![ContentBlock::text(t)] },
+            message: Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::text(t)],
+            },
             ts: 0,
         };
         let recs = vec![
-            user("q1"), asst("a1"),
-            user("q2"), asst("a2"),
-            user("q3"), asst("a3"),
+            user("q1"),
+            asst("a1"),
+            user("q2"),
+            asst("a2"),
+            user("q3"),
+            asst("a3"),
         ];
         // Last 2 exchanges = q2..a3 = 4 Turn records
         assert_eq!(compute_tail_turns(&recs), 4);
@@ -3919,15 +4318,25 @@ mod tests {
         let big = "x".repeat((TAIL_MAX_TOKENS as usize) * 4); // way over budget alone
         let recs = vec![
             SessionRecord::Turn {
-                message: Message { role: "user".into(), content: vec![ContentBlock::text(big)] },
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text(big)],
+                },
                 ts: 0,
             },
             SessionRecord::Turn {
-                message: Message { role: "assistant".into(), content: vec![ContentBlock::text("a")] },
+                message: Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text("a")],
+                },
                 ts: 0,
             },
         ];
-        assert_eq!(compute_tail_turns(&recs), 0, "oversized tail must be dropped");
+        assert_eq!(
+            compute_tail_turns(&recs),
+            0,
+            "oversized tail must be dropped"
+        );
     }
 
     /// Estimate cost for provider calls when the provider does not report cost.
@@ -3941,14 +4350,20 @@ mod tests {
     fn cost_claudinio_rates() {
         // claudinio: $0.50/M input, $0.15/M cache read, $2.00/M output
         let cost = cost_for("claudinio", 1000, 0, 500);
-        assert!((cost - 0.0015).abs() < 0.0001, "expected ~$0.0015, got {cost}");
+        assert!(
+            (cost - 0.0015).abs() < 0.0001,
+            "expected ~$0.0015, got {cost}"
+        );
     }
 
     #[test]
     fn cost_claudius_rates() {
         // claudius: $3.00/M input, $0.90/M cache read, $8.00/M output
         let cost = cost_for("claudius", 1000, 0, 500);
-        assert!((cost - 0.007).abs() < 0.0001, "expected ~$0.007, got {cost}");
+        assert!(
+            (cost - 0.007).abs() < 0.0001,
+            "expected ~$0.007, got {cost}"
+        );
     }
 
     #[test]
@@ -4104,8 +4519,10 @@ mod judge_backend_tests {
         jsonl
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("turn")
-                && v.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            .filter(|v| {
+                v.get("kind").and_then(|k| k.as_str()) == Some("turn")
+                    && v.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            })
             .filter_map(|v| {
                 v.get("content").and_then(|c| c.as_array()).map(|blocks| {
                     blocks
@@ -4184,7 +4601,8 @@ mod golden_goal_tests {
 
     #[test]
     fn test_parse_goals_multiple() {
-        let (cleaned, goals) = parse_goals("<goal>coverage 80%</goal> and <goal>no lint errors</goal>");
+        let (cleaned, goals) =
+            parse_goals("<goal>coverage 80%</goal> and <goal>no lint errors</goal>");
         assert_eq!(goals.len(), 2);
         assert_eq!(goals[0], "coverage 80%");
         assert_eq!(goals[1], "no lint errors");
@@ -4229,7 +4647,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn brain_prompt_mandates_size_and_verbatim_assets() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Brain,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         // Size/dimensions must be a mandatory interview item.
         assert!(
             sys.contains("Sizing and layout"),
@@ -4248,7 +4673,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn brain_prompt_mandates_lld_stage() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Brain,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         assert!(
             sys.contains("## Low-Level Design"),
             "Brain prompt must require the Low-Level Design section"
@@ -4269,7 +4701,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn brain_prompt_encourages_mermaid_diagrams() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Brain,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         assert!(
             sys.contains("mermaid"),
             "Brain prompt must encourage expressing ideas with Mermaid diagrams"
@@ -4283,7 +4722,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn builder_prompt_mentions_lld_context() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         assert!(
             sys.contains("Low-Level Design"),
             "Builder prompt must point at the Low-Level Design as the technical spec"
@@ -4292,7 +4738,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn builder_prompt_requires_complete_subagent_spec() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         assert!(
             sys.contains("COMPLETE technical spec"),
             "Builder prompt must require complete subagent specs"
@@ -4305,7 +4758,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn system_prompt_warns_against_similar_to_guessing() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         assert!(
             sys.contains("similar to"),
             "subagent guidance must call out the 'similar to X' anti-pattern"
@@ -4318,7 +4778,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn git_sync_prompt_has_no_task_system_or_modes() {
-        let sys = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::GitSync, subagent::MAX_PARALLEL_AGENTS);
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::GitSync,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         assert!(
             !sys.contains("tasks_get") && !sys.contains("tasks_set"),
             "GitSync prompt must not mention the task system"
@@ -4335,7 +4802,12 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn git_sync_tools_are_bash_and_ask_user_only() {
-        let defs = api_tools(SessionMode::Builder, PromptProfile::GitSync, &[], &AgentConfig::default());
+        let defs = api_tools(
+            SessionMode::Builder,
+            PromptProfile::GitSync,
+            &[],
+            &AgentConfig::default(),
+        );
         let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names.len(),
@@ -4368,7 +4840,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             eprintln!("skipping: CLAUDINIO_API_KEY not set");
             return;
         };
-        let system = system_prompt(Some(ROOT), None, None, SessionMode::Brain, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
+        let system = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Brain,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
         let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
         let user = format!(
             "{SESSION_REQUEST}\n\n---\nDo NOT call any tool and do NOT write a plan. Instead, output \
@@ -4377,16 +4856,45 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
         let reply = one_shot(&cfg, &model, &system, &user, 1500)
             .await
             .expect("live brain call");
-        eprintln!("--- brain clarifying questions ---\n{reply}\n----------------------------------");
+        eprintln!(
+            "--- brain clarifying questions ---\n{reply}\n----------------------------------"
+        );
         let lc = reply.to_lowercase();
-        let asks_size = ["tamanho", "size", "dimens", "largura", "altura", "width", "height", "fullscreen", "tela cheia", "viewport", "margin", "margem"]
-            .iter()
-            .any(|k| lc.contains(k));
-        let asks_asset = ["ícone", "icone", "icon", "lucide", "notebook-pen", "svg", "url"]
-            .iter()
-            .any(|k| lc.contains(k));
-        assert!(asks_size, "Brain must interview about the modal size/dimensions");
-        assert!(asks_asset, "Brain must confirm/preserve the exact icon asset the user linked");
+        let asks_size = [
+            "tamanho",
+            "size",
+            "dimens",
+            "largura",
+            "altura",
+            "width",
+            "height",
+            "fullscreen",
+            "tela cheia",
+            "viewport",
+            "margin",
+            "margem",
+        ]
+        .iter()
+        .any(|k| lc.contains(k));
+        let asks_asset = [
+            "ícone",
+            "icone",
+            "icon",
+            "lucide",
+            "notebook-pen",
+            "svg",
+            "url",
+        ]
+        .iter()
+        .any(|k| lc.contains(k));
+        assert!(
+            asks_size,
+            "Brain must interview about the modal size/dimensions"
+        );
+        assert!(
+            asks_asset,
+            "Brain must confirm/preserve the exact icon asset the user linked"
+        );
     }
 
     /// Give the live Builder model a plan step that references the user's exact
@@ -4401,9 +4909,19 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
             eprintln!("skipping: CLAUDINIO_API_KEY not set");
             return;
         };
-        let system = system_prompt(Some(ROOT), None, None, SessionMode::Builder, PromptProfile::Standard, subagent::MAX_PARALLEL_AGENTS);
-        let model = cfg.model_for_mode(SessionMode::Builder.as_str()).to_string();
-        let user = "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
+        let system = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
+        let model = cfg
+            .model_for_mode(SessionMode::Builder.as_str())
+            .to_string();
+        let user =
+            "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
 specified the EXACT icon to use with this reference: \
 https://icones.js.org/collection/all?s=notebook&icon=lucide:notebook-pen (that is the Lucide \
 'notebook-pen' icon).\n\n---\nDo NOT call any tool. Output ONLY the exact `goal` string you would \

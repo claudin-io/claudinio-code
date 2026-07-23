@@ -49,9 +49,9 @@ pub fn write_clipboard_blob(
     // Write to temp file in system temp directory
     let temp_dir = std::env::temp_dir();
     let file_path = temp_dir.join(&file_name);
-    
-    let mut f = fs::File::create(&file_path)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+
+    let mut f =
+        fs::File::create(&file_path).map_err(|e| format!("Failed to create temp file: {e}"))?;
     f.write_all(&bytes)
         .map_err(|e| format!("Failed to write temp file: {e}"))?;
 

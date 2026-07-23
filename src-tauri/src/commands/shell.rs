@@ -19,8 +19,8 @@ pub async fn open_in_terminal(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let terminal = std::env::var("TERMINAL")
-            .unwrap_or_else(|_| "x-terminal-emulator".to_string());
+        let terminal =
+            std::env::var("TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".to_string());
         Command::new(&terminal)
             .arg(&path)
             .spawn()

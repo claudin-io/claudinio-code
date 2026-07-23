@@ -9,3 +9,5 @@ coverage/
 src-tauri/2026-07-04-*
 2026-07-05-*
 __pycache__/
+# Stray Claude Code / agent session transcripts dumped into the repo root
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt

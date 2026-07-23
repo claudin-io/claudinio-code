@@ -173,7 +173,12 @@ impl CodeEmbedder {
             .iter()
             .any(|i| i.name() == "token_type_ids");
 
-        Ok(CodeEmbedder { session, tokenizer, output_name, wants_token_type_ids })
+        Ok(CodeEmbedder {
+            session,
+            tokenizer,
+            output_name,
+            wants_token_type_ids,
+        })
     }
 
     pub fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
@@ -214,10 +219,16 @@ impl CodeEmbedder {
             }
         }
 
-        let ids_tensor = Tensor::from_array((vec![batch_size as i64, padded_len as i64], input_ids.clone()))
-            .map_err(|e| format!("input_ids tensor: {e}"))?;
-        let mask_tensor = Tensor::from_array((vec![batch_size as i64, padded_len as i64], attention_mask.clone()))
-            .map_err(|e| format!("attention_mask tensor: {e}"))?;
+        let ids_tensor = Tensor::from_array((
+            vec![batch_size as i64, padded_len as i64],
+            input_ids.clone(),
+        ))
+        .map_err(|e| format!("input_ids tensor: {e}"))?;
+        let mask_tensor = Tensor::from_array((
+            vec![batch_size as i64, padded_len as i64],
+            attention_mask.clone(),
+        ))
+        .map_err(|e| format!("attention_mask tensor: {e}"))?;
 
         let mut inputs_map: std::collections::HashMap<String, ort::value::DynValue> =
             std::collections::HashMap::new();
@@ -380,7 +391,9 @@ fn resolve_i18n_keys(slice: &str, dict: &std::collections::HashMap<String, Strin
                 let literal = &slice[i + 1..i + 1 + end];
                 if !literal.is_empty()
                     && literal.len() <= 128
-                    && literal.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+                    && literal
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
                 {
                     if let Some(value) = dict.get(literal) {
                         if !out.contains(&value.as_str()) {
@@ -612,8 +625,7 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
         cache_dir.display()
     );
 
-    std::fs::create_dir_all(cache_dir)
-        .map_err(|e| format!("create model dir: {e}"))?;
+    std::fs::create_dir_all(cache_dir).map_err(|e| format!("create model dir: {e}"))?;
 
     let base_url = format!("https://huggingface.co/{}/resolve/main", ACTIVE_MODEL.repo);
 
@@ -720,7 +732,8 @@ mod tests {
 
     #[test]
     fn encode_produces_normalized_model_dim_vectors() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("models/{}", model_cache_dirname()));
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("models/{}", model_cache_dirname()));
         if !dir.join(ACTIVE_MODEL.model_filename).exists() {
             eprintln!("model not present, skipping");
             return;
@@ -733,7 +746,10 @@ mod tests {
             eprintln!("model input: {}", i.name());
         }
         let vecs = e
-            .encode(&["fn hello_world() {}", "struct FileWatcher that reindexes files"])
+            .encode(&[
+                "fn hello_world() {}",
+                "struct FileWatcher that reindexes files",
+            ])
             .expect("encode");
         assert_eq!(vecs.len(), 2);
         eprintln!("embedding dim = {}", vecs[0].len());
@@ -744,12 +760,25 @@ mod tests {
             assert!((norm - 1.0).abs() < 1e-3, "not normalized: {norm}");
         }
         // Distinct texts must not collapse to the same vector.
-        assert!(vecs[0].iter().zip(&vecs[1]).any(|(a, b)| (a - b).abs() > 1e-3));
+        assert!(vecs[0]
+            .iter()
+            .zip(&vecs[1])
+            .any(|(a, b)| (a - b).abs() > 1e-3));
     }
 
     #[test]
     fn small_body_yields_single_chunk_with_symbol_lines() {
-        let chunks = build_embedding_chunks("function", "foo", "", None, None, Some("let x = 1;"), 10, 10, None);
+        let chunks = build_embedding_chunks(
+            "function",
+            "foo",
+            "",
+            None,
+            None,
+            Some("let x = 1;"),
+            10,
+            10,
+            None,
+        );
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].chunk_index, 0);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (10, 10));
@@ -759,7 +788,17 @@ mod tests {
 
     #[test]
     fn no_body_yields_header_only_chunk() {
-        let chunks = build_embedding_chunks("struct", "Config", "", Some("mod db"), None, None, 5, 8, None);
+        let chunks = build_embedding_chunks(
+            "struct",
+            "Config",
+            "",
+            Some("mod db"),
+            None,
+            None,
+            5,
+            8,
+            None,
+        );
         assert_eq!(chunks.len(), 1);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 8));
         assert_eq!(chunks[0].text, "struct: Config | context: mod db");
@@ -768,11 +807,27 @@ mod tests {
     #[test]
     fn large_body_splits_into_overlapping_chunks_with_absolute_lines() {
         // 100 lines of ~40 chars -> several chunks under MAX_BODY_CHARS (800).
-        let body: Vec<String> = (0..100).map(|i| format!("line {i} {}", "x".repeat(32))).collect();
+        let body: Vec<String> = (0..100)
+            .map(|i| format!("line {i} {}", "x".repeat(32)))
+            .collect();
         let body = body.join("\n");
         // Symbol spans lines 50..149 and body covers the whole range.
-        let chunks = build_embedding_chunks("function", "big", "", None, None, Some(&body), 50, 149, None);
-        assert!(chunks.len() > 2, "expected multiple chunks, got {}", chunks.len());
+        let chunks = build_embedding_chunks(
+            "function",
+            "big",
+            "",
+            None,
+            None,
+            Some(&body),
+            50,
+            149,
+            None,
+        );
+        assert!(
+            chunks.len() > 2,
+            "expected multiple chunks, got {}",
+            chunks.len()
+        );
         assert_eq!(chunks[0].start_line, 50);
         assert_eq!(chunks.last().unwrap().end_line, 149);
         for (i, c) in chunks.iter().enumerate() {
@@ -782,7 +837,10 @@ mod tests {
         }
         // Consecutive chunks overlap by CHUNK_OVERLAP_LINES.
         for w in chunks.windows(2) {
-            assert_eq!(w[1].start_line, w[0].end_line + 1 - CHUNK_OVERLAP_LINES as i64);
+            assert_eq!(
+                w[1].start_line,
+                w[0].end_line + 1 - CHUNK_OVERLAP_LINES as i64
+            );
         }
         // Deep content (line 90) is present in some chunk even though it is
         // far beyond the first MAX_BODY_CHARS of the body.
@@ -792,7 +850,10 @@ mod tests {
     #[test]
     fn i18n_keys_resolve_into_chunk_text_framework_agnostic() {
         let mut dict = std::collections::HashMap::new();
-        dict.insert("onboarding.features.agent.title".to_string(), "Agent-first coding".to_string());
+        dict.insert(
+            "onboarding.features.agent.title".to_string(),
+            "Agent-first coding".to_string(),
+        );
         dict.insert("app.title".to_string(), "Claudinio Code".to_string());
         // t("...") (web), NSLocalizedString (iOS), I18n.t (Rails) all reduce
         // to a quoted literal that is a dict key.
@@ -801,7 +862,17 @@ mod tests {
             "let b = NSLocalizedString('app.title', comment: '');\n",
             "let c = other(\"not.a.key\");"
         );
-        let chunks = build_embedding_chunks("function", "Wizard", "", None, None, Some(body), 1, 3, Some(&dict));
+        let chunks = build_embedding_chunks(
+            "function",
+            "Wizard",
+            "",
+            None,
+            None,
+            Some(body),
+            1,
+            3,
+            Some(&dict),
+        );
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("i18n: "));
         assert!(chunks[0].text.contains("Agent-first coding"));
@@ -809,7 +880,8 @@ mod tests {
         assert!(!chunks[0].text.contains("not.a.key\" resolved"));
 
         // Without a dict, text is unchanged (no i18n marker).
-        let plain = build_embedding_chunks("function", "Wizard", "", None, None, Some(body), 1, 3, None);
+        let plain =
+            build_embedding_chunks("function", "Wizard", "", None, None, Some(body), 1, 3, None);
         assert!(!plain[0].text.contains("i18n:"));
     }
 
@@ -830,7 +902,17 @@ mod tests {
         // Doc sections: body starts after the heading line, so absolute lines
         // are anchored from end_line (body = last N lines of the range).
         let body = "para one\npara two\npara three";
-        let chunks = build_embedding_chunks("doc_section", "Intro", "", None, None, Some(body), 4, 7, None);
+        let chunks = build_embedding_chunks(
+            "doc_section",
+            "Intro",
+            "",
+            None,
+            None,
+            Some(body),
+            4,
+            7,
+            None,
+        );
         assert_eq!(chunks.len(), 1);
         assert_eq!((chunks[0].start_line, chunks[0].end_line), (5, 7));
     }
@@ -850,14 +932,24 @@ mod tests {
         );
         assert_eq!(chunks.len(), 1);
         let c = &chunks[0];
-        assert!(c.text.contains("function: buildEmbeddingChunks (build embedding chunks)"));
+        assert!(c
+            .text
+            .contains("function: buildEmbeddingChunks (build embedding chunks)"));
         assert!(c.text.contains("file: embeddings"));
         assert_eq!(c.fts_name, "buildEmbeddingChunks build embedding chunks");
         assert!(c.fts_path.contains("embeddings.rs"));
-        assert!(c.fts_path.contains("intel"), "dir words missing: {}", c.fts_path);
+        assert!(
+            c.fts_path.contains("intel"),
+            "dir words missing: {}",
+            c.fts_path
+        );
         assert!(c.fts_body.contains("Splits symbols"), "doc missing");
         assert!(c.fts_body.contains("attachSnippets"), "raw body missing");
-        assert!(c.fts_body.contains("tool body"), "split words missing: {}", c.fts_body);
+        assert!(
+            c.fts_body.contains("tool body"),
+            "split words missing: {}",
+            c.fts_body
+        );
         assert!(c.fts_body.contains("attach snippets"));
     }
 }

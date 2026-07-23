@@ -3,11 +3,11 @@ use crate::code_intel::embeddings::{
     build_embedding_chunks, build_embedding_text, CodeEmbedder, EmbedChunk, SharedEmbedder,
 };
 use crate::code_intel::parser::{self, ParseResult};
-use std::time::SystemTime;
-use xxhash_rust::xxh3::xxh3_64;
-use tauri::Emitter;
-use tauri::ipc::Channel;
 use serde::Serialize;
+use std::time::SystemTime;
+use tauri::ipc::Channel;
+use tauri::Emitter;
+use xxhash_rust::xxh3::xxh3_64;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,9 +38,16 @@ fn is_locale_resource(path_lower: &str) -> bool {
     if path_lower.ends_with("strings.xml") && path_lower.contains("/values") {
         return true;
     }
-    let in_locale_dir = ["/locales/", "/locale/", "/i18n/", "/l10n/", "/translations/", "/lang/"]
-        .iter()
-        .any(|seg| path_lower.contains(seg));
+    let in_locale_dir = [
+        "/locales/",
+        "/locale/",
+        "/i18n/",
+        "/l10n/",
+        "/translations/",
+        "/lang/",
+    ]
+    .iter()
+    .any(|seg| path_lower.contains(seg));
     in_locale_dir
         && (path_lower.ends_with(".ts")
             || path_lower.ends_with(".tsx")
@@ -58,7 +65,11 @@ fn flatten_json_into(prefix: &str, value: &serde_json::Value, dict: &mut I18nDic
         }
         serde_json::Value::Object(map) => {
             for (k, v) in map {
-                let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
                 flatten_json_into(&key, v, dict);
             }
         }
@@ -81,7 +92,9 @@ pub fn load_i18n_dict(root: &str) -> I18nDict {
         if !path.is_file() {
             continue;
         }
-        let Some(path_str) = path.to_str() else { continue };
+        let Some(path_str) = path.to_str() else {
+            continue;
+        };
         if is_locale_resource(&path_str.to_lowercase()) {
             locale_files.push(path_str.to_string());
         }
@@ -108,7 +121,9 @@ pub fn load_i18n_dict(root: &str) -> I18nDict {
 
     let mut dict = I18nDict::new();
     for file in locale_files {
-        let Ok(content) = std::fs::read_to_string(&file) else { continue };
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
         let lower = file.to_lowercase();
         if lower.ends_with(".json") || lower.ends_with(".arb") {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -150,8 +165,23 @@ const NON_RETRIEVABLE_KINDS: &[&str] = &[
 /// Generic names that carry no retrieval signal on their own — only worth
 /// embedding if accompanied by substantial doc/body text.
 const GENERIC_NAMES: &[&str] = &[
-    "props", "children", "id", "key", "value", "classname", "class_name",
-    "name", "type", "data", "item", "items", "index", "i", "x", "y", "_",
+    "props",
+    "children",
+    "id",
+    "key",
+    "value",
+    "classname",
+    "class_name",
+    "name",
+    "type",
+    "data",
+    "item",
+    "items",
+    "index",
+    "i",
+    "x",
+    "y",
+    "_",
 ];
 
 /// Symbols excluded from the embedding index: they carry no retrieval signal
@@ -260,9 +290,15 @@ pub fn index_file(
     }
 
     for call in &parse_result.calls {
-        let from_id = symbol_ids.iter().find(|(n, _)| n == &call.from_name).map(|(_, id)| *id);
+        let from_id = symbol_ids
+            .iter()
+            .find(|(n, _)| n == &call.from_name)
+            .map(|(_, id)| *id);
         if let Some(fid) = from_id {
-            let to_id = symbol_ids.iter().find(|(n, _)| n == &call.to_name).map(|(_, id)| *id);
+            let to_id = symbol_ids
+                .iter()
+                .find(|(n, _)| n == &call.to_name)
+                .map(|(_, id)| *id);
             if let Some(tid) = to_id {
                 db.insert_relation(fid, tid, "calls")?;
             }
@@ -400,7 +436,13 @@ fn encode_and_store_batched(db: &IndexDb, emb: &mut CodeEmbedder, chunks: &[(i64
         let str_refs: Vec<&str> = batch.iter().map(|(_, c)| c.text.as_str()).collect();
         if let Ok(vectors) = emb.encode(&str_refs) {
             for ((sid, chunk), vec) in batch.iter().zip(vectors.iter()) {
-                let _ = db.upsert_embedding(*sid, chunk.chunk_index, chunk.start_line, chunk.end_line, vec);
+                let _ = db.upsert_embedding(
+                    *sid,
+                    chunk.chunk_index,
+                    chunk.start_line,
+                    chunk.end_line,
+                    vec,
+                );
             }
         }
     }
@@ -421,7 +463,11 @@ pub fn scan_workspace(
     // Resolved once per scan; empty when the project has no locale resources,
     // in which case chunk texts are unchanged.
     let i18n_dict = load_i18n_dict(root);
-    let i18n = if i18n_dict.is_empty() { None } else { Some(&i18n_dict) };
+    let i18n = if i18n_dict.is_empty() {
+        None
+    } else {
+        Some(&i18n_dict)
+    };
 
     let walker = ignore::WalkBuilder::new(root)
         .git_ignore(true)
@@ -432,12 +478,7 @@ pub fn scan_workspace(
     let all_paths: Vec<String> = walker
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter(|e| {
-            parser::detect_language(
-                e.path().to_string_lossy().as_ref(),
-            )
-            .is_some()
-        })
+        .filter(|e| parser::detect_language(e.path().to_string_lossy().as_ref()).is_some())
         .map(|e| e.path().to_string_lossy().to_string())
         .collect();
 
@@ -499,7 +540,10 @@ pub fn scan_workspace(
         if let Ok(Some(existing)) = db.file_by_path(path_str) {
             if existing.hash.as_deref() == Some(new_hash.as_str()) {
                 total_files += 1;
-                total_symbols += db.symbols_in_file(path_str).map(|s| s.len() as i64).unwrap_or(0);
+                total_symbols += db
+                    .symbols_in_file(path_str)
+                    .map(|s| s.len() as i64)
+                    .unwrap_or(0);
                 counted += 1;
                 continue;
             }
@@ -514,7 +558,13 @@ pub fn scan_workspace(
                 let lang = parser::detect_language(path_str).unwrap_or("unknown");
                 let hash = compute_hash(&content);
                 let modified = std::fs::metadata(path_str)
-                    .and_then(|m| m.modified().map(|t| t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)))
+                    .and_then(|m| {
+                        m.modified().map(|t| {
+                            t.duration_since(SystemTime::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0)
+                        })
+                    })
                     .unwrap_or(0);
                 let size = content.len() as i64;
                 let _ = db.upsert_file(path_str, lang, &hash, modified, size);
@@ -689,7 +739,13 @@ pub fn generate_all_embeddings(
                 Ok(vectors) => {
                     for (c, vec) in batch.iter().zip(vectors.iter()) {
                         if db
-                            .upsert_embedding(c.symbol_id, c.chunk_index, c.start_line, c.end_line, vec)
+                            .upsert_embedding(
+                                c.symbol_id,
+                                c.chunk_index,
+                                c.start_line,
+                                c.end_line,
+                                vec,
+                            )
                             .is_ok()
                         {
                             total_embeddings += 1;
@@ -719,13 +775,16 @@ pub fn generate_all_embeddings(
 
         if processed % 10 == 0 {
             if let Some(handle) = app_handle {
-                let _ = handle.emit("index-progress", IndexProgress {
-                    status: "embedding".into(),
-                    files_indexed: processed,
-                    symbols_indexed: total_embeddings,
-                    total_files: total,
-                    workspace: workspace.to_string(),
-                });
+                let _ = handle.emit(
+                    "index-progress",
+                    IndexProgress {
+                        status: "embedding".into(),
+                        files_indexed: processed,
+                        symbols_indexed: total_embeddings,
+                        total_files: total,
+                        workspace: workspace.to_string(),
+                    },
+                );
             }
         }
     }
@@ -764,7 +823,11 @@ pub fn reindex_file(
     // Cheap per-event reload (locale resources are few and small), so copy
     // edits are reflected without waiting for a full rescan.
     let i18n_dict = workspace_root.map(load_i18n_dict).unwrap_or_default();
-    let i18n = if i18n_dict.is_empty() { None } else { Some(&i18n_dict) };
+    let i18n = if i18n_dict.is_empty() {
+        None
+    } else {
+        Some(&i18n_dict)
+    };
 
     // Doc files use the doc-specific indexer instead of tree-sitter parsing
     if path.ends_with(".md") || path.ends_with(".mdx") || path.ends_with(".txt") {
@@ -790,7 +853,9 @@ mod size_cap_tests {
         // One enormous line -> minified; normal multi-line code -> not.
         let minified = "var a=1;".repeat(10_000);
         assert!(is_probably_minified(&minified));
-        let normal: String = (0..2_000).map(|i| format!("let line_{i} = {i};\n")).collect();
+        let normal: String = (0..2_000)
+            .map(|i| format!("let line_{i} = {i};\n"))
+            .collect();
         assert!(!is_probably_minified(&normal));
         // Small files never trip the heuristic, however dense.
         assert!(!is_probably_minified("x".repeat(1_000).as_str()));
@@ -803,8 +868,14 @@ mod size_cap_tests {
         let result = index_file(&db, "dist-like/bundle.js", &minified, None, None).unwrap();
         assert!(result.symbols.is_empty());
         let file = db.file_by_path("dist-like/bundle.js").unwrap().unwrap();
-        assert_eq!(file.hash, file.embed_hash, "must not count as embedding-pending");
-        assert!(db.symbols_in_file("dist-like/bundle.js").unwrap().is_empty());
+        assert_eq!(
+            file.hash, file.embed_hash,
+            "must not count as embedding-pending"
+        );
+        assert!(db
+            .symbols_in_file("dist-like/bundle.js")
+            .unwrap()
+            .is_empty());
     }
 }
 
@@ -818,8 +889,12 @@ mod i18n_dict_tests {
         assert!(is_locale_resource("public/i18n/pt-br.json"));
         assert!(is_locale_resource("lib/l10n/app_en.arb"));
         assert!(is_locale_resource("ios/en.lproj/localizable.strings"));
-        assert!(is_locale_resource("android/app/src/main/res/values/strings.xml"));
-        assert!(is_locale_resource("android/app/src/main/res/values-pt/strings.xml"));
+        assert!(is_locale_resource(
+            "android/app/src/main/res/values/strings.xml"
+        ));
+        assert!(is_locale_resource(
+            "android/app/src/main/res/values-pt/strings.xml"
+        ));
         assert!(!is_locale_resource("src/components/chatpanel.tsx"));
         assert!(!is_locale_resource("res/layout/strings.xml.bak"));
         assert!(!is_locale_resource("src/lib/locales/readme.md"));
@@ -832,7 +907,10 @@ mod i18n_dict_tests {
                 .unwrap();
         let mut dict = I18nDict::new();
         flatten_json_into("", &v, &mut dict);
-        assert_eq!(dict.get("chat.input.placeholder").map(String::as_str), Some("Type here"));
+        assert_eq!(
+            dict.get("chat.input.placeholder").map(String::as_str),
+            Some("Type here")
+        );
         assert_eq!(dict.get("title").map(String::as_str), Some("App"));
     }
 }
@@ -845,14 +923,30 @@ mod should_embed_symbol_tests {
     fn excludes_non_retrievable_kinds() {
         let long_text = "a".repeat(200);
         assert!(!should_embed_symbol("import", "SomeModule", &long_text));
-        assert!(!should_embed_symbol("property_signature", "onClick", &long_text));
-        assert!(!should_embed_symbol("field_declaration", "counter", &long_text));
-        assert!(!should_embed_symbol("property_declaration", "counter", &long_text));
+        assert!(!should_embed_symbol(
+            "property_signature",
+            "onClick",
+            &long_text
+        ));
+        assert!(!should_embed_symbol(
+            "field_declaration",
+            "counter",
+            &long_text
+        ));
+        assert!(!should_embed_symbol(
+            "property_declaration",
+            "counter",
+            &long_text
+        ));
     }
 
     #[test]
     fn excludes_short_embedding_text() {
-        assert!(!should_embed_symbol("function_item", "compute_hash", "short text"));
+        assert!(!should_embed_symbol(
+            "function_item",
+            "compute_hash",
+            "short text"
+        ));
         assert!(should_embed_symbol(
             "function_item",
             "compute_hash",
@@ -864,16 +958,33 @@ mod should_embed_symbol_tests {
     fn excludes_generic_names_without_substantial_text() {
         let short_text = "property_signature props: react component props";
         assert!(short_text.len() >= 40 && short_text.len() < 120);
-        assert!(!should_embed_symbol("variable_declaration", "props", short_text));
-        assert!(!should_embed_symbol("variable_declaration", "ID", short_text)); // case-insensitive
+        assert!(!should_embed_symbol(
+            "variable_declaration",
+            "props",
+            short_text
+        ));
+        assert!(!should_embed_symbol(
+            "variable_declaration",
+            "ID",
+            short_text
+        )); // case-insensitive
 
         let long_text = "a".repeat(150);
-        assert!(should_embed_symbol("variable_declaration", "props", &long_text));
+        assert!(should_embed_symbol(
+            "variable_declaration",
+            "props",
+            &long_text
+        ));
     }
 
     #[test]
     fn keeps_meaningful_symbols() {
-        let text = "function_item authenticate_user: verifies credentials and issues a session token";
-        assert!(should_embed_symbol("function_item", "authenticate_user", text));
+        let text =
+            "function_item authenticate_user: verifies credentials and issues a session token";
+        assert!(should_embed_symbol(
+            "function_item",
+            "authenticate_user",
+            text
+        ));
     }
 }

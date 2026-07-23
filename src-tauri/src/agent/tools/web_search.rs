@@ -33,7 +33,9 @@ struct ErrorResponse {
 
 pub async fn execute(args: WebSearchArgs, config: &AgentConfig) -> Result<String, String> {
     if config.api_key.is_empty() {
-        return Err("Not logged in — sign in with claudin.io in Settings to use web search.".into());
+        return Err(
+            "Not logged in — sign in with claudin.io in Settings to use web search.".into(),
+        );
     }
 
     let path = "/api/app/websearch";
@@ -61,7 +63,10 @@ pub async fn execute(args: WebSearchArgs, config: &AgentConfig) -> Result<String
         req = req.header(name, value);
     }
 
-    let resp = req.send().await.map_err(|e| format!("web search request failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("web search request failed: {e}"))?;
     let status = resp.status();
 
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {

@@ -1,6 +1,6 @@
 use crate::agent::permissions;
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
-use crate::agent::session::{self, AgentEvent, ApprovalMap, AnswerMap, SteeringCtl};
+use crate::agent::session::{self, AgentEvent, AnswerMap, ApprovalMap, SteeringCtl};
 use crate::agent::tools::{self, ToolContext, ToolDef};
 use serde::Deserialize;
 use serde_json::Value;
@@ -70,7 +70,12 @@ is missing, state your assumption and proceed, or report what is missing. \
 Work autonomously and efficiently: use the fewest tool calls that accomplish the goal.\
 ";
 
-pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef], max_parallel: usize, config: &AgentConfig) -> Vec<ToolDef> {
+pub fn subagent_defs(
+    mode: SubagentMode,
+    mcp_defs: &[ToolDef],
+    max_parallel: usize,
+    config: &AgentConfig,
+) -> Vec<ToolDef> {
     let mut tools: Vec<ToolDef> = tools::get_defs(max_parallel)
         .into_iter()
         .filter(|t| t.name != "spawn_agents" && t.name != "ask_user")
@@ -90,7 +95,11 @@ pub fn subagent_defs(mode: SubagentMode, mcp_defs: &[ToolDef], max_parallel: usi
     tools
 }
 
-fn api_tools(mode: SubagentMode, mcp_defs: &[ToolDef], config: &AgentConfig) -> Vec<ToolDescription> {
+fn api_tools(
+    mode: SubagentMode,
+    mcp_defs: &[ToolDef],
+    config: &AgentConfig,
+) -> Vec<ToolDescription> {
     subagent_defs(mode, mcp_defs, MAX_PARALLEL_AGENTS, config)
         .iter()
         .map(|t| ToolDescription {
@@ -109,19 +118,21 @@ fn api_tools(mode: SubagentMode, mcp_defs: &[ToolDef], config: &AgentConfig) -> 
 fn wrap_channel(parent: &Channel<AgentEvent>, subagent_id: &str) -> Channel<AgentEvent> {
     let sid = subagent_id.to_string();
     let parent = parent.clone();
-    Channel::new(move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
-        let json_str = match &body {
-            tauri::ipc::InvokeResponseBody::Json(s) => s.clone(),
-            _ => return Ok(()),
-        };
-        if let Ok(event) = serde_json::from_str::<AgentEvent>(&json_str) {
-            let _ = parent.send(AgentEvent::Subagent {
-                subagent_id: sid.clone(),
-                event: Box::new(event),
-            });
-        }
-        Ok(())
-    })
+    Channel::new(
+        move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
+            let json_str = match &body {
+                tauri::ipc::InvokeResponseBody::Json(s) => s.clone(),
+                _ => return Ok(()),
+            };
+            if let Ok(event) = serde_json::from_str::<AgentEvent>(&json_str) {
+                let _ = parent.send(AgentEvent::Subagent {
+                    subagent_id: sid.clone(),
+                    event: Box::new(event),
+                });
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Leniency: models trained on per-agent tools sometimes flatten a single
@@ -176,7 +187,12 @@ pub async fn run_spawn_agents(
                 output: msg.clone(),
                 error: Some("invalid_input".into()),
             });
-            return (ContentBlock::tool_result(parent_tool_use_id, &msg), 0, 0, 0.0);
+            return (
+                ContentBlock::tool_result(parent_tool_use_id, &msg),
+                0,
+                0,
+                0.0,
+            );
         }
     };
 
@@ -193,7 +209,12 @@ pub async fn run_spawn_agents(
             output: msg.clone(),
             error: Some("parse_error".into()),
         });
-        return (ContentBlock::tool_result(parent_tool_use_id, &msg), 0, 0, 0.0);
+        return (
+            ContentBlock::tool_result(parent_tool_use_id, &msg),
+            0,
+            0,
+            0.0,
+        );
     }
 
     let parent_tx = event_tx.clone();
@@ -289,10 +310,14 @@ pub async fn run_subagent(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
 ) -> SubagentResult {
-    let mcp_defs = ctx.mcp.as_ref().map(|m| m.cached_defs()).unwrap_or_default();
+    let mcp_defs = ctx
+        .mcp
+        .as_ref()
+        .map(|m| m.cached_defs())
+        .unwrap_or_default();
     let tools = api_tools(spec.mode, &mcp_defs, config);
     let skill_mgr = crate::agent::skills::SkillManager::new(
-        ctx.workspace_root.as_ref().map(std::path::PathBuf::from)
+        ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let skills_hint = match &skills_section {
@@ -311,7 +336,10 @@ pub async fn run_subagent(
         content: vec![ContentBlock::text(format!(
             "Your goal:\n{goal}\n\nExpected output:\n{expected}",
             goal = spec.goal,
-            expected = spec.expected_output.as_deref().unwrap_or("A concise report")
+            expected = spec
+                .expected_output
+                .as_deref()
+                .unwrap_or("A concise report")
         ))],
     }];
 
@@ -374,7 +402,8 @@ pub async fn run_subagent(
 
         if stream_output.interrupted {
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
-                let est = session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
+                let est =
+                    session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
                 est.input + est.output
             } else {
                 total_cost
@@ -395,7 +424,8 @@ pub async fn run_subagent(
 
         if stream_output.tool_uses.is_empty() {
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
-                let est = session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
+                let est =
+                    session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
                 est.input + est.output
             } else {
                 total_cost
@@ -444,8 +474,16 @@ pub async fn run_subagent(
                 break;
             }
 
-            let tool_use_id = tool_use.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let tool_name = tool_use.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tool_use_id = tool_use
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tool_name = tool_use
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let tool_input = tool_use.get("input").cloned().unwrap_or(Value::Null);
 
             tool_assistant_blocks.push(ContentBlock::tool_use(
@@ -552,12 +590,18 @@ pub async fn run_summary_agent(
         ),
     };
 
-    let result = run_subagent(config, ctx, &spec, event_tx, approvals, answers, session_id, steering).await;
+    let result = run_subagent(
+        config, ctx, &spec, event_tx, approvals, answers, session_id, steering,
+    )
+    .await;
 
     if result.status == "completed" {
         Ok(result.report)
     } else {
-        Err(format!("Summary agent {}: {}", result.status, result.report))
+        Err(format!(
+            "Summary agent {}: {}",
+            result.status, result.report
+        ))
     }
 }
 
@@ -571,7 +615,10 @@ mod tests {
         let config = AgentConfig::default();
         let defs = subagent_defs(SubagentMode::Explore, &[], MAX_PARALLEL_AGENTS, &config);
         for d in &defs {
-            assert_ne!(d.name, "spawn_agents", "explore should not include spawn_agents");
+            assert_ne!(
+                d.name, "spawn_agents",
+                "explore should not include spawn_agents"
+            );
             assert_ne!(d.name, "ask_user", "explore should not include ask_user");
         }
     }
@@ -591,7 +638,10 @@ mod tests {
         let config = AgentConfig::default();
         let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &config);
         for d in &defs {
-            assert_ne!(d.name, "spawn_agents", "code should not include spawn_agents");
+            assert_ne!(
+                d.name, "spawn_agents",
+                "code should not include spawn_agents"
+            );
             assert_ne!(d.name, "ask_user", "code should not include ask_user");
         }
     }
@@ -601,7 +651,10 @@ mod tests {
         let config = AgentConfig::default();
         let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &config);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"edit_file"), "code should include edit_file");
+        assert!(
+            names.contains(&"edit_file"),
+            "code should include edit_file"
+        );
         assert!(names.contains(&"bash"), "code should include bash");
     }
 

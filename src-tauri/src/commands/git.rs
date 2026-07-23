@@ -60,7 +60,8 @@ pub async fn git_status(workspace: String) -> Result<GitStatus, String> {
     let numstat = numstat.unwrap_or_default();
     let staged_numstat = staged_numstat.unwrap_or_default();
 
-    let mut numstat_map: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+    let mut numstat_map: std::collections::HashMap<String, (u32, u32)> =
+        std::collections::HashMap::new();
     for line in numstat.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
@@ -94,7 +95,11 @@ pub async fn git_status(workspace: String) -> Result<GitStatus, String> {
 
         // Determine actual file path (handle "R" with "->")
         let file_path = if status_chars.starts_with('R') {
-            path_str.split(" -> ").last().unwrap_or(&path_str).to_string()
+            path_str
+                .split(" -> ")
+                .last()
+                .unwrap_or(&path_str)
+                .to_string()
         } else {
             path_str
         };
@@ -146,13 +151,17 @@ pub async fn git_status(workspace: String) -> Result<GitStatus, String> {
 #[tauri::command]
 pub async fn git_file_diff(workspace: String, path: String) -> Result<String, String> {
     // Try unstaged diff first
-    let unstaged = run_git(&workspace, &["diff", "--", &path]).await.unwrap_or_default();
+    let unstaged = run_git(&workspace, &["diff", "--", &path])
+        .await
+        .unwrap_or_default();
     if !unstaged.is_empty() {
         return Ok(unstaged);
     }
 
     // Try staged diff
-    let staged = run_git(&workspace, &["diff", "--cached", "--", &path]).await.unwrap_or_default();
+    let staged = run_git(&workspace, &["diff", "--cached", "--", &path])
+        .await
+        .unwrap_or_default();
     if !staged.is_empty() {
         return Ok(staged);
     }
@@ -182,7 +191,9 @@ pub async fn git_file_diff(workspace: String, path: String) -> Result<String, St
     }
 
     // File was deleted — show the full deletion from HEAD
-    let show_result = run_git(&workspace, &["show", &format!("HEAD:{}", path)]).await.unwrap_or_default();
+    let show_result = run_git(&workspace, &["show", &format!("HEAD:{}", path)])
+        .await
+        .unwrap_or_default();
     if !show_result.is_empty() {
         let old_lines: Vec<&str> = show_result.lines().collect();
         let line_count = old_lines.len();

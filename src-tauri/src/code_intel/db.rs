@@ -158,8 +158,8 @@ const MAX_FTS_TERMS: usize = 12;
 /// `_`/`-`/`.`) are never filtered — "for" inside delete_symbols_for_file
 /// stays part of the phrase.
 const FTS_STOPWORDS: &[&str] = &[
-    "the", "and", "for", "with", "this", "that", "does", "how", "what",
-    "where", "when", "which", "code", "file",
+    "the", "and", "for", "with", "this", "that", "does", "how", "what", "where", "when", "which",
+    "code", "file",
 ];
 
 /// BM25 column weights for chunk_fts (fts_name, fts_path, fts_body): a term
@@ -234,7 +234,10 @@ struct LegHit {
 fn bm25_only_hit_has_evidence(tokens: &[String], hit: &LegHit, required: usize) -> bool {
     let (base, stem) = basename_variants(&hit.file_path);
     let name_lower = hit.name.to_lowercase();
-    if tokens.iter().any(|t| *t == name_lower || *t == base || *t == stem) {
+    if tokens
+        .iter()
+        .any(|t| *t == name_lower || *t == base || *t == stem)
+    {
         return true;
     }
     let words: std::collections::HashSet<String> = hit
@@ -326,9 +329,11 @@ impl IndexDb {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
         let is_empty: bool = conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table'", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .map(|c| c == 0)
             .unwrap_or(true);
         if !is_empty && version != SCHEMA_VERSION {
@@ -479,7 +484,14 @@ impl IndexDb {
         Ok(())
     }
 
-    pub fn upsert_file(&self, path: &str, language: &str, hash: &str, modified: i64, size: i64) -> Result<i64, String> {
+    pub fn upsert_file(
+        &self,
+        path: &str,
+        language: &str,
+        hash: &str,
+        modified: i64,
+        size: i64,
+    ) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO files (path, language, hash, last_modified, size)
@@ -494,7 +506,11 @@ impl IndexDb {
         .map_err(|e| format!("upsert file: {e}"))?;
 
         let id: i64 = conn
-            .query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))
+            .query_row(
+                "SELECT id FROM files WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("get file id: {e}"))?;
         Ok(id)
     }
@@ -537,7 +553,10 @@ impl IndexDb {
     /// Remove file rows (and, via cascade, their symbols/relations/embeddings)
     /// whose path is not in the current scan set — e.g. node_modules leftovers
     /// indexed before ignore rules existed.
-    pub fn prune_files_not_in(&self, keep: &std::collections::HashSet<String>) -> Result<i64, String> {
+    pub fn prune_files_not_in(
+        &self,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let stale_ids: Vec<i64> = {
             let mut stmt = conn
@@ -687,7 +706,11 @@ impl IndexDb {
 
     /// Exact (case-insensitive) symbol-name lookup — the contract
     /// symbol_lookup advertises, distinct from tokenized FTS matching.
-    pub fn lookup_symbols_exact(&self, name: &str, limit: i64) -> Result<Vec<SearchResult>, String> {
+    pub fn lookup_symbols_exact(
+        &self,
+        name: &str,
+        limit: i64,
+    ) -> Result<Vec<SearchResult>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -750,7 +773,11 @@ impl IndexDb {
     }
 
     #[allow(dead_code)]
-    pub fn callers_of(&self, symbol_name: &str, file_path: &str) -> Result<Vec<SymbolRecord>, String> {
+    pub fn callers_of(
+        &self,
+        symbol_name: &str,
+        file_path: &str,
+    ) -> Result<Vec<SymbolRecord>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -847,10 +874,7 @@ impl IndexDb {
         end_line: i64,
         embedding: &[f32],
     ) -> Result<(), String> {
-        let bytes: Vec<u8> = embedding
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO symbol_embeddings (symbol_id, chunk_index, start_line, end_line, embedding)
@@ -1025,7 +1049,11 @@ impl IndexDb {
             }
         }
         let mut hits: Vec<LegHit> = best_per_symbol.into_values().collect();
-        hits.sort_by(|a, b| b.cosine.partial_cmp(&a.cosine).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.cosine
+                .partial_cmp(&a.cosine)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(k);
         Ok(hits)
     }
@@ -1046,7 +1074,9 @@ impl IndexDb {
              ORDER BY bm25(chunk_fts, {BM25_W_NAME}, {BM25_W_PATH}, {BM25_W_BODY})
              LIMIT ?2"
         );
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare bm25: {e}"))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare bm25: {e}"))?;
         // 2x headroom: several chunks of one symbol can occupy top ranks.
         let raw: Vec<LegHit> = stmt
             .query_map(params![match_query, (k * 2) as i64], |row| {
@@ -1142,7 +1172,15 @@ impl IndexDb {
         let mut fused: std::collections::HashMap<i64, Fused> = std::collections::HashMap::new();
         for (i, hit) in vector_hits.into_iter().enumerate() {
             let contrib = params.w_vector / (params.rrf_k + (i + 1) as f32);
-            fused.insert(hit.symbol_id, Fused { hit, rrf: contrib, in_vector: true, in_bm25: false });
+            fused.insert(
+                hit.symbol_id,
+                Fused {
+                    hit,
+                    rrf: contrib,
+                    in_vector: true,
+                    in_bm25: false,
+                },
+            );
         }
         for (i, hit) in bm25_hits.into_iter().enumerate() {
             let contrib = params.w_bm25 / (params.rrf_k + (i + 1) as f32);
@@ -1153,7 +1191,12 @@ impl IndexDb {
                     f.in_bm25 = true;
                 }
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(Fused { hit, rrf: contrib, in_vector: false, in_bm25: true });
+                    e.insert(Fused {
+                        hit,
+                        rrf: contrib,
+                        in_vector: false,
+                        in_bm25: true,
+                    });
                 }
             }
         }
@@ -1161,10 +1204,17 @@ impl IndexDb {
 
         let mut scored: Vec<SemanticSearchResult> = Vec::new();
         for f in fused.into_values() {
-            let norm = if norm_denom > 0.0 { f.rrf / norm_denom } else { 0.0 };
+            let norm = if norm_denom > 0.0 {
+                f.rrf / norm_denom
+            } else {
+                0.0
+            };
             let boost = lexical_boost(&tokens, &f.hit.name, &f.hit.file_path);
-            let mut penalty =
-                if f.hit.kind == "doc_section" { DOC_SECTION_PENALTY } else { 0.0 };
+            let mut penalty = if f.hit.kind == "doc_section" {
+                DOC_SECTION_PENALTY
+            } else {
+                0.0
+            };
             if is_test_file(&f.hit.file_path) || is_test_symbol(&f.hit.name) {
                 penalty += TEST_FILE_PENALTY;
             }
@@ -1243,7 +1293,9 @@ impl IndexDb {
             .query_row("SELECT count(*) FROM symbols", [], |row| row.get(0))
             .unwrap_or(0);
         let embeddings: i64 = conn
-            .query_row("SELECT count(*) FROM symbol_embeddings", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM symbol_embeddings", [], |row| {
+                row.get(0)
+            })
             .unwrap_or(0);
         Ok((files, symbols, embeddings))
     }
@@ -1321,9 +1373,20 @@ mod tests {
         // trims them.
         for i in 0..5 {
             let sym_id = db
-                .insert_symbol(file_id, &format!("sym{i}"), "function", None, i, 0, i, 0, None)
+                .insert_symbol(
+                    file_id,
+                    &format!("sym{i}"),
+                    "function",
+                    None,
+                    i,
+                    0,
+                    i,
+                    0,
+                    None,
+                )
                 .expect("insert symbol");
-            db.upsert_embedding(sym_id, 0, 0, 0, &unit_vec(4, 0)).expect("upsert embedding");
+            db.upsert_embedding(sym_id, 0, 0, 0, &unit_vec(4, 0))
+                .expect("upsert embedding");
         }
 
         // One symbol in a different file with a low-similarity embedding
@@ -1332,12 +1395,25 @@ mod tests {
             .upsert_file("src/other.ts", "typescript", "hash2", 0, 0)
             .expect("upsert file");
         let low_sym_id = db
-            .insert_symbol(other_file_id, "lowMatch", "function", None, 0, 0, 0, 0, None)
+            .insert_symbol(
+                other_file_id,
+                "lowMatch",
+                "function",
+                None,
+                0,
+                0,
+                0,
+                0,
+                None,
+            )
             .expect("insert symbol");
-        db.upsert_embedding(low_sym_id, 0, 0, 0, &unit_vec(4, 3)).expect("upsert embedding");
+        db.upsert_embedding(low_sym_id, 0, 0, 0, &unit_vec(4, 3))
+            .expect("upsert embedding");
 
         let query_vec = unit_vec(4, 0);
-        let results = db.search_hybrid("sym", Some(&query_vec), 10).expect("search_hybrid");
+        let results = db
+            .search_hybrid("sym", Some(&query_vec), 10)
+            .expect("search_hybrid");
 
         assert_eq!(results.len(), 3, "dedupe should cap results per file at 3");
         assert!(results.iter().all(|r| r.file_path == "src/big_file.ts"));
@@ -1357,8 +1433,19 @@ mod tests {
             .expect("insert symbol");
         // Orthogonal embedding -> cosine ~0; chunk text shares no word with
         // the query -> the BM25 leg matches nothing either.
-        db.upsert_embedding(sym_id, 0, 0, 0, &unit_vec(4, 1)).expect("upsert embedding");
-        db.insert_chunk(sym_id, 0, 1, 3, "function: unrelated", "unrelated", "only.ts only", "banana orchard code").unwrap();
+        db.upsert_embedding(sym_id, 0, 0, 0, &unit_vec(4, 1))
+            .expect("upsert embedding");
+        db.insert_chunk(
+            sym_id,
+            0,
+            1,
+            3,
+            "function: unrelated",
+            "unrelated",
+            "only.ts only",
+            "banana orchard code",
+        )
+        .unwrap();
 
         let query_vec = unit_vec(4, 0);
         let results = db
@@ -1373,7 +1460,8 @@ mod tests {
         // never an SQL error surfaced to the caller.
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
         let file_id = db.upsert_file("src/q.ts", "typescript", "h", 0, 0).unwrap();
-        db.insert_symbol(file_id, "fooBar", "function", None, 1, 0, 1, 0, None).unwrap();
+        db.insert_symbol(file_id, "fooBar", "function", None, 1, 0, 1, 0, None)
+            .unwrap();
         for query in [
             "foo(bar)",
             "a AND b OR c*",
@@ -1404,11 +1492,27 @@ mod tests {
         // The headline fix: a term that exists only inside a body must be
         // findable with no vector leg at all (model missing / pending).
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
-        let file_id = db.upsert_file("src/thing.ts", "typescript", "h", 0, 0).unwrap();
-        let sym_id = db.insert_symbol(file_id, "handleThing", "function", None, 1, 0, 9, 0, None).unwrap();
-        db.insert_chunk(sym_id, 0, 1, 9, "embed", "handleThing handle thing", "thing.ts thing", "calls xyzzy_special_case() here").unwrap();
+        let file_id = db
+            .upsert_file("src/thing.ts", "typescript", "h", 0, 0)
+            .unwrap();
+        let sym_id = db
+            .insert_symbol(file_id, "handleThing", "function", None, 1, 0, 9, 0, None)
+            .unwrap();
+        db.insert_chunk(
+            sym_id,
+            0,
+            1,
+            9,
+            "embed",
+            "handleThing handle thing",
+            "thing.ts thing",
+            "calls xyzzy_special_case() here",
+        )
+        .unwrap();
 
-        let results = db.search_hybrid("xyzzy_special_case", None, 10).expect("search");
+        let results = db
+            .search_hybrid("xyzzy_special_case", None, 10)
+            .expect("search");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "handleThing");
         assert_eq!(results[0].match_type, "lexical");
@@ -1423,9 +1527,15 @@ mod tests {
         let fa = db.upsert_file("src/a.ts", "typescript", "h", 0, 0).unwrap();
         let fb = db.upsert_file("src/b.ts", "typescript", "h", 0, 0).unwrap();
         let fc = db.upsert_file("src/c.ts", "typescript", "h", 0, 0).unwrap();
-        let sa = db.insert_symbol(fa, "alphaFn", "function", None, 1, 0, 2, 0, None).unwrap();
-        let sb = db.insert_symbol(fb, "betaFn", "function", None, 1, 0, 2, 0, None).unwrap();
-        let sc = db.insert_symbol(fc, "gammaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+        let sa = db
+            .insert_symbol(fa, "alphaFn", "function", None, 1, 0, 2, 0, None)
+            .unwrap();
+        let sb = db
+            .insert_symbol(fb, "betaFn", "function", None, 1, 0, 2, 0, None)
+            .unwrap();
+        let sc = db
+            .insert_symbol(fc, "gammaFn", "function", None, 1, 0, 2, 0, None)
+            .unwrap();
 
         db.upsert_embedding(sa, 0, 1, 2, &unit_vec(4, 0)).unwrap();
         let mixed = {
@@ -1436,13 +1546,36 @@ mod tests {
         db.upsert_embedding(sc, 0, 1, 2, &mixed).unwrap();
 
         // B mentions the term twice -> bm25 rank 1; C once -> rank 2.
-        db.insert_chunk(sb, 0, 1, 2, "e", "betaFn beta fn", "b.ts b", "zebrafinch pattern zebrafinch pattern").unwrap();
-        db.insert_chunk(sc, 0, 1, 2, "e", "gammaFn gamma fn", "c.ts c", "zebrafinch pattern once").unwrap();
+        db.insert_chunk(
+            sb,
+            0,
+            1,
+            2,
+            "e",
+            "betaFn beta fn",
+            "b.ts b",
+            "zebrafinch pattern zebrafinch pattern",
+        )
+        .unwrap();
+        db.insert_chunk(
+            sc,
+            0,
+            1,
+            2,
+            "e",
+            "gammaFn gamma fn",
+            "c.ts c",
+            "zebrafinch pattern once",
+        )
+        .unwrap();
 
         let results = db
             .search_hybrid("zebrafinch pattern", Some(&unit_vec(4, 0)), 10)
             .expect("search");
-        assert_eq!(results[0].name, "gammaFn", "both-legs hit must outrank single-leg hits");
+        assert_eq!(
+            results[0].name, "gammaFn",
+            "both-legs hit must outrank single-leg hits"
+        );
         assert_eq!(results[0].match_type, "hybrid");
         let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"betaFn"));
@@ -1454,23 +1587,50 @@ mod tests {
     #[test]
     fn hybrid_bm25_only_incidental_word_is_gated() {
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
-        let file_id = db.upsert_file("src/pay.ts", "typescript", "h", 0, 0).unwrap();
-        let sym_id = db.insert_symbol(file_id, "renderList", "function", None, 1, 0, 9, 0, None).unwrap();
+        let file_id = db
+            .upsert_file("src/pay.ts", "typescript", "h", 0, 0)
+            .unwrap();
+        let sym_id = db
+            .insert_symbol(file_id, "renderList", "function", None, 1, 0, 9, 0, None)
+            .unwrap();
         // Contains exactly one of the three query tokens ("payment") — not
         // enough evidence for a BM25-only hit on a multi-word query.
-        db.insert_chunk(sym_id, 0, 1, 9, "e", "renderList render list", "pay.ts pay", "handles payment display rows").unwrap();
+        db.insert_chunk(
+            sym_id,
+            0,
+            1,
+            9,
+            "e",
+            "renderList render list",
+            "pay.ts pay",
+            "handles payment display rows",
+        )
+        .unwrap();
 
-        let results = db.search_hybrid("stripe payment webhook", None, 10).expect("search");
-        assert!(results.is_empty(), "single incidental word must not pass the gate: {results:?}");
+        let results = db
+            .search_hybrid("stripe payment webhook", None, 10)
+            .expect("search");
+        assert!(
+            results.is_empty(),
+            "single incidental word must not pass the gate: {results:?}"
+        );
     }
 
     #[test]
     fn required_token_matches_scales_with_query_length() {
-        assert_eq!(required_token_matches(1, 2), 1, "single-token exact-term queries pass");
+        assert_eq!(
+            required_token_matches(1, 2),
+            1,
+            "single-token exact-term queries pass"
+        );
         assert_eq!(required_token_matches(2, 2), 2);
         assert_eq!(required_token_matches(3, 2), 2);
         assert_eq!(required_token_matches(4, 2), 2);
-        assert_eq!(required_token_matches(5, 2), 3, "long NL queries need a majority");
+        assert_eq!(
+            required_token_matches(5, 2),
+            3,
+            "long NL queries need a majority"
+        );
         assert_eq!(required_token_matches(6, 2), 3);
     }
 
@@ -1490,13 +1650,17 @@ mod tests {
     #[test]
     fn symbols_fts_has_no_ghosts_after_incremental_reindex() {
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
-        let file_id = db.upsert_file("src/a.ts", "typescript", "h1", 0, 0).unwrap();
-        db.insert_symbol(file_id, "uniqueAlphaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+        let file_id = db
+            .upsert_file("src/a.ts", "typescript", "h1", 0, 0)
+            .unwrap();
+        db.insert_symbol(file_id, "uniqueAlphaFn", "function", None, 1, 0, 2, 0, None)
+            .unwrap();
         assert_eq!(fts_raw_count(&db, "symbols_fts", "uniqueAlphaFn"), 1);
 
         // Incremental reindex: old symbols deleted, new content inserted.
         db.delete_symbols_for_file(file_id).unwrap();
-        db.insert_symbol(file_id, "uniqueBetaFn", "function", None, 1, 0, 2, 0, None).unwrap();
+        db.insert_symbol(file_id, "uniqueBetaFn", "function", None, 1, 0, 2, 0, None)
+            .unwrap();
 
         assert_eq!(
             fts_raw_count(&db, "symbols_fts", "uniqueAlphaFn"),
@@ -1509,9 +1673,23 @@ mod tests {
     #[test]
     fn chunk_fts_purged_by_delete_symbols_for_file_and_delete_file() {
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
-        let file_id = db.upsert_file("src/b.ts", "typescript", "h1", 0, 0).unwrap();
-        let sym_id = db.insert_symbol(file_id, "widgetFactory", "function", None, 1, 0, 9, 0, None).unwrap();
-        db.insert_chunk(sym_id, 0, 1, 9, "embed text", "widgetFactory widget factory", "b.ts b", "xyzzybody content here").unwrap();
+        let file_id = db
+            .upsert_file("src/b.ts", "typescript", "h1", 0, 0)
+            .unwrap();
+        let sym_id = db
+            .insert_symbol(file_id, "widgetFactory", "function", None, 1, 0, 9, 0, None)
+            .unwrap();
+        db.insert_chunk(
+            sym_id,
+            0,
+            1,
+            9,
+            "embed text",
+            "widgetFactory widget factory",
+            "b.ts b",
+            "xyzzybody content here",
+        )
+        .unwrap();
 
         let chunks = db.chunks_for_file(file_id).unwrap();
         assert_eq!(chunks.len(), 1);
@@ -1520,12 +1698,28 @@ mod tests {
         assert_eq!(fts_raw_count(&db, "chunk_fts", "xyzzybody"), 1);
 
         db.delete_symbols_for_file(file_id).unwrap();
-        assert_eq!(fts_raw_count(&db, "chunk_fts", "xyzzybody"), 0, "chunk FTS ghost row");
+        assert_eq!(
+            fts_raw_count(&db, "chunk_fts", "xyzzybody"),
+            0,
+            "chunk FTS ghost row"
+        );
         assert!(db.chunks_for_file(file_id).unwrap().is_empty());
 
         // Re-insert, then remove the whole file: everything must go.
-        let sym_id = db.insert_symbol(file_id, "widgetFactory", "function", None, 1, 0, 9, 0, None).unwrap();
-        db.insert_chunk(sym_id, 0, 1, 9, "embed text", "widgetFactory", "b.ts", "xyzzybody again").unwrap();
+        let sym_id = db
+            .insert_symbol(file_id, "widgetFactory", "function", None, 1, 0, 9, 0, None)
+            .unwrap();
+        db.insert_chunk(
+            sym_id,
+            0,
+            1,
+            9,
+            "embed text",
+            "widgetFactory",
+            "b.ts",
+            "xyzzybody again",
+        )
+        .unwrap();
         db.delete_file("src/b.ts").unwrap();
         assert!(db.file_by_path("src/b.ts").unwrap().is_none());
         assert_eq!(fts_raw_count(&db, "chunk_fts", "xyzzybody"), 0);
@@ -1537,9 +1731,23 @@ mod tests {
         // Scan-time behavior with no model loaded: chunks + FTS exist so BM25
         // works, symbol_embeddings stays empty until the background pass.
         let db = IndexDb::open(Path::new(":memory:")).expect("open in-memory db");
-        let file_id = db.upsert_file("src/c.ts", "typescript", "h1", 0, 0).unwrap();
-        let sym_id = db.insert_symbol(file_id, "pendingFn", "function", None, 1, 0, 4, 0, None).unwrap();
-        db.insert_chunk(sym_id, 0, 1, 4, "function: pendingFn | body", "pendingFn pending fn", "c.ts c", "body").unwrap();
+        let file_id = db
+            .upsert_file("src/c.ts", "typescript", "h1", 0, 0)
+            .unwrap();
+        let sym_id = db
+            .insert_symbol(file_id, "pendingFn", "function", None, 1, 0, 4, 0, None)
+            .unwrap();
+        db.insert_chunk(
+            sym_id,
+            0,
+            1,
+            4,
+            "function: pendingFn | body",
+            "pendingFn pending fn",
+            "c.ts c",
+            "body",
+        )
+        .unwrap();
 
         let pending = db.embedding_pending_files().unwrap();
         assert_eq!(pending, 1, "file without embed_hash counts as pending");
@@ -1547,7 +1755,14 @@ mod tests {
         // The background pass reads the stored chunk and writes the vector
         // keyed by (symbol_id, chunk_index).
         let chunks = db.chunks_for_file(file_id).unwrap();
-        db.upsert_embedding(chunks[0].symbol_id, chunks[0].chunk_index, chunks[0].start_line, chunks[0].end_line, &unit_vec(4, 0)).unwrap();
+        db.upsert_embedding(
+            chunks[0].symbol_id,
+            chunks[0].chunk_index,
+            chunks[0].start_line,
+            chunks[0].end_line,
+            &unit_vec(4, 0),
+        )
+        .unwrap();
         db.set_embed_hash(file_id, "h1").unwrap();
         assert_eq!(db.embedding_pending_files().unwrap(), 0);
     }
@@ -1565,10 +1780,14 @@ mod tests {
         assert_ne!(file.hash, file.embed_hash);
 
         // Embedding generation records the hash it embedded from.
-        db.set_embed_hash(file_id, "hash-v1").expect("set embed_hash");
+        db.set_embed_hash(file_id, "hash-v1")
+            .expect("set embed_hash");
         let file = db.file_by_path("src/foo.ts").unwrap().unwrap();
         assert_eq!(file.embed_hash.as_deref(), Some("hash-v1"));
-        assert_eq!(file.hash, file.embed_hash, "hash == embed_hash means the file is up to date");
+        assert_eq!(
+            file.hash, file.embed_hash,
+            "hash == embed_hash means the file is up to date"
+        );
 
         // Re-scanning with unchanged content re-upserts the same hash and
         // must NOT disturb embed_hash — this is what lets a second
@@ -1586,6 +1805,9 @@ mod tests {
         let file = db.file_by_path("src/foo.ts").unwrap().unwrap();
         assert_eq!(file.hash.as_deref(), Some("hash-v2"));
         assert_eq!(file.embed_hash.as_deref(), Some("hash-v1"));
-        assert_ne!(file.hash, file.embed_hash, "content changed — embedding is now stale");
+        assert_ne!(
+            file.hash, file.embed_hash,
+            "content changed — embedding is now stale"
+        );
     }
 }

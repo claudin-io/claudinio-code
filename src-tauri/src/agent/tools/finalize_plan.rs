@@ -65,10 +65,9 @@ pub fn git_head(root: &str) -> Option<String> {
 /// working-tree porcelain status when no base is known or the range fails.
 fn changed_files(root: &str, base: Option<&str>) -> Vec<String> {
     if let Some(base) = base {
-        if let Some(lines) = run_git_lines(
-            root,
-            &["diff", "--name-status", &format!("{base}..HEAD")],
-        ) {
+        if let Some(lines) =
+            run_git_lines(root, &["diff", "--name-status", &format!("{base}..HEAD")])
+        {
             if !lines.is_empty() {
                 return lines;
             }
@@ -238,8 +237,7 @@ fn run_finalize(
     let task_notes = collect_task_notes(ctx);
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
 
-    let section =
-        build_implementation_log(&now, summary, &commits, &files, journal, &task_notes);
+    let section = build_implementation_log(&now, summary, &commits, &files, journal, &task_notes);
 
     let mut existing = std::fs::read_to_string(plan_path).unwrap_or_default();
     existing.push_str(&section);
@@ -329,12 +327,18 @@ mod tests {
             plan_save_path: plan_save_path.map(|s| s.to_string()),
             base_commit: None,
             auto_approve_git: false,
-            mcp: None, mode_ctl: None,
-            index_progress: None,            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(std::num::NonZeroUsize::new(1).unwrap()))),        }
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        }
     }
 
     fn tmp_workspace(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("claudinio_finalize_{name}_{}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("claudinio_finalize_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(p.join(".claudinio").join("plans")).unwrap();
         p
@@ -370,7 +374,10 @@ mod tests {
         let log = build_implementation_log("t", None, &[], &[], "j", &[]);
         assert!(log.contains("_(none detected)_"));
         assert!(log.contains("_(git unavailable or none)_"));
-        assert!(!log.contains("**Task journal:**"), "no section when no notes");
+        assert!(
+            !log.contains("**Task journal:**"),
+            "no section when no notes"
+        );
     }
 
     #[test]
@@ -426,7 +433,11 @@ mod tests {
     fn errors_when_no_plan_exists() {
         let root = tmp_workspace("noplan");
         let ctx = ctx_for(root.to_str().unwrap(), None);
-        let args = FinalizePlanArgs { journal: "j".into(), plan_file: None, summary: None };
+        let args = FinalizePlanArgs {
+            journal: "j".into(),
+            plan_file: None,
+            summary: None,
+        };
         let err = execute(args, &ctx).unwrap_err();
         assert!(err.contains("no plan file found"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
@@ -438,7 +449,12 @@ mod tests {
         let r = root.to_str().unwrap();
         // init a repo with one base commit
         let git = |args: &[&str]| {
-            Command::new("git").arg("-C").arg(r).args(args).output().unwrap()
+            Command::new("git")
+                .arg("-C")
+                .arg(r)
+                .args(args)
+                .output()
+                .unwrap()
         };
         if !git(&["init", "-q"]).status.success() {
             eprintln!("git not available; skipping");
@@ -457,7 +473,10 @@ mod tests {
         git(&["commit", "-qm", "add b"]);
 
         let files = changed_files(r, Some(&base));
-        assert!(files.iter().any(|f| f.contains("b.txt")), "files: {files:?}");
+        assert!(
+            files.iter().any(|f| f.contains("b.txt")),
+            "files: {files:?}"
+        );
         let cs = commits(r, Some(&base));
         assert!(cs.iter().any(|c| c.contains("add b")), "commits: {cs:?}");
         let _ = std::fs::remove_dir_all(&root);

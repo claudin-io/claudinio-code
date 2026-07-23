@@ -39,7 +39,8 @@ impl LspClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         procutil::no_window(&mut cmd);
-        let mut process = cmd.spawn()
+        let mut process = cmd
+            .spawn()
             .map_err(|e| format!("spawn {server_path}: {e}"))?;
 
         let stdin = process.stdin.take().ok_or("no stdin")?;
@@ -138,7 +139,9 @@ impl LspClient {
             if id == expected_id {
                 Ok(response.get("result").cloned().unwrap_or(Value::Null))
             } else {
-                Err(format!("unexpected response id {id}, expected {expected_id}"))
+                Err(format!(
+                    "unexpected response id {id}, expected {expected_id}"
+                ))
             }
         } else {
             Err("response missing id".into())
@@ -177,7 +180,12 @@ impl LspClient {
         self.send_notification("initialized", serde_json::json!({}))
     }
 
-    pub fn goto_definition(&mut self, uri: &str, line: u64, character: u64) -> Result<Vec<Location>, String> {
+    pub fn goto_definition(
+        &mut self,
+        uri: &str,
+        line: u64,
+        character: u64,
+    ) -> Result<Vec<Location>, String> {
         let result = self.send_request(
             "textDocument/definition",
             serde_json::json!({
@@ -190,7 +198,12 @@ impl LspClient {
         Ok(locations)
     }
 
-    pub fn find_references(&mut self, uri: &str, line: u64, character: u64) -> Result<Vec<Location>, String> {
+    pub fn find_references(
+        &mut self,
+        uri: &str,
+        line: u64,
+        character: u64,
+    ) -> Result<Vec<Location>, String> {
         let result = self.send_request(
             "textDocument/references",
             serde_json::json!({
@@ -204,7 +217,12 @@ impl LspClient {
         Ok(locations)
     }
 
-    pub fn hover(&mut self, uri: &str, line: u64, character: u64) -> Result<Option<HoverResult>, String> {
+    pub fn hover(
+        &mut self,
+        uri: &str,
+        line: u64,
+        character: u64,
+    ) -> Result<Option<HoverResult>, String> {
         let result = self.send_request(
             "textDocument/hover",
             serde_json::json!({

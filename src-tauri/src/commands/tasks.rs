@@ -18,7 +18,10 @@ pub struct TaskItem {
 /// returning its deserialized tasks (or empty vec if none found).
 pub fn load_last_tasks(path: &Path) -> Result<Vec<TaskItem>, String> {
     let records = load_records(path)?;
-    let last = records.into_iter().rev().find(|r| matches!(r, SessionRecord::Tasks { .. }));
+    let last = records
+        .into_iter()
+        .rev()
+        .find(|r| matches!(r, SessionRecord::Tasks { .. }));
     match last {
         Some(SessionRecord::Tasks { tasks_json, .. }) => {
             serde_json::from_str(&tasks_json).map_err(|e| format!("parse tasks from session: {e}"))

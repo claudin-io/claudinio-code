@@ -190,7 +190,8 @@ pub async fn login_with_claudinio(
     let exchange_path = "/api/app/exchange";
     let exchange_url = format!("{}{}", services_url.trim_end_matches('/'), exchange_path);
     let body = serde_json::json!({ "code": code, "verifier": verifier, "install_id": install_id });
-    let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode exchange request: {e}"))?;
+    let body_bytes =
+        serde_json::to_vec(&body).map_err(|e| format!("encode exchange request: {e}"))?;
     let signature_headers = app_sign::sign("POST", exchange_path, &body_bytes);
 
     let _net_guard = crate::net_activity::NetGuard::begin(

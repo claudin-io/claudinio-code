@@ -160,12 +160,7 @@ pub fn walk_dir(root: String) -> Result<Vec<WalkEntry>, String> {
         })
         .collect();
 
-    entries.sort_by(|a, b| {
-        a.is_dir
-            .cmp(&b.is_dir)
-            .reverse()
-            .then(a.path.cmp(&b.path))
-    });
+    entries.sort_by(|a, b| a.is_dir.cmp(&b.is_dir).reverse().then(a.path.cmp(&b.path)));
     Ok(entries)
 }
 

@@ -117,10 +117,7 @@ pub async fn enhance_prompt(
 
     // Project summary
     if !context.project_summary.is_empty() {
-        user_message.push_str(&format!(
-            "=== PROJECT: {} ===\n\n",
-            context.project_summary
-        ));
+        user_message.push_str(&format!("=== PROJECT: {} ===\n\n", context.project_summary));
     }
 
     if let Some(git) = git_section {
@@ -145,8 +142,8 @@ pub async fn enhance_prompt(
          language as the draft.",
     );
 
-    let reply = provider::one_shot(&config, &model, ENHANCER_SYSTEM_PROMPT, &user_message, 4096)
-        .await?;
+    let reply =
+        provider::one_shot(&config, &model, ENHANCER_SYSTEM_PROMPT, &user_message, 4096).await?;
 
     // The draft is the only source of truth for <goal> tags (they create
     // mandatory golden tasks). If the enhancer hallucinates or "helpfully"
@@ -277,10 +274,7 @@ async fn build_code_section(
             .unwrap_or(&r.file_path);
         section.push_str(&format!(
             "- {} `{}` ({}:{})",
-            r.kind,
-            r.name,
-            path,
-            r.start_line
+            r.kind, r.name, path, r.start_line
         ));
         if let Some(sig) = &r.signature {
             section.push_str(&format!(" — {}", sig));

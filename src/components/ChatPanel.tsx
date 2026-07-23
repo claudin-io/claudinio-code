@@ -3357,7 +3357,7 @@ const ThinkingBar: Component<{
   const [hovered, setHovered] = createSignal(false);
 
   createEffect(() => {
-    const _text = props.text();
+    props.text(); // tracked: re-run as the streamed text grows
     const _hovered = hovered();
     if (_hovered && tooltipRef) {
       tooltipRef.scrollTop = tooltipRef.scrollHeight;

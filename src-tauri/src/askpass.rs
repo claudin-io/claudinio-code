@@ -131,7 +131,9 @@ async fn start_inner() -> Result<(), String> {
         .map_err(|_| "askpass bridge already started".to_string())?;
 
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
         tauri::async_runtime::spawn(async move {
             let _ = handle_conn(stream).await;
         });
@@ -181,7 +183,9 @@ async fn handle_conn(mut stream: tokio::net::TcpStream) -> Result<(), String> {
     let header = |name: &str| -> Option<String> {
         headers.lines().find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+            k.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| v.trim().to_string())
         })
     };
 
@@ -219,11 +223,8 @@ async fn handle_conn(mut stream: tokio::net::TcpStream) -> Result<(), String> {
         let _ = app.emit(EVENT_NAME, AskpassRequest { id, prompt });
     }
 
-    let answer = tokio::time::timeout(
-        std::time::Duration::from_secs(ANSWER_TIMEOUT_SECS),
-        rx,
-    )
-    .await;
+    let answer =
+        tokio::time::timeout(std::time::Duration::from_secs(ANSWER_TIMEOUT_SECS), rx).await;
     PENDING.fetch_sub(1, Ordering::SeqCst);
     if let Some(b) = BRIDGE.get() {
         if let Ok(mut m) = b.waiting.lock() {
@@ -237,7 +238,11 @@ async fn handle_conn(mut stream: tokio::net::TcpStream) -> Result<(), String> {
     }
 }
 
-async fn respond(stream: &mut tokio::net::TcpStream, status: u16, body: &str) -> Result<(), String> {
+async fn respond(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    body: &str,
+) -> Result<(), String> {
     let reason = if status == 200 { "OK" } else { "Forbidden" };
     let msg = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

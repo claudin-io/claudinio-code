@@ -1,0 +1,83 @@
+name: Bug report
+description: Something is broken or behaves differently than documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do **not** use this template for security
+        issues — see [SECURITY.md](https://github.com/claudin-io/claudinio-code/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a workspace with ...
+        2. Ask the agent to ...
+        3. Approve the bash call
+        4. See error
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From the app's About screen, or the tag/commit you built from.
+      placeholder: "0.1.15"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - Windows (x64)
+        - Windows (ARM64)
+        - Linux (x64)
+        - Linux (ARM64)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Best guess is fine.
+      options:
+        - Agent loop / tools
+        - Code intelligence (indexing, search, LSP)
+        - Provider / API connection
+        - UI / chat timeline
+        - Sessions & persistence
+        - Installer / updater
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      description: Which base URL and model were you using? Never paste API keys.
+      placeholder: "api.claudin.io — claudinio"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Relevant console output or session excerpt. **Redact API keys, tokens and
+        anything private from your codebase** — this is a public issue tracker.
+      render: shell

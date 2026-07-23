@@ -41,7 +41,11 @@ pub async fn mcp_list_servers(
             connected: false,
             tool_count: 0,
             tool_names: Vec::new(),
-            error: if entry.enabled { None } else { Some("disabled".to_string()) },
+            error: if entry.enabled {
+                None
+            } else {
+                Some("disabled".to_string())
+            },
         })
         .collect())
 }

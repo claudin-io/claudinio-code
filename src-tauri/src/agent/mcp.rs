@@ -70,7 +70,9 @@ impl McpManager {
             if !entry.enabled {
                 continue;
             }
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect_one(name, entry, workspace_root)).await {
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect_one(name, entry, workspace_root))
+                .await
+            {
                 Ok(Ok((conn, defs))) => {
                     statuses.push(McpServerStatus {
                         name: name.clone(),
@@ -124,13 +126,21 @@ impl McpManager {
 
     /// Dispatch a namespaced tool call (`mcp__server__tool`) to the owning
     /// connection and convert the result to plain text.
-    pub async fn call(&self, namespaced_name: &str, args: serde_json::Value) -> Result<String, String> {
+    pub async fn call(
+        &self,
+        namespaced_name: &str,
+        args: serde_json::Value,
+    ) -> Result<String, String> {
         let mut connections = self.connections.lock().await;
         let conn = connections
             .iter_mut()
             .find(|c| c.tool_names.contains_key(namespaced_name))
             .ok_or_else(|| format!("no MCP server owns tool '{namespaced_name}'"))?;
-        let original_name = conn.tool_names.get(namespaced_name).cloned().unwrap_or_default();
+        let original_name = conn
+            .tool_names
+            .get(namespaced_name)
+            .cloned()
+            .unwrap_or_default();
 
         let mut params = CallToolRequestParams::new(original_name);
         params.arguments = args.as_object().cloned();
@@ -158,7 +168,13 @@ fn sanitize_tool_name(server: &str, tool: &str) -> String {
     let raw = format!("mcp__{server}__{tool}");
     let sanitized: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if sanitized.len() > 64 {
         sanitized[..64].to_string()
@@ -205,8 +221,8 @@ async fn connect_one(
                     header_map.insert(hname, value);
                 }
             }
-            let config =
-                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(header_map);
+            let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
+                .custom_headers(header_map);
             let transport = StreamableHttpClientTransport::from_config(config);
             ().serve(transport)
                 .await
@@ -226,12 +242,22 @@ async fn connect_one(
         tool_names.insert(namespaced.clone(), tool.name.to_string());
         defs.push(ToolDef {
             name: namespaced,
-            description: tool.description.clone().map(|d| d.to_string()).unwrap_or_default(),
+            description: tool
+                .description
+                .clone()
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
             input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
         });
     }
 
-    Ok((McpConnection { service, tool_names }, defs))
+    Ok((
+        McpConnection {
+            service,
+            tool_names,
+        },
+        defs,
+    ))
 }
 
 fn result_to_text(result: CallToolResult) -> Result<String, String> {
@@ -262,7 +288,11 @@ fn result_to_text(result: CallToolResult) -> Result<String, String> {
     }
     let text = parts.join("\n\n");
     if result.is_error == Some(true) {
-        Err(if text.is_empty() { "tool call failed".to_string() } else { text })
+        Err(if text.is_empty() {
+            "tool call failed".to_string()
+        } else {
+            text
+        })
     } else {
         Ok(text)
     }
@@ -275,17 +305,23 @@ mod tests {
     #[test]
     fn test_sanitize_tool_name_replaces_invalid_chars_and_caps_length() {
         let name = sanitize_tool_name("my server!", "do/thing");
-        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
         assert!(name.len() <= 64);
         assert!(name.starts_with("mcp__"));
     }
 
     #[test]
     fn test_result_to_text_joins_text_blocks_and_respects_is_error() {
-        let ok = CallToolResult::success(vec![ContentBlock::Text(rmcp::model::TextContent::new("hello"))]);
+        let ok = CallToolResult::success(vec![ContentBlock::Text(rmcp::model::TextContent::new(
+            "hello",
+        ))]);
         assert_eq!(result_to_text(ok).unwrap(), "hello");
 
-        let err = CallToolResult::error(vec![ContentBlock::Text(rmcp::model::TextContent::new("boom"))]);
+        let err = CallToolResult::error(vec![ContentBlock::Text(rmcp::model::TextContent::new(
+            "boom",
+        ))]);
         assert_eq!(result_to_text(err).unwrap_err(), "boom");
     }
 }

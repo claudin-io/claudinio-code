@@ -5,9 +5,9 @@
 //! have forgotten about. The tracker emits the full list of active operations
 //! on the `network-activity` Tauri event whenever it changes.
 
+use csv::Writer;
 use serde::Serialize;
 use std::fs::OpenOptions;
-use csv::Writer;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -202,16 +202,18 @@ fn append_csv_row(op: &NetOp) {
     }
     let _lock = CSV_MUTEX.lock().unwrap();
     let file_exists = path.exists();
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path);
+    let file = OpenOptions::new().create(true).append(true).open(&path);
     if let Ok(file) = file {
         let mut wtr = Writer::from_writer(file);
         if !file_exists {
             let _ = wtr.write_record(&[
-                "workspace", "timestamp", "source", "detail",
-                "duration_ms", "bytes", "status_code",
+                "workspace",
+                "timestamp",
+                "source",
+                "detail",
+                "duration_ms",
+                "bytes",
+                "status_code",
             ]);
         }
         let _ = wtr.write_record(&[

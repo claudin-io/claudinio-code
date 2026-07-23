@@ -110,7 +110,8 @@ pub fn execute(args: ReadFileArgs) -> Result<String, String> {
                 truncate_by_tokens(&content, MAX_TOKENS);
 
             if lines_shown < total_lines {
-                let warning = truncation_warning(tokens_shown, total_tokens, lines_shown, total_lines);
+                let warning =
+                    truncation_warning(tokens_shown, total_tokens, lines_shown, total_lines);
                 Ok(format!("{warning}{truncated}"))
             } else {
                 Ok(truncated)

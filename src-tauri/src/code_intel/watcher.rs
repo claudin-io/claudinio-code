@@ -28,10 +28,7 @@ fn is_ignored_path(root: &Path, path: &Path, gitignore: &Gitignore) -> bool {
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
             let name = name.to_string_lossy();
-            if name.starts_with('.')
-                || name == "node_modules"
-                || name == "dist"
-                || name == "target"
+            if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "target"
             {
                 return true;
             }
@@ -60,11 +57,7 @@ pub struct FileWatcher {
 }
 
 impl FileWatcher {
-    pub fn start(
-        root: &str,
-        db_path: &Path,
-        app_handle: tauri::AppHandle,
-    ) -> Result<Self, String> {
+    pub fn start(root: &str, db_path: &Path, app_handle: tauri::AppHandle) -> Result<Self, String> {
         let db_path = db_path.to_path_buf();
         let handle = app_handle.clone();
         let root_owned = root.to_string();
@@ -132,30 +125,39 @@ impl FileWatcher {
                             continue;
                         }
 
-                        let _ = h.emit("index-progress", serde_json::json!({
-                            "status": "reindexing",
-                            "file": path_str,
-                            "workspace": ws,
-                        }));
+                        let _ = h.emit(
+                            "index-progress",
+                            serde_json::json!({
+                                "status": "reindexing",
+                                "file": path_str,
+                                "workspace": ws,
+                            }),
+                        );
 
                         let mut emb = embedder.as_ref().and_then(|e| e.lock().ok());
                         match indexer::reindex_file(&db, path_str, emb.as_deref_mut(), Some(&ws)) {
                             Ok(Some(result)) => {
-                                let _ = h.emit("index-progress", serde_json::json!({
-                                    "status": "reindexed",
-                                    "file": path_str,
-                                    "symbols": result.symbols.len(),
-                                    "workspace": ws,
-                                }));
+                                let _ = h.emit(
+                                    "index-progress",
+                                    serde_json::json!({
+                                        "status": "reindexed",
+                                        "file": path_str,
+                                        "symbols": result.symbols.len(),
+                                        "workspace": ws,
+                                    }),
+                                );
                             }
                             Ok(None) => {}
                             Err(e) => {
-                                let _ = h.emit("index-progress", serde_json::json!({
-                                    "status": "reindex_error",
-                                    "file": path_str,
-                                    "error": e,
-                                    "workspace": ws,
-                                }));
+                                let _ = h.emit(
+                                    "index-progress",
+                                    serde_json::json!({
+                                        "status": "reindex_error",
+                                        "file": path_str,
+                                        "error": e,
+                                        "workspace": ws,
+                                    }),
+                                );
                             }
                         }
                     }
@@ -164,8 +166,8 @@ impl FileWatcher {
         }
 
         let watch_root = std::path::PathBuf::from(&root_owned);
-        let mut watcher = notify::recommended_watcher(
-            move |event: Result<notify::Event, notify::Error>| {
+        let mut watcher =
+            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
                 let event = match event {
                     Ok(e) => e,
                     Err(_) => return,
@@ -183,9 +185,8 @@ impl FileWatcher {
                     }
                     let _ = tx.send(p.to_string_lossy().to_string());
                 }
-            },
-        )
-        .map_err(|e| format!("watcher create: {e}"))?;
+            })
+            .map_err(|e| format!("watcher create: {e}"))?;
 
         // The native backends (FSEvents/inotify/ReadDirectoryChangesW) ignore
         // poll_interval, but if notify ever falls back to PollWatcher this is
@@ -204,9 +205,7 @@ impl FileWatcher {
             .watch(Path::new(root), RecursiveMode::Recursive)
             .map_err(|e| format!("watcher watch: {e}"))?;
 
-        Ok(FileWatcher {
-            _watcher: watcher,
-        })
+        Ok(FileWatcher { _watcher: watcher })
     }
 }
 
@@ -217,14 +216,27 @@ mod tests {
     #[test]
     fn watcher_accepts_all_indexable_extensions() {
         for accepted in [
-            "src/main.go", "app/Main.kt", "styles/theme.scss", "Cargo.toml",
-            "src/lib.rs", "docs/guide.md", "notes.txt", "web/app.tsx",
-            "api/server.rb", "native/window.cpp",
+            "src/main.go",
+            "app/Main.kt",
+            "styles/theme.scss",
+            "Cargo.toml",
+            "src/lib.rs",
+            "docs/guide.md",
+            "notes.txt",
+            "web/app.tsx",
+            "api/server.rb",
+            "native/window.cpp",
         ] {
-            assert!(is_indexable_file(Path::new(accepted)), "should accept {accepted}");
+            assert!(
+                is_indexable_file(Path::new(accepted)),
+                "should accept {accepted}"
+            );
         }
         for rejected in ["logo.png", "pnpm-lock.lock", "video.mp4", "binary.bin"] {
-            assert!(!is_indexable_file(Path::new(rejected)), "should reject {rejected}");
+            assert!(
+                !is_indexable_file(Path::new(rejected)),
+                "should reject {rejected}"
+            );
         }
     }
 
@@ -235,9 +247,17 @@ mod tests {
         assert!(is_ignored_path(root, &root.join(".claudinio/foo.ts"), &gi));
         assert!(is_ignored_path(root, &root.join(".agents/bar.ts"), &gi));
         assert!(is_ignored_path(root, &root.join(".git/hooks/foo.rs"), &gi));
-        assert!(is_ignored_path(root, &root.join("node_modules/pkg/index.js"), &gi));
+        assert!(is_ignored_path(
+            root,
+            &root.join("node_modules/pkg/index.js"),
+            &gi
+        ));
         assert!(is_ignored_path(root, &root.join("dist/bundle.js"), &gi));
-        assert!(is_ignored_path(root, &root.join("target/debug/foo.rs"), &gi));
+        assert!(is_ignored_path(
+            root,
+            &root.join("target/debug/foo.rs"),
+            &gi
+        ));
         assert!(!is_ignored_path(root, &root.join("src/main.rs"), &gi));
     }
 }

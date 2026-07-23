@@ -28,7 +28,10 @@ pub struct IndexStatus {
     pub watcher_warning: Option<String>,
 }
 
-fn resolve_model_dir(app_handle: &tauri::AppHandle, workspace_root: &Path) -> Option<std::path::PathBuf> {
+fn resolve_model_dir(
+    app_handle: &tauri::AppHandle,
+    workspace_root: &Path,
+) -> Option<std::path::PathBuf> {
     let subdir = format!("models/{}", embeddings::model_cache_dirname());
     let model_file = embeddings::model_filename();
     if let Ok(r) = app_handle.path().resource_dir() {
@@ -83,7 +86,13 @@ fn index_db_path(app_handle: &tauri::AppHandle, workspace_root: &Path) -> std::p
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".into())
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(40)
         .collect();
     let hash = xxhash_rust::xxh3::xxh3_64(workspace_root.to_string_lossy().as_bytes());
@@ -112,7 +121,8 @@ fn migrate_legacy_index_db(workspace_root: &Path, new_db_path: &Path) {
             let _ = std::fs::copy(&legacy_wal, std::path::PathBuf::from(wal_target));
         }
         for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(workspace_root.join(format!(".claudinio/index.db{suffix}")));
+            let _ =
+                std::fs::remove_file(workspace_root.join(format!(".claudinio/index.db{suffix}")));
         }
         eprintln!(
             "[open_workspace] migrated index db out of workspace: {} -> {}",
@@ -134,7 +144,8 @@ pub async fn open_workspace(
     // Already open: switching back to this workspace must be cheap and must
     // not restart indexing/watcher/LSP under a possibly-running agent.
     if let Ok(ws) = state.workspace(&path).await {
-        let (files_count, symbols_count, embeddings_count) = ws.index_db.index_stats().unwrap_or((0, 0, 0));
+        let (files_count, symbols_count, embeddings_count) =
+            ws.index_db.index_stats().unwrap_or((0, 0, 0));
         let warning = ws.watcher_warning.lock().await.clone();
         return Ok(IndexStatus {
             status: "ok".into(),
@@ -159,7 +170,9 @@ pub async fn open_workspace(
             total_files: 0,
             workspace: path.clone(),
         })));
-    let lsp_manager = Arc::new(tokio::sync::Mutex::new(crate::lsp::manager::LspManager::new()));
+    let lsp_manager = Arc::new(tokio::sync::Mutex::new(
+        crate::lsp::manager::LspManager::new(),
+    ));
     let early_workspace = Arc::new(WorkspaceState {
         root: root.clone(),
         index_db: db.clone(),
@@ -199,13 +212,16 @@ pub async fn open_workspace(
         });
     }
 
-    let _ = app_handle.emit("index-progress", indexer::IndexProgress {
-        status: "loading_model".into(),
-        files_indexed: 0,
-        symbols_indexed: 0,
-        total_files: 0,
-        workspace: path.clone(),
-    });
+    let _ = app_handle.emit(
+        "index-progress",
+        indexer::IndexProgress {
+            status: "loading_model".into(),
+            files_indexed: 0,
+            symbols_indexed: 0,
+            total_files: 0,
+            workspace: path.clone(),
+        },
+    );
 
     let ws_root = Path::new(&path);
 
@@ -214,13 +230,16 @@ pub async fn open_workspace(
         let cache = cache_model_dir(&app_handle);
         if let Err(e) = embeddings::ensure_model_downloaded(&cache).await {
             eprintln!("[open_workspace] failed to download embedding model: {e}");
-            let _ = app_handle.emit("index-progress", indexer::IndexProgress {
-                status: "embedding_model_error".into(),
-                files_indexed: 0,
-                symbols_indexed: 0,
-                total_files: 0,
-                workspace: path.clone(),
-            });
+            let _ = app_handle.emit(
+                "index-progress",
+                indexer::IndexProgress {
+                    status: "embedding_model_error".into(),
+                    files_indexed: 0,
+                    symbols_indexed: 0,
+                    total_files: 0,
+                    workspace: path.clone(),
+                },
+            );
         }
     }
 
@@ -301,7 +320,9 @@ pub async fn open_workspace(
 
     // Index scan is done — clear the shared progress so tools know the index is ready
     {
-        let mut p = index_progress.lock().map_err(|e| format!("index_progress lock: {e}"))?;
+        let mut p = index_progress
+            .lock()
+            .map_err(|e| format!("index_progress lock: {e}"))?;
         *p = None;
     }
 
@@ -337,12 +358,7 @@ pub async fn open_workspace(
         let ws_path = path.clone();
         let join = spawn_blocking(move || {
             let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
-            indexer::generate_all_embeddings(
-                db2.as_ref(),
-                &shared,
-                Some(&emit_handle),
-                &ws_path,
-            )
+            indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle), &ws_path)
         });
         let emit_handle = app_handle.clone();
         let db3 = db.clone();
@@ -367,13 +383,16 @@ pub async fn open_workspace(
             // only returns newly generated embeddings (0 on re-open since all
             // files are already embedded), but we need the total count for the UI.
             let real_embeddings = db3.index_stats().unwrap_or((0, 0, 0)).2;
-            let _ = emit_handle.emit("index-progress", indexer::IndexProgress {
-                status: status.into(),
-                files_indexed: files,
-                symbols_indexed: real_embeddings,
-                total_files: files,
-                workspace: ws_path,
-            });
+            let _ = emit_handle.emit(
+                "index-progress",
+                indexer::IndexProgress {
+                    status: status.into(),
+                    files_indexed: files,
+                    symbols_indexed: real_embeddings,
+                    total_files: files,
+                    workspace: ws_path,
+                },
+            );
         });
     }
 
@@ -382,13 +401,16 @@ pub async fn open_workspace(
             Ok(w) => (Some(w), None),
             Err(e) => {
                 eprintln!("[open_workspace] file watcher failed (workspace still usable): {e}");
-                let _ = app_handle.emit("index-progress", indexer::IndexProgress {
-                    status: "watcher_warning".into(),
-                    files_indexed: files_count,
-                    symbols_indexed: symbols_count,
-                    total_files: files_count,
-                    workspace: path.clone(),
-                });
+                let _ = app_handle.emit(
+                    "index-progress",
+                    indexer::IndexProgress {
+                        status: "watcher_warning".into(),
+                        files_indexed: files_count,
+                        symbols_indexed: symbols_count,
+                        total_files: files_count,
+                        workspace: path.clone(),
+                    },
+                );
                 (None, Some(format!("Live file watching unavailable: {e}")))
             }
         };
@@ -421,10 +443,7 @@ pub async fn open_workspace(
 /// Close an open workspace: drops its watcher, LSP servers and index handle.
 /// Any in-flight agent run keeps its own snapshot of these and finishes.
 #[tauri::command]
-pub async fn close_workspace(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn close_workspace(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let removed = {
         let mut map = state.workspaces.lock().await;
         map.remove(Path::new(&path))

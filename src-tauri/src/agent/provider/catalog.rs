@@ -99,7 +99,10 @@ pub fn trim_catalog(raw: &Value) -> Value {
             }
         }
         models.sort_by(|a, b| {
-            a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
+            a["id"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["id"].as_str().unwrap_or(""))
         });
 
         providers.push(json!({
