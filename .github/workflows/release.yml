@@ -7,8 +7,39 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
+  # Only release tags strictly newer than the last version shipped before this
+  # guard existed. Legacy tags (v0.1.0 .. v0.1.15) and any accidental re-push of
+  # an old tag are skipped, not built — so `git push --tags` can never re-release
+  # a historical version. Bump RELEASE_FLOOR only if you ever need to re-open an
+  # older line; normal releases just keep climbing above it.
+  guard:
+    name: Guard (new tags only)
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_FLOOR: '0.1.15'
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - name: Check tag is newer than the floor
+        id: check
+        shell: bash
+        run: |
+          VER="${{ github.ref_name }}"
+          VER="${VER#v}"
+          FLOOR="${RELEASE_FLOOR}"
+          highest="$(printf '%s\n%s\n' "$VER" "$FLOOR" | sort -V | tail -1)"
+          if [ "$VER" != "$FLOOR" ] && [ "$highest" = "$VER" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ $VER > $FLOOR — proceeding with release."
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "⏭️  $VER is not newer than the floor ($FLOOR) — skipping release."
+          fi
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
     strategy:
       fail-fast: false
       matrix:
