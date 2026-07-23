@@ -73,8 +73,8 @@ importers:
         specifier: ~5.6.2
         version: 5.6.3
       typescript-language-server:
-        specifier: ^4.3.0
-        version: 4.4.1
+        specifier: ^5.3.0
+        version: 5.3.0
       vite:
         specifier: ^6.0.3
         version: 6.4.3(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.32.0)
@@ -1696,9 +1696,9 @@ packages:
     resolution: {integrity: sha512-JfJeIHke7y2egdGGgRAvpCwYFUsHlM2gPcrVOxFkznt/4uzQ7HFmvE63iFHVLBJNDuyDOQgijDK/tXH/f6Msjg==}
     engines: {node: '>=6.10'}
 
-  typescript-language-server@4.4.1:
-    resolution: {integrity: sha512-vEvDw+cjY75afMN2rhx0z8sQtFDAUHoBniksBmB6NUZlDt0rEIwQq01VMiqyXFm9uZwcED2475cmDeXxoDHleg==}
-    engines: {node: '>=18'}
+  typescript-language-server@5.3.0:
+    resolution: {integrity: sha512-5puofxZHgFdAYtfNpmwCAvgtaYgg8wrUnH30m7Ze3QuguId5RNRadKASpOpyDxTyUdAF51FjhTdjntLw/EuWcQ==}
+    engines: {node: '>=20'}
     hasBin: true
 
   typescript@5.6.3:
@@ -3358,7 +3358,7 @@ snapshots:
 
   ts-dedent@2.3.0: {}
 
-  typescript-language-server@4.4.1:
+  typescript-language-server@5.3.0:
     dependencies:
       vscode-jsonrpc: 5.0.1
       vscode-languageserver-protocol: 3.18.2
