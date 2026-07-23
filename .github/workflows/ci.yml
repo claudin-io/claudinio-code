@@ -88,6 +88,13 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm exec vite build
 
+      # tauri.conf.json bundles models/all-MiniLM-L6-v2/* as a resource, so the
+      # build script's glob fails unless the model is present. Fetch it before
+      # anything compiles the crate (clippy/test run the build script).
+      - name: Fetch embedding model
+        shell: bash
+        run: python3 scripts/fetch_embedding_model.py
+
       - name: Format
         working-directory: src-tauri
         run: cargo fmt --all --check
