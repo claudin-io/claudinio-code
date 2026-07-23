@@ -110,7 +110,12 @@ orientação no meio do raciocínio. `Esc` interrompe de vez.
 - **Skills** — jogue um `SKILL.md` em `.agents/skills/`, `.claudinio/skills/` ou
   `.claude/skills/` e o agente descobre sozinho.
 - **MCP** — conecte servidores Model Context Protocol via stdio ou HTTP.
-- **18 locales de UI**, com detecção do idioma do sistema no primeiro uso.
+
+A interface e o agente são apenas em inglês. Os system prompts são escritos e
+ajustados em inglês, e o agente pede que você também escreva em inglês — uma
+casca localizada em volta de um agente que só fala inglês era pior do que ser
+direto sobre isso. (Este README é uma cortesia de documentação, não uma
+tradução da UI.)
 
 ## As ferramentas que o modelo pode chamar
 

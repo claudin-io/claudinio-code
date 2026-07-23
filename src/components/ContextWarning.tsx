@@ -1,6 +1,5 @@
 import { createSignal, For, Show, onCleanup, onMount, batch, type Component } from "solid-js";
 import { getContextWarning, type ContextWarningData } from "../lib/ipc";
-import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 
 export function formatBytes(bytes: number): string {
@@ -77,7 +76,7 @@ const ContextWarning: Component<{
         <button
           onClick={() => setOpen(true)}
           class={`flex h-7 w-7 items-center justify-center rounded-md hover:bg-surface-2 ${agentColor()}`}
-          title={t("context.warning.title")}
+          title={"Context Budget"}
         >
           <Icon name="alert-triangle" class="h-4 w-4" />
         </button>
@@ -91,7 +90,7 @@ const ContextWarning: Component<{
               <div class="mb-4 flex items-center justify-between">
                 <div class="flex items-center gap-2">
                   <Icon name="alert-triangle" class="h-5 w-5 text-amber-400" />
-                  <h2 class="text-sm font-semibold text-ink">{t("context.warning.title")}</h2>
+                  <h2 class="text-sm font-semibold text-ink">{"Context Budget"}</h2>
                 </div>
                 <button
                   onClick={() => setOpen(false)}
@@ -108,7 +107,7 @@ const ContextWarning: Component<{
                     <Show when={d().agentsMdPath}>
                       <div>
                         <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-muted">
-                          {t("context.warning.agentsFile")}
+                          {"Injected File"}
                         </h3>
                         <div class="rounded-md border border-border-subtle bg-surface-0 p-3">
                           <div class="mb-2 flex items-center gap-2">
@@ -117,21 +116,21 @@ const ContextWarning: Component<{
                           </div>
                           <div class="grid grid-cols-2 gap-2 text-[12px]">
                             <div>
-                              <span class="text-ink-faint">{t("context.warning.size")}:</span>{" "}
+                              <span class="text-ink-faint">{"Size"}:</span>{" "}
                               <span class="font-mono text-ink">{formatBytes(d().agentsMdSize)}</span>
                             </div>
                             <div>
-                              <span class="text-ink-faint">{t("context.warning.lines")}:</span>{" "}
+                              <span class="text-ink-faint">{"Lines"}:</span>{" "}
                               <span class="font-mono text-ink">{d().agentsMdLines}</span>
                             </div>
                             <div>
-                              <span class="text-ink-faint">{t("context.warning.estTokens")}:</span>{" "}
+                              <span class="text-ink-faint">{"Est. tokens"}:</span>{" "}
                               <span class={`font-mono ${severityClass(d().agentsMdTokens)}`}>
                                 {formatTokens(d().agentsMdTokens)}
                               </span>
                             </div>
                             <div>
-                              <span class="text-ink-faint">{t("context.warning.issues")}:</span>{" "}
+                              <span class="text-ink-faint">{"Issues"}:</span>{" "}
                               <span class={`font-mono ${d().agentsMdIssues > 0 ? "text-amber-400" : "text-ink-muted"}`}>
                                 {d().agentsMdIssues}
                               </span>
@@ -140,7 +139,7 @@ const ContextWarning: Component<{
                           <Show when={d().agentsMdIssues > 0}>
                             <div class="mt-2 rounded bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-400">
                               <Icon name="alert-triangle" class="mr-1 inline-block h-3 w-3 align-middle" />
-                              {t("context.warning.issuesFound", String(d().agentsMdIssues))}
+                              {`${String(d().agentsMdIssues)} issues found — these directives consume context tokens every turn.`}
                             </div>
                           </Show>
                         </div>
@@ -151,15 +150,15 @@ const ContextWarning: Component<{
                     <Show when={d().skillsCount > 0}>
                       <div>
                         <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-muted">
-                          {t("context.warning.skills")}
+                          {"Installed Skills"}
                         </h3>
                         <div class="rounded-md border border-border-subtle bg-surface-0 p-3">
                           <div class="mb-2 flex items-center justify-between">
-                            <span class="text-[12px] text-ink-faint">{t("context.warning.totalSkills")}</span>
+                            <span class="text-[12px] text-ink-faint">{"Total skills"}</span>
                             <span class="font-mono text-[13px] text-ink">{d().skillsCount}</span>
                           </div>
                           <div class="mb-3 flex items-center justify-between">
-                            <span class="text-[12px] text-ink-faint">{t("context.warning.skillTokens")}</span>
+                            <span class="text-[12px] text-ink-faint">{"Combined token cost"}</span>
                             <span class={`font-mono text-[13px] ${skillSeverityClass(d().skillsTotalTokens)}`}>
                               {formatTokens(d().skillsTotalTokens)}
                             </span>
@@ -195,8 +194,8 @@ const ContextWarning: Component<{
                     <div class="rounded-md border border-accent/20 bg-accent/5 p-3">
                       <p class="text-[11px] leading-relaxed text-ink-muted">
                         {d().agentsMdPath
-                          ? t("context.warning.hintAgents")
-                          : t("context.warning.hintSkills")}
+                          ? "💡 The AGENTS.md/CLAUDE.md file is injected at the start of every new chat. Large files consume significant context budget. Consider trimming unnecessary sections."
+                          : "💡 Skills are injected into the system prompt as XML. Skills with large SKILL.md bodies increase the base context cost. Review if all skills are still needed."}
                       </p>
                     </div>
                   </div>

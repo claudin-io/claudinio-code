@@ -12,12 +12,12 @@ pub mod openai;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Prefixo-sentinela para erros de budget esgotado. O frontend detecta isso
-/// para trocar o error bar de retry por um banner de upgrade, e o retry loop
-/// (session.rs `is_retryable_error`) o trata como não-retentável.
+/// Sentinel prefix for budget-exhausted errors. The frontend keys off it to
+/// swap the retry error bar for an upgrade banner, and the retry loop
+/// (`is_retryable_error` in session.rs) treats it as non-retryable.
 pub const BUDGET_EXCEEDED_MARKER: &str = "BUDGET_EXCEEDED::";
 
-/// Extrai `error.message` de um corpo de erro estilo Anthropic/LiteLLM; se
+/// Extract `error.message` from an Anthropic/LiteLLM-style error body; if
 /// contiver "budget" (case-insensitive), é um estouro de budget do plano.
 /// A API retorna HTTP 500 com corpo
 /// `{"error":{"message":"Claudinio: Budget exceeded for window '1h'. ..."}}`.
@@ -235,10 +235,10 @@ impl AgentConfig {
     /// the slider floor (120k) would otherwise make the mechanism untestable
     /// end-to-end.
     pub fn effective_handoff_threshold(&self) -> u64 {
-        if let Ok(v) = std::env::var("CLAUDINIO_HANDOFF_TOKENS") {
-            if let Ok(n) = v.trim().parse::<u64>() {
-                return n;
-            }
+        if let Ok(v) = std::env::var("CLAUDINIO_HANDOFF_TOKENS")
+            && let Ok(n) = v.trim().parse::<u64>()
+        {
+            return n;
         }
         self.handoff_context_tokens
             .unwrap_or(120_000)
@@ -360,32 +360,32 @@ impl AgentConfig {
     /// slash, or an unknown prefix — is the unchanged Claudinio path,
     /// preserving the override_base_url/override_api_key BYOK precedence.
     pub fn resolve_provider(&self, model: &str) -> ResolvedProvider {
-        if let Some((prefix, rest)) = model.split_once('/') {
-            if let Some(entry) = self.providers.get(prefix) {
-                let protocol = if entry.protocol == "anthropic" {
-                    Protocol::Anthropic
-                } else {
-                    Protocol::OpenAiChat
-                };
-                let mut base_url = entry.base_url.trim_end_matches('/').to_string();
-                // The Anthropic client appends "/v1/messages", but models.dev
-                // base URLs already end in "/v1" — strip it so external
-                // Anthropic-protocol entries don't produce "/v1/v1/messages".
-                if protocol == Protocol::Anthropic {
-                    if let Some(stripped) = base_url.strip_suffix("/v1") {
-                        base_url = stripped.to_string();
-                    }
-                }
-                return ResolvedProvider {
-                    protocol,
-                    base_url,
-                    api_key: entry.api_key.clone(),
-                    model: rest.to_string(),
-                    provider_id: prefix.to_string(),
-                    pricing: entry.model_pricing.get(rest).copied(),
-                    max_output_tokens: entry.model_output_limits.get(rest).copied(),
-                };
+        if let Some((prefix, rest)) = model.split_once('/')
+            && let Some(entry) = self.providers.get(prefix)
+        {
+            let protocol = if entry.protocol == "anthropic" {
+                Protocol::Anthropic
+            } else {
+                Protocol::OpenAiChat
+            };
+            let mut base_url = entry.base_url.trim_end_matches('/').to_string();
+            // The Anthropic client appends "/v1/messages", but models.dev
+            // base URLs already end in "/v1" — strip it so external
+            // Anthropic-protocol entries don't produce "/v1/v1/messages".
+            if protocol == Protocol::Anthropic
+                && let Some(stripped) = base_url.strip_suffix("/v1")
+            {
+                base_url = stripped.to_string();
             }
+            return ResolvedProvider {
+                protocol,
+                base_url,
+                api_key: entry.api_key.clone(),
+                model: rest.to_string(),
+                provider_id: prefix.to_string(),
+                pricing: entry.model_pricing.get(rest).copied(),
+                max_output_tokens: entry.model_output_limits.get(rest).copied(),
+            };
         }
         ResolvedProvider {
             protocol: Protocol::Anthropic,
@@ -447,10 +447,10 @@ pub fn load_config() -> AgentConfig {
 }
 
 pub fn save_config(config: &AgentConfig) {
-    if let Ok(path) = config_path() {
-        if let Ok(json) = serde_json::to_string_pretty(config) {
-            let _ = std::fs::write(path, json);
-        }
+    if let Ok(path) = config_path()
+        && let Ok(json) = serde_json::to_string_pretty(config)
+    {
+        let _ = std::fs::write(path, json);
     }
 }
 
@@ -518,13 +518,12 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
             .filter_map(|item| item.as_str().map(|s| s.to_string()))
             .collect();
     }
-    if let Some(v) = obj.get("mcp") {
-        if let Ok(ws_servers) =
+    if let Some(v) = obj.get("mcp")
+        && let Ok(ws_servers) =
             serde_json::from_value::<std::collections::HashMap<String, McpServerEntry>>(v.clone())
-        {
-            for (name, entry) in ws_servers {
-                cfg.mcp.insert(name, entry);
-            }
+    {
+        for (name, entry) in ws_servers {
+            cfg.mcp.insert(name, entry);
         }
     }
     if let Some(v) = obj.get("handoff_context_tokens") {
@@ -694,20 +693,20 @@ pub struct Usage {
 fn merge_usage(usage: &mut Option<Usage>, value: &Value) {
     let Some(obj) = value.as_object() else { return };
     let u = usage.get_or_insert_with(Usage::default);
-    if let Some(v) = obj.get("input_tokens").and_then(|v| v.as_u64()) {
-        if v > 0 {
-            u.input_tokens = v as u32;
-        }
+    if let Some(v) = obj.get("input_tokens").and_then(|v| v.as_u64())
+        && v > 0
+    {
+        u.input_tokens = v as u32;
     }
-    if let Some(v) = obj.get("output_tokens").and_then(|v| v.as_u64()) {
-        if v > 0 {
-            u.output_tokens = v as u32;
-        }
+    if let Some(v) = obj.get("output_tokens").and_then(|v| v.as_u64())
+        && v > 0
+    {
+        u.output_tokens = v as u32;
     }
-    if let Some(v) = obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
-        if v > 0 {
-            u.cache_read_input_tokens = v as u32;
-        }
+    if let Some(v) = obj.get("cache_read_input_tokens").and_then(|v| v.as_u64())
+        && v > 0
+    {
+        u.cache_read_input_tokens = v as u32;
     }
     if let Some(v) = obj.get("cost").and_then(|v| v.as_f64()) {
         u.cost = Some(v);
@@ -736,8 +735,7 @@ pub struct StreamOutput {
 /// sentinel token so the caller never has to parse natural language — this is
 /// what keeps the mechanism language-agnostic (the judged text may be in any
 /// language the UI supports, but the answer is always CONTINUE / DONE).
-const COMPLETION_JUDGE_SYSTEM: &str =
-    "You are a strict classifier inside an agentic coding harness. \
+const COMPLETION_JUDGE_SYSTEM: &str = "You are a strict classifier inside an agentic coding harness. \
 You are given the assistant's final message of a turn that ended WITHOUT calling any tool. \
 Decide whether the turn is genuinely complete, or whether the assistant merely announced or \
 implied an immediate next step (e.g. said it would ask the user a question, spawn subagents, \
@@ -937,6 +935,7 @@ fn maybe_emit_text_delta(
     *last_flush = std::time::Instant::now();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn stream_message(
     config: &AgentConfig,
     model: &str,
@@ -1037,7 +1036,7 @@ pub async fn stream_message(
         let dump_path =
             std::path::Path::new("/tmp").join(format!("claudinio_api_dump_{session_id}.txt"));
         std::fs::File::create(&dump_path)
-            .map(|f| std::io::BufWriter::new(f))
+            .map(std::io::BufWriter::new)
             .ok()
     } else {
         None
@@ -1082,7 +1081,7 @@ pub async fn stream_message(
             Ok(Some(r)) => r,
             Ok(None) => break,
             Err(_) => {
-                return Err("stream error: no data received for 90s, connection stalled".into())
+                return Err("stream error: no data received for 90s, connection stalled".into());
             }
         };
 
@@ -1096,11 +1095,7 @@ pub async fn stream_message(
         }
         buf.push_str(&chunk_str);
 
-        loop {
-            let newline = match buf.find('\n') {
-                Some(pos) => pos,
-                None => break,
-            };
+        while let Some(newline) = buf.find('\n') {
             let line = buf[..newline].trim_end_matches('\r').to_string();
             buf = buf[newline + 1..].to_string();
 
@@ -1172,45 +1167,43 @@ pub async fn stream_message(
         });
     }
 
-    if !buf.is_empty() {
-        if let Ok(full) = serde_json::from_str::<Value>(&buf) {
-            if let Some(blocks) = full.get("content").and_then(|c| c.as_array()) {
-                for block in blocks {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        if let Some(input) = block.get("input") {
-                            if !input.is_null() {
-                                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                                let _name =
-                                    block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                if let Some(existing) = tool_uses
-                                    .iter_mut()
-                                    .find(|t| t.get("id").and_then(|i| i.as_str()) == Some(id))
-                                {
-                                    if let Some(obj) = existing.as_object_mut() {
-                                        obj.insert("input".into(), input.clone());
-                                    }
-                                } else {
-                                    tool_uses.push(block.clone());
-                                }
-                            }
+    if !buf.is_empty()
+        && let Ok(full) = serde_json::from_str::<Value>(&buf)
+    {
+        if let Some(blocks) = full.get("content").and_then(|c| c.as_array()) {
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                    && let Some(input) = block.get("input")
+                    && !input.is_null()
+                {
+                    let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                    let _name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if let Some(existing) = tool_uses
+                        .iter_mut()
+                        .find(|t| t.get("id").and_then(|i| i.as_str()) == Some(id))
+                    {
+                        if let Some(obj) = existing.as_object_mut() {
+                            obj.insert("input".into(), input.clone());
                         }
+                    } else {
+                        tool_uses.push(block.clone());
                     }
                 }
             }
-            if let Some(reason) = full.get("stop_reason").and_then(|r| r.as_str()) {
-                stop_reason = Some(reason.to_string());
-            }
-            if let Some(u) = full.get("usage") {
-                merge_usage(&mut usage, u);
-            }
+        }
+        if let Some(reason) = full.get("stop_reason").and_then(|r| r.as_str()) {
+            stop_reason = Some(reason.to_string());
+        }
+        if let Some(u) = full.get("usage") {
+            merge_usage(&mut usage, u);
         }
     }
 
-    if !buf.is_empty() {
-        if let Some(ref mut f) = dump {
-            use std::io::Write;
-            let _ = writeln!(f, "--- REMAINING BUF ---\n{}", buf);
-        }
+    if !buf.is_empty()
+        && let Some(ref mut f) = dump
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "--- REMAINING BUF ---\n{}", buf);
     }
 
     if let Some(ref mut f) = dump {
@@ -1231,10 +1224,9 @@ pub async fn stream_message(
             Ok(parsed) => {
                 if let Some(tool) = tool_uses.iter_mut().find(|t| {
                     t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize) == Some(idx)
-                }) {
-                    if let Some(obj) = tool.as_object_mut() {
-                        obj.insert("input".into(), parsed);
-                    }
+                }) && let Some(obj) = tool.as_object_mut()
+                {
+                    obj.insert("input".into(), parsed);
                 }
             }
             Err(_) if !accumulated.is_empty() => {
@@ -1279,47 +1271,47 @@ fn process_line(
 
     match event_type {
         "content_block_start" => {
-            if let Some(block) = value.get("content_block") {
-                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                    let mut tool = block.clone();
-                    if let Some(idx) = index {
-                        if let Some(obj) = tool.as_object_mut() {
-                            obj.insert("_index".into(), serde_json::json!(idx));
-                        }
-                        tool_inputs.insert(idx, String::new());
+            if let Some(block) = value.get("content_block")
+                && block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+            {
+                let mut tool = block.clone();
+                if let Some(idx) = index {
+                    if let Some(obj) = tool.as_object_mut() {
+                        obj.insert("_index".into(), serde_json::json!(idx));
                     }
-                    tool_uses.push(tool);
+                    tool_inputs.insert(idx, String::new());
                 }
+                tool_uses.push(tool);
             }
         }
         "content_block_delta" => {
             if let Some(delta) = value.get("delta") {
                 match delta.get("type").and_then(|t| t.as_str()) {
                     Some("text_delta") => {
-                        if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                            if !text.is_empty() {
-                                text_deltas.push(text.to_string());
-                                assistant_text.push_str(text);
-                            }
+                        if let Some(text) = delta.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            text_deltas.push(text.to_string());
+                            assistant_text.push_str(text);
                         }
                     }
                     Some("thinking_delta") => {
-                        if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
-                            if !thinking.is_empty() {
-                                thinking_text.push_str(thinking);
-                                let _ = event_tx.send(AgentEvent::Thinking(thinking_text.clone()));
-                            }
+                        if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str())
+                            && !thinking.is_empty()
+                        {
+                            thinking_text.push_str(thinking);
+                            let _ = event_tx.send(AgentEvent::Thinking(thinking_text.clone()));
                         }
                     }
                     Some("input_json_delta") => {
-                        if let Some(idx) = index {
-                            if let Some(partial) = delta.get("partial_json") {
-                                let fragment = match partial {
-                                    Value::String(s) => s.clone(),
-                                    other => serde_json::to_string(other).unwrap_or_default(),
-                                };
-                                tool_inputs.entry(idx).or_default().push_str(&fragment);
-                            }
+                        if let Some(idx) = index
+                            && let Some(partial) = delta.get("partial_json")
+                        {
+                            let fragment = match partial {
+                                Value::String(s) => s.clone(),
+                                other => serde_json::to_string(other).unwrap_or_default(),
+                            };
+                            tool_inputs.entry(idx).or_default().push_str(&fragment);
                         }
                     }
                     _ => {}
@@ -1327,40 +1319,39 @@ fn process_line(
             }
         }
         "content_block_stop" => {
-            if let Some(idx) = index {
-                if let Some(accumulated) = tool_inputs.remove(&idx) {
-                    match serde_json::from_str::<Value>(&accumulated) {
-                        Ok(parsed) => {
-                            if let Some(tool) = tool_uses.iter_mut().find(|t| {
-                                t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize)
-                                    == Some(idx)
-                            }) {
-                                if let Some(obj) = tool.as_object_mut() {
-                                    obj.insert("input".into(), parsed);
-                                }
-                            }
+            if let Some(idx) = index
+                && let Some(accumulated) = tool_inputs.remove(&idx)
+            {
+                match serde_json::from_str::<Value>(&accumulated) {
+                    Ok(parsed) => {
+                        if let Some(tool) = tool_uses.iter_mut().find(|t| {
+                            t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize)
+                                == Some(idx)
+                        }) && let Some(obj) = tool.as_object_mut()
+                        {
+                            obj.insert("input".into(), parsed);
                         }
-                        // Empty accumulation is a no-arg tool: keep the {}
-                        // input from content_block_start. Non-empty JSON that
-                        // fails to parse means the stream was cut mid-input
-                        // (max_tokens) — drop the block instead of running the
-                        // tool with a bogus empty input.
-                        Err(_) if !accumulated.is_empty() => {
-                            tool_uses.retain(|t| {
-                                t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize)
-                                    != Some(idx)
-                            });
-                        }
-                        Err(_) => {}
                     }
+                    // Empty accumulation is a no-arg tool: keep the {}
+                    // input from content_block_start. Non-empty JSON that
+                    // fails to parse means the stream was cut mid-input
+                    // (max_tokens) — drop the block instead of running the
+                    // tool with a bogus empty input.
+                    Err(_) if !accumulated.is_empty() => {
+                        tool_uses.retain(|t| {
+                            t.get("_index").and_then(|i| i.as_u64()).map(|i| i as usize)
+                                != Some(idx)
+                        });
+                    }
+                    Err(_) => {}
                 }
             }
         }
         "message_delta" => {
-            if let Some(delta) = value.get("delta") {
-                if let Some(reason) = delta.get("stop_reason").and_then(|r| r.as_str()) {
-                    *stop_reason = Some(reason.to_string());
-                }
+            if let Some(delta) = value.get("delta")
+                && let Some(reason) = delta.get("stop_reason").and_then(|r| r.as_str())
+            {
+                *stop_reason = Some(reason.to_string());
             }
             if let Some(u) = value.get("usage") {
                 merge_usage(usage, u);
@@ -1479,8 +1470,10 @@ mod tests {
     }
 
     fn cfg_with_openrouter() -> AgentConfig {
-        let mut cfg = AgentConfig::default();
-        cfg.api_key = "sk-claudinio".into();
+        let mut cfg = AgentConfig {
+            api_key: "sk-claudinio".into(),
+            ..Default::default()
+        };
         cfg.providers.insert(
             "openrouter".into(),
             ProviderEntry {
@@ -1613,7 +1606,9 @@ mod tests {
         let body = r#"{"error":{"message":"Claudinio: Budget exceeded for window '1h'. Please check your dashboard for details.","type":"None","param":"None","code":"500"}}"#;
         assert_eq!(
             budget_exceeded_message(body).as_deref(),
-            Some("Claudinio: Budget exceeded for window '1h'. Please check your dashboard for details.")
+            Some(
+                "Claudinio: Budget exceeded for window '1h'. Please check your dashboard for details."
+            )
         );
     }
 
@@ -2023,7 +2018,7 @@ mod tests {
 
         // Text block stop at index 0 must NOT clear tool input at index 1
         assert!(
-            tool_inputs.get(&1).is_none(),
+            !tool_inputs.contains_key(&1),
             "tool_inputs should be empty after content_block_stop"
         );
     }

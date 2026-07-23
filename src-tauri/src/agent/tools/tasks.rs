@@ -1,8 +1,7 @@
-use lru::LruCache;
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::commands::tasks::TaskItem;
+use crate::agent::persist::TaskItem;
 
 /// Return the current list of tasks from the session JSONL.
 pub fn execute_get(ctx: &crate::agent::tools::ToolContext) -> Result<String, String> {
@@ -10,7 +9,7 @@ pub fn execute_get(ctx: &crate::agent::tools::ToolContext) -> Result<String, Str
         .session_store_path
         .as_ref()
         .ok_or("session_store_path not set")?;
-    let tasks = crate::commands::tasks::load_last_tasks(Path::new(path))?;
+    let tasks = crate::agent::persist::load_last_tasks(Path::new(path))?;
     Ok(serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "[]".into()))
 }
 
@@ -29,10 +28,10 @@ pub fn execute_set(
         .session_store_path
         .as_ref()
         .ok_or("session_store_path not set")?;
-    let prev = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
+    let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
-    crate::commands::tasks::append_tasks(Path::new(path), &merged)?;
+    crate::agent::persist::append_tasks(Path::new(path), &merged)?;
     let mut note = String::new();
     if renamed > 0 {
         note.push_str(&format!(
@@ -60,7 +59,7 @@ pub fn execute_set(
 /// reference concrete technical detail instead of guesses. No-op in Builder
 /// mode or when no mode handle / workspace is attached (tests, aux workflows).
 fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext) -> Result<(), String> {
-    use crate::agent::tools::write_plan::{has_nonempty_section, latest_plan_path, LLD_HEADING};
+    use crate::agent::tools::write_plan::{LLD_HEADING, has_nonempty_section, latest_plan_path};
     if !ctx.is_brain() {
         return Ok(());
     }
@@ -207,9 +206,8 @@ pub fn slugify(s: &str) -> String {
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
-            } else if c.is_whitespace() {
-                '-'
             } else {
+                // whitespace and punctuation alike collapse to a hyphen
                 '-'
             }
         })
@@ -239,6 +237,7 @@ pub fn slugify(s: &str) -> String {
 mod lld_gate_tests {
     use super::*;
     use crate::agent::session::{ModeCtl, ModeOrigin, SessionMode};
+    use lru::LruCache;
     use std::sync::Arc;
 
     /// Tempdir workspace with a session JSONL; `mode` = None disables the gate.
@@ -341,7 +340,7 @@ mod lld_gate_tests {
 #[cfg(test)]
 mod golden_tests {
     use super::*;
-    use crate::commands::tasks::TaskItem;
+    use crate::agent::persist::TaskItem;
 
     #[test]
     fn test_create_golden_tasks() {

@@ -14,13 +14,11 @@ use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
 use crate::code_intel::indexer::IndexProgress;
 use crate::lsp::manager::LspManager;
-use lru::LruCache;
 use serde::Serialize;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -68,9 +66,7 @@ pub struct ToolContext {
     pub index_progress: Option<Arc<std::sync::Mutex<Option<IndexProgress>>>>,
     /// LRU cache for the session's persisted records, so load_records in the
     /// hot loop skips the filesystem when the file hasn't changed (800 ms TTL).
-    pub records_cache: std::sync::Arc<
-        std::sync::Mutex<LruCache<PathBuf, (Vec<crate::agent::persist::SessionRecord>, Instant)>>,
-    >,
+    pub records_cache: crate::agent::persist::RecordsCache,
 }
 
 impl ToolContext {
@@ -84,44 +80,15 @@ impl ToolContext {
     }
 }
 
+/// Reject any path outside the session's workspace. The containment rule itself
+/// lives in `crate::workspace_path` because `commands::fs` has to enforce the
+/// identical rule on the IPC surface — see that module for why.
 pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     let root = match &ctx.workspace_root {
         Some(r) => r,
         None => return Ok(()),
     };
-    let req_clean = std::path::Path::new(requested);
-    let root_clean = std::path::Path::new(root);
-
-    // Resolve relative paths against the workspace root so canonicalize
-    // doesn't resolve against the process CWD (which in Tauri GUI is wrong).
-    let req_effective = if req_clean.is_relative() {
-        root_clean.join(req_clean)
-    } else {
-        req_clean.to_path_buf()
-    };
-
-    if let (Ok(canon_req), Ok(canon_root)) =
-        (req_effective.canonicalize(), root_clean.canonicalize())
-    {
-        if canon_req.starts_with(&canon_root) {
-            return Ok(());
-        }
-    } else {
-        // Fallback: lexical check. Reject paths with `..` components since
-        // they can't be resolved safely without canonicalize.
-        if !req_effective
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-            && req_effective.starts_with(root_clean)
-        {
-            return Ok(());
-        }
-    }
-
-    Err(format!(
-        "path '{}' is outside the workspace '{}'. All file operations are restricted to the project workspace.",
-        requested, root
-    ))
+    crate::workspace_path::ensure_within_root(requested, std::path::Path::new(root))
 }
 
 /// Like `validate_path`, but additionally allows READ access to user-level
@@ -403,7 +370,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "spawn_agents".into(),
-            description: format!("ONE call spawns ALL agents: pass 'agents', an array of 1-{n} specs ({{name, goal, mode, expected_output}}); every spec in the call runs in parallel, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints.", n = max_parallel).into(),
+            description: format!("ONE call spawns ALL agents: pass 'agents', an array of 1-{n} specs ({{name, goal, mode, expected_output}}); every spec in the call runs in parallel, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints.", n = max_parallel),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["agents"],
@@ -616,12 +583,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 
             if let Some(ref lsp) = ctx.lsp_manager {
                 let mut mgr = lsp.lock().await;
-                match mgr.goto_definition(file_path, line, character) {
-                    Ok(locs) => {
-                        let content = serde_json::to_string_pretty(&locs).unwrap_or_default();
-                        return Ok(ToolOutput::Text { content });
-                    }
-                    Err(_) => {}
+                if let Ok(locs) = mgr.goto_definition(file_path, line, character) {
+                    let content = serde_json::to_string_pretty(&locs).unwrap_or_default();
+                    return Ok(ToolOutput::Text { content });
                 }
             }
 
@@ -644,12 +608,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 
             if let Some(ref lsp) = ctx.lsp_manager {
                 let mut mgr = lsp.lock().await;
-                match mgr.find_references(file_path, line, character) {
-                    Ok(locs) => {
-                        let content = serde_json::to_string_pretty(&locs).unwrap_or_default();
-                        return Ok(ToolOutput::Text { content });
-                    }
-                    Err(_) => {}
+                if let Ok(locs) = mgr.find_references(file_path, line, character) {
+                    let content = serde_json::to_string_pretty(&locs).unwrap_or_default();
+                    return Ok(ToolOutput::Text { content });
                 }
             }
 
@@ -849,15 +810,16 @@ fn check_index_ready(ctx: &ToolContext) -> Result<(), String> {
         let guard = progress
             .lock()
             .map_err(|e| format!("index progress lock: {e}"))?;
-        if let Some(ref prog) = *guard {
-            if prog.status == "indexing" && prog.total_files > 0 {
-                return Err(format!(
-                    "Workspace index is still being built: {}/{} files indexed ({} symbols). \
+        if let Some(ref prog) = *guard
+            && prog.status == "indexing"
+            && prog.total_files > 0
+        {
+            return Err(format!(
+                "Workspace index is still being built: {}/{} files indexed ({} symbols). \
                      This tool requires the index to be complete. Please wait a moment and try again, \
                      or use tools that don't depend on the index (read_file, list_dir, grep, bash).",
-                    prog.files_indexed, prog.total_files, prog.symbols_indexed
-                ));
-            }
+                prog.files_indexed, prog.total_files, prog.symbols_indexed
+            ));
         }
     }
     Ok(())
@@ -903,7 +865,7 @@ fn heuristically_find_definition(
         Err(_) => {
             return Ok(ToolOutput::Text {
                 content: format!("LSP unavailable; symbol at cursor: {word}"),
-            })
+            });
         }
     };
 
@@ -952,7 +914,7 @@ fn heuristically_find_references(
         Err(_) => {
             return Ok(ToolOutput::Text {
                 content: format!("LSP unavailable; checking references for {word}"),
-            })
+            });
         }
     };
 
@@ -1055,7 +1017,7 @@ impl ReadTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroUsize;
+    use lru::LruCache;
 
     /// Helper: a ToolContext with a fresh ReadTracker and no workspace root
     /// (so any path is valid).
@@ -1479,7 +1441,7 @@ mod tests {
     #[test]
     fn test_validate_path_allows_relative_within_workspace() {
         let tmp = std::env::temp_dir().join(format!("claudinio_vp_rel_{}", std::process::id()));
-        std::fs::create_dir_all(&tmp.join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
         let file_path = tmp.join("src").join("main.rs");
         std::fs::write(&file_path, "fn main() {}").unwrap();
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { platform, revealLabel, revealI18nKey } from "./platform";
+import { platform, revealLabel } from "./platform";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -39,19 +39,3 @@ describe("revealLabel()", () => {
   });
 });
 
-describe("revealI18nKey()", () => {
-  it("returns 'context.revealInFinder' on Mac", () => {
-    vi.stubGlobal("navigator", { userAgent: "Macintosh" });
-    expect(revealI18nKey()).toBe("context.revealInFinder");
-  });
-
-  it("returns 'context.revealInExplorer' on Windows", () => {
-    vi.stubGlobal("navigator", { userAgent: "Windows NT 10.0" });
-    expect(revealI18nKey()).toBe("context.revealInExplorer");
-  });
-
-  it("returns 'context.revealInFileManager' on Linux", () => {
-    vi.stubGlobal("navigator", { userAgent: "Linux" });
-    expect(revealI18nKey()).toBe("context.revealInFileManager");
-  });
-});

@@ -1,7 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
 
 import Fuse from "fuse.js";
-import { t } from "../lib/grill-me";
 
 interface FileMentionPopoverProps {
   fileList: string[];
@@ -79,7 +78,7 @@ export const FileMentionPopover: Component<FileMentionPopoverProps> = (props) =>
         <Show
           when={results().length > 0}
           fallback={
-            <div class="px-3 py-2 text-[12px] text-ink-faint">{t("mention.noFiles")}</div>
+            <div class="px-3 py-2 text-[12px] text-ink-faint">{"No files found"}</div>
           }
         >
           <For each={results()}>

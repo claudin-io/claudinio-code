@@ -1,7 +1,7 @@
 use serde::Serialize;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tauri::{AppHandle, Emitter};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 static EVENT: &str = "system-stats";
 

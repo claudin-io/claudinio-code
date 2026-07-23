@@ -1,5 +1,4 @@
 import { Component, Show, createSignal, type Accessor, type Setter } from "solid-js";
-import { t } from "../../lib/grill-me";
 import { Icon } from "../Icon";
 import { ModelSelect } from "../ModelSelect";
 import type { ModelGroup } from "../../lib/ipc";
@@ -38,12 +37,12 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
       when={props.workspaceConfigFields().has(field)}
       fallback={
         <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">
-          {t("app.config.sourceLocal")}
+          {"Local"}
         </span>
       }
     >
       <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">
-        {t("app.config.sourceWorkspace")}
+        {"Workspace"}
       </span>
     </Show>
   );
@@ -60,7 +59,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
         {/* Brain model */}
         <div>
           <div class="flex items-center gap-2 mb-1">
-            <label class="block text-xs text-ink-muted">{t("app.config.brainModel")}</label>
+            <label class="block text-xs text-ink-muted">{"Brain Model"}</label>
             {sourceBadge("brain_model")}
           </div>
 
@@ -88,7 +87,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
         {/* Builder model */}
         <div>
           <div class="flex items-center gap-2 mb-1">
-            <label class="block text-xs text-ink-muted">{t("app.config.builderModel")}</label>
+            <label class="block text-xs text-ink-muted">{"Builder Model"}</label>
             {sourceBadge("builder_model")}
           </div>
 
@@ -118,13 +117,13 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
       <div class="mb-4">
         <div class="flex items-center gap-2 mb-1">
           <label class="block text-xs text-ink-muted">
-            {t("app.config.maxParallelAgents")}: {props.maxParallelAgents()}
+            {"Parallel subagents"}: {props.maxParallelAgents()}
           </label>
           {sourceBadge("max_parallel_agents")}
         </div>
 
         <div class="flex items-center gap-2">
-          <span class="text-[10px] text-ink-faint w-10 text-right">{t("app.config.slower")}</span>
+          <span class="text-[10px] text-ink-faint w-10 text-right">{"slower"}</span>
           <input
             type="range"
             min="1"
@@ -138,10 +137,10 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
               "opacity-50 cursor-not-allowed": props.workspaceConfigFields().has("max_parallel_agents"),
             }}
           />
-          <span class="text-[10px] text-ink-faint w-10">{t("app.config.faster")}</span>
+          <span class="text-[10px] text-ink-faint w-10">{"faster"}</span>
         </div>
 
-        <p class="mt-1 mb-0 text-[11px] text-ink-faint">{t("app.config.maxParallelAgentsHint")}</p>
+        <p class="mt-1 mb-0 text-[11px] text-ink-faint">{"Higher = faster, but uses more of your hourly rate limit. Lower = slower, but conserves it."}</p>
       </div>
 
       <hr class="mb-4 border-border-subtle" />
@@ -150,7 +149,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
       <div class="grid grid-cols-2 gap-x-4 gap-y-2 mb-4">
         <div>
           <div class="flex items-center gap-2 mb-1">
-            <label class="block text-xs text-ink-muted">{t("app.config.maxRounds")}</label>
+            <label class="block text-xs text-ink-muted">{"Max rounds (main agent)"}</label>
             {sourceBadge("max_rounds")}
           </div>
 
@@ -162,17 +161,17 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
               const v = e.currentTarget.value;
               props.setMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
             }}
-            placeholder={t("app.config.unlimited")}
+            placeholder={"Unlimited (default)"}
             class="mb-1 w-full rounded-md border border-border-subtle p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             classList={workspaceDisabledClass("max_rounds")}
             disabled={props.workspaceConfigFields().has("max_rounds")}
           />
-          <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.maxRoundsHint")}</p>
+          <p class="mb-0 text-[11px] text-ink-faint">{"Leave empty for unlimited. Sets how many tool calls the agent may make per submission."}</p>
         </div>
 
         <div>
           <div class="flex items-center gap-2 mb-1">
-            <label class="block text-xs text-ink-muted">{t("app.config.subMaxRounds")}</label>
+            <label class="block text-xs text-ink-muted">{"Max rounds (subagents)"}</label>
             {sourceBadge("sub_max_rounds")}
           </div>
 
@@ -184,17 +183,17 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
               const v = e.currentTarget.value;
               props.setSubMaxRounds(v === "" ? null : Math.max(1, parseInt(v, 10) || 1));
             }}
-            placeholder={t("app.config.unlimited")}
+            placeholder={"Unlimited (default)"}
             class="mb-1 w-full rounded-md border border-border-subtle p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             classList={workspaceDisabledClass("sub_max_rounds")}
             disabled={props.workspaceConfigFields().has("sub_max_rounds")}
           />
-          <p class="mb-0 text-[11px] text-ink-faint">{t("app.config.subMaxRoundsHint")}</p>
+          <p class="mb-0 text-[11px] text-ink-faint">{"Leave empty for unlimited. Sets the limit per subagent."}</p>
         </div>
 
         {/* 4. Max Golden Cycles + Max Golden Stalls */}
         <div>
-          <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenCycles")}</label>
+          <label class="mb-1 block text-xs text-ink-muted">{"Max golden cycles"}</label>
           <input
             type="number"
             min="0"
@@ -206,11 +205,11 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
             placeholder="5"
             class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenCyclesHint")}</p>
+          <p class="mb-0 text-[11px] text-ink-faint">{"How many automatic Brain↔Builder cycles to run while golden goals (<goal> tags) are pending. Empty = 5."}</p>
         </div>
 
         <div>
-          <label class="mb-1 block text-xs text-ink-muted">{t("settings.maxGoldenStalls")}</label>
+          <label class="mb-1 block text-xs text-ink-muted">{"Max golden stalls"}</label>
           <input
             type="number"
             min="0"
@@ -222,7 +221,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
             placeholder="2"
             class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          <p class="mb-0 text-[11px] text-ink-faint">{t("settings.maxGoldenStallsHint")}</p>
+          <p class="mb-0 text-[11px] text-ink-faint">{"Stop the golden loop after this many cycles without progress. Empty = 2."}</p>
         </div>
       </div>
 
@@ -230,7 +229,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
       <div class="mb-4">
         <div class="flex items-center gap-2 mb-1">
           <label class="block text-xs text-ink-muted">
-            {t("settings.handoffThreshold")}
+            {"Session handoff threshold"}
             <span class="ml-2 font-mono text-[11px] text-ink-faint">
               {Math.round(props.handoffTokens() / 1000)}k tokens
             </span>
@@ -258,13 +257,13 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
 
         {/* Context rot risk bar */}
         <div class="mt-1 flex items-center gap-2">
-          <span class="text-[10px] text-ink-faint">{t("app.config.lowerRisk")}</span>
+          <span class="text-[10px] text-ink-faint">{"lower risk"}</span>
           <div class="flex-1 flex items-center">
             <div class="flex-1 border-t border-border-subtle"></div>
-            <span class="mx-2 text-[10px] text-ink-faint whitespace-nowrap">{t("app.config.contextRotRisk")}</span>
+            <span class="mx-2 text-[10px] text-ink-faint whitespace-nowrap">{"Context Rot Risk"}</span>
             <div class="flex-1 border-t border-border-subtle"></div>
           </div>
-          <span class="text-[10px] text-ink-faint">{t("app.config.higherRisk")}</span>
+          <span class="text-[10px] text-ink-faint">{"higher risk"}</span>
         </div>
       </div>
 
@@ -286,7 +285,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
 
         <Show when={showAdvanced()}>
           <div class="mb-4">
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.overrideBaseUrl")}</label>
+            <label class="mb-1 block text-xs text-ink-muted">{"Anthropic URL Override"}</label>
             <input
               type="text"
               value={props.overrideBaseUrl()}
@@ -294,9 +293,9 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
               placeholder="https://api.claudin.io"
               class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
-            <p class="mt-1 mb-3 text-[11px] text-ink-faint">{t("app.config.overrideBaseUrlHint")}</p>
+            <p class="mt-1 mb-3 text-[11px] text-ink-faint">{"Overrides the API endpoint for LLM calls only. Leave empty to use default."}</p>
 
-            <label class="mb-1 block text-xs text-ink-muted">{t("app.config.overrideApiKey")}</label>
+            <label class="mb-1 block text-xs text-ink-muted">{"API Key Override"}</label>
             <input
               type="password"
               value={props.overrideApiKey()}
@@ -304,7 +303,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
               placeholder="sk-ant-..."
               class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
-            <p class="mt-1 text-[11px] text-ink-faint">{t("app.config.overrideApiKeyHint")}</p>
+            <p class="mt-1 text-[11px] text-ink-faint">{"Overrides the API key for LLM calls only. Leave empty to use the signed-in key."}</p>
           </div>
         </Show>
       </Show>

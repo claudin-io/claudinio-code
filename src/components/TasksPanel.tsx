@@ -1,7 +1,6 @@
 import { createSignal, For, Show, onCleanup, type Component } from "solid-js";
 import { Popover } from "./Popover";
 import { getTasks, setTasks, dismissGoldenTasks, type TaskItem } from "../lib/ipc";
-import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 import { createVisibilityAwareInterval } from "../lib/visibility";
 
@@ -76,15 +75,23 @@ export const TasksPanel: Component<{
     task.id.endsWith("-0") ? "plan" : "execute";
 
   const displayTitle = (task: TaskItem) =>
-    isGolden(task) ? t(`golden.task.${goldenPhase(task)}`, task.title) : task.title;
+    isGolden(task)
+      ? goldenPhase(task) === "plan"
+        ? `Plan: ${task.title}`
+        : `Execute: ${task.title}`
+      : task.title;
 
   const displayDescription = (task: TaskItem) =>
-    isGolden(task) ? t(`golden.task.${goldenPhase(task)}.desc`, task.title) : task.description;
+    isGolden(task)
+      ? goldenPhase(task) === "plan"
+        ? `Create a detailed plan to achieve the goal: ${task.title}`
+        : `Execute the plan and verify the goal is met: ${task.title}`
+      : task.description;
 
   const statusLabel = (s: string) => {
-    if (s === "done") return t("tasks.status.done");
-    if (s === "doing") return t("tasks.status.doing");
-    return t("tasks.status.todo");
+    if (s === "done") return "Done";
+    if (s === "doing") return "Doing";
+    return "Todo";
   };
 
   const scheduleClose = () => {
@@ -121,7 +128,7 @@ export const TasksPanel: Component<{
               classList={{ "gold-outline p-px": isGolden(task) }}
               title={
                 isGolden(task)
-                  ? `${displayTitle(task)} (${t("golden.task.badge")}) — ${task.status}`
+                  ? `${displayTitle(task)} (${"Golden — mandatory goal"}) — ${task.status}`
                   : `${task.title} — ${task.status}`
               }
             >
@@ -136,9 +143,9 @@ export const TasksPanel: Component<{
       {/* Summary — three mini dots, color legend */}
       <Show when={tasks().length > 0}>
         <div class="flex flex-col items-center gap-1.5 border-t border-border-subtle px-1 pt-2">
-          <span class="inline-block h-2 w-2 rounded-full bg-ink-faint" title={t("tasks.status.todo")} />
-          <span class="inline-block h-2 w-2 rounded-full bg-amber-500" title={t("tasks.status.doing")} />
-          <span class="inline-block h-2 w-2 rounded-full bg-success" title={t("tasks.status.done")} />
+          <span class="inline-block h-2 w-2 rounded-full bg-ink-faint" title={"Todo"} />
+          <span class="inline-block h-2 w-2 rounded-full bg-amber-500" title={"Doing"} />
+          <span class="inline-block h-2 w-2 rounded-full bg-success" title={"Done"} />
         </div>
       </Show>
 
@@ -171,7 +178,7 @@ export const TasksPanel: Component<{
                     stroke={task.status === "done"}
                     class="h-3 w-3"
                   />
-                  {t("golden.task.badge")}
+                  {"Golden — mandatory goal"}
                 </span>
               </Show>
               {/* Title + status */}
@@ -208,7 +215,7 @@ export const TasksPanel: Component<{
               <Show when={task.journal.length > 0}>
                 <div class="mt-2 space-y-0.5">
                   <span class="text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
-                    {t("tasks.panel.journal")}
+                    {"Journal"}
                   </span>
                   <For each={task.journal}>
                     {(entry) => (
@@ -221,7 +228,7 @@ export const TasksPanel: Component<{
               </Show>
 
               {/* Click hint */}
-              <p class="mt-2 text-[10px] text-ink-faint">{t("tasks.panel.cycleStatus")}</p>
+              <p class="mt-2 text-[10px] text-ink-faint">{"Cycle status"}</p>
 
               {/* Dismiss — golden tasks can be completed but not deleted by
                   the model; this lets the user drop a stale goal so it stops
@@ -231,7 +238,7 @@ export const TasksPanel: Component<{
                   onClick={() => dismissGolden(task.id)}
                   class="mt-2 text-[10px] font-medium text-ink-faint hover:text-ink-muted hover:underline"
                 >
-                  {t("golden.task.dismiss")}
+                  {"Dismiss this goal"}
                 </button>
               </Show>
             </div>

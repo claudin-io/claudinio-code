@@ -254,7 +254,7 @@ describe("theme", () => {
     expect(mod.ALL_THEMES).toContain("everforest");
   });
 
-  it("themeMetadata has entries for all 15 themes with labelKey and previewColors", async () => {
+  it("themeMetadata has entries for all 15 themes with a label and previewColors", async () => {
     stubGlobals(false);
     const mod = await import("./theme") as any;
     __resetState = mod.__resetState;
@@ -262,7 +262,8 @@ describe("theme", () => {
     for (const id of mod.ALL_THEMES) {
       const meta = mod.themeMetadata[id];
       expect(meta).toBeDefined();
-      expect(meta.labelKey).toBe(`theme.${id}`);
+      expect(typeof meta.label).toBe("string");
+      expect(meta.label.length).toBeGreaterThan(0);
       expect(meta.category).toMatch(/^(dark|light)$/);
       expect(meta.previewColors.length).toBe(5);
     }

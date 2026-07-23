@@ -63,37 +63,34 @@ pub async fn get_context_warning(
     for (name, path) in &candidates {
         if path.exists() && path.is_file() {
             agents_md_path = Some(name.to_string());
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    let bytes = content.len() as u64;
-                    let lines = content.lines().count() as u64;
-                    let tokens = (bytes / 4).max(1);
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let bytes = content.len() as u64;
+                let lines = content.lines().count() as u64;
+                let tokens = (bytes / 4).max(1);
 
-                    // Count issue-like lines
-                    let issues = content
-                        .lines()
-                        .filter(|l| {
-                            let t = l.trim();
-                            t.starts_with("TODO")
-                                || t.starts_with("FIXME")
-                                || t.starts_with("HACK")
-                                || t.starts_with("XXX")
-                                || t.starts_with("BUG")
-                                || t.starts_with("ISSUE")
-                                || t.starts_with("# TODO")
-                                || t.starts_with("# FIXME")
-                                || t.starts_with("// TODO")
-                                || t.starts_with("// FIXME")
-                                || t.starts_with("<!-- TODO")
-                        })
-                        .count() as u64;
+                // Count issue-like lines
+                let issues = content
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim();
+                        t.starts_with("TODO")
+                            || t.starts_with("FIXME")
+                            || t.starts_with("HACK")
+                            || t.starts_with("XXX")
+                            || t.starts_with("BUG")
+                            || t.starts_with("ISSUE")
+                            || t.starts_with("# TODO")
+                            || t.starts_with("# FIXME")
+                            || t.starts_with("// TODO")
+                            || t.starts_with("// FIXME")
+                            || t.starts_with("<!-- TODO")
+                    })
+                    .count() as u64;
 
-                    agents_md_size = bytes;
-                    agents_md_lines = lines;
-                    agents_md_tokens = tokens;
-                    agents_md_issues = issues;
-                }
-                Err(_) => {}
+                agents_md_size = bytes;
+                agents_md_lines = lines;
+                agents_md_tokens = tokens;
+                agents_md_issues = issues;
             }
             break;
         }

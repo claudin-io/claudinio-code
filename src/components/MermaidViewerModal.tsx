@@ -1,6 +1,5 @@
 import { createEffect, createSignal, onCleanup, Show, type JSX } from "solid-js";
-import { save } from "@tauri-apps/plugin-dialog";
-import { writeFile, writeFileBytes } from "../lib/ipc";
+import { exportFile, exportFileBytes } from "../lib/ipc";
 import { mermaidViewerSvg, closeMermaidViewer } from "../lib/mermaidViewer";
 
 // Fullscreen viewer for a rendered Mermaid diagram: scroll/buttons to zoom,
@@ -135,11 +134,7 @@ export function MermaidViewerModal(): JSX.Element {
   const downloadSvg = async () => {
     const out = exportSvgString();
     if (!out) return;
-    const path = await save({
-      defaultPath: "diagram.svg",
-      filters: [{ name: "SVG", extensions: ["svg"] }],
-    });
-    if (path) await writeFile(path, out.svg);
+    await exportFile("diagram.svg", "SVG", "svg", out.svg);
   };
 
   const downloadPng = async () => {
@@ -168,11 +163,7 @@ export function MermaidViewerModal(): JSX.Element {
       img.src = `data:image/svg+xml;base64,${b64svg}`;
     });
     if (!dataUrl) return;
-    const path = await save({
-      defaultPath: "diagram.png",
-      filters: [{ name: "PNG", extensions: ["png"] }],
-    });
-    if (path) await writeFileBytes(path, dataUrl.split(",")[1]);
+    await exportFileBytes("diagram.png", "PNG", "png", dataUrl.split(",")[1]);
   };
 
   return (

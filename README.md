@@ -109,7 +109,11 @@ guidance mid-reasoning. `Esc` interrupts outright.
 - **Skills** — drop a `SKILL.md` into `.agents/skills/`, `.claudinio/skills/` or
   `.claude/skills/` and the agent discovers it.
 - **MCP** — connect Model Context Protocol servers over stdio or HTTP.
-- **18 UI locales**, with the system language detected on first run.
+
+The interface and the agent are English-only. The system prompts are written and
+tuned in English, and the agent asks you to write in English too — a localized
+shell around an English-speaking agent was worse than being straightforward
+about it.
 
 ## The tools the model can call
 
@@ -139,6 +143,9 @@ traversal. A denylist blocks known-destructive commands outright. See
 project explicitly does *not* defend against.
 
 ## Architecture
+
+Full write-up in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layering rules,
+trust boundaries, and the shapes that are deliberate.
 
 ```
 ┌──────────────────────────────────────────────────────────┐

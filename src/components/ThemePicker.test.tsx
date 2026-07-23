@@ -8,7 +8,7 @@ vi.mock("../lib/theme", () => ({
   setThemePreference: vi.fn(),
   themeMetadata: {
     claudinio: {
-      labelKey: "theme.claudinio",
+      label: "Claudinio",
       category: "dark",
       previewColors: [
         "oklch(0.145 0.015 280)",
@@ -19,7 +19,7 @@ vi.mock("../lib/theme", () => ({
       ],
     },
     dracula: {
-      labelKey: "theme.dracula",
+      label: "Dracula",
       category: "dark",
       previewColors: [
         "oklch(0.14 0.02 325)",
@@ -30,7 +30,7 @@ vi.mock("../lib/theme", () => ({
       ],
     },
     "claudinio-sepia": {
-      labelKey: "theme.claudinio-sepia",
+      label: "theme.claudinio-sepia",
       category: "light",
       previewColors: [
         "oklch(0.96 0.015 90)",
@@ -44,9 +44,6 @@ vi.mock("../lib/theme", () => ({
   ALL_THEMES: ["claudinio", "dracula", "claudinio-sepia"],
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: (k: string) => k,
-}));
 
 vi.mock("./Icon", () => ({
   Icon: () => null,
@@ -71,21 +68,21 @@ describe("ThemePicker", () => {
     const container = mount();
     const buttons = container.querySelectorAll("button");
     expect(buttons.length).toBe(4); // system + 3 themes
-    expect(buttons[0].textContent).toContain("theme.system");
+    expect(buttons[0].textContent).toContain("System");
   });
 
   it("renders all theme cards with their labels", () => {
     const container = mount();
     const text = container.textContent ?? "";
-    expect(text).toContain("theme.claudinio");
-    expect(text).toContain("theme.dracula");
+    expect(text).toContain("Claudinio");
+    expect(text).toContain("Dracula");
     expect(text).toContain("theme.claudinio-sepia");
   });
 
   it("shows resolved theme badge on System card", () => {
     const container = mount();
     const systemCard = container.querySelector("button")!;
-    expect(systemCard.textContent).toContain("theme.claudinio");
+    expect(systemCard.textContent).toContain("Claudinio");
   });
 
   it("calls setThemePreference when a theme card is clicked", async () => {

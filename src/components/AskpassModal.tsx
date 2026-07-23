@@ -1,6 +1,5 @@
 import { createSignal, Show, type Component } from "solid-js";
 import { Portal } from "solid-js/web";
-import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 import { answerAskpass, type AskpassRequest } from "../lib/ipc";
 
@@ -30,10 +29,10 @@ export const AskpassModal: Component<{
             <div class="w-96 rounded-lg border border-border-subtle bg-surface-1 p-4 shadow-modal">
               <div class="mb-2 flex items-center gap-2">
                 <Icon name="alert-circle" class="h-4 w-4 text-accent" />
-                <span class="text-sm font-medium text-ink">{t("askpass.title")}</span>
+                <span class="text-sm font-medium text-ink">{"Credential required"}</span>
               </div>
               <p class="mb-1 break-words font-mono text-[12px] text-ink-muted">{req().prompt}</p>
-              <p class="mb-3 text-[11px] text-ink-faint">{t("askpass.hint")}</p>
+              <p class="mb-3 text-[11px] text-ink-faint">{"A command the agent is running (e.g. git push) needs this credential. It is passed directly to git/ssh and never stored."}</p>
               <input
                 type="password"
                 autofocus
@@ -44,20 +43,20 @@ export const AskpassModal: Component<{
                   if (e.key === "Escape") finish(null);
                 }}
                 class="mb-3 w-full rounded border border-border-subtle bg-surface-2 px-2 py-1.5 text-sm text-ink outline-none focus:border-accent"
-                placeholder={t("askpass.placeholder")}
+                placeholder={"Password / passphrase"}
               />
               <div class="flex justify-end gap-2">
                 <button
                   onClick={() => finish(null)}
                   class="rounded px-3 py-1.5 text-[12px] text-ink-muted hover:bg-surface-2"
                 >
-                  {t("askpass.cancel")}
+                  {"Cancel"}
                 </button>
                 <button
                   onClick={() => finish(secret())}
                   class="rounded bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:opacity-90"
                 >
-                  {t("askpass.submit")}
+                  {"Unlock"}
                 </button>
               </div>
             </div>

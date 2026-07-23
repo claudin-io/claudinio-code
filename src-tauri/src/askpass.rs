@@ -213,10 +213,10 @@ async fn handle_conn(mut stream: tokio::net::TcpStream) -> Result<(), String> {
     // Register the pending prompt and ask the UI.
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel::<Option<String>>();
-    if let Some(b) = BRIDGE.get() {
-        if let Ok(mut m) = b.waiting.lock() {
-            m.insert(id, tx);
-        }
+    if let Some(b) = BRIDGE.get()
+        && let Ok(mut m) = b.waiting.lock()
+    {
+        m.insert(id, tx);
     }
     PENDING.fetch_add(1, Ordering::SeqCst);
     if let Some(app) = APP.get() {
@@ -226,10 +226,10 @@ async fn handle_conn(mut stream: tokio::net::TcpStream) -> Result<(), String> {
     let answer =
         tokio::time::timeout(std::time::Duration::from_secs(ANSWER_TIMEOUT_SECS), rx).await;
     PENDING.fetch_sub(1, Ordering::SeqCst);
-    if let Some(b) = BRIDGE.get() {
-        if let Ok(mut m) = b.waiting.lock() {
-            m.remove(&id);
-        }
+    if let Some(b) = BRIDGE.get()
+        && let Ok(mut m) = b.waiting.lock()
+    {
+        m.remove(&id);
     }
 
     match answer {

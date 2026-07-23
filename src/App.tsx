@@ -4,8 +4,6 @@ import "./App.css";
 import { listen } from "@tauri-apps/api/event";
 import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listAllModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, openrouterLogin, openrouterLoginCancel, disconnectProvider, type ConnectedProviderInfo, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ModelGroup, type ThinkingEffort } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
-import "./lib/grill-me";
-import { t, locale, setLocale, type LocaleId } from "./lib/grill-me";
 import { FileTree } from "./components/FileTree";
 import { ChatPanel } from "./components/ChatPanel";
 import { EmptyState } from "./components/EmptyState";
@@ -472,7 +470,7 @@ function App() {
       setConfigApiKey("");
       setSettingsApiKeyError(null);
     } catch (e) {
-      alert(t("app.config.saveError", String(e)));
+      alert(`Error saving config: ${String(e)}`);
     }
   };
 
@@ -483,7 +481,7 @@ function App() {
       setAccountLogin(result.login);
       setAccountTier(result.tier ?? null);
     } catch (e) {
-      alert(t("app.config.loginError", String(e)));
+      alert(`Sign-in failed: ${String(e)}`);
     } finally {
       setLoggingIn(false);
     }
@@ -622,7 +620,7 @@ function App() {
       setActiveWorkspace(folder);
       setShowTree(false);
     }
-    setWsIndexStatus(folder, t("app.index.indexingStatus"));
+    setWsIndexStatus(folder, "indexing…");
     setWsProgress(folder, null);
     try {
       const s = await openWorkspace(folder, (p) => setWsProgress(folder, p));
@@ -640,7 +638,7 @@ function App() {
         800,
       );
     } catch (e) {
-      setWsIndexStatus(folder, `${t("chat.status.error")}: ${e}`);
+      setWsIndexStatus(folder, `${"Error"}: ${e}`);
       setWsProgress(folder, null);
     }
   };
@@ -700,7 +698,7 @@ function App() {
       setAccountLogin(result.login);
       setAccountTier(result.tier ?? null);
     } catch (e) {
-      setOnboardingSignInError(t("onboarding.signIn.error") + ": " + String(e));
+      setOnboardingSignInError("Sign-in failed. Please try again." + ": " + String(e));
     }
   };
 
@@ -762,11 +760,11 @@ function App() {
           >
             <Show
               when={updateProgress() !== null}
-              fallback={<>{t("update.updateTo", updateInfo()!.version)}</>}
+              fallback={<>{`Update to v${updateInfo()!.version}`}</>}
             >
               <span class="flex items-center gap-1.5">
                 <Icon name="loader" class="h-3 w-3 animate-spin" />
-                {t("update.installing")}
+                {"Installing…"}
               </span>
             </Show>
           </button>
@@ -791,7 +789,7 @@ function App() {
                 if (ws && ide) openInIde(ws, ide).catch(console.error);
               }}
               class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
-              title={t("app.config.openInIde")}
+              title={"Open in IDE"}
             >
               <Icon name="external-link" />
             </button>
@@ -799,7 +797,7 @@ function App() {
           <button
             onClick={openConfig}
             class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
-            title={t("app.config.title")}
+            title={"API Configuration"}
           >
             <Icon name="settings" />
           </button>
@@ -809,12 +807,6 @@ function App() {
       <SettingsPanel
         showConfig={showConfig}
         setShowConfig={setShowConfig}
-        language={locale}
-        setLanguage={(v: LocaleId | ((prev: LocaleId) => LocaleId)) => {
-          const id = typeof v === "function" ? v(locale()) : v;
-          setLocale(id);
-          return id;
-        }}
         configBrainModel={configBrainModel}
         setConfigBrainModel={setConfigBrainModel}
         configBuilderModel={configBuilderModel}
@@ -893,9 +885,9 @@ function App() {
       {/* Update-available prompt (auto-check on startup) */}
       <Show when={updateInfo() && !updateBannerDismissed()}>
         <div class="fixed bottom-4 right-4 z-50 w-80 rounded-lg border border-border-subtle bg-surface-1 p-4 shadow-modal">
-          <div class="mb-2 text-sm font-semibold text-ink">{t("update.available", updateInfo()!.version)}</div>
+          <div class="mb-2 text-sm font-semibold text-ink">{`New version ${updateInfo()!.version} available`}</div>
           <Show when={updateInstallError()}>
-            <div class="mb-2 text-xs text-red-400">{t("update.error", updateInstallError() ?? "")}</div>
+            <div class="mb-2 text-xs text-red-400">{`Update failed: ${updateInstallError() ?? ""}`}</div>
           </Show>
           <Show
             when={updateProgress() !== null}
@@ -905,13 +897,13 @@ function App() {
                   onClick={() => setUpdateBannerDismissed(true)}
                   class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-xs text-ink hover:bg-surface-3"
                 >
-                  {t("update.later")}
+                  {"Later"}
                 </button>
                 <button
                   onClick={() => void installUpdate()}
                   class="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-ink hover:bg-accent-hover"
                 >
-                  {t("update.installNow")}
+                  {"Update now"}
                 </button>
               </div>
 
@@ -925,7 +917,7 @@ function App() {
               />
             </div>
 
-            <div class="mt-1.5 text-xs text-ink-muted">{t("update.downloading")}</div>
+            <div class="mt-1.5 text-xs text-ink-muted">{"Downloading and installing…"}</div>
           </Show>
         </div>
       </Show>
@@ -948,7 +940,7 @@ function App() {
               <>
                 <div class="flex items-center justify-between border-b border-border-subtle px-3 py-2">
                   <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-                    {t("app.sidebar.projects")}
+                    {"Projects"}
                   </span>
                 </div>
 
@@ -998,11 +990,11 @@ function App() {
 
                             <div class="truncate text-[11px] text-ink-faint">
                               {workspaceStatus[proj] === "thinking"
-                                ? t("chat.status.thinking")
+                                ? "Thinking"
                                 : workspaceStatus[proj] === "awaiting_approval"
-                                  ? t("chat.status.awaitingApproval")
+                                  ? "Awaiting approval"
                                   : workspaceStatus[proj] === "awaiting_input"
-                                    ? t("chat.status.awaitingInput")
+                                    ? "Awaiting your input"
                                     : proj}
                             </div>
 
@@ -1011,7 +1003,7 @@ function App() {
                         </button>
                         <button
                           class="hidden shrink-0 rounded p-0.5 text-ink-faint hover:bg-surface-3 hover:text-ink group-hover:block"
-                          title={t("app.sidebar.closeWorkspace")}
+                          title={"Close workspace"}
                           onClick={(e) => {
                             e.stopPropagation();
                             closeOpenWorkspace(proj);
@@ -1052,7 +1044,7 @@ function App() {
                         </button>
                         <button
                           class="hidden shrink-0 rounded p-0.5 text-ink-faint hover:bg-surface-3 hover:text-ink group-hover:block"
-                          title={t("app.sidebar.closeWorkspace")}
+                          title={"Close workspace"}
                           onClick={(e) => {
                             e.stopPropagation();
                             removeFromRecent(proj);
@@ -1067,7 +1059,7 @@ function App() {
 
                   <Show when={recentProjects().length === 0 && openWorkspaces().length === 0}>
                     <div class="px-3 py-8 text-center text-xs text-ink-faint">
-                      {t("app.sidebar.noRecent")}
+                      {"No recent projects"}
                     </div>
 
                   </Show>
@@ -1080,7 +1072,7 @@ function App() {
                     class="flex w-full items-center gap-2 rounded-md border border-dashed border-border-subtle px-3 py-2 text-xs text-ink-muted hover:border-accent hover:text-accent"
                   >
                     <Icon name="plus" class="h-3.5 w-3.5" />
-                    {t("app.sidebar.openFolder")}
+                    {"Open folder"}
                   </button>
                   <Show when={activeWorkspace()}>
                     <button
@@ -1088,7 +1080,7 @@ function App() {
                       class="mt-1 flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
                     >
                       <Icon name="chevron-right" class="h-3 w-3" />
-                      {t("app.sidebar.browseFiles")}
+                      {"Browse files"}
                     </button>
                   </Show>
                 </div>
@@ -1102,7 +1094,7 @@ function App() {
                 class="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-ink-muted hover:bg-surface-2 hover:text-ink"
               >
                 <Icon name="arrow-left" class="h-3 w-3" />
-                {t("app.sidebar.back")}
+                {"Back"}
               </button>
               <span class="truncate text-xs font-semibold text-ink">
                 {activeWorkspace()?.split("/").pop()}
@@ -1132,17 +1124,17 @@ function App() {
                       <div class="flex flex-col gap-0.5">
                         <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
                           <Icon name="file" class="w-3 h-3" />
-                          <span>{t("app.index.filesLabel", (indexStatus() as IndexStatus).filesCount)}</span>
+                          <span>{`${(indexStatus() as IndexStatus).filesCount} files`}</span>
                         </div>
 
                         <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
                           <Icon name="layers" class="w-3 h-3" />
-                          <span>{t("app.index.symbolsLabel", (indexStatus() as IndexStatus).symbolsCount)}</span>
+                          <span>{`${(indexStatus() as IndexStatus).symbolsCount} symbols`}</span>
                         </div>
 
                         <div class="flex items-center gap-1 font-mono text-[10px] text-ink-faint">
                           <Icon name="brain" class="w-3 h-3" />
-                          <span>{t("app.index.embeddingsLabel", (indexStatus() as IndexStatus).embeddingsCount)}</span>
+                          <span>{`${(indexStatus() as IndexStatus).embeddingsCount} embeddings`}</span>
                         </div>
 
                         <Show when={(indexStatus() as IndexStatus).watcherWarning}>
@@ -1166,13 +1158,13 @@ function App() {
                 <Switch>
                   <Match when={progress()!.status === "loading_model"}>
                     <div class="font-mono text-[10px] text-ink-faint">
-                      {t("app.index.loadingModel")}
+                      {"Loading model…"}
                     </div>
 
                   </Match>
                   <Match when={progress()!.status === "embeddings_done"}>
                     <div class="font-mono text-[10px] text-ink-faint">
-                      {t("app.index.embeddingsReady")} · {progress()!.symbolsIndexed} {t("app.index.symbols")}
+                      {"Embeddings ready"} · {progress()!.symbolsIndexed} {"symbols"}
                     </div>
 
                   </Match>
@@ -1183,7 +1175,7 @@ function App() {
                     }
                   >
                     <div class="font-mono text-[10px] text-red-400">
-                      {t("app.index.embeddingFailed")}
+                      {"Embedding failed — semantic search unavailable"}
                     </div>
 
                   </Match>
@@ -1192,8 +1184,8 @@ function App() {
                       <div class="flex items-center justify-between text-[10px]">
                         <span class="text-ink-muted">
                           {progress()!.status === "embedding"
-                            ? t("app.index.embeddingStatus")
-                            : t("app.index.indexing")}
+                            ? "Generating embeddings"
+                            : "Indexing"}
                         </span>
                         <span class="font-mono text-ink-faint">
                           {progress()!.filesIndexed}/{progress()!.totalFiles}
@@ -1213,7 +1205,7 @@ function App() {
                       </div>
 
                       <div class="font-mono text-[9px] text-ink-faint">
-                        {progress()!.symbolsIndexed} {t("app.index.symbols")}
+                        {progress()!.symbolsIndexed} {"symbols"}
                       </div>
 
                     </div>

@@ -38,9 +38,6 @@ vi.mock("./Icon", () => ({
   Icon: () => null,
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: (k: string) => k,
-}));
 
 vi.mock("../lib/ipc", () => ({
   readFile: vi.fn().mockResolvedValue("original content"),
@@ -143,12 +140,12 @@ describe("FileEditorModal component", () => {
     expect(buttons.length).toBe(2);
 
     const saveBtn = Array.from(buttons).find(
-      (b) => b.textContent === "fileEditor.save",
+      (b) => b.textContent === "Save",
     );
     expect(saveBtn).toBeTruthy();
 
     const closeBtn = Array.from(buttons).find(
-      (b) => b.textContent !== "fileEditor.save",
+      (b) => b.textContent !== "Save",
     );
     expect(closeBtn).toBeTruthy();
 
@@ -325,7 +322,7 @@ describe("FileEditorModal component", () => {
     const { onClose, dispose } = await renderModal();
 
     const closeBtn = [...document.body.querySelectorAll("button")].find(
-      (b) => b.textContent !== "fileEditor.save",
+      (b) => b.textContent !== "Save",
     )!;
     closeBtn.click();
 
@@ -344,11 +341,11 @@ describe("FileEditorModal component", () => {
     confirmSpy.mockReturnValue(true);
 
     const closeBtn = [...document.body.querySelectorAll("button")].find(
-      (b) => b.textContent !== "fileEditor.save",
+      (b) => b.textContent !== "Save",
     )!;
     closeBtn.click();
 
-    expect(confirmSpy).toHaveBeenCalledWith("fileEditor.unsavedMessage");
+    expect(confirmSpy).toHaveBeenCalledWith("You have unsaved changes. Are you sure you want to close?");
     expect(onClose).toHaveBeenCalledTimes(1);
 
     confirmSpy.mockRestore();
@@ -365,7 +362,7 @@ describe("FileEditorModal component", () => {
     confirmSpy.mockReturnValue(false);
 
     const closeBtn = [...document.body.querySelectorAll("button")].find(
-      (b) => b.textContent !== "fileEditor.save",
+      (b) => b.textContent !== "Save",
     )!;
     closeBtn.click();
 
@@ -381,7 +378,7 @@ describe("FileEditorModal component", () => {
 
     mockEditor.getValue.mockReturnValue("save btn content");
     const saveBtn = [...document.body.querySelectorAll("button")].find(
-      (b) => b.textContent === "fileEditor.save",
+      (b) => b.textContent === "Save",
     )!;
     saveBtn.click();
     await flush();
@@ -418,7 +415,7 @@ describe("FileEditorModal component", () => {
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith("fileEditor.unsavedMessage");
+    expect(confirmSpy).toHaveBeenCalledWith("You have unsaved changes. Are you sure you want to close?");
     expect(onClose).toHaveBeenCalledTimes(1);
 
     confirmSpy.mockRestore();
@@ -479,7 +476,7 @@ describe("FileEditorModal component", () => {
     const overlay = document.body.firstElementChild as HTMLElement;
     overlay.click();
 
-    expect(confirmSpy).toHaveBeenCalledWith("fileEditor.unsavedMessage");
+    expect(confirmSpy).toHaveBeenCalledWith("You have unsaved changes. Are you sure you want to close?");
     expect(onClose).toHaveBeenCalledTimes(1);
 
     confirmSpy.mockRestore();

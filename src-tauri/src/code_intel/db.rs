@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
@@ -35,6 +35,11 @@ pub struct SymbolRecord {
     pub end_col: i64,
     pub file_path: Option<String>,
 }
+
+/// One embedded chunk of a symbol as stored: the symbol, the chunk's start and
+/// end line, and the vector. Both line numbers are 0 for whole-symbol
+/// embeddings (headers, small bodies).
+pub type EmbeddingRow = (SymbolRecord, i64, i64, Vec<f32>);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -636,6 +641,7 @@ impl IndexDb {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_symbol(
         &self,
         file_id: i64,
@@ -816,6 +822,7 @@ impl IndexDb {
     /// Insert one retrieval chunk. Plain INSERT by design: callers always run
     /// `delete_symbols_for_file` first, and REPLACE would route the implicit
     /// delete around the FTS trigger on setups without recursive_triggers.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_chunk(
         &self,
         symbol_id: i64,
@@ -895,9 +902,8 @@ impl IndexDb {
         Ok(())
     }
 
-    /// One embedded chunk of a symbol, as stored. `chunk_start_line`/`chunk_end_line`
-    /// are 0 for whole-symbol embeddings (headers, small bodies).
-    pub fn load_all_embeddings(&self) -> Result<Vec<(SymbolRecord, i64, i64, Vec<f32>)>, String> {
+    /// Every embedded chunk, as stored.
+    pub fn load_all_embeddings(&self) -> Result<Vec<EmbeddingRow>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -946,7 +952,7 @@ impl IndexDb {
         &self,
         page_size: i64,
         offset: i64,
-    ) -> Result<Vec<(SymbolRecord, i64, i64, Vec<f32>)>, String> {
+    ) -> Result<Vec<EmbeddingRow>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -1013,7 +1019,7 @@ impl IndexDb {
                     continue;
                 }
                 let dot: f32 = query_vec.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
-                let cosine = dot.max(0.0).min(1.0);
+                let cosine = dot.clamp(0.0, 1.0);
                 if cosine < min_cosine {
                     continue;
                 }

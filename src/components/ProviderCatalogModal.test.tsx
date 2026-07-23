@@ -17,9 +17,6 @@ vi.mock("../lib/ipc", () => ({
   openExternalUrl: __test.mockOpenExternalUrl,
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string, ...args: string[]) => (args.length ? `${key}:${args.join(",")}` : key),
-}));
 
 vi.mock("./Icon", () => ({
   Icon: (props: { name: string; class?: string }) => (
@@ -120,7 +117,9 @@ describe("ProviderCatalogModal", () => {
       (i) => i.value.includes("deepseek"),
     );
     expect(urlInput?.value).toBe("https://api.deepseek.com");
-    expect(container.textContent).toContain("providerCatalog.envHint:DEEPSEEK_API_KEY");
+    expect(container.textContent).toContain(
+      "Usually stored in the DEEPSEEK_API_KEY environment variable.",
+    );
   });
 
   it("connect success reports the model count and refreshes the app", async () => {
@@ -136,7 +135,7 @@ describe("ProviderCatalogModal", () => {
     keyInput.dispatchEvent(new Event("input", { bubbles: true }));
     await flush();
     Array.from(container.querySelectorAll("button"))
-      .find((b) => b.textContent === "settings.providers.connect")!
+      .find((b) => b.textContent === "Connect")!
       .click();
     await flush();
     expect(__test.mockConnectProvider).toHaveBeenCalledWith(
@@ -144,7 +143,7 @@ describe("ProviderCatalogModal", () => {
       "sk-test",
       "https://api.deepseek.com",
     );
-    expect(container.textContent).toContain("providerCatalog.connectSuccess:2");
+    expect(container.textContent).toContain("Connected — 2 models available.");
     expect(onChanged).toHaveBeenCalled();
   });
 
@@ -161,10 +160,12 @@ describe("ProviderCatalogModal", () => {
     keyInput.dispatchEvent(new Event("input", { bubbles: true }));
     await flush();
     Array.from(container.querySelectorAll("button"))
-      .find((b) => b.textContent === "settings.providers.connect")!
+      .find((b) => b.textContent === "Connect")!
       .click();
     await flush();
-    expect(container.textContent).toContain("providerCatalog.connectError");
+    expect(container.textContent).toContain(
+      "Could not connect: Authentication failed — check your API key",
+    );
     expect(onChanged).not.toHaveBeenCalled();
   });
 
@@ -177,7 +178,7 @@ describe("ProviderCatalogModal", () => {
       .click();
     await flush();
     Array.from(container.querySelectorAll("button"))
-      .find((b) => b.textContent === "settings.providers.disconnect")!
+      .find((b) => b.textContent === "Disconnect")!
       .click();
     await flush();
     expect(__test.mockDisconnectProvider).toHaveBeenCalledWith("deepseek");
@@ -189,9 +190,9 @@ describe("ProviderCatalogModal", () => {
     __test.mockFetchProviderCatalog.mockResolvedValueOnce({ providers: CATALOG });
     mount();
     await flush();
-    expect(container.textContent).toContain("providerCatalog.loadError");
+    expect(container.textContent).toContain("Could not load the provider catalog.");
     Array.from(container.querySelectorAll("button"))
-      .find((b) => b.textContent === "providerCatalog.retry")!
+      .find((b) => b.textContent === "Retry")!
       .click();
     await flush();
     expect(__test.mockFetchProviderCatalog).toHaveBeenLastCalledWith(true);

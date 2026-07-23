@@ -80,7 +80,9 @@ fn main() {
         .filter(|a| !a.starts_with("--"))
         .collect();
     if positional.len() != 3 {
-        eprintln!("usage: semantic_eval <model_dir> <workspace_root> <queries.json> [--sweep] [--no-vector]");
+        eprintln!(
+            "usage: semantic_eval <model_dir> <workspace_root> <queries.json> [--sweep] [--no-vector]"
+        );
         std::process::exit(1);
     }
     let (model_dir, root, queries_path) = (positional[0], positional[1], positional[2]);
@@ -334,7 +336,7 @@ fn run_eval(
     summary
 }
 
-fn print_dist(label: &str, scores: &mut Vec<f32>) {
+fn print_dist(label: &str, scores: &mut [f32]) {
     if scores.is_empty() {
         println!("{label}: (none)");
         return;

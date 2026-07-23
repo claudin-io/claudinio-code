@@ -14,7 +14,7 @@ use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,11 +423,11 @@ fn fold_into_history<'a>(out: &mut Vec<Message>, records: impl Iterator<Item = &
                         )));
                     }
                 }
-                if let Some(last) = out.last_mut() {
-                    if last.role == "user" {
-                        last.content.extend(blocks);
-                        continue;
-                    }
+                if let Some(last) = out.last_mut()
+                    && last.role == "user"
+                {
+                    last.content.extend(blocks);
+                    continue;
                 }
                 out.push(Message {
                     role: "user".into(),
@@ -738,19 +738,71 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
         }
         collapsed.push(summary);
     }
-    collapsed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    collapsed.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     Ok(collapsed)
 }
+
+/// A single task item managed by the agent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskItem {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub journal: Vec<String>,
+    pub status: String, // "todo" | "doing" | "done"
+}
+
+/// Read all records from a JSONL file and find the LAST SessionRecord::Tasks,
+/// returning its deserialized tasks (or empty vec if none found).
+pub fn load_last_tasks(path: &Path) -> Result<Vec<TaskItem>, String> {
+    let records = load_records(path)?;
+    let last = records
+        .into_iter()
+        .rev()
+        .find(|r| matches!(r, SessionRecord::Tasks { .. }));
+    match last {
+        Some(SessionRecord::Tasks { tasks_json, .. }) => {
+            serde_json::from_str(&tasks_json).map_err(|e| format!("parse tasks from session: {e}"))
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Serialize tasks and append a SessionRecord::Tasks line to the JSONL.
+pub fn append_tasks(path: &Path, tasks: &[TaskItem]) -> Result<(), String> {
+    let tasks_json = serde_json::to_string(tasks).map_err(|e| format!("serialize tasks: {e}"))?;
+    let record = SessionRecord::Tasks {
+        tasks_json,
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    };
+    let line = serde_json::to_string(&record).map_err(|e| format!("serialize record: {e}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open session file: {e}"))?;
+    use std::io::Write;
+    writeln!(file, "{line}").map_err(|e| format!("write session file: {e}"))?;
+    Ok(())
+}
+
+/// The parsed-session-record LRU shared by AppState, the tool context and the
+/// transition helpers. One alias so the four holders cannot drift apart.
+pub type RecordsCache = Arc<Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>;
 
 pub fn load_records_cached(
     path: &Path,
     cache: &Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>,
 ) -> Result<Vec<SessionRecord>, String> {
     let mut cache = cache.lock().unwrap();
-    if let Some((records, cached_at)) = cache.get(path) {
-        if cached_at.elapsed() < std::time::Duration::from_millis(800) {
-            return Ok(records.clone());
-        }
+    if let Some((records, cached_at)) = cache.get(path)
+        && cached_at.elapsed() < std::time::Duration::from_millis(800)
+    {
+        return Ok(records.clone());
     }
     let records = load_records(path)?;
     cache.put(path.to_path_buf(), (records.clone(), Instant::now()));
@@ -963,9 +1015,11 @@ mod tests {
         );
         assert_eq!(tip.turn_count, 3, "turn_count sums the whole chain");
         assert!(list.iter().any(|s| s.session_id == "solo"));
-        assert!(!list
-            .iter()
-            .any(|s| s.session_id == "root" || s.session_id == "mid"));
+        assert!(
+            !list
+                .iter()
+                .any(|s| s.session_id == "root" || s.session_id == "mid")
+        );
     }
 
     #[test]
@@ -1284,10 +1338,12 @@ mod tests {
         let history = history_from_records(&recs);
         // summary + 2 tail turns + 1 post-compact
         assert_eq!(history.len(), 4);
-        assert!(history[0].content[0]
-            .get_text()
-            .unwrap()
-            .starts_with("[Contexto anterior compactado]"));
+        assert!(
+            history[0].content[0]
+                .get_text()
+                .unwrap()
+                .starts_with("[Contexto anterior compactado]")
+        );
         assert_eq!(history[1].content[0].get_text().unwrap(), "recent question");
         assert_eq!(history[2].content[0].get_text().unwrap(), "recent answer");
         assert_eq!(history[3].content[0].get_text().unwrap(), "post-compact");

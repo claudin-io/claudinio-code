@@ -1,9 +1,8 @@
 import { Component, createSignal, createMemo, Show, For, onMount, onCleanup } from "solid-js";
-import { marked } from "marked";
 import { commitAndPush, interruptSession, AgentEvent, ToolCallData, ToolResultData, AskUserData, UserAnswer, submitAnswers } from "../lib/ipc";
-import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 import { ProseContent } from "./ProseContent";
+import { renderMarkdown } from "../lib/markdown";
 import QuestionCard from "./QuestionCard";
 
 interface TimelineStep {
@@ -152,10 +151,10 @@ const CommitPushModal: Component<{
 
   const statusLabel = () => {
     switch (status()) {
-      case "running": return t("commitPush.committing");
-      case "completed": return t("commitPush.completed");
-      case "failed": return t("commitPush.failed");
-      case "interrupted": return t("commitPush.interrupted");
+      case "running": return "Committing changes...";
+      case "completed": return "Completed";
+      case "failed": return "Failed";
+      case "interrupted": return "Interrupted";
     }
   };
 
@@ -167,7 +166,7 @@ const CommitPushModal: Component<{
           <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
             <div class="flex items-center gap-2">
               <Icon name="git-commit" class="h-4 w-4 text-ink-muted" stroke />
-              <span class="font-semibold text-[14px] text-ink">{t("commitPush.modalTitle")}</span>
+              <span class="font-semibold text-[14px] text-ink">{"Commit & Push"}</span>
               <span class={`rounded px-1.5 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
                 {statusLabel()}
               </span>
@@ -178,7 +177,7 @@ const CommitPushModal: Component<{
                 class="flex h-7 items-center gap-1.5 rounded-md bg-danger/20 px-3 text-[12px] font-medium text-danger hover:bg-danger/40"
               >
                 <Icon name="stop" class="h-3.5 w-3.5" />
-                {t("commitPush.cancel")}
+                {"Cancel"}
               </button>
             </Show>
             <Show when={status() !== "running"}>
@@ -254,7 +253,7 @@ const CommitPushModal: Component<{
                     <div class="rounded-md bg-surface-1 p-3">
                       <ProseContent
                         class="prose-content text-[12px] leading-[1.6] text-ink-muted"
-                        html={marked.parse(step.text!, { async: false }) as string}
+                        html={renderMarkdown(step.text!)}
                       />
                     </div>
                   </Show>

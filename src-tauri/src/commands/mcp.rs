@@ -14,20 +14,20 @@ pub async fn mcp_list_servers(
     let mut effective = cfg.clone();
     drop(cfg);
 
-    if let Some(ref root) = workspace {
-        if let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root) {
-            crate::agent::provider::merge_workspace_config(&mut effective, &ws_cfg);
-        }
+    if let Some(ref root) = workspace
+        && let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root)
+    {
+        crate::agent::provider::merge_workspace_config(&mut effective, &ws_cfg);
     }
 
     // If the workspace is open and already has a connected manager, report
     // its live status instead of re-connecting.
-    if let Some(ref root) = workspace {
-        if let Ok(ws) = state.workspace(root).await {
-            let mgr = ws.mcp.lock().await.clone();
-            if let Some(mgr) = mgr {
-                return Ok(mgr.statuses());
-            }
+    if let Some(ref root) = workspace
+        && let Ok(ws) = state.workspace(root).await
+    {
+        let mgr = ws.mcp.lock().await.clone();
+        if let Some(mgr) = mgr {
+            return Ok(mgr.statuses());
         }
     }
 

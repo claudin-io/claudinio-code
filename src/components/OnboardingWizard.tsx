@@ -1,6 +1,5 @@
 import { For, Show, createSignal, type Component } from "solid-js";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 
 export const OnboardingWizard: Component<{
   onSignIn: () => Promise<void>;
@@ -17,23 +16,23 @@ export const OnboardingWizard: Component<{
   const features = () => [
     {
       icon: "thinking-face" as const,
-      title: t("onboarding.features.agent.title"),
-      desc: t("onboarding.features.agent.desc"),
+      title: "Intelligent Agent",
+      desc: "Chat with AI that plans, executes tools, and shows everything in real time on the timeline.",
     },
     {
       icon: "check-circle" as const,
-      title: t("onboarding.features.approval.title"),
-      desc: t("onboarding.features.approval.desc"),
+      title: "Safe Approvals",
+      desc: "Bash commands and file edits require your permission with Monaco Editor visual diff.",
     },
     {
       icon: "layers" as const,
-      title: t("onboarding.features.subagents.title"),
-      desc: t("onboarding.features.subagents.desc"),
+      title: "Parallel Subagents",
+      desc: "Up to 4 simultaneous agents for complex tasks, each with its own timeline.",
     },
     {
       icon: "search" as const,
-      title: t("onboarding.features.indexing.title"),
-      desc: t("onboarding.features.indexing.desc"),
+      title: "Smart Indexing",
+      desc: "Semantic search with CodeBERT that understands what your code does, not just names.",
     },
   ];
 
@@ -61,18 +60,18 @@ export const OnboardingWizard: Component<{
       <Show when={step() === 0}>
         <img src="/reddit_icon_256.png" class="mb-4 h-20 w-20" />
         <h2 class="mb-2 text-lg font-semibold text-ink">
-          {t("onboarding.welcome.title")}
+          {"Welcome to Claudinio Code"}
         </h2>
         <p class="mb-2 max-w-sm text-center text-sm text-ink-muted">
-          {t("onboarding.welcome.subtitle")}
+          {"Your AI agent for software development. Plan, code, and execute tasks with autonomous agents."}
         </p>
-        <p class="text-xs text-ink-faint">{t("onboarding.welcome.tagline")}</p>
+        <p class="text-xs text-ink-faint">{"Maximum productivity with AI that understands your code."}</p>
       </Show>
 
       {/* Step 1: Features */}
       <Show when={step() === 1}>
         <h2 class="mb-4 text-lg font-semibold text-ink">
-          {t("onboarding.features.title")}
+          {"What you can do"}
         </h2>
         <div class="grid max-w-md grid-cols-2 gap-3">
           <For each={features()}>
@@ -91,10 +90,10 @@ export const OnboardingWizard: Component<{
       <Show when={step() === 2}>
         <Icon name="goal" class="mb-4 h-16 w-16 text-accent" />
         <h2 class="mb-2 text-lg font-semibold text-ink">
-          {t("onboarding.signIn.title")}
+          {"Let's get started"}
         </h2>
         <p class="mb-6 max-w-sm text-center text-sm text-ink-muted">
-          {t("onboarding.signIn.subtitle")}
+          {"Sign in with your claudin.io account to unlock all features."}
         </p>
 
         <Show when={!showApiKeyField()} fallback={
@@ -103,7 +102,7 @@ export const OnboardingWizard: Component<{
               type="password"
               value={apiKeyInput()}
               onInput={(e) => setApiKeyInput(e.currentTarget.value)}
-              placeholder={t("onboarding.signIn.apiKeyPlaceholder")}
+              placeholder={"Paste your API key"}
               class="w-full rounded-md border border-border-subtle bg-surface-0 p-2.5 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
             />
             <button
@@ -111,8 +110,8 @@ export const OnboardingWizard: Component<{
               disabled={props.apiKeyValidating || !apiKeyInput().trim()}
               class="inline-flex items-center gap-2 rounded-md bg-accent px-6 py-2.5 text-sm font-medium text-accent-ink hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Show when={props.apiKeyValidating} fallback={t("onboarding.signIn.apiKeyContinue")}>
-                <span>{t("onboarding.signIn.apiKeyValidating")}</span>
+              <Show when={props.apiKeyValidating} fallback={"Continue"}>
+                <span>{"Validating…"}</span>
                 <Icon name="loader" class="h-4 w-4 animate-spin" />
               </Show>
             </button>
@@ -123,7 +122,7 @@ export const OnboardingWizard: Component<{
               onClick={() => { setShowApiKeyField(false); setApiKeyInput(""); }}
               class="text-xs text-ink-muted hover:text-ink hover:underline"
             >
-              {t("onboarding.signIn.apiKeyBack")}
+              {"← Back to sign in"}
             </button>
           </div>
         }>
@@ -133,11 +132,11 @@ export const OnboardingWizard: Component<{
             class="inline-flex items-center gap-2 rounded-md bg-accent px-6 py-2.5 text-sm font-medium text-accent-ink hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Icon name="external-link" class="h-4 w-4" />
-            <span>{t("onboarding.signIn.button")}</span>
+            <span>{"Sign in with claudin.io"}</span>
           </button>
           <Show when={props.signingIn}>
             <div class="mt-4 text-sm text-ink-muted">
-              {t("onboarding.signIn.signingIn")}
+              {"Waiting for browser sign-in…"}
             </div>
           </Show>
           <Show when={props.signInError}>
@@ -147,7 +146,7 @@ export const OnboardingWizard: Component<{
             onClick={() => setShowApiKeyField(true)}
             class="mt-3 text-xs text-ink-muted hover:text-ink hover:underline"
           >
-            {t("onboarding.signIn.apiKeyLink")}
+            {"Use API Key instead"}
           </button>
         </Show>
       </Show>
@@ -159,7 +158,7 @@ export const OnboardingWizard: Component<{
             onClick={() => setStep(1)}
             class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-2 px-4 py-1.5 text-sm text-ink hover:bg-surface-3"
           >
-            <span>{t("onboarding.next")}</span>
+            <span>{"Next"}</span>
             <Icon name="chevron-right" class="h-4 w-4" />
           </button>
         </Show>
@@ -170,13 +169,13 @@ export const OnboardingWizard: Component<{
             class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-2 px-4 py-1.5 text-sm text-ink hover:bg-surface-3"
           >
             <Icon name="chevron-left" class="h-4 w-4" />
-            <span>{t("onboarding.prev")}</span>
+            <span>{"Previous"}</span>
           </button>
           <button
             onClick={() => setStep(2)}
             class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-2 px-4 py-1.5 text-sm text-ink hover:bg-surface-3"
           >
-            <span>{t("onboarding.next")}</span>
+            <span>{"Next"}</span>
             <Icon name="chevron-right" class="h-4 w-4" />
           </button>
         </Show>
@@ -187,7 +186,7 @@ export const OnboardingWizard: Component<{
             class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-2 px-4 py-1.5 text-sm text-ink hover:bg-surface-3"
           >
             <Icon name="chevron-left" class="h-4 w-4" />
-            <span>{t("onboarding.prev")}</span>
+            <span>{"Previous"}</span>
           </button>
         </Show>
       </div>

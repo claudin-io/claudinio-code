@@ -5,11 +5,6 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // scope. Mock them to prevent the import cascade from throwing
 // before any test runs.
 vi.mock("./lib/theme", () => ({}));
-vi.mock("./lib/grill-me", () => ({
-  t: (key: string) => key,
-  locale: () => "en-US" as const,
-  setLocale: vi.fn(),
-}));
 vi.mock("monaco-editor", () => ({}));
 vi.mock("./lib/monacoThemes", () => ({ defineMonacoThemes: vi.fn() }));
 

@@ -1,6 +1,6 @@
 import { createSignal, For, Show, onMount, onCleanup, type Component } from "solid-js";
+import { NET_SOURCE_NAME } from "./NetworkIndicator";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 import { getNetworkLog, type LogEntry } from "../lib/ipc";
 
 const statusDotClass = (code?: number): string => {
@@ -63,7 +63,7 @@ const NetworkActivityModal: Component<{
       <div class="flex w-[640px] max-h-[500px] flex-col rounded-xl bg-surface-0 shadow-2xl">
         {/* Header */}
         <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3 shrink-0">
-          <span class="font-semibold text-ink">{t("net.modal.title")}</span>
+          <span class="font-semibold text-ink">{"Network Log"}</span>
           <button onClick={props.onClose} class="rounded-md p-1 hover:bg-surface-2">
             <Icon name="x" class="h-4 w-4 text-ink-faint" />
           </button>
@@ -73,11 +73,11 @@ const NetworkActivityModal: Component<{
         <div class="flex-1 min-h-0 overflow-y-auto p-4">
           <Show
             when={!loading()}
-            fallback={<p class="text-sm text-ink-muted">{t("contentViewer.loading")}</p>}
+            fallback={<p class="text-sm text-ink-muted">{"Loading..."}</p>}
           >
             <Show
               when={entries().length > 0}
-              fallback={<p class="text-sm text-ink-muted">{t("net.modal.empty")}</p>}
+              fallback={<p class="text-sm text-ink-muted">{"No requests logged for this workspace."}</p>}
             >
               <div class="space-y-0">
                 <For each={entries()}>
@@ -87,7 +87,7 @@ const NetworkActivityModal: Component<{
                       <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2">
                           <span class="text-xs font-medium text-ink">
-                            {t(`net.source.${entry.source}`)}
+                            {NET_SOURCE_NAME[entry.source] ?? entry.source}
                           </span>
                           <Show when={entry.statusCode}>
                             <span class={statusBadgeClass(entry.statusCode)}>

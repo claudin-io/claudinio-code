@@ -26,6 +26,9 @@ importers:
       '@tauri-apps/plugin-updater':
         specifier: ^2.10.1
         version: 2.10.1
+      dompurify:
+        specifier: ^3.4.12
+        version: 3.4.12
       fuse.js:
         specifier: ^7.4.2
         version: 7.4.2

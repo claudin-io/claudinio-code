@@ -2,9 +2,6 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import type { ToolCallData, ToolResultData } from "../../lib/ipc";
 
-vi.mock("../../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 vi.mock("../Icon", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../Icon")>()),

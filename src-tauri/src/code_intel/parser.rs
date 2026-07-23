@@ -672,11 +672,8 @@ fn extract_doc_comment(content: &str, start_line: i64) -> Option<String> {
         return None;
     }
     let mut line = (start_line - 2) as usize;
-    loop {
-        let trimmed = match lines.get(line) {
-            Some(l) => l.trim(),
-            None => break,
-        };
+    while let Some(raw) = lines.get(line) {
+        let trimmed = raw.trim();
         if trimmed.starts_with("///") || trimmed.starts_with("//!") {
             doc_lines.push(
                 trimmed
@@ -747,7 +744,7 @@ fn extract_body_text(content: &str, start_line: i64, end_line: i64) -> Option<St
     Some(lines[start..end].join("\n"))
 }
 
-fn get_node_text<'a>(content: &'a str, node: &tree_sitter::Node, max_len: usize) -> String {
+fn get_node_text(content: &str, node: &tree_sitter::Node, max_len: usize) -> String {
     let text = node.utf8_text(content.as_bytes()).unwrap_or("");
     if text.len() <= max_len {
         text.to_string()
@@ -813,13 +810,13 @@ fn extract_declaration_name(node: &tree_sitter::Node, kind: &str, content: &str)
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             let child_kind = child.kind();
-            if child_kind == "type_identifier" || child_kind == "identifier" || child_kind == "name"
+            if (child_kind == "type_identifier"
+                || child_kind == "identifier"
+                || child_kind == "name")
+                && let Ok(text) = child.utf8_text(content.as_bytes())
+                && !text.trim().is_empty()
             {
-                if let Ok(text) = child.utf8_text(content.as_bytes()) {
-                    if !text.trim().is_empty() {
-                        return Some(text.trim().to_string());
-                    }
-                }
+                return Some(text.trim().to_string());
             }
         }
         return None;
@@ -908,7 +905,7 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                 symbols: vec![],
                 calls: vec![],
                 error: Some("unsupported language".into()),
-            }
+            };
         }
     };
 
@@ -945,7 +942,7 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                 symbols: vec![],
                 calls: vec![],
                 error: Some("parse failed".into()),
-            }
+            };
         }
     };
     let root = tree.root_node();
@@ -963,27 +960,27 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
         let kind = node.kind();
 
         // --- Declarations ---
-        if DECLARATION_KINDS.contains(&kind) {
-            if let Some(name) = extract_declaration_name(&node, kind, content) {
-                let start = node.start_position();
-                let end = node.end_position();
-                let sig_text = get_node_text(content, &node, 80);
-                let sl = start.row as i64 + 1;
-                let el = end.row as i64 + 1;
+        if DECLARATION_KINDS.contains(&kind)
+            && let Some(name) = extract_declaration_name(&node, kind, content)
+        {
+            let start = node.start_position();
+            let end = node.end_position();
+            let sig_text = get_node_text(content, &node, 80);
+            let sl = start.row as i64 + 1;
+            let el = end.row as i64 + 1;
 
-                symbols.push(ParsedSymbol {
-                    name,
-                    kind: kind.into(),
-                    parent_context: collect_parent_context(&node, content),
-                    signature: Some(sig_text),
-                    doc_comment: extract_doc_comment(content, sl),
-                    body_text: extract_body_text(content, sl, el),
-                    start_line: sl,
-                    start_col: start.column as i64 + 1,
-                    end_line: el,
-                    end_col: end.column as i64 + 1,
-                });
-            }
+            symbols.push(ParsedSymbol {
+                name,
+                kind: kind.into(),
+                parent_context: collect_parent_context(&node, content),
+                signature: Some(sig_text),
+                doc_comment: extract_doc_comment(content, sl),
+                body_text: extract_body_text(content, sl, el),
+                start_line: sl,
+                start_col: start.column as i64 + 1,
+                end_line: el,
+                end_col: end.column as i64 + 1,
+            });
         }
 
         // --- Function-valued variable declarations (JS/TS/etc.) ---
@@ -1004,27 +1001,26 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                     )
                 })
                 .unwrap_or(false);
-            if value_is_function {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
-                        let start = node.start_position();
-                        let end = node.end_position();
-                        let sl = start.row as i64 + 1;
-                        let el = end.row as i64 + 1;
-                        symbols.push(ParsedSymbol {
-                            name: name.trim().to_string(),
-                            kind: "function_declaration".into(),
-                            parent_context: collect_parent_context(&node, content),
-                            signature: Some(get_node_text(content, &node, 80)),
-                            doc_comment: extract_doc_comment(content, sl),
-                            body_text: extract_body_text(content, sl, el),
-                            start_line: sl,
-                            start_col: start.column as i64 + 1,
-                            end_line: el,
-                            end_col: end.column as i64 + 1,
-                        });
-                    }
-                }
+            if value_is_function
+                && let Some(name_node) = node.child_by_field_name("name")
+                && let Ok(name) = name_node.utf8_text(content.as_bytes())
+            {
+                let start = node.start_position();
+                let end = node.end_position();
+                let sl = start.row as i64 + 1;
+                let el = end.row as i64 + 1;
+                symbols.push(ParsedSymbol {
+                    name: name.trim().to_string(),
+                    kind: "function_declaration".into(),
+                    parent_context: collect_parent_context(&node, content),
+                    signature: Some(get_node_text(content, &node, 80)),
+                    doc_comment: extract_doc_comment(content, sl),
+                    body_text: extract_body_text(content, sl, el),
+                    start_line: sl,
+                    start_col: start.column as i64 + 1,
+                    end_line: el,
+                    end_col: end.column as i64 + 1,
+                });
             }
         }
 
@@ -1034,23 +1030,23 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
                 .child_by_field_name("function")
                 .or_else(|| node.child(0));
 
-            if let Some(func) = func_node {
-                if let Ok(func_text) = func.utf8_text(content.as_bytes()) {
-                    let called_name = func_text.trim();
-                    if !called_name.starts_with('"')
-                        && !called_name.starts_with('\'')
-                        && !called_name.starts_with('`')
-                    {
-                        let start = node.start_position();
-                        let containing =
-                            find_containing_function_name(&node, content).unwrap_or_default();
-                        if !containing.is_empty() && called_name != containing {
-                            calls.push(ParsedCall {
-                                from_name: containing,
-                                to_name: called_name.to_string(),
-                                from_line: start.row as i64 + 1,
-                            });
-                        }
+            if let Some(func) = func_node
+                && let Ok(func_text) = func.utf8_text(content.as_bytes())
+            {
+                let called_name = func_text.trim();
+                if !called_name.starts_with('"')
+                    && !called_name.starts_with('\'')
+                    && !called_name.starts_with('`')
+                {
+                    let start = node.start_position();
+                    let containing =
+                        find_containing_function_name(&node, content).unwrap_or_default();
+                    if !containing.is_empty() && called_name != containing {
+                        calls.push(ParsedCall {
+                            from_name: containing,
+                            to_name: called_name.to_string(),
+                            from_line: start.row as i64 + 1,
+                        });
                     }
                 }
             }
@@ -1155,7 +1151,7 @@ fn collect_parent_context(node: &tree_sitter::Node, content: &str) -> Option<Str
                     "extension_declaration" => "extension",
                     "record_declaration" => "record",
                     "data_type" | "newtype" => "type",
-                    _ => &k,
+                    _ => k,
                 };
                 ctx_parts.push(format!("{short_kind}:{n}"));
             }
@@ -1180,14 +1176,13 @@ fn find_containing_function_name(node: &tree_sitter::Node, content: &str) -> Opt
     loop {
         let k = current.kind();
         // Match any kind that represents a function/method definition
-        if DECLARATION_KINDS.contains(&k) {
-            if let Some(n) = current.child_by_field_name("name") {
-                if let Ok(name) = n.utf8_text(content.as_bytes()) {
-                    let name = name.trim();
-                    if !name.is_empty() {
-                        return Some(name.to_string());
-                    }
-                }
+        if DECLARATION_KINDS.contains(&k)
+            && let Some(n) = current.child_by_field_name("name")
+            && let Ok(name) = n.utf8_text(content.as_bytes())
+        {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
             }
         }
         current = current.parent()?;
@@ -1243,35 +1238,43 @@ Deep details here.
         // H1 title captures the preamble before the first H2.
         assert_eq!(symbols[0].name, "Title");
         assert_eq!(symbols[0].kind, "doc_section");
-        assert!(symbols[0]
-            .body_text
-            .as_ref()
-            .unwrap()
-            .contains("intro text"));
+        assert!(
+            symbols[0]
+                .body_text
+                .as_ref()
+                .unwrap()
+                .contains("intro text")
+        );
 
         assert_eq!(symbols[1].name, "Installation");
         assert_eq!(symbols[1].kind, "doc_section");
-        assert!(symbols[1]
-            .body_text
-            .as_ref()
-            .unwrap()
-            .contains("npm install"));
+        assert!(
+            symbols[1]
+                .body_text
+                .as_ref()
+                .unwrap()
+                .contains("npm install")
+        );
         assert_eq!(symbols[1].start_line, 4);
         assert_eq!(symbols[1].parent_context.as_deref(), Some("test.md"));
 
         assert_eq!(symbols[2].name, "Usage");
-        assert!(symbols[2]
-            .body_text
-            .as_ref()
-            .unwrap()
-            .contains("Call the function"));
+        assert!(
+            symbols[2]
+                .body_text
+                .as_ref()
+                .unwrap()
+                .contains("Call the function")
+        );
 
         assert_eq!(symbols[3].name, "Advanced");
-        assert!(symbols[3]
-            .body_text
-            .as_ref()
-            .unwrap()
-            .contains("Deep details"));
+        assert!(
+            symbols[3]
+                .body_text
+                .as_ref()
+                .unwrap()
+                .contains("Deep details")
+        );
     }
 
     #[test]
@@ -1285,11 +1288,13 @@ Deep details here.
         );
         assert_eq!(symbols[0].name, "README");
         assert_eq!(symbols[0].kind, "doc_section");
-        assert!(symbols[0]
-            .body_text
-            .as_ref()
-            .unwrap()
-            .contains("plain text"));
+        assert!(
+            symbols[0]
+                .body_text
+                .as_ref()
+                .unwrap()
+                .contains("plain text")
+        );
         assert_eq!(symbols[0].start_line, 1);
         assert_eq!(symbols[0].parent_context.as_deref(), Some("README.txt"));
     }

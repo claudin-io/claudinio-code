@@ -1,17 +1,14 @@
 use serde::Deserialize;
-use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 
 use crate::agent::tools::ToolContext;
-use crate::commands::procutil::no_window_tokio;
-use lru::LruCache;
+use crate::procutil::no_window_tokio;
 
 const MAX_OUTPUT_BYTES: u64 = 100 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -159,13 +156,13 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         .spawn()
         .map_err(|e| format!("failed to spawn command: {e}"))?;
 
-    if let Some(stdin_data) = &args.stdin {
-        if let Some(stdin_handle) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let mut writer = stdin_handle;
-            let _ = writer.write_all(stdin_data.as_bytes()).await;
-            let _ = writer.shutdown().await;
-        }
+    if let Some(stdin_data) = &args.stdin
+        && let Some(stdin_handle) = child.stdin.take()
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut writer = stdin_handle;
+        let _ = writer.write_all(stdin_data.as_bytes()).await;
+        let _ = writer.shutdown().await;
     }
 
     // Take the stdout/stderr handles before the select loop so we can
@@ -286,6 +283,7 @@ async fn poll_interrupt(interrupt: &Option<Arc<AtomicBool>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lru::LruCache;
     use std::time::Instant;
 
     fn run(cmd: &str) -> Result<String, String> {

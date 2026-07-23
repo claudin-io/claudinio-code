@@ -5,7 +5,9 @@ mod commands;
 pub(crate) mod http;
 mod lsp;
 pub(crate) mod net_activity;
+pub(crate) mod procutil;
 mod state;
+pub(crate) mod workspace_path;
 
 use state::AppState;
 
@@ -30,9 +32,10 @@ pub fn run() {
             commands::fs::read_file,
             commands::fs::write_file,
             commands::fs::write_file_bytes,
+            commands::fs::export_file,
+            commands::fs::export_file_bytes,
             commands::fs::read_attachment,
             commands::fs::walk_dir,
-            commands::locale::get_os_locale,
             commands::agent::send_message,
             commands::agent::new_session,
             commands::agent::list_sessions,
@@ -76,7 +79,6 @@ pub fn run() {
             commands::agent::get_session_mode,
             commands::agent::check_plan_exists,
             commands::agent::list_plans,
-            commands::agent::set_workspace_config,
             commands::context::get_context_warning,
             commands::enhance::enhance_prompt,
             commands::skills::list_skills,
@@ -101,4 +103,47 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    use std::path::Path;
+
+    /// `commands/` is the adapter layer: it may reach into the core, never the
+    /// other way round. This used to be violated by `commands::procutil` (a
+    /// platform helper with no IPC in it), `commands::tasks` (JSONL persistence)
+    /// and `commands::code_intel::INDEX_SEMAPHORE` — each pulling the core back
+    /// into the adapter. The rule is cheap to state and easy to break silently,
+    /// so it is checked instead of only documented.
+    #[test]
+    fn core_modules_do_not_depend_on_the_command_layer() {
+        let mut offenders = Vec::new();
+        for dir in ["src/agent", "src/code_intel", "src/lsp"] {
+            visit(Path::new(dir), &mut |path, body| {
+                if body.contains("crate::commands") {
+                    offenders.push(path.display().to_string());
+                }
+            });
+        }
+        assert!(
+            offenders.is_empty(),
+            "these core files import crate::commands, inverting the layering: {offenders:?}"
+        );
+    }
+
+    fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, f);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(body) = std::fs::read_to_string(&path)
+            {
+                f(&path, &body);
+            }
+        }
+    }
 }

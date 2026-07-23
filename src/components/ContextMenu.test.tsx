@@ -3,9 +3,6 @@ import { render } from "solid-js/web";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 
 // ── i18n mock (returns the key as-is for stable assertions) ─────────
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 // ── Icon mock (lightweight SVG stub) ────────────────────────────────
 vi.mock("./Icon", () => ({

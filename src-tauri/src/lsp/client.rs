@@ -1,4 +1,4 @@
-use crate::commands::procutil;
+use crate::procutil;
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, Read, Write};

@@ -283,9 +283,9 @@ fn scan_brace_keywords(content: &str, keywords: &[&str]) -> Vec<Chunk> {
 
 fn find_brace_end(lines: &[&str], start: usize, initial: usize) -> usize {
     let mut depth = initial;
-    for i in start + 1..lines.len() {
-        depth += lines[i].matches('{').count();
-        depth = depth.saturating_sub(lines[i].matches('}').count());
+    for (i, line) in lines.iter().enumerate().skip(start + 1) {
+        depth += line.matches('{').count();
+        depth = depth.saturating_sub(line.matches('}').count());
         if depth == 0 {
             return i;
         }
@@ -296,8 +296,7 @@ fn find_brace_end(lines: &[&str], start: usize, initial: usize) -> usize {
 fn find_indent_end(lines: &[&str], start: usize) -> usize {
     let base = lines[start].len() - lines[start].trim_start().len();
     let mut end = start;
-    for i in start + 1..lines.len() {
-        let l = lines[i];
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
         if l.trim().is_empty() {
             continue;
         }
@@ -311,8 +310,8 @@ fn find_indent_end(lines: &[&str], start: usize) -> usize {
 
 fn find_keyword_pair_end(lines: &[&str], start: usize, start_kw: &str, end_kw: &str) -> usize {
     let mut depth = 0usize;
-    for i in start..lines.len() {
-        let t = lines[i].trim();
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        let t = line.trim();
         if t.starts_with(start_kw) && i > start {
             depth += 1;
         } else if t == end_kw || t.starts_with(end_kw) {

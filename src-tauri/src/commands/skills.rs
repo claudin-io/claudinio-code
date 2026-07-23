@@ -1,4 +1,4 @@
-use crate::agent::skills::{self, build_skills_system_prompt_section, RemoteSkill, SkillEntry};
+use crate::agent::skills::{self, RemoteSkill, SkillEntry, build_skills_system_prompt_section};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 

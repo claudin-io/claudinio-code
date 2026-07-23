@@ -24,7 +24,6 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("../lib/theme", () => ({ theme: vi.fn(() => "dark") }));
 
 vi.mock("./Icon", () => ({ Icon: () => null }));
-vi.mock("../lib/grill-me", () => ({ t: (k: string) => k }));
 vi.mock("../lib/monacoThemes", () => ({
   defineMonacoThemes: vi.fn(),
   getMonacoTheme: vi.fn((t: string) => {
@@ -110,7 +109,7 @@ describe("ContentViewerModal", () => {
     // Icon is mocked to null so button text is just the t() string
     const buttons = Array.from(document.body.querySelectorAll("button"));
     const externalBtn = buttons.find((b) =>
-      b.textContent?.includes("contentViewer.openExternally"),
+      b.textContent?.includes("Open Externally"),
     );
     expect(externalBtn).not.toBeUndefined();
 
@@ -143,7 +142,7 @@ describe("ContentViewerModal", () => {
 
     // Icon is mocked to null so the "loader" SVG is not rendered.
     // The loading text is rendered by the Show block.
-    expect(document.body.textContent).toContain("contentViewer.loading");
+    expect(document.body.textContent).toContain("Loading...");
   });
 
   // ────── Text content type: editor after load ────────────────
@@ -209,7 +208,7 @@ describe("ContentViewerModal", () => {
     expect(spinner).toBeNull();
 
     // Error indicator should be shown
-    expect(document.body.textContent).toContain("contentViewer.error");
+    expect(document.body.textContent).toContain("Failed to load file");
 
     // The error text should use the error styling
     const errorText = document.body.querySelector(".text-red-400");
@@ -317,7 +316,7 @@ describe("ContentViewerModal", () => {
     await flush();
 
     const closeBtn = document.body.querySelector(
-      'button[title="contentViewer.close"]',
+      'button[title="Close"]',
     ) as HTMLElement | null;
     expect(closeBtn).not.toBeNull();
 
@@ -623,7 +622,7 @@ describe("ContentViewerModal", () => {
 
     // No error content should appear since mounted is false
     expect(monaco.editor.create).not.toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain("contentViewer.error");
+    expect(document.body.textContent).not.toContain("Failed to load file");
   });
 
   // ────── Empty string content (falsy value in Show condition) ──
@@ -647,9 +646,9 @@ describe("ContentViewerModal", () => {
     await flush();
 
     // Loading is finished
-    expect(document.body.textContent).not.toContain("contentViewer.loading");
+    expect(document.body.textContent).not.toContain("Loading...");
     // No error
-    expect(document.body.textContent).not.toContain("contentViewer.error");
+    expect(document.body.textContent).not.toContain("Failed to load file");
 
     // content() is "" which is falsy, so the Show condition
     // !loading() && !error() && content() evaluates to false
@@ -701,7 +700,7 @@ describe("ContentViewerModal", () => {
 
     const buttons = Array.from(document.body.querySelectorAll("button"));
     const externalBtn = buttons.find((b) =>
-      b.textContent?.includes("contentViewer.openExternally"),
+      b.textContent?.includes("Open Externally"),
     );
     expect(externalBtn).not.toBeUndefined();
     externalBtn!.click();

@@ -1,7 +1,8 @@
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
-use crate::agent::persist::{now_ms, SessionRecord, SessionStore};
+use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
+use crate::agent::run_state::{CostLedger, GoldenLoopState, GuardState};
 use crate::agent::subagent;
 use crate::agent::tools::{self, ToolContext, ToolOutput};
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::ipc::Channel;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 /// Context window of the supported models (claudinio and claudius: 256K).
 pub const MAX_CONTEXT_TOKENS: u64 = 200_000;
@@ -126,6 +127,7 @@ fn compute_tail_turns(records: &[SessionRecord]) -> usize {
 /// file and produce a summary. The subagent has a completely fresh context.
 /// The last `TAIL_USER_TURNS` exchanges are kept verbatim (recorded as
 /// `tail_turns` on the Compacted marker). Returns the generated summary.
+#[allow(clippy::too_many_arguments)]
 pub async fn compact_history(
     config: &AgentConfig,
     store: &SessionStore,
@@ -869,11 +871,11 @@ fn push_user_blocks(
     ctx: &ToolContext,
     blocks: Vec<ContentBlock>,
 ) {
-    if let Some(last) = history.last_mut() {
-        if last.role == "user" {
-            last.content.extend(blocks);
-            return;
-        }
+    if let Some(last) = history.last_mut()
+        && last.role == "user"
+    {
+        last.content.extend(blocks);
+        return;
     }
     push_turn(
         history,
@@ -923,12 +925,6 @@ fn inject_steering(
     true
 }
 
-/// Run a single continuous provider→tool loop for one user input, until the
-/// model produces a turn with no tool calls. Shares one conversation history
-/// (append-only, cache-friendly) and persists every step to the session JSONL
-/// store. The model decides at each round whether it still needs a tool call
-/// or can answer directly — there are no forced phases.
-#[allow(clippy::too_many_arguments)]
 /// Reject messages that are not written in English.
 fn reject_non_english(msg: &str) -> Result<(), String> {
     let non_ascii: Vec<char> = msg.chars().filter(|&c| c > '\u{7E}').collect();
@@ -1050,45 +1046,12 @@ pub(crate) fn cost_or_estimate(
     }
 }
 
-/// Roll this round's cost into the cumulative totals — both the blended
-/// `cumul_cost` (kept independent so sessions persisted before the breakdown
-/// existed don't lose their historical total) and the per-category breakdown.
-#[allow(clippy::too_many_arguments)]
-fn roll_cost(
-    model: &str,
-    total_in: u32,
-    total_cache: u32,
-    total_out: u32,
-    run_cost_input: Option<f64>,
-    run_cost_output: Option<f64>,
-    run_cost_cache: Option<f64>,
-    subagent_cost: f64,
-    cumul_cost: &mut Option<f64>,
-    cumul_cost_input: &mut Option<f64>,
-    cumul_cost_output: &mut Option<f64>,
-    cumul_cost_cache: &mut Option<f64>,
-) {
-    let (ci, co, cc) = cost_or_estimate(
-        model,
-        total_in,
-        total_cache,
-        total_out,
-        run_cost_input,
-        run_cost_output,
-        run_cost_cache,
-    );
-    *cumul_cost = Some(cumul_cost.unwrap_or(0.0) + ci + co + cc + subagent_cost);
-    *cumul_cost_input = Some(cumul_cost_input.unwrap_or(0.0) + ci);
-    *cumul_cost_output = Some(cumul_cost_output.unwrap_or(0.0) + co);
-    *cumul_cost_cache = Some(cumul_cost_cache.unwrap_or(0.0) + cc);
-}
-
 /// True for errors worth retrying: network hiccups, stalled connections, and
 /// rate-limit/server errors. False for things that will fail again immediately
 /// (bad auth, malformed request) — retrying those just wastes time.
 fn is_retryable_error(msg: &str) -> bool {
-    // Budget esgotado do plano: retentar é inútil (o servidor recusará de novo
-    // até o usuário fazer upgrade). O frontend mostra um banner de upgrade.
+    // Plan budget exhausted: retrying is pointless (the server will refuse
+    // again until the user upgrades). The frontend shows an upgrade banner.
     if msg.starts_with(crate::agent::provider::BUDGET_EXCEEDED_MARKER) {
         return false;
     }
@@ -1100,14 +1063,13 @@ fn is_retryable_error(msg: &str) -> bool {
     // token. (Parsing the whole remainder silently classified every 5xx as
     // non-retryable: a claudin.io failover 502 aborted the run instead of
     // waiting out the ~2min the backup server takes to pick up.)
-    if let Some(rest) = msg.strip_prefix("API error: HTTP ") {
-        if let Some(code) = rest
+    if let Some(rest) = msg.strip_prefix("API error: HTTP ")
+        && let Some(code) = rest
             .split_whitespace()
             .next()
             .and_then(|s| s.parse::<u16>().ok())
-        {
-            return code == 429 || (500..600).contains(&code);
-        }
+    {
+        return code == 429 || (500..600).contains(&code);
     }
     // Mid-stream SSE errors ("API error: overloaded_error — Overloaded"): the
     // server accepted the request and died mid-turn — same transient class.
@@ -1141,10 +1103,10 @@ fn parse_turn_verdict(reply: &str) -> TurnVerdict {
     // Accept the token anywhere in the reply so a chatty model ("CONTINUE — it
     // said it would ask a question") is still handled correctly. CONTINUE wins
     // ties: if the judge is unsure enough to emit both, keep working.
+    // Anything that is not an explicit CONTINUE is treated as done: an
+    // unparseable judge reply must let the turn end, never wedge the loop.
     if norm.contains("CONTINUE") {
         TurnVerdict::Continue
-    } else if norm.contains("DONE") {
-        TurnVerdict::Done
     } else {
         TurnVerdict::Done
     }
@@ -1435,6 +1397,12 @@ async fn maybe_context_handoff(
     })))
 }
 
+/// Run a single continuous provider→tool loop for one user input, until the
+/// model produces a turn with no tool calls. Shares one conversation history
+/// (append-only, cache-friendly) and persists every step to the session JSONL
+/// store. The model decides at each round whether it still needs a tool call
+/// or can answer directly — there are no forced phases.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_workflow(
     config: &AgentConfig,
     history: &mut Vec<Message>,
@@ -1627,35 +1595,15 @@ pub async fn run_workflow_with_profile(
         &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
             .unwrap_or_default(),
     );
-    let mut cumul_in: u64 = cumul.0;
-    let mut cumul_out: u64 = cumul.1;
-    let mut cumul_cost: Option<f64> = cumul.2;
-    let mut cumul_cost_input: Option<f64> = cumul.3;
-    let mut cumul_cost_output: Option<f64> = cumul.4;
-    let mut cumul_cost_cache: Option<f64> = cumul.5;
-
-    let mut total_in: u32 = 0;
-    let mut total_out: u32 = 0;
-    let mut total_cache: u32 = 0;
-    let mut run_cost: Option<f64> = None;
-    let mut run_cost_input: Option<f64> = None;
-    let mut run_cost_output: Option<f64> = None;
-    let mut run_cost_cache: Option<f64> = None;
-    let mut subagent_cost: f64 = 0.0;
-    let emit_final_stats = |cumul_in: u64,
-                            cumul_out: u64,
-                            cumul_cost: Option<f64>,
-                            cumul_cost_input: Option<f64>,
-                            cumul_cost_output: Option<f64>,
-                            cumul_cost_cache: Option<f64>,
-                            last_context: u64| {
+    let mut ledger = CostLedger::resuming(cumul);
+    let emit_final_stats = |ledger: &CostLedger, last_context: u64| {
         let _ = event_tx.send(AgentEvent::SessionStats {
-            input_tokens: cumul_in as u32,
-            output_tokens: cumul_out as u32,
-            cumulative_cost: cumul_cost,
-            cost_input: cumul_cost_input,
-            cost_output: cumul_cost_output,
-            cost_cache_read: cumul_cost_cache,
+            input_tokens: ledger.cumul_in as u32,
+            output_tokens: ledger.cumul_out as u32,
+            cumulative_cost: ledger.cumul_cost,
+            cost_input: ledger.cumul_cost_input,
+            cost_output: ledger.cumul_cost_output,
+            cost_cache_read: ledger.cumul_cost_cache,
             context_tokens: last_context,
             max_context_tokens: MAX_CONTEXT_TOKENS,
             compact_threshold: COMPACT_THRESHOLD,
@@ -1665,9 +1613,7 @@ pub async fn run_workflow_with_profile(
     // Size of the context for the next request: the real number reported by
     // the API when available, the char-based estimate otherwise.
     let mut last_context: u64 = estimate_tokens(history, &system, &tools);
-    let mut truncation_streak: u32 = 0;
-    let mut empty_streak: u32 = 0;
-    let mut unfinished_streak: u32 = 0;
+    let mut guards = GuardState::default();
 
     // Golden-goals loop state. The cycle counter resumes from the session's
     // records so a restart doesn't reset the cap mid-loop; a linked session
@@ -1678,26 +1624,25 @@ pub async fn run_workflow_with_profile(
         &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
             .unwrap_or_default(),
     );
-    let mut golden_cycle: u32 = crate::agent::persist::golden_cycle_count(
-        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
-            .unwrap_or_default(),
-    )
-    .max(linked_cycle);
-    let mut golden_last_pending: Vec<String> = linked_pending;
-    let mut golden_stalls: usize = linked_stalls as usize;
+    let mut golden = GoldenLoopState {
+        cycle: crate::agent::persist::golden_cycle_count(
+            &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                .unwrap_or_default(),
+        )
+        .max(linked_cycle),
+        last_pending: linked_pending,
+        stalls: linked_stalls as usize,
+    };
 
-    // Plan-finalization state. `plan_finalized` flips when the agent calls the
-    // finalize_plan tool this run; `finalize_nudged` bounds the enforcement to a
+    // Plan-finalization state. `guards.plan_finalized` flips when the agent calls the
+    // finalize_plan tool this run; `guards.finalize_nudged` bounds the enforcement to a
     // single reminder before the harness falls back to auto-appending the log.
-    let mut plan_finalized = false;
-    let mut finalize_nudged = false;
 
     // Brain progress guard: track consecutive rounds where the agent only uses
     // explore tools without interviewing (ask_user), writing a plan (write_plan),
     // or creating tasks (tasks_set). After BRAIN_EXPLORE_LIMIT rounds, inject
     // a system reminder redirecting the agent to the required deliverables.
     const BRAIN_EXPLORE_LIMIT: u32 = 4;
-    let mut brain_explore_streak: u32 = 0;
 
     // Anchor the diff window at the true start of the plan's work: record the
     // git HEAD once per session (guarded), so finalize_plan can report every
@@ -1739,8 +1684,19 @@ pub async fn run_workflow_with_profile(
         // the next LLM call so we never feed an oversized context.
         let pre_tokens = estimate_tokens(history, &system, &tools);
         if let Some(outcome) = maybe_context_handoff(
-            config, profile, pre_tokens, history, &system, store, ctx, event_tx, session_id,
-            steering, mode_ctl, total_in, total_out,
+            config,
+            profile,
+            pre_tokens,
+            history,
+            &system,
+            store,
+            ctx,
+            event_tx,
+            session_id,
+            steering,
+            mode_ctl,
+            ledger.total_in,
+            ledger.total_out,
         )
         .await
         {
@@ -1864,21 +1820,21 @@ pub async fn run_workflow_with_profile(
         let tool_uses = stream_output.tool_uses;
         let was_interrupted = stream_output.interrupted;
         if let Some(u) = &stream_output.usage {
-            total_in += u.input_tokens;
-            total_out += u.output_tokens;
-            total_cache += u.cache_read_input_tokens;
+            ledger.total_in += u.input_tokens;
+            ledger.total_out += u.output_tokens;
+            ledger.total_cache += u.cache_read_input_tokens;
             // Use provider-reported cost if available, otherwise estimate
             if let Some(c) = u.cost {
-                run_cost = Some(run_cost.unwrap_or(0.0) + c);
+                ledger.run_cost = Some(ledger.run_cost.unwrap_or(0.0) + c);
             }
             if let Some(c) = u.cost_input {
-                run_cost_input = Some(run_cost_input.unwrap_or(0.0) + c);
+                ledger.run_cost_input = Some(ledger.run_cost_input.unwrap_or(0.0) + c);
             }
             if let Some(c) = u.cost_output {
-                run_cost_output = Some(run_cost_output.unwrap_or(0.0) + c);
+                ledger.run_cost_output = Some(ledger.run_cost_output.unwrap_or(0.0) + c);
             }
             if let Some(c) = u.cost_cache_read {
-                run_cost_cache = Some(run_cost_cache.unwrap_or(0.0) + c);
+                ledger.run_cost_cache = Some(ledger.run_cost_cache.unwrap_or(0.0) + c);
             }
         }
         // Context for the next request = the history just sent + this round's
@@ -1901,21 +1857,25 @@ pub async fn run_workflow_with_profile(
         // Live stats for the context bar
         let (round_ci, round_co, round_cc) = cost_or_estimate(
             resolved_model,
-            total_in,
-            total_cache,
-            total_out,
-            run_cost_input,
-            run_cost_output,
-            run_cost_cache,
+            ledger.total_in,
+            ledger.total_cache,
+            ledger.total_out,
+            ledger.run_cost_input,
+            ledger.run_cost_output,
+            ledger.run_cost_cache,
         );
-        let live_cost_input = cumul_cost_input.unwrap_or(0.0) + round_ci;
-        let live_cost_output = cumul_cost_output.unwrap_or(0.0) + round_co;
-        let live_cost_cache = cumul_cost_cache.unwrap_or(0.0) + round_cc;
+        let live_cost_input = ledger.cumul_cost_input.unwrap_or(0.0) + round_ci;
+        let live_cost_output = ledger.cumul_cost_output.unwrap_or(0.0) + round_co;
+        let live_cost_cache = ledger.cumul_cost_cache.unwrap_or(0.0) + round_cc;
         let _ = event_tx.send(AgentEvent::SessionStats {
-            input_tokens: total_in + cumul_in as u32,
-            output_tokens: total_out + cumul_out as u32,
+            input_tokens: ledger.total_in + ledger.cumul_in as u32,
+            output_tokens: ledger.total_out + ledger.cumul_out as u32,
             cumulative_cost: Some(
-                cumul_cost.unwrap_or(0.0) + round_ci + round_co + round_cc + subagent_cost,
+                ledger.cumul_cost.unwrap_or(0.0)
+                    + round_ci
+                    + round_co
+                    + round_cc
+                    + ledger.subagent_cost,
             ),
             cost_input: Some(live_cost_input),
             cost_output: Some(live_cost_output),
@@ -1925,8 +1885,8 @@ pub async fn run_workflow_with_profile(
             compact_threshold: COMPACT_THRESHOLD,
         });
 
-        // A — Interrupt no meio do stream: persistir texto parcial se não vazio,
-        //     resetar flag, tentar steering ou pausar.
+        // Interrupted mid-stream: persist any partial text, reset the flag,
+        // then either apply queued steering or pause.
         if was_interrupted {
             if !text_output.is_empty() {
                 push_turn(
@@ -1945,56 +1905,22 @@ pub async fn run_workflow_with_profile(
                 continue;
             }
             if last_text.is_empty() {
-                last_text = "Pausado pelo usuário.".into();
+                last_text = "Paused by the user.".into();
             }
             store.try_append(&SessionRecord::Done {
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-            cumul_in += total_in as u64;
-            cumul_out += total_out as u64;
-            roll_cost(
-                resolved_model,
-                total_in,
-                total_cache,
-                total_out,
-                run_cost_input,
-                run_cost_output,
-                run_cost_cache,
-                subagent_cost,
-                &mut cumul_cost,
-                &mut cumul_cost_input,
-                &mut cumul_cost_output,
-                &mut cumul_cost_cache,
-            );
-            write_status(
-                store,
-                ctx,
-                session_id,
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                Some(last_context),
-            );
-            emit_final_stats(
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                last_context,
-            );
+            ledger.roll(resolved_model);
+            ledger.write_status(store, ctx, session_id, Some(last_context));
+            emit_final_stats(&ledger, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
             });
             return Ok(RunOutcome::Completed);
         }
@@ -2007,7 +1933,7 @@ pub async fn run_workflow_with_profile(
         // the loop continues naturally.
         let truncated = stream_output.stop_reason.as_deref() == Some("max_tokens");
         if truncated && tool_uses.is_empty() {
-            truncation_streak += 1;
+            guards.truncation_streak += 1;
             if !text_output.is_empty() {
                 push_turn(
                     history,
@@ -2020,7 +1946,7 @@ pub async fn run_workflow_with_profile(
                 );
                 last_text = text_output;
             }
-            if truncation_streak < 3 {
+            if guards.truncation_streak < 3 {
                 push_user_blocks(
                     history,
                     store,
@@ -2042,62 +1968,29 @@ pub async fn run_workflow_with_profile(
                              Tente dividir o pedido em partes menores."
                     .into();
             } else {
-                last_text =
-                    format!("{last_text}\n\n(Resposta truncada no limite de tokens — pode não estar completa.)");
+                last_text = format!(
+                    "{last_text}\n\n(Response truncated at the token limit — it may be incomplete.)"
+                );
             }
             store.try_append(&SessionRecord::Done {
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-            cumul_in += total_in as u64;
-            cumul_out += total_out as u64;
-            roll_cost(
-                resolved_model,
-                total_in,
-                total_cache,
-                total_out,
-                run_cost_input,
-                run_cost_output,
-                run_cost_cache,
-                subagent_cost,
-                &mut cumul_cost,
-                &mut cumul_cost_input,
-                &mut cumul_cost_output,
-                &mut cumul_cost_cache,
-            );
-            write_status(
-                store,
-                ctx,
-                session_id,
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                Some(last_context),
-            );
-            emit_final_stats(
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                last_context,
-            );
+            ledger.roll(resolved_model);
+            ledger.write_status(store, ctx, session_id, Some(last_context));
+            emit_final_stats(&ledger, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "max_tokens".into(),
                 text_output: last_text,
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
             });
             return Ok(RunOutcome::Completed);
         }
         if !truncated {
-            truncation_streak = 0;
+            guards.truncation_streak = 0;
         }
 
         // Empty response: no text AND no tool calls, without truncation. A real
@@ -2105,8 +1998,8 @@ pub async fn run_workflow_with_profile(
         // nudge it to continue instead of silently ending the run (same pattern
         // as the truncation nudge above). Give up after repeated empties.
         if tool_uses.is_empty() && text_output.is_empty() {
-            empty_streak += 1;
-            if empty_streak < 3 {
+            guards.empty_streak += 1;
+            if guards.empty_streak < 3 {
                 push_user_blocks(
                     history,
                     store,
@@ -2121,7 +2014,7 @@ pub async fn run_workflow_with_profile(
                 continue;
             }
         } else {
-            empty_streak = 0;
+            guards.empty_streak = 0;
         }
 
         // Terminal turn: no tool calls — the loop is done, this text is the reply.
@@ -2150,7 +2043,7 @@ pub async fn run_workflow_with_profile(
             // hardcoded phrases) whether the turn is really done; if not, nudge
             // it to actually take the action. Bounded so a genuinely-final reply
             // the judge misreads can't loop forever.
-            if !last_text.is_empty() && unfinished_streak < 2 {
+            if !last_text.is_empty() && guards.unfinished_streak < 2 {
                 // Always judge with the Brain model (planning/reasoning), never
                 // the Builder model, regardless of the session's current mode.
                 let judge_model = config.model_for_mode(SessionMode::Brain.as_str());
@@ -2164,12 +2057,12 @@ pub async fn run_workflow_with_profile(
                         TurnVerdict::Done => "done".into(),
                     },
                     nudged: will_nudge,
-                    streak: unfinished_streak + if will_nudge { 1 } else { 0 },
+                    streak: guards.unfinished_streak + if will_nudge { 1 } else { 0 },
                     ts: now_ms(),
                 });
                 crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                 if will_nudge {
-                    unfinished_streak += 1;
+                    guards.unfinished_streak += 1;
                     push_user_blocks(
                         history,
                         store,
@@ -2194,7 +2087,7 @@ pub async fn run_workflow_with_profile(
             let golden_pending: Vec<String> = ctx
                 .session_store_path
                 .as_deref()
-                .and_then(|p| crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok())
+                .and_then(|p| crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok())
                 .map(|t| crate::agent::tools::tasks::golden_pending_ids(&t))
                 .unwrap_or_default();
             if !golden_pending.is_empty() {
@@ -2204,14 +2097,14 @@ pub async fn run_workflow_with_profile(
                 let max_stalls = config
                     .max_golden_stalls
                     .unwrap_or(DEFAULT_MAX_GOLDEN_STALLS);
-                if golden_pending == golden_last_pending {
-                    golden_stalls += 1;
+                if golden_pending == golden.last_pending {
+                    golden.stalls += 1;
                 } else {
-                    golden_stalls = 0;
+                    golden.stalls = 0;
                 }
-                golden_last_pending = golden_pending.clone();
-                if (golden_cycle as usize) < max_cycles && golden_stalls < max_stalls {
-                    golden_cycle += 1;
+                golden.last_pending = golden_pending.clone();
+                if (golden.cycle as usize) < max_cycles && golden.stalls < max_stalls {
+                    golden.cycle += 1;
                     let next = match cur_mode {
                         SessionMode::Brain => SessionMode::Builder,
                         SessionMode::Builder => SessionMode::Brain,
@@ -2220,47 +2113,21 @@ pub async fn run_workflow_with_profile(
                     // session (link_session writes it); this session only logs
                     // the cycle for audit and closes its books.
                     store.try_append(&SessionRecord::GoldenCycle {
-                        cycle: golden_cycle,
+                        cycle: golden.cycle,
                         mode: next.as_str().into(),
                         goals: golden_pending.clone(),
                         ts: now_ms(),
                     });
                     store.try_append(&SessionRecord::Done {
-                        input_tokens: total_in,
-                        output_tokens: total_out,
+                        input_tokens: ledger.total_in,
+                        output_tokens: ledger.total_out,
                         ts: now_ms(),
                     });
                     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-                    cumul_in += total_in as u64;
-                    cumul_out += total_out as u64;
-                    roll_cost(
-                        resolved_model,
-                        total_in,
-                        total_cache,
-                        total_out,
-                        run_cost_input,
-                        run_cost_output,
-                        run_cost_cache,
-                        subagent_cost,
-                        &mut cumul_cost,
-                        &mut cumul_cost_input,
-                        &mut cumul_cost_output,
-                        &mut cumul_cost_cache,
-                    );
-                    write_status(
-                        store,
-                        ctx,
-                        session_id,
-                        cumul_in,
-                        cumul_out,
-                        cumul_cost,
-                        cumul_cost_input,
-                        cumul_cost_output,
-                        cumul_cost_cache,
-                        Some(last_context),
-                    );
+                    ledger.roll(resolved_model);
+                    ledger.write_status(store, ctx, session_id, Some(last_context));
                     let _ = event_tx.send(AgentEvent::GoldenLoop {
-                        cycle: golden_cycle,
+                        cycle: golden.cycle,
                         max_cycles: max_cycles as u32,
                         pending: golden_pending.clone(),
                         mode: next.as_str().into(),
@@ -2270,19 +2137,20 @@ pub async fn run_workflow_with_profile(
                         next_mode: next,
                         next_origin: ModeOrigin::Agent,
                         first_message: format!(
-                            "[system] Golden tasks are still pending: {}. You are now in {} mode (golden cycle {golden_cycle}/{max_cycles}). Read the linked session's plan file and tasks, then resume work on the pending goals — plan or execute what is missing, and only mark a golden task 'done' after verifying the goal is truly met.",
+                            "[system] Golden tasks are still pending: {}. You are now in {} mode (golden cycle {}/{max_cycles}). Read the linked session's plan file and tasks, then resume work on the pending goals — plan or execute what is missing, and only mark a golden task 'done' after verifying the goal is truly met.",
                             golden_pending.join(", "),
                             next.as_str(),
+                            golden.cycle,
                         ),
-                        golden_cycle,
-                        golden_stalls: golden_stalls as u32,
+                        golden_cycle: golden.cycle,
+                        golden_stalls: golden.stalls as u32,
                         golden_last_pending: golden_pending.clone(),
                     };
                     return Ok(RunOutcome::Handoff(Box::new(handoff_spec)));
                 }
                 // Cap hit: stop honestly with a specific reason so the user
                 // sees WHY the loop gave up with goals unmet.
-                stop_reason = if golden_stalls >= max_stalls {
+                stop_reason = if golden.stalls >= max_stalls {
                     "golden_stalled"
                 } else {
                     "max_golden_cycles"
@@ -2304,20 +2172,20 @@ pub async fn run_workflow_with_profile(
             // finalize_plan wasn't called yet. One reminder, then the harness
             // auto-appends the log so the plan is ALWAYS fed. Fail-open: this
             // never blocks the finish.
-            if !plan_finalized && stop_reason == "end_turn" {
+            if !guards.plan_finalized && stop_reason == "end_turn" {
                 let tasks = ctx
                     .session_store_path
                     .as_deref()
                     .and_then(|p| {
-                        crate::commands::tasks::load_last_tasks(std::path::Path::new(p)).ok()
+                        crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok()
                     })
                     .unwrap_or_default();
                 let had_golden = tasks.iter().any(crate::agent::tools::tasks::is_golden);
                 let plan_exists =
                     crate::agent::tools::finalize_plan::latest_plan_file(ctx).is_some();
                 if had_golden && plan_exists {
-                    if !finalize_nudged {
-                        finalize_nudged = true;
+                    if !guards.finalize_nudged {
+                        guards.finalize_nudged = true;
                         push_user_blocks(
                             history,
                             store,
@@ -2350,60 +2218,26 @@ pub async fn run_workflow_with_profile(
                 last_text = "Pronto. Como posso ajudar mais?".into();
             }
             store.try_append(&SessionRecord::Done {
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-            cumul_in += total_in as u64;
-            cumul_out += total_out as u64;
-            roll_cost(
-                resolved_model,
-                total_in,
-                total_cache,
-                total_out,
-                run_cost_input,
-                run_cost_output,
-                run_cost_cache,
-                subagent_cost,
-                &mut cumul_cost,
-                &mut cumul_cost_input,
-                &mut cumul_cost_output,
-                &mut cumul_cost_cache,
-            );
-            write_status(
-                store,
-                ctx,
-                session_id,
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                Some(last_context),
-            );
-            emit_final_stats(
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                last_context,
-            );
+            ledger.roll(resolved_model);
+            ledger.write_status(store, ctx, session_id, Some(last_context));
+            emit_final_stats(&ledger, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: stop_reason.into(),
                 text_output: last_text,
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
             });
             return Ok(RunOutcome::Completed);
         }
 
         // The model recovered and is taking an action — reset the dangling-promise
         // guard so the cap only counts *consecutive* announce-but-don't-act turns.
-        unfinished_streak = 0;
+        guards.unfinished_streak = 0;
 
         // The model wants to use tools: the assistant message carries the
         // (optional) text plus every tool_use block; the following user message
@@ -2439,7 +2273,7 @@ pub async fn run_workflow_with_profile(
                         &tname,
                         remaining.get("input").cloned().unwrap_or(Value::Null),
                     ));
-                    let msg = "Interrompido pelo usuário — ferramenta não executada.";
+                    let msg = "Interrupted by the user — the tool was not run.";
                     let _ = event_tx.send(AgentEvent::ToolResult {
                         tool_id: tid.clone(),
                         tool_name: tname,
@@ -2501,9 +2335,9 @@ pub async fn run_workflow_with_profile(
                     steering,
                 )
                 .await;
-                total_in += sub_in;
-                total_out += sub_out;
-                subagent_cost += sub_cost;
+                ledger.total_in += sub_in;
+                ledger.total_out += sub_out;
+                ledger.subagent_cost += sub_cost;
                 block
             } else if tool_name == "edit_file" {
                 // Not offered to the main session in any mode; deny defensively
@@ -2599,12 +2433,11 @@ pub async fn run_workflow_with_profile(
             };
             // Note a successful finalize_plan so the golden-completion gate
             // knows the plan was fed and skips the reminder / fallback.
-            if tool_name == "finalize_plan" {
-                if let ContentBlock::ToolResult { content, .. } = &block {
-                    if !content.starts_with("Error") {
-                        plan_finalized = true;
-                    }
-                }
+            if tool_name == "finalize_plan"
+                && let ContentBlock::ToolResult { content, .. } = &block
+                && !content.starts_with("Error")
+            {
+                guards.plan_finalized = true;
             }
             tool_result_blocks.push(block);
         }
@@ -2631,48 +2464,14 @@ pub async fn run_workflow_with_profile(
         // If exit_plan_mode requested a handoff, persist and return it now.
         if let Some(handoff) = pending_handoff.take() {
             store.try_append(&SessionRecord::Done {
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-            cumul_in += total_in as u64;
-            cumul_out += total_out as u64;
-            roll_cost(
-                resolved_model,
-                total_in,
-                total_cache,
-                total_out,
-                run_cost_input,
-                run_cost_output,
-                run_cost_cache,
-                subagent_cost,
-                &mut cumul_cost,
-                &mut cumul_cost_input,
-                &mut cumul_cost_output,
-                &mut cumul_cost_cache,
-            );
-            write_status(
-                store,
-                ctx,
-                session_id,
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                Some(last_context),
-            );
-            emit_final_stats(
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                last_context,
-            );
+            ledger.roll(resolved_model);
+            ledger.write_status(store, ctx, session_id, Some(last_context));
+            emit_final_stats(&ledger, last_context);
             // No AgentEvent::Done: the conversation continues in the linked
             // successor session — SessionLinked (emitted by link_session) is
             // what the UI reacts to.
@@ -2705,11 +2504,11 @@ pub async fn run_workflow_with_profile(
             });
 
             if has_progress_tool {
-                brain_explore_streak = 0;
+                guards.brain_explore_streak = 0;
             } else if is_explore_only {
-                brain_explore_streak += 1;
-                if brain_explore_streak >= BRAIN_EXPLORE_LIMIT {
-                    brain_explore_streak = 0; // Reset so we don't loop-spam
+                guards.brain_explore_streak += 1;
+                if guards.brain_explore_streak >= BRAIN_EXPLORE_LIMIT {
+                    guards.brain_explore_streak = 0; // Reset so we don't loop-spam
                     push_user_blocks(
                         history,
                         store,
@@ -2737,56 +2536,22 @@ pub async fn run_workflow_with_profile(
                 continue;
             }
             if last_text.is_empty() {
-                last_text = "Pausado pelo usuário.".into();
+                last_text = "Paused by the user.".into();
             }
             store.try_append(&SessionRecord::Done {
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-            cumul_in += total_in as u64;
-            cumul_out += total_out as u64;
-            roll_cost(
-                resolved_model,
-                total_in,
-                total_cache,
-                total_out,
-                run_cost_input,
-                run_cost_output,
-                run_cost_cache,
-                subagent_cost,
-                &mut cumul_cost,
-                &mut cumul_cost_input,
-                &mut cumul_cost_output,
-                &mut cumul_cost_cache,
-            );
-            write_status(
-                store,
-                ctx,
-                session_id,
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                Some(last_context),
-            );
-            emit_final_stats(
-                cumul_in,
-                cumul_out,
-                cumul_cost,
-                cumul_cost_input,
-                cumul_cost_output,
-                cumul_cost_cache,
-                last_context,
-            );
+            ledger.roll(resolved_model);
+            ledger.write_status(store, ctx, session_id, Some(last_context));
+            emit_final_stats(&ledger, last_context);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
-                input_tokens: total_in,
-                output_tokens: total_out,
+                input_tokens: ledger.total_in,
+                output_tokens: ledger.total_out,
             });
             return Ok(RunOutcome::Completed);
         }
@@ -2796,58 +2561,26 @@ pub async fn run_workflow_with_profile(
     // Safety cap hit: stop looping and report what we have so far rather than
     // running forever. Only reachable when config.max_rounds is set.
     let capped_text = if last_text.is_empty() {
-        format!("Parei após {max_rounds} rounds de ferramentas sem concluir. Tente reformular o pedido em partes menores.")
+        format!(
+            "Stopped after {max_rounds} tool rounds without finishing. Try breaking the request into smaller parts."
+        )
     } else {
-        format!("{last_text}\n\n(Parei após {max_rounds} rounds de ferramentas — pode não estar completo.)")
+        format!("{last_text}\n\n(Stopped after {max_rounds} tool rounds — this may be incomplete.)")
     };
     store.try_append(&SessionRecord::Done {
-        input_tokens: total_in,
-        output_tokens: total_out,
+        input_tokens: ledger.total_in,
+        output_tokens: ledger.total_out,
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-    cumul_in += total_in as u64;
-    cumul_out += total_out as u64;
-    roll_cost(
-        config.model_for_mode(cur_mode.as_str()),
-        total_in,
-        total_cache,
-        total_out,
-        run_cost_input,
-        run_cost_output,
-        run_cost_cache,
-        subagent_cost,
-        &mut cumul_cost,
-        &mut cumul_cost_input,
-        &mut cumul_cost_output,
-        &mut cumul_cost_cache,
-    );
-    write_status(
-        store,
-        ctx,
-        session_id,
-        cumul_in,
-        cumul_out,
-        cumul_cost,
-        cumul_cost_input,
-        cumul_cost_output,
-        cumul_cost_cache,
-        Some(last_context),
-    );
-    emit_final_stats(
-        cumul_in,
-        cumul_out,
-        cumul_cost,
-        cumul_cost_input,
-        cumul_cost_output,
-        cumul_cost_cache,
-        last_context,
-    );
+    ledger.roll(config.model_for_mode(cur_mode.as_str()));
+    ledger.write_status(store, ctx, session_id, Some(last_context));
+    emit_final_stats(&ledger, last_context);
     let _ = event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
-        input_tokens: total_in,
-        output_tokens: total_out,
+        input_tokens: ledger.total_in,
+        output_tokens: ledger.total_out,
     });
     Ok(RunOutcome::Completed)
 }
@@ -2970,7 +2703,7 @@ pub(crate) async fn run_tool(
                                 output: String::new(),
                                 error: Some(e.clone()),
                             });
-                            ContentBlock::tool_result(tool_use_id, &format!("Error applying: {e}"))
+                            ContentBlock::tool_result(tool_use_id, format!("Error applying: {e}"))
                         }
                     }
                 }
@@ -2981,7 +2714,7 @@ pub(crate) async fn run_tool(
                         output: String::new(),
                         error: Some(e.clone()),
                     });
-                    ContentBlock::tool_result(tool_use_id, &format!("Error: {e}"))
+                    ContentBlock::tool_result(tool_use_id, format!("Error: {e}"))
                 }
             }
         }
@@ -3090,7 +2823,7 @@ pub(crate) async fn run_tool(
                                         output: String::new(),
                                         error: Some(e.clone()),
                                     });
-                                    ContentBlock::tool_result(tool_use_id, &format!("Error: {e}"))
+                                    ContentBlock::tool_result(tool_use_id, format!("Error: {e}"))
                                 }
                             }
                         }
@@ -3159,7 +2892,7 @@ pub(crate) async fn run_tool(
                             output: String::new(),
                             error: Some(e.clone()),
                         });
-                        ContentBlock::tool_result(tool_use_id, &format!("Error: {e}"))
+                        ContentBlock::tool_result(tool_use_id, format!("Error: {e}"))
                     }
                 },
                 Ok(false) => {
@@ -3235,7 +2968,7 @@ pub(crate) async fn run_tool(
                                 });
                                 ContentBlock::tool_result(
                                     tool_use_id,
-                                    &format!("Error applying: {e}"),
+                                    format!("Error applying: {e}"),
                                 )
                             }
                         },
@@ -3259,7 +2992,7 @@ pub(crate) async fn run_tool(
                         output: String::new(),
                         error: Some(e.clone()),
                     });
-                    ContentBlock::tool_result(tool_use_id, &format!("Error: {e}"))
+                    ContentBlock::tool_result(tool_use_id, format!("Error: {e}"))
                 }
             }
         }
@@ -3331,6 +3064,7 @@ fn force_explore_mode(tool_input: Value) -> Value {
 /// works (origin becomes Agent); exit_plan_mode only works when the agent
 /// itself entered Brain — a human-initiated Brain is exited only by
 /// the human toggle.
+#[allow(clippy::too_many_arguments)]
 fn handle_mode_switch(
     tool_name: &str,
     tool_use_id: &str,
@@ -3415,38 +3149,36 @@ fn handle_mode_switch(
                     .as_ref()
                     .map(|c| c.auto_commit_plan)
                     .unwrap_or(true);
-                if auto_commit {
-                    if let Some(root) = &ctx.workspace_root {
-                        let plan_save_path = ctx.plan_save_path.as_deref();
-                        if let Some(plan_path) =
-                            crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path)
-                        {
-                            let fname = plan_path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("plan");
-                            // filename format: YYYY-MM-DD_slug.md — strip date prefix
-                            let slug = if fname.len() > 11 && &fname[4..5] == "-" {
-                                &fname[11..] // after "YYYY-MM-DD_"
-                            } else {
-                                fname
-                            };
-                            let commit_msg = format!("docs(plan): {}", slug);
-                            let add = std::process::Command::new("git")
+                if auto_commit && let Some(root) = &ctx.workspace_root {
+                    let plan_save_path = ctx.plan_save_path.as_deref();
+                    if let Some(plan_path) =
+                        crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path)
+                    {
+                        let fname = plan_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("plan");
+                        // filename format: YYYY-MM-DD_slug.md — strip date prefix
+                        let slug = if fname.len() > 11 && &fname[4..5] == "-" {
+                            &fname[11..] // after "YYYY-MM-DD_"
+                        } else {
+                            fname
+                        };
+                        let commit_msg = format!("docs(plan): {}", slug);
+                        let add = std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(root)
+                            .arg("add")
+                            .arg(plan_path.to_string_lossy().as_ref())
+                            .output();
+                        if add.is_ok() {
+                            let _ = std::process::Command::new("git")
                                 .arg("-C")
                                 .arg(root)
-                                .arg("add")
-                                .arg(plan_path.to_string_lossy().as_ref())
+                                .arg("commit")
+                                .arg("-m")
+                                .arg(&commit_msg)
                                 .output();
-                            if add.is_ok() {
-                                let _ = std::process::Command::new("git")
-                                    .arg("-C")
-                                    .arg(root)
-                                    .arg("commit")
-                                    .arg("-m")
-                                    .arg(&commit_msg)
-                                    .output();
-                            }
                         }
                     }
                 }
@@ -3469,10 +3201,10 @@ fn handle_mode_switch(
     ContentBlock::tool_result(tool_use_id, &result)
 }
 
-/// Aguarda resposta do usuário com proteção contra drop prematuro do oneshot.
-/// Se o sender for dropado (task abortada, lifecycle), recria o canal até
-/// o limite de tentativas — o gating deve ser quebrado apenas por uma
-/// resposta real do usuário ou por exaustão de retries.
+/// Await the user's answer, guarding against the oneshot being dropped early.
+/// If the sender goes away (aborted task, lifecycle churn) the channel is
+/// recreated up to a retry limit — the gate must only be released by a real
+/// answer or by exhausting the retries.
 async fn await_user_answer(answers: &AnswerMap, session_id: &str, tool_use_id: &str) -> String {
     let key = format!("{session_id}:{tool_use_id}");
     let mut retries = 10usize;
@@ -3497,7 +3229,7 @@ async fn await_user_answer(answers: &AnswerMap, session_id: &str, tool_use_id: &
                     session_id, tool_use_id, retries
                 );
                 if retries == 0 {
-                    return "O usuário não respondeu.".to_string();
+                    return "The user did not respond.".to_string();
                 }
                 retries -= 1;
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -3568,8 +3300,7 @@ fn normalize_ask_user_questions(questions: &Value) -> Result<Value, String> {
                     match (short, desc) {
                         (Some(short), desc) => {
                             // Drop a description that merely repeats the label.
-                            let desc =
-                                desc.filter(|d| d.to_lowercase() != short.to_lowercase());
+                            let desc = desc.filter(|d| d.to_lowercase() != short.to_lowercase());
                             (short, desc)
                         }
                         // Description-only (the shape that used to be rejected):
@@ -3578,14 +3309,14 @@ fn normalize_ask_user_questions(questions: &Value) -> Result<Value, String> {
                         (None, None) => {
                             return Err(at(
                                 "option objects must carry a 'label', 'value', 'title', or 'description' string",
-                            ))
+                            ));
                         }
                     }
                 }
                 _ => {
                     return Err(at(
                         "every option must be a string or a {label, description} object",
-                    ))
+                    ));
                 }
             };
             if label.is_empty() {
@@ -3675,7 +3406,7 @@ async fn ask_user(
                 output: String::new(),
                 error: Some(msg.clone()),
             });
-            return ContentBlock::tool_result(tool_use_id, &format!("Error: {msg}"));
+            return ContentBlock::tool_result(tool_use_id, format!("Error: {msg}"));
         }
     };
 
@@ -3718,7 +3449,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// this cap limits the history copy so a giant tool result (e.g. a subagent
 /// report, file read, or search) can't blow up the context.
 fn tool_result_block(tool_use_id: &str, content: &str) -> ContentBlock {
-    ContentBlock::tool_result(tool_use_id, &truncate(content, MAX_TOOL_RESULT_CHARS))
+    ContentBlock::tool_result(tool_use_id, truncate(content, MAX_TOOL_RESULT_CHARS))
 }
 
 #[cfg(test)]
@@ -4129,6 +3860,9 @@ mod tests {
         // Regression for session b024da97: the model sent options carrying ONLY a
         // `description` (no label), which the old validator rejected 4× in a row
         // until the agent gave up. They must now normalize to { label: <description> }.
+        // The payload is reproduced verbatim, Portuguese and all — normalization
+        // must not depend on the language, and a translated fixture would no
+        // longer be the input that actually broke.
         let q = json!([{
             "question": "O que voce quer dizer com \"lancar um novo patch em release\"?",
             "multi_select": false,
@@ -4280,7 +4014,7 @@ mod tests {
             role: "assistant".into(),
             content: vec![ContentBlock::text("b".repeat(1000))],
         };
-        let small = estimate_tokens(&[msg1.clone()], "", &[]);
+        let small = estimate_tokens(std::slice::from_ref(&msg1), "", &[]);
         let large = estimate_tokens(&[msg1, msg2], "", &[]);
         assert!(large > small, "more history should mean more tokens");
     }
@@ -4437,7 +4171,7 @@ mod tests {
 #[cfg(test)]
 mod judge_backend_tests {
     use super::*;
-    use crate::agent::provider::{classify_turn_completion, AgentConfig};
+    use crate::agent::provider::{AgentConfig, classify_turn_completion};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -4533,8 +4267,7 @@ mod judge_backend_tests {
                         .join("")
                 })
             })
-            .filter(|s| !s.trim().is_empty())
-            .last()
+            .rfind(|s| !s.trim().is_empty())
     }
 
     /// End-to-end reproduction of the stall: replay the real session that
@@ -4631,13 +4364,16 @@ mod golden_goal_tests {
 #[cfg(test)]
 mod prompt_eval_tests {
     use super::*;
-    use crate::agent::provider::{one_shot, AgentConfig};
+    use crate::agent::provider::{AgentConfig, one_shot};
 
     const ROOT: &str = "/Users/victortavernari/claudinio_code";
 
     /// The verbatim first user message from session 44ec41c1 — a UI feature
     /// (button + modal) that carries a concrete icon reference (a URL naming
-    /// the exact `lucide:notebook-pen` icon).
+    /// the exact `lucide:notebook-pen` icon). Left in the original Portuguese
+    /// on purpose: it is captured regression data, not app copy, and the point
+    /// is that the prompt keeps the asset reference verbatim whatever the
+    /// language.
     const SESSION_REQUEST: &str = "Gostaria que o textarea do input tivesse um botão para editar \
 https://icones.js.org/collection/all?s=notebook&icon=lucide:notebook-pen e ao clicar nele, ele pega \
 o texto que está na text area e abre um editor de texto numa modal com multiplas linhas, e ao fechar \
@@ -4920,13 +4656,12 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
         let model = cfg
             .model_for_mode(SessionMode::Builder.as_str())
             .to_string();
-        let user =
-            "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
+        let user = "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
 specified the EXACT icon to use with this reference: \
 https://icones.js.org/collection/all?s=notebook&icon=lucide:notebook-pen (that is the Lucide \
 'notebook-pen' icon).\n\n---\nDo NOT call any tool. Output ONLY the exact `goal` string you would \
 pass to a single 'code' subagent to implement this task.";
-        let reply = one_shot(&cfg, &model, &system, &user, 1200)
+        let reply = one_shot(&cfg, &model, &system, user, 1200)
             .await
             .expect("live builder call");
         eprintln!("--- builder subagent goal ---\n{reply}\n-----------------------------");

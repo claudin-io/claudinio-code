@@ -15,10 +15,3 @@ export function revealLabel(): string {
   return 'Open in File Manager';
 }
 
-/** Returns the i18n key for the reveal action */
-export function revealI18nKey(): string {
-  const p = platform();
-  if (p === 'mac') return 'context.revealInFinder';
-  if (p === 'win') return 'context.revealInExplorer';
-  return 'context.revealInFileManager';
-}

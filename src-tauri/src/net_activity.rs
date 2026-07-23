@@ -118,10 +118,10 @@ fn emit_snapshot() {
             .collect(),
         Err(_) => return,
     };
-    if let Ok(app) = t.app.lock() {
-        if let Some(app) = app.as_ref() {
-            let _ = app.emit(EVENT_NAME, &views);
-        }
+    if let Ok(app) = t.app.lock()
+        && let Some(app) = app.as_ref()
+    {
+        let _ = app.emit(EVENT_NAME, &views);
     }
 }
 
@@ -155,14 +155,14 @@ impl NetGuard {
     /// second so a fast SSE stream doesn't flood the UI with events.
     pub fn add_bytes(&self, n: u64) {
         let t = tracker();
-        if let Ok(mut ops) = t.ops.lock() {
-            if let Some(op) = ops.iter_mut().find(|op| op.id == self.id) {
-                op.bytes += n;
-            }
+        if let Ok(mut ops) = t.ops.lock()
+            && let Some(op) = ops.iter_mut().find(|op| op.id == self.id)
+        {
+            op.bytes += n;
         }
         let should_emit = match t.last_bytes_emit.lock() {
             Ok(mut last) => {
-                let due = last.map_or(true, |l| l.elapsed().as_millis() >= BYTES_EMIT_INTERVAL_MS);
+                let due = last.is_none_or(|l| l.elapsed().as_millis() >= BYTES_EMIT_INTERVAL_MS);
                 if due {
                     *last = Some(Instant::now());
                 }
@@ -178,10 +178,10 @@ impl NetGuard {
     /// Record the HTTP status code the call site received. Optional — if never
     /// called the column stays empty in the CSV.
     pub fn set_status(&self, code: u16) {
-        if let Ok(mut ops) = tracker().ops.lock() {
-            if let Some(op) = ops.iter_mut().find(|op| op.id == self.id) {
-                op.status_code = Some(code);
-            }
+        if let Ok(mut ops) = tracker().ops.lock()
+            && let Some(op) = ops.iter_mut().find(|op| op.id == self.id)
+        {
+            op.status_code = Some(code);
         }
     }
 }
@@ -206,7 +206,7 @@ fn append_csv_row(op: &NetOp) {
     if let Ok(file) = file {
         let mut wtr = Writer::from_writer(file);
         if !file_exists {
-            let _ = wtr.write_record(&[
+            let _ = wtr.write_record([
                 "workspace",
                 "timestamp",
                 "source",
@@ -216,7 +216,7 @@ fn append_csv_row(op: &NetOp) {
                 "status_code",
             ]);
         }
-        let _ = wtr.write_record(&[
+        let _ = wtr.write_record([
             &op.workspace,
             &chrono::Utc::now().to_rfc3339(),
             source_to_str(op.source),

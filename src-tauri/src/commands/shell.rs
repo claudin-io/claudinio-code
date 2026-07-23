@@ -13,7 +13,7 @@ pub async fn open_in_terminal(path: String) -> Result<(), String> {
     {
         let mut cmd = Command::new("cmd");
         cmd.args(["/c", "start", "cmd", "/k", "cd", "/d", &path]);
-        crate::commands::procutil::no_window(&mut cmd);
+        crate::procutil::no_window(&mut cmd);
         cmd.spawn()
             .map_err(|e| format!("Failed to open Terminal: {e}"))?;
     }

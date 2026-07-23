@@ -8,12 +8,11 @@ import {
   type ThemeId,
   type ThemeMeta,
 } from "../lib/theme";
-import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 
 /** The "system" option rendered as the first card */
 const SYSTEM_META: ThemeMeta = {
-  labelKey: "theme.system",
+  label: "System",
   category: "dark",
   previewColors: [
     "oklch(0.145 0.015 280)",
@@ -50,11 +49,11 @@ const ThemePicker: Component = () => {
         </div>
         {/* Label */}
         <span class="text-[11px] font-medium leading-none text-ink">
-          {t("theme.system")}
+          {"System"}
         </span>
         {/* Badge showing resolved theme */}
         <span class="text-[9px] leading-none text-ink-faint">
-          → {t(getThemeMeta(resolvedTheme()).labelKey)}
+          → {getThemeMeta(resolvedTheme()).label}
         </span>
         {/* Check icon when selected */}
         <Show when={preference() === "system"}>
@@ -90,7 +89,7 @@ const ThemePicker: Component = () => {
               </div>
               {/* Name */}
               <span class="text-[11px] font-medium leading-none text-ink">
-                {t(meta.labelKey)}
+                {meta.label}
               </span>
               {/* Category hint */}
               <span class="text-[9px] leading-none text-ink-faint">

@@ -3,7 +3,7 @@
 //! any OpenAI-compatible (or Anthropic-compatible) provider from that
 //! catalog. Claudinio's own login stays in `commands::auth`.
 
-use crate::agent::provider::{catalog, save_config, ProviderEntry};
+use crate::agent::provider::{ProviderEntry, catalog, save_config};
 use crate::commands::auth::{random_hex, wait_for_callback};
 use crate::state::AppState;
 use base64::Engine;

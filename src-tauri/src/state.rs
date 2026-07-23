@@ -1,4 +1,3 @@
-use crate::agent::persist::SessionRecord;
 use crate::agent::provider::AgentConfig;
 use crate::agent::session::{
     AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, SteeringCtl,
@@ -13,7 +12,6 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::Mutex;
 
 /// The conversation the user is currently in. The JSONL file at `store_path` is
@@ -66,10 +64,10 @@ impl WorkspaceState {
         {
             let current = self.mcp.lock().await;
             let current_fp = self.mcp_fingerprint.lock().await;
-            if let (Some(mgr), Some(fp)) = (current.as_ref(), current_fp.as_ref()) {
-                if *fp == fingerprint {
-                    return mgr.clone();
-                }
+            if let (Some(mgr), Some(fp)) = (current.as_ref(), current_fp.as_ref())
+                && *fp == fingerprint
+            {
+                return mgr.clone();
             }
         }
 
@@ -106,8 +104,7 @@ pub struct AppState {
     /// so the UI can abort instead of sitting out the 120s callback timeout.
     pub oauth_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
-    pub records_cache:
-        std::sync::Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>,
+    pub records_cache: crate::agent::persist::RecordsCache,
 }
 
 impl AppState {

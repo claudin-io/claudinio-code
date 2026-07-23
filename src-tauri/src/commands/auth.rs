@@ -8,7 +8,7 @@ use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub(crate) const CALLBACK_OK: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style=\"font-family:sans-serif;text-align:center;padding-top:64px\"><h2>Signed in</h2><p>You can return to Claudinio Code.</p></body></html>";
 pub(crate) const CALLBACK_ERR: &str = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style=\"font-family:sans-serif;text-align:center;padding-top:64px\"><h2>Login failed</h2><p>Please return to Claudinio Code and try again.</p></body></html>";
@@ -134,11 +134,11 @@ pub(crate) async fn wait_for_callback(
         }
     };
 
-    if let Some(expected) = expected_state {
-        if state.as_deref() != Some(expected) {
-            let _ = stream.write_all(CALLBACK_ERR.as_bytes()).await;
-            return Err("login state mismatch — possible CSRF, aborting".into());
-        }
+    if let Some(expected) = expected_state
+        && state.as_deref() != Some(expected)
+    {
+        let _ = stream.write_all(CALLBACK_ERR.as_bytes()).await;
+        return Err("login state mismatch — possible CSRF, aborting".into());
     }
 
     let _ = stream.write_all(CALLBACK_OK.as_bytes()).await;

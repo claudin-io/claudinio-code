@@ -1,7 +1,6 @@
 import { Component, For, Show, createMemo, createSignal, type Accessor } from "solid-js";
 import { Popover } from "./Popover";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 import type { ModelGroup } from "../lib/ipc";
 
 interface ModelSelectProps {
@@ -85,14 +84,14 @@ export const ModelSelect: Component<ModelSelectProps> = (props) => {
             type="text"
             value={query()}
             onInput={(e) => setQuery(e.currentTarget.value)}
-            placeholder={t("modelSelect.search")}
+            placeholder={"Search models…"}
             class="w-full rounded border border-border-subtle bg-surface-0 px-2 py-1 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none"
           />
         </div>
         <div class="max-h-64 overflow-y-auto py-1">
           <Show
             when={filteredGroups().length > 0}
-            fallback={<p class="px-3 py-2 text-xs text-ink-faint">{t("modelSelect.empty")}</p>}
+            fallback={<p class="px-3 py-2 text-xs text-ink-faint">{"No models match your search."}</p>}
           >
             <For each={filteredGroups()}>
               {(group) => (
@@ -103,7 +102,7 @@ export const ModelSelect: Component<ModelSelectProps> = (props) => {
                     </span>
                     <Show when={group.providerId !== "claudinio"}>
                       <span class="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-px text-[9px] text-amber-600">
-                        {t("settings.providers.experimental")}
+                        {"Experimental"}
                       </span>
                     </Show>
                   </div>

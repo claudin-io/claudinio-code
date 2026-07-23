@@ -1,5 +1,4 @@
 import { createMemo, For, Match, Show, Switch, type Component } from "solid-js";
-import { marked } from "marked";
 import hljs from "highlight.js/lib/core";
 import langTypescript from "highlight.js/lib/languages/typescript";
 import langJavascript from "highlight.js/lib/languages/javascript";
@@ -24,15 +23,21 @@ import type { ToolCallData, ToolResultData } from "../../lib/ipc";
 import { Icon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
-import { t } from "../../lib/grill-me";
+import { renderMarkdown, escapeHtml } from "../../lib/markdown";
 import { detectLanguageFromPath } from "./toolPresentation";
 
+// The result goes straight to `innerHTML`, and both inputs are untrusted: the
+// command comes from the model, the file content from the workspace. hljs
+// escapes what it emits, but only a handful of grammars are registered here —
+// every other language (markdown, html, …) takes the fallback, so that path has
+// to escape too or reading a file with `<img onerror=…>` in it executes script.
 function highlight(code: string, lang: string): string {
   try {
-    return hljs.getLanguage(lang) ? hljs.highlight(code, { language: lang }).value : code;
+    if (hljs.getLanguage(lang)) return hljs.highlight(code, { language: lang }).value;
   } catch {
-    return code;
+    // fall through to the escaped plain-text rendering
   }
+  return escapeHtml(code);
 }
 
 const JSON_LIST_TOOLS = new Set([
@@ -86,7 +91,7 @@ const ReadFileBody: Component<{ path: string; startLine?: number; result?: ToolR
           <div>
             <pre class="hljs max-h-72 overflow-y-auto whitespace-pre font-mono text-[11px] leading-relaxed" innerHTML={highlight(content, lang)} />
             <Show when={result().output.length > 20000}>
-              <div class="mt-1 text-[11px] text-ink-faint">{t("chat.timeline.truncated")}</div>
+              <div class="mt-1 text-[11px] text-ink-faint">{"Output truncated"}</div>
             </Show>
           </div>
         );
@@ -208,7 +213,7 @@ const TasksBody: Component<{ argsTasks?: unknown; result?: ToolResultData }> = (
   });
 
   return (
-    <Show when={tasks().length > 0} fallback={<div class="text-[11px] text-ink-faint">{t("chat.timeline.noResults")}</div>}>
+    <Show when={tasks().length > 0} fallback={<div class="text-[11px] text-ink-faint">{"No results"}</div>}>
       <div class="flex flex-col gap-1">
         <For each={tasks()}>
           {(task) => (
@@ -231,7 +236,7 @@ const TasksBody: Component<{ argsTasks?: unknown; result?: ToolResultData }> = (
 // ── write_plan / finalize_plan ─────────────────────────────────────
 const PlanBody: Component<{ markdown: string; planFile?: string }> = (props) => (
   <div>
-    <ProseContent class="prose-content text-[12px] leading-[1.6] text-ink-muted" html={marked.parse(props.markdown, { async: false }) as string} />
+    <ProseContent class="prose-content text-[12px] leading-[1.6] text-ink-muted" html={renderMarkdown(props.markdown)} />
     <Show when={props.planFile}>
       <div class="mt-2 flex items-center gap-1.5 text-[11px] text-ink-faint">
         <Icon name="file-text" class="h-3 w-3" />
@@ -388,7 +393,7 @@ const JsonListBody: Component<{ result?: ToolResultData }> = (props) => {
       }
     >
       {(list) => (
-        <Show when={list().length > 0} fallback={<div class="text-[11px] text-ink-faint">{t("chat.timeline.noResults")}</div>}>
+        <Show when={list().length > 0} fallback={<div class="text-[11px] text-ink-faint">{"No results"}</div>}>
           <div class="flex flex-col gap-0.5">
             <For each={list().slice(0, 60)}>
               {(item) => {
@@ -408,7 +413,7 @@ const JsonListBody: Component<{ result?: ToolResultData }> = (props) => {
               }}
             </For>
             <Show when={list().length > 60}>
-              <div class="text-[11px] text-ink-faint">+{list().length - 60} {t("chat.timeline.more")}</div>
+              <div class="text-[11px] text-ink-faint">+{list().length - 60} {"more"}</div>
             </Show>
           </div>
         </Show>

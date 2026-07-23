@@ -6,12 +6,12 @@
 //! expects from the Anthropic client.
 
 use super::{
-    maybe_emit_text_delta, AgentConfig, ContentBlock, Message, ResolvedProvider, StreamOutput,
-    ToolDescription, Usage, STREAM_IDLE_TIMEOUT, TEXT_DELTA_THROTTLE,
+    AgentConfig, ContentBlock, Message, ResolvedProvider, STREAM_IDLE_TIMEOUT, StreamOutput,
+    TEXT_DELTA_THROTTLE, ToolDescription, Usage, maybe_emit_text_delta,
 };
 use crate::agent::session::AgentEvent;
 use futures::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
@@ -196,13 +196,12 @@ fn parse_usage(v: &Value, pricing: Option<(f64, f64)>) -> Usage {
         .and_then(|t| t.as_u64())
         .unwrap_or(0) as u32;
     let mut cost = v.get("cost").and_then(|c| c.as_f64());
-    if cost.is_none() {
-        if let Some((in_price, out_price)) = pricing {
-            cost = Some(
-                f64::from(input) * in_price / 1_000_000.0
-                    + f64::from(output) * out_price / 1_000_000.0,
-            );
-        }
+    if cost.is_none()
+        && let Some((in_price, out_price)) = pricing
+    {
+        cost = Some(
+            f64::from(input) * in_price / 1_000_000.0 + f64::from(output) * out_price / 1_000_000.0,
+        );
     }
     Usage {
         input_tokens: input,
@@ -236,15 +235,15 @@ fn accumulate_tool_calls(
     for item in items {
         let idx = item.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
         let entry = acc.entry(idx).or_default();
-        if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-            if !id.is_empty() {
-                entry.id = id.to_string();
-            }
+        if let Some(id) = item.get("id").and_then(|i| i.as_str())
+            && !id.is_empty()
+        {
+            entry.id = id.to_string();
         }
-        if let Some(name) = item.pointer("/function/name").and_then(|n| n.as_str()) {
-            if !name.is_empty() {
-                entry.name = name.to_string();
-            }
+        if let Some(name) = item.pointer("/function/name").and_then(|n| n.as_str())
+            && !name.is_empty()
+        {
+            entry.name = name.to_string();
         }
         if let Some(args) = item.pointer("/function/arguments").and_then(|a| a.as_str()) {
             entry.args.push_str(args);
@@ -297,10 +296,10 @@ fn shape_http_error(status: reqwest::StatusCode, body: &str) -> String {
     if status.as_u16() == 401 {
         return "Unauthorized — check your API key".into();
     }
-    if let Ok(v) = serde_json::from_str::<Value>(body) {
-        if let Some(msg) = error_message(&v) {
-            return format!("API error: HTTP {status} — {msg}");
-        }
+    if let Ok(v) = serde_json::from_str::<Value>(body)
+        && let Some(msg) = error_message(&v)
+    {
+        return format!("API error: HTTP {status} — {msg}");
     }
     format!("API error: HTTP {status}")
 }
@@ -393,7 +392,7 @@ pub async fn stream_message(
             Ok(Some(r)) => r,
             Ok(None) => break,
             Err(_) => {
-                return Err("stream error: no data received for 90s, connection stalled".into())
+                return Err("stream error: no data received for 90s, connection stalled".into());
             }
         };
 
@@ -443,22 +442,22 @@ pub async fn stream_message(
 
     // Some providers close the stream without a trailing newline after the
     // last data line; salvage whatever is left in the buffer.
-    if !done {
-        if let Some(data) = buf.trim().strip_prefix("data: ") {
-            if data.trim() != "[DONE]" && !data.trim().is_empty() {
-                process_chunk(
-                    data,
-                    rp,
-                    event_tx,
-                    assistant_text,
-                    &mut thinking_text,
-                    &mut text_deltas,
-                    &mut tool_acc,
-                    &mut stop_reason,
-                    &mut usage,
-                )?;
-            }
-        }
+    if !done
+        && let Some(data) = buf.trim().strip_prefix("data: ")
+        && data.trim() != "[DONE]"
+        && !data.trim().is_empty()
+    {
+        process_chunk(
+            data,
+            rp,
+            event_tx,
+            assistant_text,
+            &mut thinking_text,
+            &mut text_deltas,
+            &mut tool_acc,
+            &mut stop_reason,
+            &mut usage,
+        )?;
     }
 
     if emit_text_deltas && assistant_text.len() != last_sent_len {
@@ -514,11 +513,11 @@ fn process_chunk(
         .and_then(|c| c.first())
     {
         if let Some(delta) = choice.get("delta") {
-            if let Some(text) = delta.get("content").and_then(|t| t.as_str()) {
-                if !text.is_empty() {
-                    text_deltas.push(text.to_string());
-                    assistant_text.push_str(text);
-                }
+            if let Some(text) = delta.get("content").and_then(|t| t.as_str())
+                && !text.is_empty()
+            {
+                text_deltas.push(text.to_string());
+                assistant_text.push_str(text);
             }
             // OpenRouter surfaces reasoning as `reasoning`; DeepSeek-style
             // backends use `reasoning_content`. Both feed the same Thinking
@@ -527,11 +526,11 @@ fn process_chunk(
                 .get("reasoning")
                 .and_then(|t| t.as_str())
                 .or_else(|| delta.get("reasoning_content").and_then(|t| t.as_str()));
-            if let Some(r) = reasoning {
-                if !r.is_empty() {
-                    thinking_text.push_str(r);
-                    let _ = event_tx.send(AgentEvent::Thinking(thinking_text.clone()));
-                }
+            if let Some(r) = reasoning
+                && !r.is_empty()
+            {
+                thinking_text.push_str(r);
+                let _ = event_tx.send(AgentEvent::Thinking(thinking_text.clone()));
             }
             if let Some(tc) = delta.get("tool_calls") {
                 accumulate_tool_calls(tool_acc, tc);
@@ -544,10 +543,10 @@ fn process_chunk(
 
     // Usage arrives on a final chunk with empty `choices` (stream_options
     // include_usage) — but some providers attach it to the last delta too.
-    if let Some(u) = value.get("usage") {
-        if !u.is_null() {
-            *usage = Some(parse_usage(u, rp.pricing));
-        }
+    if let Some(u) = value.get("usage")
+        && !u.is_null()
+    {
+        *usage = Some(parse_usage(u, rp.pricing));
     }
 
     Ok(())

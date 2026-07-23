@@ -18,6 +18,12 @@ pub struct WalkEntry {
 
 /// Read a file and return its base64-encoded content plus metadata.
 /// Used by the frontend to prepare attachments before sending to the agent.
+///
+/// Deliberately NOT workspace-scoped, unlike `read_file`: attaching a screenshot
+/// from the Desktop or a spec from Downloads is the point of the feature, and
+/// those paths arrive from a native file picker or a drag-and-drop event. The
+/// consequence is that this command can read any file the user can — see the
+/// "What we explicitly do not defend" section of SECURITY.md.
 #[tauri::command]
 pub fn read_attachment(path: String) -> Result<AttachmentData, String> {
     let file_path = Path::new(&path);
@@ -166,8 +172,46 @@ pub fn walk_dir(root: String) -> Result<Vec<WalkEntry>, String> {
 
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Reject a path that is not inside one of the currently open workspaces.
+///
+/// The webview renders untrusted content — model output, and file contents the
+/// agent quotes back into the chat. `lib/markdown.ts` sanitizes that before it
+/// becomes DOM, but sanitization is one layer: any script that does run in the
+/// webview can call every registered Tauri command, and these commands are the
+/// ones that reach the filesystem. Without this check, `write_file` is an
+/// unguarded `std::fs::write` to any absolute path — enough to append to a shell
+/// rc file and get code execution on the user's next terminal.
+///
+/// The agent's own file tools enforce the same rule via
+/// `agent::tools::validate_path`; both go through `crate::workspace_path` so the
+/// two can't drift.
+async fn ensure_in_open_workspace(
+    path: &str,
+    state: &tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
+    let roots: Vec<std::path::PathBuf> = state.workspaces.lock().await.keys().cloned().collect();
+    if roots.is_empty() {
+        return Err(format!(
+            "cannot access '{path}': no workspace is open. File access is restricted to the open project."
+        ));
+    }
+    if roots
+        .iter()
+        .any(|root| crate::workspace_path::is_within_root(Path::new(path), root))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "path '{path}' is outside every open workspace. File access is restricted to the open project."
+    ))
+}
+
 #[tauri::command]
-pub fn read_file(path: String) -> Result<String, String> {
+pub async fn read_file(
+    path: String,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<String, String> {
+    ensure_in_open_workspace(&path, &state).await?;
     let file = Path::new(&path);
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() {
@@ -180,18 +224,88 @@ pub fn read_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn write_file(path: String, content: String) -> Result<(), String> {
+pub async fn write_file(
+    path: String,
+    content: String,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
+    ensure_in_open_workspace(&path, &state).await?;
     std::fs::write(&path, &content).map_err(|e| format!("cannot write {path}: {e}"))
 }
 
-/// Write binary content (base64-encoded) to disk. Used to save exported images
-/// such as a rasterized PNG of a Mermaid diagram, which cannot go through the
-/// text-only `write_file`.
+/// Write binary content (base64-encoded) inside the workspace. Exports that
+/// legitimately land outside it (a diagram saved to the Desktop) go through
+/// `export_file` / `export_file_bytes`, which own the save dialog.
 #[tauri::command]
-pub fn write_file_bytes(path: String, base64_data: String) -> Result<(), String> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64_data.as_bytes())
-        .map_err(|e| format!("invalid base64: {e}"))?;
+pub async fn write_file_bytes(
+    path: String,
+    base64_data: String,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
+    ensure_in_open_workspace(&path, &state).await?;
+    let bytes = decode_base64(&base64_data)?;
     std::fs::write(&path, &bytes).map_err(|e| format!("cannot write {path}: {e}"))
+}
+
+fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| format!("invalid base64: {e}"))
+}
+
+/// Ask the user where to save an export, then write it there.
+///
+/// The save dialog runs here rather than in the frontend on purpose: it means
+/// the destination is chosen by the user in a native dialog and never travels
+/// across IPC as an attacker-suppliable argument. That is what lets `write_file`
+/// stay strictly workspace-scoped without losing "export diagram to Desktop".
+/// Returns the chosen path, or `None` if the user cancelled.
+async fn save_dialog(
+    app: &tauri::AppHandle,
+    default_name: &str,
+    filter_name: &str,
+    extension: &str,
+) -> Option<std::path::PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name)
+        .add_filter(filter_name, &[extension])
+        .save_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    rx.await.ok().flatten().and_then(|p| p.into_path().ok())
+}
+
+#[tauri::command]
+pub async fn export_file(
+    app: tauri::AppHandle,
+    default_name: String,
+    filter_name: String,
+    extension: String,
+    content: String,
+) -> Result<bool, String> {
+    let Some(path) = save_dialog(&app, &default_name, &filter_name, &extension).await else {
+        return Ok(false);
+    };
+    std::fs::write(&path, &content).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn export_file_bytes(
+    app: tauri::AppHandle,
+    default_name: String,
+    filter_name: String,
+    extension: String,
+    base64_data: String,
+) -> Result<bool, String> {
+    let bytes = decode_base64(&base64_data)?;
+    let Some(path) = save_dialog(&app, &default_name, &filter_name, &extension).await else {
+        return Ok(false);
+    };
+    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(true)
 }

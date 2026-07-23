@@ -31,17 +31,14 @@ import {
   type ModeChangedData,
   type GoldenLoopData,
   type SessionLinkedData,
-  type HandoffReason,
   type AgentEvent,
   type RetryingData,
   type AskUserData,
   type ToolCallData,
-  type EditProposalData,
   type DoneData,
   type ToolResultData,
   type SubagentStartedData,
   type SubagentDoneData,
-  type Phase,
   type SessionSummary,
   type PlanEntry,
   type SessionRecord,
@@ -49,21 +46,16 @@ import {
 } from "../lib/ipc";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
-import { marked } from "marked";
-import hljs from "highlight.js";
-import { DiffViewer } from "./DiffViewer";
+import { renderMarkdown, renderLiveMarkdown } from "../lib/markdown";
 import { ProseContent } from "./ProseContent";
-import { Icon, type IconName } from "./Icon";
-import { ToolBody } from "./tool-renderers/ToolBody";
-import { alwaysShowsBody, detectLanguageFromPath, toolHeader, toolSummary } from "./tool-renderers/toolPresentation";
+import { Icon } from "./Icon";
 import TextEditorModal from "./TextEditorModal";
-import { FileMentionPopover } from "./FileMentionPopover";
 import { ThinkingEffortSlider } from "./ThinkingEffortSlider";
+import { FileMentionPopover } from "./FileMentionPopover";
 import { TagMentionPopover } from "./TagMentionPopover";
 import { SkillMentionPopover } from "./SkillMentionPopover";
 import ContextWarning from "./ContextWarning";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { t } from "../lib/grill-me";
 import { setWorkspaceStatus, isBusy } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
 import { GitIndicator } from "./GitIndicator";
@@ -77,497 +69,28 @@ import { Popover } from "./Popover";
 import { NewSessionPopover } from "./NewSessionPopover";
 import QuestionCard from "./QuestionCard";
 
-// The live streaming block re-parses the whole message every smooth-text tick
-// (~30/s), which used to re-highlight every code block each time. Completed
-// blocks hit this cache instead; only the still-growing block re-highlights.
-const highlightCache = new Map<string, string>();
-const HIGHLIGHT_CACHE_MAX = 300;
+import {
+  ellipsize,
+  promoteSubstantialText,
+  recordsToMessages,
+  type ChatMessage,
+  type QueuedSteeringEntry,
+  type Status,
+  type SubagentTimelineState,
+  type TimelineItem,
+} from "../lib/chatRecords";
+import {
+  ApprovalCard,
+  ArchivedBlock,
+  ContextFooter,
+  SubagentModal,
+  ThinkingBar,
+  TimelineSteps,
+  Trajectory,
+} from "./chat/TimelineRows";
 
-// True while parsing the live streaming message (see parseLiveMarkdown):
-// unlabeled blocks skip hljs.highlightAuto there — it tries every registered
-// grammar and is by far the worst per-tick cost.
-let parsingLiveMessage = false;
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-/** marked.parse for the live streaming block, with auto-detection disabled. */
-function parseLiveMarkdown(text: string): string {
-  parsingLiveMessage = true;
-  try {
-    return marked.parse(text, { async: false }) as string;
-  } finally {
-    parsingLiveMessage = false;
-  }
-}
-
-marked.use({
-  renderer: {
-    code({ text, lang }) {
-      // lang + text joined by a separator no fence language token can
-      // contain, so "js"+"xA" and "jsx"+"A" never collide as one key. Must
-      // not be a NUL byte: that makes git treat this whole file as binary.
-      const key = `${lang ?? ""}\x1f${text}`;
-      if (lang === "mermaid") {
-        // Emit a placeholder carrying the (encoded) source. ProseContent
-        // hydrates it into an SVG after injection; the visible <pre> is the
-        // fallback shown while streaming and on any render error. This runs
-        // inside marked.parse() during render, so it must not throw:
-        // encodeURIComponent rejects lone surrogates (possible in streamed or
-        // model-authored source), which would otherwise blank the message.
-        let encoded: string;
-        try {
-          encoded = encodeURIComponent(text);
-        } catch {
-          // Fall back to a plain code block — no diagram, but nothing breaks.
-          return `<div class="code-block"><pre class="hljs"><code>${escapeHtml(text)}</code></pre></div>`;
-        }
-        return `<div class="mermaid-block" data-mermaid="${encoded}">`
-          + `<pre class="mermaid-src"><code>${escapeHtml(text)}</code></pre></div>`;
-      }
-      let highlighted = highlightCache.get(key);
-      if (highlighted === undefined) {
-        if (lang && hljs.getLanguage(lang)) {
-          highlighted = hljs.highlight(text, { language: lang }).value;
-        } else if (parsingLiveMessage) {
-          // Don't cache: once the message completes, the final render
-          // auto-detects (one-time cost) and caches that result.
-          return `<div class="code-block"><pre class="hljs"><code>${escapeHtml(text)}</code></pre></div>`;
-        } else {
-          highlighted = hljs.highlightAuto(text).value;
-        }
-        if (highlightCache.size >= HIGHLIGHT_CACHE_MAX) highlightCache.clear();
-        highlightCache.set(key, highlighted);
-      }
-      const label = lang
-        ? `<span class="code-lang-label">${lang}</span>`
-        : "";
-      return `<div class="code-block">${label}<pre class="hljs"><code>${highlighted}</code></pre></div>`;
-    },
-    link({ href, title, text }) {
-      const clean = href.split('?')[0].split('#')[0];
-      const ext = clean.split('.').pop()?.toLowerCase();
-      let dataType = 'file';
-      if (href.match(/^https?:\/\//)) {
-        dataType = 'external';
-      } else if (ext && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) {
-        dataType = 'image';
-      } else if (ext && ['mp4', 'webm', 'mov'].includes(ext)) {
-        dataType = 'video';
-      } else if (ext && ['mp3', 'wav', 'ogg', 'flac'].includes(ext)) {
-        dataType = 'audio';
-      }
-      const titleAttr = title ? ` title="${title}"` : '';
-      return `<a href="${href}"${titleAttr} data-link-type="${dataType}">${text}</a>`;
-    },
-  },
-});
-
-type Status = "idle" | "thinking" | "awaiting_approval" | "awaiting_input" | "done" | "error";
-
-interface ArchivedBlock {
-  summary: string;
-  messages: ChatMessage[];
-}
-
-interface ChatMessage {
-  role: "user" | "assistant" | "archived";
-  text: string;
-  steps?: TimelineItem[];
-  done?: DoneData;
-  archived?: ArchivedBlock;
-  /** Files attached to a user message, shown as pills in the chat bubble */
-  attachments?: { name: string; mediaType: string; size: number }[];
-}
-
-interface SubagentTimelineState {
-  id: string;
-  name: string;
-  goal: string;
-  mode: string;
-  status: "running" | "completed" | "failed" | "interrupted" | "max_rounds";
-  rounds: number;
-  inputTokens: number;
-  outputTokens: number;
-  cost: number;
-  report?: string;
-  steps: TimelineItem[];
-}
-
-interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode" | "golden" | "linked";
-  thinking?: { text: string; startedAt: number; endedAt?: number };
-  tool?: {
-    call: ToolCallData;
-    result?: ToolResultData;
-    status: "running" | "ok" | "error";
-  };
-  phase?: Phase;
-  phaseResult?: { phase: Phase; text: string };
-  text?: string;
-  steering?: { text: string; attachments?: Array<{ name: string; mediaType: string; size: number }> };
-  subagent?: SubagentTimelineState;
-  compaction?: {
-    kind: "start" | "done" | "fail" | "handoff_start" | "handoff_fail";
-    args: string[];
-  };
-  modeChange?: ModeChangedData;
-  golden?: GoldenLoopData;
-  /// Chain divider: this conversation continued in a new linked session.
-  /// `firstMessage` (when present) is the successor's kickoff prompt / handoff
-  /// document, rendered collapsed. `docOnly` marks the predecessor-side
-  /// handoff-document record.
-  linked?: {
-    reason: HandoffReason;
-    mode?: SessionMode;
-    firstMessage?: string;
-    docOnly?: boolean;
-  };
-}
-
-interface QueuedSteeringEntry {
-  text: string;
-  attachments: Array<{ name: string; mediaType: string; size: number }>;
-}
-
-function modeChangeLabel(mc: ModeChangedData): string {
-  const label = t(`mode.changed.${mc.mode}.${mc.origin}`);
-  return mc.reason ? `${label} — ${t("mode.changed.reason", mc.reason)}` : label;
-}
-
-const PHASE_LABEL = (phase: Phase): string => {
-  switch (phase) {
-    case "plan": return t("chat.phase.plan");
-    case "execute": return t("chat.phase.execute");
-    case "summary": return t("chat.phase.summary");
-  }
-};
-
-function formatTokens(n: number): string {
-  if (n < 1000) return `${n}`;
-  return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-interface ContentBlockJson {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-  tool_use_id?: string;
-  content?: string;
-}
-
-// Mirror of persist.rs is_real_user_turn: a turn record that starts a real
-// user exchange (role "user", first content block is plain text).
-function isRealUserTurn(rec: SessionRecord): boolean {
-  if (rec.kind !== "turn" || rec.role !== "user") return false;
-  const content = (rec.content as ContentBlockJson[]) ?? [];
-  return content.length > 0 && content[0].type === "text";
-}
-
-// Mirror of persist.rs tail_start_index: where the kept-verbatim tail of a
-// Compacted marker begins. Expands backwards so the tail starts on a real
-// user turn; drops the tail (returns compactIdx) when none exists.
-function tailStartIndex(recs: SessionRecord[], compactIdx: number, tailTurns: number): number {
-  if (tailTurns <= 0) return compactIdx;
-  let start = compactIdx;
-  let count = 0;
-  for (let i = compactIdx - 1; i >= 0; i--) {
-    if (recs[i].kind === "turn") {
-      start = i;
-      count++;
-      if (count >= tailTurns) break;
-    }
-  }
-  if (count === 0) return compactIdx;
-  for (;;) {
-    if (isRealUserTurn(recs[start])) break;
-    let prev = -1;
-    for (let i = start - 1; i >= 0; i--) {
-      if (recs[i].kind === "turn") {
-        prev = i;
-        break;
-      }
-    }
-    if (prev < 0) return compactIdx;
-    start = prev;
-  }
-  // Pull in the raw user/steering records that precede the tail's user turn
-  // so the "Você" bubble renders in the active view, not the archive.
-  while (start > 0 && (recs[start - 1].kind === "user" || recs[start - 1].kind === "steering")) {
-    start--;
-  }
-  return start;
-}
-
-// Relocate each Compacted marker to before its kept-verbatim tail so the fold
-// logic below archives only what the backend actually summarized.
-function normalizeCompactTails(records: SessionRecord[]): SessionRecord[] {
-  const recs = [...records];
-  for (let i = 0; i < recs.length; i++) {
-    const rec = recs[i];
-    if (rec.kind !== "compacted") continue;
-    const tailTurns = Number(rec.tail_turns ?? 0);
-    if (tailTurns <= 0) continue;
-    const start = tailStartIndex(recs, i, tailTurns);
-    if (start < i) {
-      recs.splice(i, 1);
-      recs.splice(start, 0, rec);
-    }
-  }
-  return recs;
-}
-
-// Rebuild the chat transcript from a reopened session's JSONL records. User
-// turns become user bubbles; everything between them folds into one assistant
-// message with a phase/tool timeline. Tool results are paired to their calls by
-// tool_use_id across turn records.
-//
-// Compacted records are rendered as an ArchivedBlock: the messages the
-// compaction summarized fold into a collapsible section; the kept-verbatim
-// tail (tail_turns) stays in the active view.
-// Text long enough to be a real explanation rather than a one-line status note.
-const SUBSTANTIAL_TEXT_CHARS = 280;
-
-// A short closing message after tool calls often just points at a longer
-// explanation the model wrote mid-turn (before a trailing tasks_set). That
-// explanation would otherwise stay hidden inside the collapsed trajectory, so
-// hoist the last substantial text step into the visible answer.
-function promoteSubstantialText(
-  steps: TimelineItem[],
-  text: string,
-): { steps: TimelineItem[]; text: string } {
-  if (text.length >= SUBSTANTIAL_TEXT_CHARS) return { steps, text };
-  let idx = -1;
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const s = steps[i];
-    if (s.type === "text" && s.text && s.text.length >= SUBSTANTIAL_TEXT_CHARS) {
-      idx = i;
-      break;
-    }
-  }
-  if (idx === -1) return { steps, text };
-  const hoisted = steps[idx].text!;
-  return {
-    steps: steps.filter((_, i) => i !== idx),
-    text: text ? `${hoisted}\n\n${text}` : hoisted,
-  };
-}
-
-function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
-  const records = normalizeCompactTails(rawRecords);
-  const out: ChatMessage[] = [];
-  let steps: TimelineItem[] = [];
-  let assistantText = "";
-  let done: DoneData | undefined;
-  const toolIndex = new Map<string, number>();
-  // Pile of messages accumulated before a Compacted record
-  let preCompact: ChatMessage[] = [];
-
-  const flush = () => {
-    if (steps.length || assistantText || done) {
-      const promoted = promoteSubstantialText([...steps], assistantText);
-      const msg: ChatMessage = { role: "assistant", text: promoted.text, steps: promoted.steps };
-      if (done) msg.done = done;
-      preCompact.push(msg);
-      steps = [];
-      assistantText = "";
-      done = undefined;
-      toolIndex.clear();
-    }
-  };
-
-  const flushToOut = () => {
-    flush();
-    if (preCompact.length > 0) {
-      out.push(...preCompact);
-      preCompact = [];
-    }
-  };
-
-  // Set right after a linked_from record: the next raw `user` record is the
-  // harness-composed kickoff / handoff wrapper, which folds into the divider
-  // (collapsed) instead of rendering as a user bubble.
-  let pendingLinkIdx = -1;
-
-  for (const rec of records) {
-    const kind = rec.kind;
-    // Metadata records (base_commit, tasks, mode, status…) sit between
-    // linked_from and the kickoff user record — only real content resets the
-    // pending fold.
-    if (kind === "turn" || kind === "steering") pendingLinkIdx = -1;
-    if (kind === "linked_from") {
-      flush();
-      steps.push({
-        type: "linked",
-        linked: { reason: (rec.reason as HandoffReason) ?? "context_handoff" },
-      });
-      pendingLinkIdx = steps.length - 1;
-      continue;
-    }
-    if (kind === "handoff") {
-      steps.push({
-        type: "linked",
-        linked: {
-          reason: "context_handoff",
-          firstMessage: String(rec.text ?? ""),
-          docOnly: true,
-        },
-      });
-      continue;
-    }
-    if (kind === "user" && pendingLinkIdx >= 0) {
-      const idx = pendingLinkIdx;
-      pendingLinkIdx = -1;
-      const item = steps[idx];
-      if (item?.type === "linked" && item.linked) {
-        steps[idx] = {
-          ...item,
-          linked: { ...item.linked, firstMessage: String(rec.text ?? "") },
-        };
-        continue;
-      }
-    }
-    if (kind === "compacted") {
-      // Flush current assistant message into preCompact pile
-      flush();
-      // Wrap all pre-compact messages into an ArchivedBlock.
-      // If the last item before the marker is a bare "user" record, peel it back out:
-      // compaction can be inserted after receiving a user message but before its
-      // response turns are written (e.g. high context triggered auto-compact on "oi").
-      // The peeled user starts the visible post-compact transcript so the chat
-      // renders the prompt + the activity that followed the compaction marker.
-      let liveLead: ChatMessage | null = null;
-      if (preCompact.length > 0 && preCompact[preCompact.length - 1].role === "user") {
-        liveLead = preCompact.pop()!;
-      }
-      if (preCompact.length > 0) {
-        out.push({
-          role: "archived",
-          text: "",
-          archived: {
-            summary: String(rec.summary ?? ""),
-            messages: [...preCompact],
-          },
-        });
-      }
-      preCompact = [];
-      if (liveLead) preCompact.push(liveLead);
-    } else if (kind === "user") {
-      flush();
-      preCompact.push({ role: "user", text: String(rec.text ?? "") });
-    } else if (kind === "phase") {
-      steps.push({ type: "phase", phase: rec.phase as Phase });
-    } else if (kind === "phase_result") {
-      const phase = rec.phase as Phase;
-      const text = String(rec.text ?? "");
-      steps.push({ type: "phase_result", phaseResult: { phase, text } });
-      if (phase === "summary") assistantText = text;
-    } else if (kind === "turn") {
-      const role = rec.role as string;
-      const content = (rec.content as ContentBlockJson[]) ?? [];
-      if (role === "assistant") {
-        const hasToolUse = content.some((b) => b.type === "tool_use");
-        for (const block of content) {
-          if (block.type === "tool_use") {
-            steps.push({
-              type: "tool",
-              tool: {
-                call: {
-                  sessionId: "",
-                  toolId: block.id ?? "",
-                  toolName: block.name ?? "",
-                  args: block.input ?? {},
-                  permission: "auto",
-                },
-                status: "ok",
-              },
-            });
-            toolIndex.set(block.id ?? "", steps.length - 1);
-          } else if (block.type === "text" && block.text) {
-            if (hasToolUse) {
-              steps.push({ type: "text", text: block.text });
-            } else {
-              assistantText = block.text;
-            }
-          }
-        }
-      } else if (role === "user") {
-        for (const block of content) {
-          if (block.type === "tool_result" && block.tool_use_id) {
-            const idx = toolIndex.get(block.tool_use_id);
-            if (idx !== undefined) {
-              const item = steps[idx];
-              if (item.type === "tool" && item.tool) {
-                steps[idx] = {
-                  ...item,
-                  tool: {
-                    ...item.tool,
-                    result: {
-                      toolId: block.tool_use_id,
-                      toolName: item.tool.call.toolName,
-                      output: block.content ?? "",
-                    },
-                  },
-                };
-              }
-            }
-          }
-        }
-      }
-    } else if (kind === "steering") {
-      steps.push({
-        type: "steering",
-        steering: { text: String(rec.text ?? ""), attachments: rec.attachments as Array<{ name: string; mediaType: string; size: number }> | undefined },
-      });
-    } else if (kind === "mode") {
-      steps.push({
-        type: "mode",
-        modeChange: {
-          mode: normalizeSessionMode(rec.mode),
-          origin: rec.origin as ModeChangedData["origin"],
-        },
-      });
-    } else if (kind === "golden_cycle") {
-      steps.push({
-        type: "golden",
-        golden: {
-          cycle: Number(rec.cycle ?? 0),
-          maxCycles: 0,
-          pending: (rec.goals as string[]) ?? [],
-          mode: normalizeSessionMode(rec.mode),
-        },
-      });
-    } else if (kind === "done") {
-      done = {
-        stopReason: "end_turn",
-        textOutput: assistantText,
-        inputTokens: Number(rec.input_tokens ?? 0),
-        outputTokens: Number(rec.output_tokens ?? 0),
-      };
-    }
-  }
-  flushToOut();
-  return out;
-}
-
-// Fallback shown when a single message (or the live block) throws while
-// rendering. It MUST stay trivially safe — no markdown, no Icon, no ProseContent
-// — because it renders precisely when something else in the thread just failed.
-// Its whole purpose is to contain that failure to one bubble instead of letting
-// it blank the entire conversation (there is no ErrorBoundary above the list).
 const RenderErrorFallback: Component = () => (
-  <div class="my-2 ml-6 text-[11px] text-ink-faint">⚠ {t("chat.message.renderError")}</div>
+  <div class="my-2 ml-6 text-[11px] text-ink-faint">⚠ {"This message couldn't be displayed"}</div>
 );
 
 export const ChatPanel: Component<{
@@ -837,7 +360,7 @@ export const ChatPanel: Component<{
     // Phase 3: If we attached something via paste, prevent default text paste and show toast
     if (handled) {
       e.preventDefault();
-      showToast(t("chat.toast.fileAttached"));
+      showToast("File attached");
     }
   };
 
@@ -1095,7 +618,7 @@ export const ChatPanel: Component<{
       if (String(e).includes("API key not configured")) {
         setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
       } else {
-        setMessages((prev) => [...prev, { role: "user" as const, text: t("chat.message.failedToCompact", String(e)) }]);
+        setMessages((prev) => [...prev, { role: "user" as const, text: `Compaction failed: ${String(e)}` }]);
       }
     } finally {
       setIsCompacting(false);
@@ -1369,7 +892,7 @@ export const ChatPanel: Component<{
           inputTokens: 0,
           outputTokens: 0,
           cost: 0,
-          steps: [{ type: "thinking" as const, thinking: { text: t("chat.timeline.waiting"), startedAt: now } }],
+          steps: [{ type: "thinking" as const, thinking: { text: "Waiting for response...", startedAt: now } }],
         },
       }));
       setCurrentSteps((prev) => [
@@ -1547,7 +1070,7 @@ export const ChatPanel: Component<{
           if (String(e).includes("API key not configured")) {
             setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
           } else {
-            setMessages((prev) => [...prev, { role: "user" as const, text: t("chat.message.failedToSend", String(e)) }]);
+            setMessages((prev) => [...prev, { role: "user" as const, text: `Failed to send: ${String(e)}` }]);
           }
           setStatus("idle");
         }
@@ -1588,7 +1111,7 @@ export const ChatPanel: Component<{
       const ctx = await buildEnhanceContext(text);
       return await enhancePrompt(props.workspace, text, ctx);
     } catch (e) {
-      showToast(t("enhance.error", String(e)));
+      showToast(`Enhancement failed: ${String(e)}`);
       throw e;
     } finally {
       setIsEnhancing(false);
@@ -1703,7 +1226,7 @@ export const ChatPanel: Component<{
         setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
         setStatus("idle");
       } else {
-        setMessages((prev) => [...prev, { role: "user" as const, text: t("chat.message.failedToSend", String(e)) }]);
+        setMessages((prev) => [...prev, { role: "user" as const, text: `Failed to send: ${String(e)}` }]);
         setStatus("error");
       }
     }
@@ -1716,7 +1239,7 @@ export const ChatPanel: Component<{
     try {
       await approveTool(tc.sessionId, tc.toolId);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: t("chat.approval.failed", String(e)) }]);
+      setMessages((prev) => [...prev, { role: "user", text: `Approval failed: ${String(e)}` }]);
     }
   };
 
@@ -1728,7 +1251,7 @@ export const ChatPanel: Component<{
     try {
       await submitAnswers(ask.sessionId, ask.toolId, answers);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: t("chat.question.answerFailed", String(e)) }]);
+      setMessages((prev) => [...prev, { role: "user", text: `Failed to submit answers: ${String(e)}` }]);
     }
   };
 
@@ -1739,7 +1262,7 @@ export const ChatPanel: Component<{
     try {
       await rejectTool(tc.sessionId, tc.toolId);
     } catch (e) {
-      setMessages((prev) => [...prev, { role: "user", text: t("chat.approval.rejectFailed", String(e)) }]);
+      setMessages((prev) => [...prev, { role: "user", text: `Rejection failed: ${String(e)}` }]);
     }
   };
 
@@ -1847,7 +1370,7 @@ export const ChatPanel: Component<{
       scrollToBottom(true);
     } catch (e) {
       console.error("reopenSession failed", e);
-      setMessages((prev) => [...prev, { role: "user", text: t("chat.message.failedToReopen", String(e)) }]);
+      setMessages((prev) => [...prev, { role: "user", text: `Failed to reopen: ${String(e)}` }]);
       setShowSessions(false);
     }
   };
@@ -1883,12 +1406,12 @@ export const ChatPanel: Component<{
 
   const statusLabel = () => {
     switch (status()) {
-      case "thinking": return t("chat.status.working");
-      case "awaiting_approval": return t("chat.status.awaitingApproval");
-      case "awaiting_input": return t("chat.status.awaitingInput");
-      case "done": return t("chat.status.done");
-      case "error": return t("chat.status.error");
-      default: return t("chat.status.idle");
+      case "thinking": return "Working";
+      case "awaiting_approval": return "Awaiting approval";
+      case "awaiting_input": return "Awaiting your input";
+      case "done": return "Done";
+      case "error": return "Error";
+      default: return "Idle";
     }
   };
 
@@ -1907,7 +1430,7 @@ export const ChatPanel: Component<{
       <div class="relative flex items-center justify-between border-b border-border-subtle px-6 py-1.5">
         <div class="flex items-center gap-2">
           <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-            {t("chat.header.agent")}
+            {"Agent"}
           </span>
           <span
             class={`inline-block h-[6px] w-[6px] rounded-full ${statusDot()}`}
@@ -1930,29 +1453,29 @@ export const ChatPanel: Component<{
               }
             }}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
-            title={t("chat.header.newSession")}
+            title={"New session"}
           >
             <Icon name="plus" class="h-3.5 w-3.5" />
-            {t("chat.header.new")}
+            {"New"}
           </button>
           <ContextWarning workspace={props.workspace} />
           <button
             ref={historyButtonRef}
             onClick={toggleSessions}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
-            title={t("chat.header.savedSessions")}
+            title={"Saved sessions"}
           >
             <Icon name="clock" class="h-3.5 w-3.5" />
-            {t("chat.header.history")}
+            {"History"}
           </button>
           <button
             ref={plansButtonRef}
             onClick={togglePlans}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
-            title={t("chat.header.plans")}
+            title={"Plans"}
           >
             <Icon name="archive-drawer" class="h-3.5 w-3.5" />
-            {t("chat.header.plans")}
+            {"Plans"}
           </button>
           <GitIndicator workspace={props.workspace} active={props.isActive()} onShowChanges={() => setShowGitModal(true)} />
           <NetworkIndicator workspace={props.workspace} onClick={() => setShowNetModal(true)} />
@@ -1985,7 +1508,7 @@ export const ChatPanel: Component<{
           <div class="max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
             <Show
               when={sessions().length > 0}
-              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{t("chat.header.noSessions")}</div>}
+              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{"No saved sessions."}</div>}
             >
               <For each={sessions()}>
                 {(s) => (
@@ -1995,7 +1518,7 @@ export const ChatPanel: Component<{
                   >
                     <span class="truncate text-[12px] text-ink">{s.title}</span>
                     <span class="font-mono text-[10px] text-ink-faint">
-                      {new Date(s.updatedAt).toLocaleString()} · {s.turnCount} {s.turnCount === 1 ? t("chat.header.turn") : t("chat.header.turns")}
+                      {new Date(s.updatedAt).toLocaleString()} · {s.turnCount} {s.turnCount === 1 ? "" : "s"}
                     </span>
                   </button>
                 )}
@@ -2015,7 +1538,7 @@ export const ChatPanel: Component<{
           <div class="max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
             <Show
               when={plans().length > 0}
-              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{t("chat.header.noPlans")}</div>}
+              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{"No plans found."}</div>}
             >
               <For each={plans()}>
                 {(p) => (
@@ -2051,19 +1574,19 @@ export const ChatPanel: Component<{
                 <Show when={msg.role === "user"}>
                   <div class="mb-1">
                     <span class="text-[11px] font-semibold uppercase tracking-wider text-accent">
-                      {t("chat.message.you")}
+                      {"You"}
                     </span>
                   </div>
                   <Show when={msg.text === "__auth_card__"}>
                     <div class="rounded-lg border border-border-subtle bg-surface-1 p-4">
-                      <h3 class="mb-1 text-sm font-semibold text-ink">{t("chat.authCard.title")}</h3>
-                      <p class="mb-3 text-xs text-ink-muted">{t("chat.authCard.description")}</p>
+                      <h3 class="mb-1 text-sm font-semibold text-ink">{"Sign in required"}</h3>
+                      <p class="mb-3 text-xs text-ink-muted">{"Sign in to claudin.io to send messages."}</p>
                       <button
                         onClick={handleAuthSignIn}
                         disabled={authSigningIn()}
                         class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
                       >
-                        {authSigningIn() ? t("chat.authCard.signingIn") : t("chat.authCard.signIn")}
+                        {authSigningIn() ? "Signing in…" : "Sign In"}
                       </button>
                     </div>
                   </Show>
@@ -2110,7 +1633,7 @@ export const ChatPanel: Component<{
                   <Show when={msg.text}>
                     <ProseContent
                       class="prose-content text-[13px] text-ink"
-                      html={marked.parse(msg.text, { async: false }) as string}
+                      html={renderMarkdown(msg.text)}
                       onClick={(e) => {
                         const a = (e.target as HTMLElement).closest("a[data-link-type]");
                         if (!a) return;
@@ -2138,14 +1661,14 @@ export const ChatPanel: Component<{
                 class="inline-flex items-center gap-2 rounded-full border border-border-subtle bg-surface-1 px-5 py-2.5 text-sm font-semibold text-ink-muted transition-all hover:bg-surface-2 hover:text-ink active:scale-[0.98]"
               >
                 <Icon name="archive-drawer" class="h-4 w-4" />
-                {t("mode.readPlan")}
+                {"Read Plan"}
               </button>
               <button
                 onClick={continueWithBuilder}
                 class="inline-flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-accent-ink shadow-lg shadow-accent/20 transition-all hover:bg-accent/90 hover:shadow-xl hover:shadow-accent/30 active:scale-[0.98]"
               >
                 <Icon name="construction-worker" class="h-4 w-4" />
-                {t("mode.continueWithBuilder")}
+                {"Continue with Builder"}
               </button>
             </div>
           </Show>
@@ -2167,7 +1690,7 @@ export const ChatPanel: Component<{
                     <ProseContent
                       live
                       class="prose-content text-[13px] leading-[1.6] text-ink"
-                      html={parseLiveMarkdown(balanceMarkdown(smoothLiveText.displayed()))}
+                      html={renderLiveMarkdown(balanceMarkdown(smoothLiveText.displayed()))}
                       onClick={(e) => {
                         const a = (e.target as HTMLElement).closest("a[data-link-type]");
                         if (!a) return;
@@ -2220,7 +1743,7 @@ export const ChatPanel: Component<{
           <button
             class="absolute bottom-4 right-6 z-10 flex h-8 w-8 items-center justify-center rounded-full border border-border-subtle bg-surface text-ink-muted shadow-md transition-colors hover:text-ink"
             onClick={() => scrollToBottom(true)}
-            title={t("chat.scrollToBottom")}
+            title={"Scroll to bottom"}
           >
             <Icon name="chevron-down" class="h-4 w-4" />
           </button>
@@ -2245,7 +1768,7 @@ export const ChatPanel: Component<{
               <>
                 <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
                   <span class="h-1.5 w-1.5 rounded-full bg-accent" />
-                  {s.text.length > 40 ? `${s.text.slice(0, 40)}…` : s.text}
+                  {ellipsize(s.text, 40)}
                 </span>
                 <For each={s.attachments}>
                   {(att) => (
@@ -2308,8 +1831,8 @@ export const ChatPanel: Component<{
                 <Icon name="external-link" class="h-4 w-4" />
               </div>
               <div class="min-w-0">
-                <p class="text-[13px] font-semibold text-ink">{t("chat.budgetBanner.title")}</p>
-                <p class="text-[12px] text-ink-muted mt-0.5">{t("chat.budgetBanner.description")}</p>
+                <p class="text-[13px] font-semibold text-ink">{"Plan budget reached"}</p>
+                <p class="text-[12px] text-ink-muted mt-0.5">{"You've hit your usage limit, so the agent can't continue. Upgrade your plan to keep going."}</p>
               </div>
             </div>
             <div class="flex gap-2 shrink-0">
@@ -2317,13 +1840,13 @@ export const ChatPanel: Component<{
                 onClick={() => setRetryableError(null)}
                 class="rounded-md px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-surface-2"
               >
-                {t("chat.budgetBanner.dismiss")}
+                {"Dismiss"}
               </button>
               <button
                 onClick={() => openExternalUrl("https://claudin.io/dashboard#billing")}
                 class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-accent-ink hover:bg-accent/80"
               >
-                {t("chat.budgetBanner.upgrade")}
+                {"Upgrade plan"}
               </button>
             </div>
           </div>
@@ -2336,12 +1859,7 @@ export const ChatPanel: Component<{
             <div class="flex items-center gap-3">
               <div class="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-amber-500/30 border-t-amber-500" />
               <p class="min-w-0 truncate text-[13px] text-amber-600">
-                {t(
-                  "chat.reconnecting.banner",
-                  String(info().attempt),
-                  String(info().maxAttempts),
-                  String(Math.round(info().delayMs / 1000)),
-                )}
+                {`Connection lost — retrying in ${String(Math.round(info().delayMs / 1000))}s (attempt ${String(info().attempt)} of ${String(info().maxAttempts)})`}
                 <span class="ml-2 text-[11px] text-ink-faint">{info().error}</span>
               </p>
             </div>
@@ -2352,19 +1870,19 @@ export const ChatPanel: Component<{
       <Show when={retryableError() !== null && !isBudgetError()}>
         <div class="border-t border-danger/30 bg-danger/5 px-4 py-3">
           <div class="flex items-center justify-between gap-4">
-            <p class="text-[13px] text-danger shrink-0">{t("chat.status.error")}: {retryableError()}</p>
+            <p class="text-[13px] text-danger shrink-0">{"Error"}: {retryableError()}</p>
             <div class="flex gap-2 shrink-0">
               <button
                 onClick={() => setRetryableError(null)}
                 class="rounded-md px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-surface-2"
               >
-                {t("chat.errorBar.dismiss")}
+                {"Dismiss"}
               </button>
               <button
                 onClick={handleRetryContinue}
                 class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:bg-accent/80"
               >
-                {t("chat.errorBar.continue")}
+                {"Continue"}
               </button>
             </div>
           </div>
@@ -2457,14 +1975,14 @@ export const ChatPanel: Component<{
               disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
               placeholder={
                 isCompacting()
-                  ? t("chat.input.compacting")
+                  ? "Compacting context…"
                   : status() === "awaiting_approval"
-                    ? t("chat.input.approveFirst")
+                    ? "Approve or reject the edit first…"
                     : status() === "awaiting_input"
-                      ? t("chat.input.answerFirst")
+                      ? "Answer the questions above first…"
                       : status() === "thinking"
-                        ? t("chat.input.steerAgent")
-                        : t("chat.input.askCode")
+                        ? "Type to steer the agent… (Esc to pause)"
+                        : "Write anything… | @file | <tag> | <skill>"
               }
               class="max-h-[156px] min-h-[32px] w-full resize-none border-0 bg-transparent px-1 py-1.5 text-[13px] leading-[18px] text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
               rows={1}
@@ -2480,7 +1998,7 @@ export const ChatPanel: Component<{
                   }}
                   disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
                   class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
-                  title={t("chat.input.attachFile")}
+                  title={"Attach file"}
                 >
                   <Icon name="paperclip" class="h-4 w-4" />
                 </button>
@@ -2488,7 +2006,7 @@ export const ChatPanel: Component<{
                   onClick={() => setShowEditor(true)}
                   disabled={isCompacting() || status() === "awaiting_approval" || status() === "awaiting_input"}
                   class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-ink-muted hover:bg-surface-3 hover:text-accent disabled:opacity-30"
-                  title={t("editor.open")}
+                  title={"Open editor"}
                 >
                   <Icon name="notebook-pen" class="h-4 w-4" stroke />
                 </button>
@@ -2500,7 +2018,7 @@ export const ChatPanel: Component<{
                         ? "bg-accent/15 text-accent"
                         : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
                     }`}
-                    title={t("mode.brain.tooltip")}
+                    title={"Brain mode: read-only exploration, requirements interview, plan + tasks"}
                   >
                     <Icon name="thinking-face" class="h-4 w-4" />
                   </button>
@@ -2511,7 +2029,7 @@ export const ChatPanel: Component<{
                         ? "bg-accent/15 text-accent"
                         : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
                     }`}
-                    title={t("mode.builder.tooltip")}
+                    title={"Builder mode: executes the plan's tasks with subagents"}
                   >
                     <Icon name="construction-worker" class="h-4 w-4" />
                   </button>
@@ -2530,7 +2048,7 @@ export const ChatPanel: Component<{
                       if (sid) interruptSession(sid).catch(() => {});
                     }}
                     class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-danger/20 text-danger hover:bg-danger/40"
-                    title={t("chat.input.stop")}
+                    title={"Stop"}
                   >
                     <Icon name="stop" class="h-4 w-4" />
                   </button>
@@ -2616,8 +2134,8 @@ export const ChatPanel: Component<{
         <div class="drop-overlay">
           <div class="drop-overlay-inner">
             <Icon name="paperclip" class="h-8 w-8" />
-            <span>{t("chat.drop.title")}</span>
-            <small>{t("chat.drop.hint")}</small>
+            <span>{"Drop file to attach"}</span>
+            <small>{"Images, PDFs, docs, code and more"}</small>
           </div>
         </div>
       </Show>
@@ -2680,939 +2198,3 @@ export const ChatPanel: Component<{
   );
 };
 
-const ArchivedBlock: Component<{
-  summary: string;
-  messages: ChatMessage[];
-}> = (props) => {
-  const [expanded, setExpanded] = createSignal(false);
-
-  return (
-    <div class="mb-6 overflow-hidden rounded-lg border border-border-subtle bg-surface-1">
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-surface-2"
-      >
-        <Icon
-          name="compress"
-          class={`h-3.5 w-3.5 shrink-0 text-ink-faint transition-transform duration-120 ${expanded() ? "rotate-90" : ""}`}
-        />
-        <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-          {t("chat.archived.title")}
-        </span>
-        <div class="h-px flex-1 bg-border-subtle" />
-        <span class="text-[11px] text-ink-faint">
-          {t("chat.archived.messages", String(props.messages.length))}
-        </span>
-        <Icon
-          name="chevron-right"
-          class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${expanded() ? "rotate-90" : ""}`}
-        />
-      </button>
-
-      <Show when={expanded()}>
-        <div class="border-t border-border-subtle px-3 py-2">
-          <div class="mb-3 text-[12px] leading-[1.6] text-ink-muted">
-            {props.summary}
-          </div>
-          <div class="space-y-2 opacity-60">
-            <For each={props.messages}>
-              {(msg) => (
-                <div class="rounded bg-surface-0 px-2 py-1.5">
-                  <span class="mr-2 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
-                    {msg.role === "user" ? t("chat.archived.you") : t("chat.archived.agent")}
-                  </span>
-                  <span class="text-[12px] text-ink-muted">
-                    {msg.text.length > 120 ? `${msg.text.slice(0, 120)}…` : msg.text}
-                  </span>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-      </Show>
-    </div>
-  );
-};
-
-const ContextFooter: Component<{
-  contextTokens: number;
-  maxTokens: number;
-  cumulativeTokens: number;
-  estimatedCost?: number;
-  costInput?: number;
-  costOutput?: number;
-  costCacheRead?: number;
-  isCompacting: boolean;
-  onCompact: () => void;
-  showCompact: boolean;
-}> = (props) => {
-  const hasBreakdown = () =>
-    props.costInput !== undefined && props.costOutput !== undefined && props.costCacheRead !== undefined;
-  const costTitle = () =>
-    hasBreakdown()
-      ? t(
-          "chat.context.costBreakdown",
-          props.costInput!.toFixed(4),
-          props.costOutput!.toFixed(4),
-          props.costCacheRead!.toFixed(4),
-        )
-      : t("chat.context.sessionCost");
-  const pct = () => Math.min((props.contextTokens / props.maxTokens) * 100, 100);
-  const barColor = () => {
-    if (pct() < 50) return "bg-success";
-    if (pct() < 80) return "bg-[#d9a05b]";
-    if (pct() < 95) return "bg-accent";
-    return "bg-danger";
-  };
-
-  const formatTokens = (n: number) => {
-    if (n < 1000) return `${n}`;
-    return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
-  };
-
-  return (
-    <div class="flex items-center gap-3 border-t border-border-subtle bg-surface-2 px-6 py-1.5">
-      <div class="flex flex-1 items-center gap-2" title={t("chat.context.nextRequest")}>
-        <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-0">
-          <div
-            class={`h-full rounded-full transition-[width] duration-300 ease-out ${barColor()}`}
-            style={{ width: `${pct()}%` }}
-          />
-        </div>
-        <span class="font-mono text-[11px] text-ink-faint whitespace-nowrap">
-          {formatTokens(props.contextTokens)} / {formatTokens(props.maxTokens)}
-        </span>
-      </div>
-
-      <Show when={props.cumulativeTokens > 0}>
-        <span
-          class="font-mono text-[11px] text-ink-faint whitespace-nowrap"
-          title={t("chat.context.sessionTokens")}
-        >
-          {t("chat.context.total", formatTokens(props.cumulativeTokens))}
-        </span>
-      </Show>
-
-      <Show when={props.estimatedCost !== undefined}>
-        <span class="font-mono text-[11px] text-ink-faint" title={costTitle()}>
-          ${props.estimatedCost!.toFixed(4)}
-        </span>
-      </Show>
-
-      <Show when={props.showCompact && !props.isCompacting}>
-        <button
-          onClick={props.onCompact}
-          class="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-ink-muted hover:bg-surface-3 hover:text-accent"
-        >
-          <Icon name="compress" class="h-3 w-3" />
-          {t("chat.context.compact")}
-        </button>
-      </Show>
-
-      <Show when={props.isCompacting}>
-        <span class="flex items-center gap-1 text-[11px] text-accent">
-          <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
-          {t("chat.context.compacting")}
-        </span>
-      </Show>
-    </div>
-  );
-};
-
-const Trajectory: Component<{
-  steps: TimelineItem[];
-  tokens?: { input: number; output: number };
-  onViewDetails?: (id: string) => void;
-}> = (props) => {
-  const [expanded, setExpanded] = createSignal(false);
-  const [expandedStep, setExpandedStep] = createSignal<number | null>(null);
-
-  const stats = () => {
-    let ms = 0;
-    let count = 0;
-    for (const s of props.steps) {
-      if (s.type === "thinking" && s.thinking) {
-        count++;
-        ms += (s.thinking.endedAt ?? Date.now()) - s.thinking.startedAt;
-      } else if (s.type === "tool") {
-        count++;
-      }
-    }
-    return { ms, count };
-  };
-
-  const hasTrajectory = () => stats().count > 0;
-
-  const tokensLabel = () =>
-    props.tokens ? `${formatTokens(props.tokens.input)} → ${formatTokens(props.tokens.output)} tokens` : "";
-
-  const summary = () => {
-    const { ms, count } = stats();
-    const parts = [t("chat.timeline.workedFor", formatDuration(ms)), t("chat.timeline.steps", String(count), count === 1 ? "" : "s")];
-    if (props.tokens) parts.push(tokensLabel());
-    return parts.join(" · ");
-  };
-
-  return (
-    <Show
-      when={hasTrajectory()}
-      fallback={
-        <div class="mb-4">
-          <div class="trajectory-rail flex flex-col gap-0.5">
-            <TimelineSteps
-              steps={props.steps}
-              expandedStep={expandedStep()}
-              onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
-              isLive={false}
-              onViewDetails={props.onViewDetails}
-            />
-          </div>
-          <Show when={props.tokens}>
-            <div class="mt-1 font-mono text-[11px] text-ink-faint">{tokensLabel()}</div>
-          </Show>
-        </div>
-      }
-    >
-      <div class="mb-4">
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          class="flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-ink-faint hover:text-ink-muted"
-        >
-          <Icon
-            name="chevron-right"
-            class={`h-3 w-3 shrink-0 transition-transform duration-120 ${expanded() ? "rotate-90" : ""}`}
-          />
-          <span>{summary()}</span>
-        </button>
-        <div class={`trajectory-collapse ${expanded() ? "is-open" : ""}`}>
-          <div>
-            <div class="trajectory-rail mt-2 flex flex-col gap-0.5">
-              <TimelineSteps
-                steps={props.steps}
-                expandedStep={expandedStep()}
-                onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
-                isLive={false}
-                onViewDetails={props.onViewDetails}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-    </Show>
-  );
-};
-
-const TimelineSteps: Component<{
-  steps: TimelineItem[];
-  expandedStep: number | null;
-  onToggle: (index: number) => void;
-  isLive: boolean;
-  onViewDetails?: (id: string) => void;
-  /// Smoothed live text for the currently-streaming "Thoughts" block, main
-  /// agent run only (not passed by the subagent-detail-panel call sites).
-  liveThinkingDisplay?: () => string;
-}> = (props) => {
-  return (
-    <For each={props.steps}>
-      {(step, i) => (
-        <>
-          <Show when={step.type === "compaction" && step.compaction}>
-            <CompactionRow compaction={step.compaction!} />
-          </Show>
-          <Show when={step.type === "phase" && step.phase}>
-            <PhaseRow phase={step.phase!} />
-          </Show>
-          <Show when={step.type === "phase_result" && step.phaseResult}>
-            <PhaseResultRow phaseResult={step.phaseResult!} />
-          </Show>
-          <Show when={step.type === "text" && step.text}>
-            <TextRow text={step.text!} />
-          </Show>
-          <Show when={step.type === "thinking" && step.thinking}>
-            <ThinkingRow
-              thinking={step.thinking!}
-              isLive={props.isLive}
-              isLast={i() === props.steps.length - 1}
-              isExpanded={props.expandedStep === i()}
-              onToggle={() => props.onToggle(i())}
-              liveText={i() === props.steps.length - 1 ? props.liveThinkingDisplay : undefined}
-            />
-          </Show>
-          <Show when={step.type === "tool" && step.tool}>
-            <ToolRow
-              tool={step.tool!}
-              isExpanded={props.expandedStep === i()}
-              onToggle={() => props.onToggle(i())}
-            />
-          </Show>
-          <Show when={step.type === "steering" && step.steering}>
-            <div class="my-1 ml-6 flex flex-col gap-1">
-              <div class="flex items-center gap-1.5">
-                <span class="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
-                  <span class="h-1.5 w-1.5 rounded-full bg-accent" />
-                  {step.steering!.text.length > 50
-                    ? `${step.steering!.text.slice(0, 50)}…`
-                    : step.steering!.text}
-                </span>
-                <span class="text-[10px] text-ink-faint">{t("chat.timeline.steering")}</span>
-              </div>
-              <Show when={step.steering!.attachments && step.steering!.attachments!.length > 0}>
-                <div class="ml-6 flex flex-wrap gap-1">
-                  <For each={step.steering!.attachments!}>
-                    {(att) => (
-                      <span class="inline-flex items-center gap-1 rounded-md border border-border-subtle bg-surface-1 px-2 py-0.5 text-[10px] text-ink-muted">
-                        <Icon
-                          name={(att.mediaType ?? "").startsWith("image/") ? "image" : "file-text"}
-                          class="h-3 w-3 shrink-0"
-                        />
-                        <span class="max-w-[120px] truncate">{att.name}</span>
-                        <span class="font-mono text-[10px] text-ink-faint">
-                          {att.size > 1024 * 1024
-                            ? `${(att.size / (1024 * 1024)).toFixed(1)} MB`
-                            : att.size > 1024
-                              ? `${(att.size / 1024).toFixed(0)} KB`
-                              : `${att.size} B`}
-                        </span>
-                      </span>
-                    )}
-                  </For>
-                </div>
-              </Show>
-            </div>
-          </Show>
-          <Show when={step.type === "subagent" && step.subagent}>
-            <SubagentRow subagent={step.subagent!} onViewDetails={props.onViewDetails} />
-          </Show>
-          <Show when={step.type === "mode" && step.modeChange}>
-            <div class="my-1 ml-6 flex items-center gap-1.5">
-              <span class="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
-                <Icon
-                  name={step.modeChange!.mode === "brain" ? "thinking-face" : "construction-worker"}
-                  class="h-3 w-3"
-                />
-                {modeChangeLabel(step.modeChange!)}
-              </span>
-            </div>
-          </Show>
-          <Show when={step.type === "golden" && step.golden}>
-            <div class="my-1 ml-6 flex items-center gap-1.5">
-              <span
-                class="gold-outline inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] text-amber-500"
-                title={step.golden!.pending.join(", ")}
-              >
-                <Icon name="goal" class="h-3 w-3" />
-                {step.golden!.maxCycles > 0
-                  ? t("golden.loop", String(step.golden!.cycle), String(step.golden!.maxCycles), String(step.golden!.pending.length))
-                  : t("golden.loop.replay", String(step.golden!.cycle), String(step.golden!.pending.length))}
-              </span>
-            </div>
-          </Show>
-          <Show when={step.type === "linked" && step.linked}>
-            <LinkedRow linked={step.linked!} />
-          </Show>
-        </>
-      )}
-    </For>
-  );
-};
-
-/// Chain divider: the conversation continued in a new linked session (or, with
-/// `docOnly`, the predecessor's handoff document). Indicator only — the
-/// kickoff / handoff text stays stored in the session JSONL but is never
-/// rendered in the thread.
-const LinkedRow: Component<{
-  linked: NonNullable<TimelineItem["linked"]>;
-}> = (props) => {
-  const label = () => {
-    if (props.linked.docOnly) return t("chat.linked.handoffDoc");
-    switch (props.linked.reason) {
-      case "plan_execution": return t("chat.linked.planExecution");
-      case "golden_flip": return t("chat.linked.goldenFlip");
-      case "context_handoff": return t("chat.linked.contextHandoff");
-      case "manual_builder": return t("chat.linked.manualBuilder");
-      default: return t("chat.linked.contextHandoff");
-    }
-  };
-  return (
-    <div class="my-2 flex items-center gap-2">
-      <div class="h-px flex-1 bg-border-subtle" />
-      <span class="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-0.5 text-[11px] text-accent">
-        <Icon name="git-branch" class="h-3 w-3" />
-        <span>{label()}</span>
-      </span>
-      <div class="h-px flex-1 bg-border-subtle" />
-    </div>
-  );
-};
-
-const SubagentRow: Component<{
-  subagent: SubagentTimelineState;
-  onViewDetails?: (id: string) => void;
-}> = (props) => {
-  const badgeClass = () => {
-    switch (props.subagent.status) {
-      case "running": return "bg-accent/15 text-accent";
-      case "completed": return "bg-success/15 text-success";
-      case "failed": return "bg-danger/15 text-danger";
-      case "interrupted": return "bg-amber-500/15 text-amber-500";
-      case "max_rounds": return "bg-amber-500/15 text-amber-500";
-    }
-  };
-
-  const statusLabel = () => {
-    switch (props.subagent.status) {
-      case "running": return t("chat.subagent.running");
-      case "completed": return t("chat.subagent.completed", String(props.subagent.rounds));
-      case "failed": return t("chat.subagent.failed");
-      case "interrupted": return t("chat.subagent.interrupted");
-      case "max_rounds": return t("chat.subagent.maxRounds");
-    }
-  };
-
-  return (
-    <div class="my-2 ml-4 border-l-2 border-accent/30 pl-2">
-      <button
-        onClick={() => props.onViewDetails?.(props.subagent.id)}
-        class="flex w-full flex-col gap-0.5 rounded px-1 py-0.5 text-xs hover:bg-surface-2"
-      >
-        <div class="flex w-full items-center gap-2">
-          <span class="trajectory-node flex h-4 w-4 shrink-0 items-center justify-center">
-            <Icon name="layers" class="h-[11px] w-[11px] text-accent" />
-          </span>
-          <span class="font-mono text-[12px] text-ink-muted">{props.subagent.name}</span>
-          <span class={`rounded px-1 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
-            {props.subagent.mode}
-          </span>
-          <span class="text-[11px] text-ink-faint">{statusLabel()}</span>
-          <Show when={props.subagent.status === "running"}>
-            <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
-          </Show>
-          <div class="ml-auto flex items-center gap-2">
-            <Show when={props.subagent.inputTokens > 0}>
-              <span class="font-mono text-[10px] text-ink-faint">
-                {formatTokens(props.subagent.inputTokens)}→{formatTokens(props.subagent.outputTokens)}
-                <Show when={props.subagent.cost > 0}>
-                  <span class="text-ink-faint">
-                    {" · $"}
-                    {props.subagent.cost < 0.01
-                      ? props.subagent.cost.toFixed(6)
-                      : props.subagent.cost < 1
-                        ? props.subagent.cost.toFixed(4)
-                        : props.subagent.cost.toFixed(2)}
-                  </span>
-                </Show>
-              </span>
-            </Show>
-            <Icon name="external-link" class="h-3 w-3 text-ink-faint" />
-          </div>
-        </div>
-        <Show when={props.subagent.goal}>
-          <div class="ml-6 flex items-start gap-1">
-            <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.goal")}</span>
-            <span class="truncate text-[11px] text-ink-muted">
-              {props.subagent.goal.length > 80 ? props.subagent.goal.slice(0, 80) + "…" : props.subagent.goal}
-            </span>
-          </div>
-        </Show>
-        <Show when={props.subagent.report}>
-          <div class="ml-6 flex items-start gap-1">
-            <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.report")}</span>
-            <span class="truncate text-[11px] text-ink-muted">
-              {props.subagent.report!.length > 120 ? props.subagent.report!.slice(0, 120) + "…" : props.subagent.report}
-            </span>
-          </div>
-        </Show>
-      </button>
-    </div>
-  );
-};
-
-const SubagentModal: Component<{
-  subagent: SubagentTimelineState;
-  onClose: () => void;
-}> = (props) => {
-  const [expandedStep, setExpandedStep] = createSignal<number | null>(null);
-
-  onMount(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    onCleanup(() => document.removeEventListener("keydown", onKey));
-  });
-
-  const badgeClass = () => {
-    switch (props.subagent.status) {
-      case "running": return "bg-accent/15 text-accent";
-      case "completed": return "bg-success/15 text-success";
-      case "failed": return "bg-danger/15 text-danger";
-      case "interrupted": return "bg-amber-500/15 text-amber-500";
-      case "max_rounds": return "bg-amber-500/15 text-amber-500";
-    }
-  };
-
-  const statusLabel = () => {
-    switch (props.subagent.status) {
-      case "running": return t("chat.subagent.running");
-      case "completed": return t("chat.subagent.completed", String(props.subagent.rounds));
-      case "failed": return t("chat.subagent.failed");
-      case "interrupted": return t("chat.subagent.interrupted");
-      case "max_rounds": return t("chat.subagent.maxRounds");
-    }
-  };
-
-  return (
-    <div
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-      onClick={(e) => { if (e.target === e.currentTarget) props.onClose(); }}
-    >
-      <div class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl bg-surface-0 shadow-2xl">
-        <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
-          <div class="flex items-center gap-2">
-            <span class="font-mono text-[14px] font-semibold text-ink">{props.subagent.name}</span>
-            <span class={`rounded px-1.5 py-0.5 text-[10px] font-medium ${badgeClass()}`}>
-              {props.subagent.mode}
-            </span>
-            <span class="text-[12px] text-ink-faint">{statusLabel()}</span>
-          </div>
-          <button
-            onClick={props.onClose}
-            class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2"
-          >
-            <Icon name="x" class="h-4 w-4" />
-          </button>
-        </div>
-        <div class="overflow-y-auto px-5 py-3 space-y-4">
-          <Show when={props.subagent.goal}>
-            <div class="rounded-md bg-surface-1 p-3">
-              <span class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.goal")}</span>
-              <p class="whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.6] text-ink-muted">
-                {props.subagent.goal}
-              </p>
-            </div>
-          </Show>
-
-          <TimelineSteps
-            steps={props.subagent.steps}
-            expandedStep={expandedStep()}
-            onToggle={(i) => setExpandedStep(expandedStep() === i ? null : i)}
-            isLive={props.subagent.status === "running"}
-          />
-
-          <Show when={props.subagent.report}>
-            <div class="rounded-md bg-surface-1 p-3">
-              <span class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-ink-faint">{t("chat.subagent.report")}</span>
-              <ProseContent
-                class="prose-content text-[12px] leading-[1.6] text-ink-muted"
-                html={marked.parse(props.subagent.report!, { async: false }) as string}
-                onClick={(e) => {
-                  const a = (e.target as HTMLElement).closest("a[data-link-type]");
-                  if (!a) return;
-                  e.preventDefault();
-                  const href = a.getAttribute("href")!;
-                  const linkType = a.getAttribute("data-link-type")!;
-                  if (linkType === "external") openExternalUrl(href);
-                }}
-              />
-            </div>
-          </Show>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const PhaseRow: Component<{ phase: Phase }> = (props) => {
-  return (
-    <div class="mt-3 flex h-7 items-center gap-2 px-1 first:mt-0">
-      <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
-        <Icon name="layers" class="h-[13px] w-[13px] text-accent" />
-      </span>
-      <span class="text-[10px] font-semibold uppercase tracking-wider text-accent">
-        {PHASE_LABEL(props.phase)}
-      </span>
-      <div class="h-px flex-1 bg-border-subtle" />
-    </div>
-  );
-};
-
-const PhaseResultRow: Component<{ phaseResult: { phase: Phase; text: string } }> = (props) => {
-  return (
-    <div class="my-1 ml-6">
-      <ProseContent
-        class="prose-content text-[12px] leading-[1.6] text-ink-muted"
-        html={marked.parse(props.phaseResult.text, { async: false }) as string}
-        onClick={(e) => {
-          const a = (e.target as HTMLElement).closest("a[data-link-type]");
-          if (!a) return;
-          e.preventDefault();
-          const href = a.getAttribute("href")!;
-          const linkType = a.getAttribute("data-link-type")!;
-          if (linkType === "external") openExternalUrl(href);
-        }}
-      />
-    </div>
-  );
-};
-
-// Substantial intermediate text (a real explanation the model wrote before a
-// tool call) must read like an answer, not like a dim progress note; only
-// short one-liner status texts keep the muted style.
-const TextRow: Component<{ text: string }> = (props) => {
-  const substantial = () => props.text.length >= SUBSTANTIAL_TEXT_CHARS;
-  return (
-    <div class="my-1 ml-6">
-      <ProseContent
-        class={
-          substantial()
-            ? "prose-content text-[13px] leading-[1.6] text-ink"
-            : "prose-content text-[12px] leading-[1.6] text-ink-muted"
-        }
-        html={marked.parse(props.text, { async: false }) as string}
-        onClick={(e) => {
-          const a = (e.target as HTMLElement).closest("a[data-link-type]");
-          if (!a) return;
-          e.preventDefault();
-          const href = a.getAttribute("href")!;
-          const linkType = a.getAttribute("data-link-type")!;
-          if (linkType === "external") openExternalUrl(href);
-        }}
-      />
-    </div>
-  );
-};
-
-const CompactionRow: Component<{ compaction: { kind: "start" | "done" | "fail" | "handoff_start" | "handoff_fail"; args: string[] } }> = (props) => {
-  const iconName = (): IconName => {
-    if (props.compaction.kind === "start" || props.compaction.kind === "handoff_start") return "package-process" as IconName;
-    if (props.compaction.kind === "done") return "package" as IconName;
-    return "package-out-of-stock" as IconName;
-  };
-
-  const label = () => {
-    switch (props.compaction.kind) {
-      case "start": return t("chat.compact.start", props.compaction.args[0], props.compaction.args[1]);
-      case "done": return t("chat.compact.done", props.compaction.args[0], props.compaction.args[1]);
-      case "handoff_start": return t("chat.handoff.start", props.compaction.args[0], props.compaction.args[1]);
-      case "handoff_fail": return t("chat.handoff.fail", props.compaction.args[0]);
-      default: return t("chat.compact.fail", props.compaction.args[0]);
-    }
-  };
-
-  const isActive = () => props.compaction.kind === "start" || props.compaction.kind === "handoff_start";
-  const isFail = () => props.compaction.kind === "fail" || props.compaction.kind === "handoff_fail";
-
-  const colorClass = () => {
-    if (isActive()) return "text-accent";
-    if (props.compaction.kind === "done") return "text-success";
-    return "text-danger";
-  };
-
-  const isStroke = () => isActive() || isFail();
-
-  return (
-    <div class="my-2 ml-4 border-l-2 border-current pl-2" classList={{
-      "border-accent/40": isActive(),
-      "border-success/40": props.compaction.kind === "done",
-      "border-danger/40": isFail(),
-    }}>
-      <div class="flex items-center gap-2 px-1 py-1 text-[12px]">
-        <span class={`trajectory-node flex h-5 w-5 shrink-0 items-center justify-center ${colorClass()}`}>
-          <Icon name={iconName()} class={`h-[14px] w-[14px] ${colorClass()}`} stroke={isStroke()} />
-        </span>
-        <span class="text-ink-muted">{label()}</span>
-        <Show when={isActive()}>
-          <span class="inline-block h-2 w-2 animate-pulse-soft rounded-full bg-accent" />
-        </Show>
-      </div>
-    </div>
-  );
-};
-
-const thinkingSvgSpinner = (
-  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
-    <defs>
-      <filter id="tbGlow">
-        <feGaussianBlur in="SourceGraphic" result="y" stdDeviation="1" />
-        <feColorMatrix in="y" result="z" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 18 -7" />
-        <feBlend in="SourceGraphic" in2="z" />
-      </filter>
-    </defs>
-    <g filter="url(#tbGlow)">
-      <circle cx="5" cy="12" r="4" fill="currentColor">
-        <animate attributeName="cx" calcMode="spline" dur="2s" keySplines=".36,.62,.43,.99;.79,0,.58,.57" repeatCount="indefinite" values="5;8;5" />
-      </circle>
-      <circle cx="19" cy="12" r="4" fill="currentColor">
-        <animate attributeName="cx" calcMode="spline" dur="2s" keySplines=".36,.62,.43,.99;.79,0,.58,.57" repeatCount="indefinite" values="19;16;19" />
-      </circle>
-      <animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12" />
-    </g>
-  </svg>
-);
-
-const ThinkingBar: Component<{
-  text: () => string;
-}> = (props) => {
-  let tooltipRef: HTMLDivElement | undefined;
-  const [hovered, setHovered] = createSignal(false);
-
-  createEffect(() => {
-    props.text(); // tracked: re-run as the streamed text grows
-    const _hovered = hovered();
-    if (_hovered && tooltipRef) {
-      tooltipRef.scrollTop = tooltipRef.scrollHeight;
-    }
-  });
-
-  return (
-    <div
-      class="thinking-bar-wrapper"
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div class="thinking-bar">
-        <span class="thinking-bar-spinner">
-          {thinkingSvgSpinner}
-        </span>
-        <span class="thinking-bar-label">
-          {t("chat.status.thinking")}
-        </span>
-        <span class="ml-auto flex items-center gap-3">
-          <NetworkIndicator placement="top" />
-        </span>
-      </div>
-      <div ref={tooltipRef} class="thinking-bar-tooltip">
-        {props.text() || ""}
-      </div>
-    </div>
-  );
-};
-
-const ThinkingRow: Component<{
-  thinking: { text: string; startedAt: number; endedAt?: number };
-  isLive: boolean;
-  isLast: boolean;
-  isExpanded: boolean;
-  onToggle: () => void;
-  /// Smoothed live text, only used while this row is the live/last step.
-  /// Undefined for subagent panels (no smoothing there) or once a newer
-  /// step has been pushed after this one — falls back to the always-fully-
-  /// accumulated `thinking.text`.
-  liveText?: () => string;
-}> = (props) => {
-  const duration = () => {
-    if (props.thinking.endedAt) {
-      return formatDuration(props.thinking.endedAt - props.thinking.startedAt);
-    }
-    return formatDuration(Date.now() - props.thinking.startedAt);
-  };
-
-  const showText = () => (props.isLive && props.isLast) || props.isExpanded;
-  const bodyText = () =>
-    props.liveText && props.isLive && props.isLast ? props.liveText() : props.thinking.text;
-
-  return (
-    <div>
-      <button
-        onClick={props.onToggle}
-        class="flex h-7 w-full items-center gap-2 rounded px-1 text-xs hover:bg-surface-2"
-      >
-        <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
-          <Icon name="brain" class="h-[14px] w-[14px] text-accent" />
-        </span>
-        <span class="text-[12px] text-ink-muted">{t("chat.timeline.thought")}</span>
-        <span class="ml-auto font-mono text-[11px] text-ink-faint">{duration()}</span>
-      </button>
-      <Show when={showText()}>
-        <div class="ml-6 rounded-md bg-surface-1 p-2 text-left">
-          <p class="whitespace-pre-wrap break-words text-left text-[12px] leading-[1.6] text-ink-muted">
-            {bodyText()}
-            <Show when={props.isLive && props.isLast}>
-              <span class="stream-cursor" />
-            </Show>
-          </p>
-        </div>
-      </Show>
-    </div>
-  );
-};
-
-const ToolRow: Component<{
-  tool: { call: ToolCallData; result?: ToolResultData; status: string };
-  isExpanded: boolean;
-  onToggle: () => void;
-}> = (props) => {
-  const header = () => toolHeader(props.tool.call);
-  const icon = () => header().icon;
-  const title = () => header().title;
-  const summary = () => toolSummary(props.tool.call);
-  const alwaysShown = () => alwaysShowsBody(props.tool.call.toolName);
-  const [showRaw, setShowRaw] = createSignal(false);
-
-  const statusIcon = () => {
-    if (props.tool.status === "running") return "loader";
-    if (props.tool.status === "error") return "x";
-    return "check";
-  };
-
-  const statusClass = () => {
-    if (props.tool.status === "running") return "text-accent animate-spin-slow";
-    if (props.tool.status === "error") return "text-danger";
-    return "text-success";
-  };
-
-  return (
-    <div>
-      <button
-        onClick={alwaysShown() ? undefined : props.onToggle}
-        class="flex h-7 w-full items-center gap-2 rounded px-1 text-xs hover:bg-surface-2"
-        classList={{ "cursor-default": alwaysShown() }}
-      >
-        <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
-          <Icon name={icon()} class="h-[14px] w-[14px] text-ink-muted" />
-        </span>
-        <span class="shrink-0 whitespace-nowrap text-[12px] text-ink-muted">{title()}</span>
-        <span class="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-ink-faint">{summary()}</span>
-        <div class="ml-auto flex items-center gap-1">
-          <Icon name={statusIcon() as IconName} class={`h-3 w-3 ${statusClass()}`} />
-          <Show when={!alwaysShown()}>
-            <Icon
-              name="chevron-right"
-              class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${props.isExpanded ? "rotate-90" : ""}`}
-            />
-          </Show>
-        </div>
-      </button>
-      <Show when={alwaysShown() || props.isExpanded}>
-        <div class="ml-6 rounded-md bg-surface-1 p-2 text-left text-xs">
-          <ToolBody call={props.tool.call} result={props.tool.result} />
-          <button
-            onClick={() => setShowRaw(!showRaw())}
-            class="mt-2 text-[10px] text-ink-faint underline decoration-dotted hover:text-ink-muted"
-          >
-            {showRaw() ? t("chat.timeline.hideRaw") : t("chat.timeline.showRaw")}
-          </button>
-          <Show when={showRaw()}>
-            <div class="mt-1">
-              <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.args")}</div>
-              <pre class="mb-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-ink-faint">
-                {JSON.stringify(props.tool.call.args, null, 2)}
-              </pre>
-              <Show when={props.tool.result}>
-                <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{t("chat.timeline.result")}</div>
-                <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
-                  {(props.tool.result!.error ?? props.tool.result!.output).slice(0, 5000)}
-                </pre>
-              </Show>
-            </div>
-          </Show>
-        </div>
-      </Show>
-    </div>
-  );
-};
-
-
-const ApprovalCard: Component<{
-  toolCall: ToolCallData;
-  /// Whether the owning ChatPanel is the visible one. Hidden panels keep
-  /// their pending ApprovalCards mounted, so without this guard Enter/Esc in
-  /// the visible workspace would resolve another workspace's approval.
-  isActive: () => boolean;
-  onApprove: () => void;
-  onReject: () => void;
-}> = (props) => {
-  const proposal = () => props.toolCall.editProposal as EditProposalData | undefined;
-  const isBash = () => props.toolCall.toolName === "bash";
-
-  // The chat input is disabled while an approval is pending, so a global
-  // listener is safe: Enter approves, Esc rejects.
-  const onKey = (e: KeyboardEvent) => {
-    if (!props.isActive()) return;
-    if (e.key === "Enter") {
-      e.preventDefault();
-      props.onApprove();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      props.onReject();
-    }
-  };
-  onMount(() => document.addEventListener("keydown", onKey));
-  onCleanup(() => document.removeEventListener("keydown", onKey));
-
-  return (
-    <div class="rounded-lg border border-accent/50 bg-surface-1 p-3">
-      <div class="mb-2 flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <Show
-            when={isBash()}
-            fallback={
-              <>
-                <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-                  {t("chat.approval.proposedEdit")}
-                </span>
-                <span class="truncate font-mono text-[12px] text-ink-muted">
-                  {proposal()?.path ?? (props.toolCall.args.path as string)}
-                </span>
-              </>
-            }
-          >
-            <span class="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-500">
-              {t("chat.approval.bashCommand")}
-            </span>
-          </Show>
-        </div>
-      </div>
-
-      <Show when={isBash()}>
-        <div class="mb-3 rounded-md border border-border-subtle bg-surface-0">
-          <div class="flex items-center gap-1.5 border-b border-border-subtle px-3 py-1.5">
-            <Icon name="terminal" class="h-3.5 w-3.5 text-ink-muted" />
-            <span class="text-[11px] font-medium text-ink-muted">$</span>
-          </div>
-          <pre class="overflow-x-auto p-3 font-mono text-[13px] leading-relaxed text-ink">
-            {String(props.toolCall.args.command ?? "")}
-          </pre>
-        </div>
-      </Show>
-
-      <Show when={!isBash() && proposal()}>
-        {(p) => (
-          <div class="mb-3 overflow-hidden rounded border border-border-subtle">
-            <DiffViewer
-              original={p().oldString}
-              modified={p().newString}
-              language={detectLanguageFromPath(p().path)}
-              inline
-            />
-          </div>
-        )}
-      </Show>
-
-      <Show when={!isBash() && !proposal()}>
-        <pre class="mb-3 max-h-32 overflow-auto rounded bg-surface-0 p-2 font-mono text-[12px] text-ink-faint">
-          {JSON.stringify(props.toolCall.args, null, 2)}
-        </pre>
-      </Show>
-
-      <div class="flex gap-2">
-        <button
-          onClick={props.onApprove}
-          class="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
-        >
-          <Icon name="check" class="h-4 w-4" />
-          {t("chat.approval.approve")}
-          <kbd class="rounded bg-accent-ink/15 px-1 font-mono text-[10px]">⏎</kbd>
-        </button>
-        <button
-          onClick={props.onReject}
-          class="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-sm text-ink hover:border-danger hover:text-danger"
-        >
-          <Icon name="x" class="h-4 w-4" />
-          {t("chat.approval.reject")}
-          <kbd class="rounded bg-surface-2 px-1 font-mono text-[10px]">esc</kbd>
-        </button>
-      </div>
-    </div>
-  );
-};

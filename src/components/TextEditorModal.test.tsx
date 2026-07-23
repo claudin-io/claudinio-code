@@ -22,7 +22,6 @@ vi.mock("monaco-editor", () => ({
 }));
 
 vi.mock("./Icon", () => ({ Icon: () => null }));
-vi.mock("../lib/grill-me", () => ({ t: (k: string) => k }));
 
 // ── Import the component (vi.mock is hoisted above imports) ──
 
@@ -67,10 +66,10 @@ describe("TextEditorModal", () => {
       }),
     );
 
-    // Title is rendered via t("editor.title")
+    // Title is rendered via "Editor"
     const title = document.body.querySelector(".font-semibold");
     expect(title).toBeTruthy();
-    expect(title!.textContent).toBe("editor.title");
+    expect(title!.textContent).toBe("Editor");
 
     dispose();
   });
@@ -195,7 +194,7 @@ describe("TextEditorModal", () => {
     const buttons = document.body.querySelectorAll("button");
     expect(buttons.length).toBe(1);
     expect(
-      Array.from(buttons).some((b) => b.title === "enhance.button"),
+      Array.from(buttons).some((b) => b.title === "Enhance prompt"),
     ).toBe(false);
   });
 
@@ -284,7 +283,7 @@ describe("TextEditorModal", () => {
 
     // The title should reflect the loading state
     expect((enhanceButton as HTMLButtonElement).title).toBe(
-      "enhance.enhancing",
+      "Enhancing...",
     );
 
     // Resolve the promise
@@ -295,7 +294,7 @@ describe("TextEditorModal", () => {
     expect((enhanceButton as HTMLButtonElement).disabled).toBe(false);
 
     // Title should be back to the non-loading state
-    expect((enhanceButton as HTMLButtonElement).title).toBe("enhance.button");
+    expect((enhanceButton as HTMLButtonElement).title).toBe("Enhance prompt");
   });
 
   it("calls onEnhance and stays enabled when enhancement finishes", async () => {

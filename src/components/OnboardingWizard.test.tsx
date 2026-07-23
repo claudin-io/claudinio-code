@@ -2,9 +2,6 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import { OnboardingWizard } from "./OnboardingWizard";
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 describe("OnboardingWizard", () => {
   afterEach(() => {
@@ -18,9 +15,9 @@ describe("OnboardingWizard", () => {
       ),
       document.body,
     );
-    expect(document.body.textContent).toContain("onboarding.welcome.title");
-    expect(document.body.textContent).toContain("onboarding.welcome.subtitle");
-    expect(document.body.textContent).toContain("onboarding.welcome.tagline");
+    expect(document.body.textContent).toContain("Welcome to Claudinio Code");
+    expect(document.body.textContent).toContain("Your AI agent for software development. Plan, code, and execute tasks with autonomous agents.");
+    expect(document.body.textContent).toContain("Maximum productivity with AI that understands your code.");
     dispose();
   });
 
@@ -32,12 +29,12 @@ describe("OnboardingWizard", () => {
       document.body,
     );
     const nextBtn = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.next"),
+      b.textContent?.includes("Next"),
     );
     expect(nextBtn).toBeTruthy();
     nextBtn!.click();
-    expect(document.body.textContent).toContain("onboarding.features.title");
-    expect(document.body.textContent).toContain("onboarding.features.agent.title");
+    expect(document.body.textContent).toContain("What you can do");
+    expect(document.body.textContent).toContain("Intelligent Agent");
     dispose();
   });
 
@@ -50,12 +47,12 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
-    expect(document.body.textContent).toContain("onboarding.signIn.title");
-    expect(document.body.textContent).toContain("onboarding.signIn.button");
+    expect(document.body.textContent).toContain("Let's get started");
+    expect(document.body.textContent).toContain("Sign in with claudin.io");
     dispose();
   });
 
@@ -69,24 +66,24 @@ describe("OnboardingWizard", () => {
     // Click next to step 1, then next to step 2
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     // Prev from step 2 → step 1
     const prevBtnStep2 = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.prev"),
+      b.textContent?.includes("Previous"),
     );
     expect(prevBtnStep2).toBeTruthy();
     prevBtnStep2!.click();
-    expect(document.body.textContent).toContain("onboarding.features.title");
+    expect(document.body.textContent).toContain("What you can do");
     // Prev from step 1 → step 0
     const prevBtnStep1 = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.prev"),
+      b.textContent?.includes("Previous"),
     );
     expect(prevBtnStep1).toBeTruthy();
     prevBtnStep1!.click();
-    expect(document.body.textContent).toContain("onboarding.welcome.title");
+    expect(document.body.textContent).toContain("Welcome to Claudinio Code");
     dispose();
   });
 
@@ -101,18 +98,18 @@ describe("OnboardingWizard", () => {
     const allButtons = Array.from(document.body.querySelectorAll("button"));
     const dotButtons = allButtons.filter((b) => {
       const text = b.textContent?.trim() || "";
-      // Dots have no visible text content; nav buttons have "onboarding.next" etc. text
+      // Dots have no visible text content; nav buttons have "Next" etc. text
       return text === "";
     });
     // Click dot for step 2
     dotButtons[2]?.click();
-    expect(document.body.textContent).toContain("onboarding.signIn.title");
+    expect(document.body.textContent).toContain("Let's get started");
     // Click dot for step 0
     dotButtons[0]?.click();
-    expect(document.body.textContent).toContain("onboarding.welcome.title");
+    expect(document.body.textContent).toContain("Welcome to Claudinio Code");
     // Click dot for step 1
     dotButtons[1]?.click();
-    expect(document.body.textContent).toContain("onboarding.features.title");
+    expect(document.body.textContent).toContain("What you can do");
     dispose();
   });
 
@@ -126,12 +123,12 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     const signInBtn = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.button"),
+      b.textContent?.includes("Sign in with claudin.io"),
     );
     expect(signInBtn).toBeTruthy();
     signInBtn!.click();
@@ -148,12 +145,12 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     const signInBtn = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.button"),
+      b.textContent?.includes("Sign in with claudin.io"),
     );
     expect(signInBtn).toBeTruthy();
     expect(signInBtn!.hasAttribute("disabled")).toBe(true);
@@ -169,7 +166,7 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
@@ -186,12 +183,12 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     const apiKeyLink = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyLink"),
+      b.textContent?.includes("Use API Key instead"),
     );
     expect(apiKeyLink).toBeTruthy();
     apiKeyLink!.click();
@@ -199,7 +196,7 @@ describe("OnboardingWizard", () => {
       'input[type="password"]',
     ) as HTMLInputElement;
     expect(input).toBeTruthy();
-    expect(input.placeholder).toBe("onboarding.signIn.apiKeyPlaceholder");
+    expect(input.placeholder).toBe("Paste your API key");
     dispose();
   });
 
@@ -214,19 +211,19 @@ describe("OnboardingWizard", () => {
     // Go to step 2
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     // Show API key field
     const apiKeyLink = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyLink"),
+      b.textContent?.includes("Use API Key instead"),
     );
     expect(apiKeyLink).toBeTruthy();
     apiKeyLink!.click();
     // Button is disabled when input is empty — force-enable it and click to test the handler's early return
     const continueBtn = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyContinue"),
+      b.textContent?.includes("Continue"),
     );
     expect(continueBtn).toBeTruthy();
     expect(continueBtn!.disabled).toBe(true);
@@ -248,13 +245,13 @@ describe("OnboardingWizard", () => {
     // Go to step 2
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     // Show API key field
     const apiKeyLink = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyLink"),
+      b.textContent?.includes("Use API Key instead"),
     );
     expect(apiKeyLink).toBeTruthy();
     apiKeyLink!.click();
@@ -268,7 +265,7 @@ describe("OnboardingWizard", () => {
     // Click continue — wait for Solid to flush and enable the button
     const continueBtn = await vi.waitFor(() => {
       const btn = Array.from(document.body.querySelectorAll("button")).find((b) =>
-        b.textContent?.includes("onboarding.signIn.apiKeyContinue"),
+        b.textContent?.includes("Continue"),
       );
       expect(btn).toBeTruthy();
       expect(btn!.disabled).toBe(false);
@@ -291,16 +288,16 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     const apiKeyLink = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyLink"),
+      b.textContent?.includes("Use API Key instead"),
     );
     expect(apiKeyLink).toBeTruthy();
     apiKeyLink!.click();
-    expect(document.body.textContent).toContain("onboarding.signIn.apiKeyValidating");
+    expect(document.body.textContent).toContain("Validating\u2026");
     expect(document.body.querySelector(".animate-spin")).toBeTruthy();
     dispose();
   });
@@ -314,12 +311,12 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     const apiKeyLink = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyLink"),
+      b.textContent?.includes("Use API Key instead"),
     );
     expect(apiKeyLink).toBeTruthy();
     apiKeyLink!.click();
@@ -336,18 +333,18 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
     const apiKeyLink = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyLink"),
+      b.textContent?.includes("Use API Key instead"),
     );
     expect(apiKeyLink).toBeTruthy();
     apiKeyLink!.click();
     expect(document.body.querySelector('input[type="password"]')).toBeTruthy();
     const backBtn = Array.from(document.body.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("onboarding.signIn.apiKeyBack"),
+      b.textContent?.includes("\u2190 Back to sign in"),
     );
     expect(backBtn).toBeTruthy();
     backBtn!.click();
@@ -364,11 +361,11 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
-    expect(document.body.textContent).toContain("onboarding.signIn.signingIn");
+    expect(document.body.textContent).toContain("Waiting for browser sign-in\u2026");
     dispose();
   });
 
@@ -381,7 +378,7 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
     nextBtns()[0]?.click();
@@ -398,13 +395,13 @@ describe("OnboardingWizard", () => {
     );
     const nextBtns = () =>
       Array.from(document.body.querySelectorAll("button")).filter((b) =>
-        b.textContent?.includes("onboarding.next"),
+        b.textContent?.includes("Next"),
       );
     nextBtns()[0]?.click();
-    expect(document.body.textContent).toContain("onboarding.features.agent.title");
-    expect(document.body.textContent).toContain("onboarding.features.approval.title");
-    expect(document.body.textContent).toContain("onboarding.features.subagents.title");
-    expect(document.body.textContent).toContain("onboarding.features.indexing.title");
+    expect(document.body.textContent).toContain("Intelligent Agent");
+    expect(document.body.textContent).toContain("Safe Approvals");
+    expect(document.body.textContent).toContain("Parallel Subagents");
+    expect(document.body.textContent).toContain("Smart Indexing");
     dispose();
   });
 });

@@ -16,15 +16,11 @@ const sampleSkills = [
 
 // ── Hoisted mocks ─────────────────────────────────────────────────
 const mockListSkills = vi.hoisted(() => vi.fn());
-const mockT = vi.hoisted(() => vi.fn((key: string) => key));
 
 vi.mock("../lib/ipc", () => ({
   listSkills: mockListSkills,
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: mockT,
-}));
 
 // ── Default props ─────────────────────────────────────────────────
 const defaultProps = () => ({
@@ -81,7 +77,7 @@ describe("SkillMentionPopover", () => {
     render(() => <SkillMentionPopover {...props} />, document.body);
 
     await vi.waitFor(() => {
-      expect(document.body.textContent).toContain("mention.noSkills");
+      expect(document.body.textContent).toContain("No skills found");
     });
   });
 

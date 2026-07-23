@@ -1,11 +1,11 @@
+use crate::agent::persist as tasks_store;
 use crate::agent::persist::{
-    self, load_records, now_ms, AttachmentMeta, SessionRecord, SessionStore, SessionSummary,
+    self, AttachmentMeta, SessionRecord, SessionStore, SessionSummary, load_records, now_ms,
 };
-use crate::agent::provider::{save_config, ContentBlock};
+use crate::agent::provider::{ContentBlock, save_config};
 use crate::agent::session::{self, AgentEvent, SteeringEntry};
 use crate::agent::tools::{ReadTracker, ToolContext};
 use crate::agent::transition;
-use crate::commands::tasks as tasks_cmd;
 use crate::state::{AppState, SessionHandle};
 use base64::Engine;
 use image::GenericImageView;
@@ -14,8 +14,8 @@ use serde_json::Value;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::ipc::Channel;
 use tauri::State;
+use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 
 /// Compress an image to reduce its token footprint before base64-encoding.
@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 ///    gain), resize down to 1568 px.
 /// 3. Re-encode: JPEG at quality 80; convert large PNG/BMP to JPEG.
 /// 4. On any error, fall back to the original bytes silently.
+///
 /// Returns (compressed_bytes, media_type, width, height).
 fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String, u32, u32) {
     let img = match image::load_from_memory(bytes) {
@@ -174,7 +175,7 @@ pub fn process_attachments(atts: &[AttachmentInput]) -> Vec<(ContentBlock, Attac
                 _ => "image/png",
             };
             let (compressed_bytes, final_media_type, img_w, img_h) =
-                compress_image(&bytes, &media_type, &ext);
+                compress_image(&bytes, media_type, &ext);
             let data = base64::engine::general_purpose::STANDARD.encode(&compressed_bytes);
             results.push((
                 ContentBlock::image(&final_media_type, &data, img_w, img_h),
@@ -238,10 +239,10 @@ pub async fn send_message(
 
     // Load workspace-level config (.claudinio.json) and merge over local config
     let mut config = config;
-    if let Some(ref root) = workspace_root {
-        if let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root) {
-            crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
-        }
+    if let Some(ref root) = workspace_root
+        && let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root)
+    {
+        crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
     }
 
     // Continue the workspace's active session, or start a fresh one persisted
@@ -276,18 +277,18 @@ pub async fn send_message(
     // Sync the session's mode with what the UI toggle sent: a human-set value
     // that differs from the current one is persisted before the run starts.
     let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
-    if let Some(m) = mode.as_deref().and_then(session::SessionMode::parse) {
-        if mode_ctl.get().0 != m {
-            mode_ctl.set(m, session::ModeOrigin::Human);
-            let store = SessionStore {
-                path: handle.store_path.clone(),
-            };
-            store.try_append(&SessionRecord::Mode {
-                mode: m.as_str().into(),
-                origin: session::ModeOrigin::Human.as_str().into(),
-                ts: now_ms(),
-            });
-        }
+    if let Some(m) = mode.as_deref().and_then(session::SessionMode::parse)
+        && mode_ctl.get().0 != m
+    {
+        mode_ctl.set(m, session::ModeOrigin::Human);
+        let store = SessionStore {
+            path: handle.store_path.clone(),
+        };
+        store.try_append(&SessionRecord::Mode {
+            mode: m.as_str().into(),
+            origin: session::ModeOrigin::Human.as_str().into(),
+            ts: now_ms(),
+        });
     }
 
     // Reset this session's steering for the new run, then drain any residual
@@ -352,11 +353,11 @@ pub async fn send_message(
     let message = if goals.is_empty() {
         message
     } else {
-        let mut tasks = tasks_cmd::load_last_tasks(&handle.store_path).unwrap_or_default();
+        let mut tasks = tasks_store::load_last_tasks(&handle.store_path).unwrap_or_default();
         // New goals replace previous golden tasks; normal tasks are preserved.
         tasks.retain(|t| !crate::agent::tools::tasks::is_golden(t));
         tasks.extend(crate::agent::tools::tasks::create_golden_tasks(&goals));
-        if let Err(e) = tasks_cmd::append_tasks(&handle.store_path, &tasks) {
+        if let Err(e) = tasks_store::append_tasks(&handle.store_path, &tasks) {
             eprintln!("failed to persist golden tasks: {e}");
         }
         if cleaned.is_empty() {
@@ -805,10 +806,10 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(auto_commit_plan) = args.auto_commit_plan {
         cfg.auto_commit_plan = auto_commit_plan;
     }
-    if let Some(thinking_effort) = args.thinking_effort {
-        if ["low", "medium", "high", "xhigh", "max"].contains(&thinking_effort.as_str()) {
-            cfg.thinking_effort = thinking_effort;
-        }
+    if let Some(thinking_effort) = args.thinking_effort
+        && ["low", "medium", "high", "xhigh", "max"].contains(&thinking_effort.as_str())
+    {
+        cfg.thinking_effort = thinking_effort;
     }
     save_config(&cfg);
     Ok(())
@@ -1110,10 +1111,10 @@ pub async fn continue_with_builder(
     let workspace_root = Some(ws.root.to_string_lossy().to_string());
 
     let mut config = config;
-    if let Some(ref root) = workspace_root {
-        if let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root) {
-            crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
-        }
+    if let Some(ref root) = workspace_root
+        && let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root)
+    {
+        crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
     }
 
     let old_handle = ws
@@ -1336,7 +1337,7 @@ pub async fn list_plans(
         })
         .unwrap_or_default();
 
-    plans.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    plans.sort_by_key(|p| std::cmp::Reverse(p.modified_at));
 
     Ok(plans)
 }
@@ -1384,10 +1385,10 @@ pub async fn commit_and_push(
 
     // Merge workspace-level config (.claudinio.json) over local config
     let mut config = config;
-    if let Some(ref root) = workspace_root {
-        if let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root) {
-            crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
-        }
+    if let Some(ref root) = workspace_root
+        && let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root)
+    {
+        crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
     }
 
     // === FRESH session — NOT attached to ws.active_session ===

@@ -23,7 +23,7 @@ export type ResolvedTheme = ThemeId;
 
 // ── Theme metadata ───────────────────────────────────────────────────
 export interface ThemeMeta {
-  labelKey: string;
+  label: string;
   category: "dark" | "light";
   /** 5 representative oklch colours for the preview swatch card */
   previewColors: string[];
@@ -31,7 +31,7 @@ export interface ThemeMeta {
 
 export const themeMetadata: Record<ThemeId, ThemeMeta> = {
   claudinio: {
-    labelKey: "theme.claudinio",
+    label: "Claudinio",
     category: "dark",
     previewColors: [
       "oklch(0.145 0.015 280)",
@@ -42,7 +42,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "claudinio-light": {
-    labelKey: "theme.claudinio-light",
+    label: "Claudinio Light",
     category: "light",
     previewColors: [
       "oklch(0.98 0.003 280)",
@@ -53,7 +53,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "claudinio-sepia": {
-    labelKey: "theme.claudinio-sepia",
+    label: "Claudinio Sepia",
     category: "light",
     previewColors: [
       "oklch(0.96 0.015 90)",
@@ -64,7 +64,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   dracula: {
-    labelKey: "theme.dracula",
+    label: "Dracula",
     category: "dark",
     previewColors: [
       "oklch(0.14 0.02 325)",
@@ -75,7 +75,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   nord: {
-    labelKey: "theme.nord",
+    label: "Nord",
     category: "dark",
     previewColors: [
       "oklch(0.17 0.015 220)",
@@ -86,7 +86,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "solarized-dark": {
-    labelKey: "theme.solarized-dark",
+    label: "Solarized Dark",
     category: "dark",
     previewColors: [
       "oklch(0.16 0.01 45)",
@@ -97,7 +97,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "solarized-light": {
-    labelKey: "theme.solarized-light",
+    label: "Solarized Light",
     category: "light",
     previewColors: [
       "oklch(0.96 0.01 45)",
@@ -108,7 +108,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   monokai: {
-    labelKey: "theme.monokai",
+    label: "Monokai",
     category: "dark",
     previewColors: [
       "oklch(0.14 0.01 50)",
@@ -119,7 +119,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "one-dark": {
-    labelKey: "theme.one-dark",
+    label: "One Dark",
     category: "dark",
     previewColors: [
       "oklch(0.16 0.015 230)",
@@ -130,7 +130,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   catppuccin: {
-    labelKey: "theme.catppuccin",
+    label: "Catppuccin",
     category: "dark",
     previewColors: [
       "oklch(0.14 0.015 350)",
@@ -141,7 +141,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "tokyo-night": {
-    labelKey: "theme.tokyo-night",
+    label: "Tokyo Night",
     category: "dark",
     previewColors: [
       "oklch(0.12 0.02 240)",
@@ -152,7 +152,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "gruvbox-dark": {
-    labelKey: "theme.gruvbox-dark",
+    label: "Gruvbox Dark",
     category: "dark",
     previewColors: [
       "oklch(0.18 0.02 40)",
@@ -163,7 +163,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "gruvbox-light": {
-    labelKey: "theme.gruvbox-light",
+    label: "Gruvbox Light",
     category: "light",
     previewColors: [
       "oklch(0.93 0.02 40)",
@@ -174,7 +174,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   "rose-pine": {
-    labelKey: "theme.rose-pine",
+    label: "Rose Pine",
     category: "dark",
     previewColors: [
       "oklch(0.16 0.015 340)",
@@ -185,7 +185,7 @@ export const themeMetadata: Record<ThemeId, ThemeMeta> = {
     ],
   },
   everforest: {
-    labelKey: "theme.everforest",
+    label: "Everforest",
     category: "dark",
     previewColors: [
       "oklch(0.17 0.015 160)",
@@ -287,7 +287,7 @@ function createThemeState() {
   return { preference, resolvedTheme, setThemePreference, cycleTheme };
 }
 
-// ── Module-level root (lazy init via createRoot, same pattern as grill-me.ts) ─
+// ── Module-level root (lazy init via createRoot) ─
 let rootState: ReturnType<typeof createThemeState> | undefined;
 function initState() {
   if (!rootState) {

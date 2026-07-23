@@ -34,10 +34,10 @@ fn is_ignored_path(root: &Path, path: &Path, gitignore: &Gitignore) -> bool {
             }
         }
     }
-    if let Ok(rel) = path.strip_prefix(root) {
-        if gitignore.matched(rel, false).is_ignore() {
-            return true;
-        }
+    if let Ok(rel) = path.strip_prefix(root)
+        && gitignore.matched(rel, false).is_ignore()
+    {
+        return true;
     }
     false
 }
@@ -98,7 +98,7 @@ impl FileWatcher {
                     // contended the embedder lock. Keep coalescing while we
                     // wait; nothing is dropped.
                     let _permit = loop {
-                        match crate::commands::code_intel::INDEX_SEMAPHORE.try_acquire() {
+                        match crate::code_intel::INDEX_SEMAPHORE.try_acquire() {
                             Ok(p) => break p,
                             Err(_) => {
                                 std::thread::sleep(Duration::from_secs(2));

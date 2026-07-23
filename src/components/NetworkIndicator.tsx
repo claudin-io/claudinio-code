@@ -1,6 +1,5 @@
 import { createSignal, createMemo, For, Show, type Component } from "solid-js";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 import {
   activeOps,
   lastFinishedOp,
@@ -9,9 +8,39 @@ import {
   type NetOp,
 } from "../lib/networkActivity";
 
-/** Localized name + explanation for one network operation's source. */
-const sourceName = (op: NetOp) => t(`net.source.${op.source}`);
-const sourceWhy = (op: NetOp) => t(`net.why.${op.source}`);
+/** Name + explanation for one network operation's source, shown on hover. */
+export const NET_SOURCE_NAME: Record<string, string> = {
+  llm_stream: "Model response",
+  llm_classify: "Turn-completion check",
+  llm_one_shot: "One-off model call",
+  list_models: "Model list",
+  auth: "Authentication",
+  provider_catalog: "Provider catalog",
+  skills_index: "Skills registry",
+  skill_fetch: "Skill download",
+  embedding_model_download: "Embedding model download",
+  web_search: "Web search",
+  mcp: "MCP server",
+};
+
+const NET_SOURCE_WHY: Record<string, string> = {
+  llm_stream:
+    "Streaming the agent's response from the model API. Runs until the turn finishes — including golden-loop cycles and subagents.",
+  llm_classify: "Small model call that checks whether the agent's reply is really finished.",
+  llm_one_shot: "Single non-streaming model request (enhancement, compaction, evaluation).",
+  list_models: "Fetching the list of available models from the API.",
+  auth: "Signing in or validating your API key.",
+  provider_catalog: "Fetching the models.dev provider catalog.",
+  skills_index: "Fetching the remote skills index.",
+  skill_fetch: "Downloading a skill definition.",
+  embedding_model_download:
+    "Downloading the local semantic-search model (only when it's not cached yet).",
+  web_search: "The agent is running a web search.",
+  mcp: "Connecting to a remote MCP server.",
+};
+
+const sourceName = (op: NetOp) => NET_SOURCE_NAME[op.source] ?? op.source;
+const sourceWhy = (op: NetOp) => NET_SOURCE_WHY[op.source] ?? "";
 
 /**
  * Status-bar globe that lights up whenever the backend has an open network
@@ -41,7 +70,7 @@ export const NetworkIndicator: Component<{
           "text-accent": active(),
           "text-ink-faint": !active(),
         }}
-        aria-label={t("net.title")}
+        aria-label={"Network activity"}
       >
         <Icon name="globe" class={"h-3.5 w-3.5" + (active() ? " animate-pulse" : "")} />
       </button>
@@ -50,17 +79,17 @@ export const NetworkIndicator: Component<{
       <Show when={hovered()}>
         <div class="absolute right-0 z-50 w-80 rounded-lg border border-border-subtle bg-surface-1 p-3 shadow-modal" classList={{ 'top-full mt-1': placement() === 'bottom', 'bottom-full mb-1': placement() === 'top' }}>
           <p class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
-            {t("net.title")}
+            {"Network activity"}
           </p>
           <Show
             when={active()}
             fallback={
               <div>
-                <p class="text-[12px] text-ink-muted">{t("net.idle")}</p>
+                <p class="text-[12px] text-ink-muted">{"No network activity"}</p>
                 <Show when={lastFinishedOp()}>
                   {(op) => (
                     <p class="mt-1 text-[11px] text-ink-faint">
-                      {t("net.lastOp", sourceName(op()))}
+                      {`Last: ${sourceName(op())}`}
                       <Show when={op().detail}> — {op().detail}</Show>
                     </p>
                   )}

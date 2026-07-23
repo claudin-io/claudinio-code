@@ -163,36 +163,37 @@ pub fn execute(
         .map(|c| c.auto_commit_plan)
         .unwrap_or(true); // default true when config is absent
 
-    if has_lld && auto_commit {
-        if let Some(root) = &ctx.workspace_root {
-            let slug = slugify(&args.name);
-            let commit_msg = format!("docs(plan): {slug}");
-            // git add only the plan file (NOT -A)
-            let add = std::process::Command::new("git")
+    if has_lld
+        && auto_commit
+        && let Some(root) = &ctx.workspace_root
+    {
+        let slug = slugify(&args.name);
+        let commit_msg = format!("docs(plan): {slug}");
+        // git add only the plan file (NOT -A)
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .arg("add")
+            .arg(path.to_string_lossy().as_ref())
+            .output();
+        if add.is_ok() {
+            let commit = std::process::Command::new("git")
                 .arg("-C")
                 .arg(root)
-                .arg("add")
-                .arg(path.to_string_lossy().as_ref())
+                .arg("commit")
+                .arg("-m")
+                .arg(&commit_msg)
                 .output();
-            if add.is_ok() {
-                let commit = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(root)
-                    .arg("commit")
-                    .arg("-m")
-                    .arg(&commit_msg)
-                    .output();
-                match commit {
-                    Ok(out) if out.status.success() => {
-                        msg.push_str(&format!("\nPlan auto-committed: \"{commit_msg}\""));
-                    }
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        eprintln!("[write_plan] git commit plan (non-zero): {stderr}");
-                    }
-                    Err(e) => {
-                        eprintln!("[write_plan] git commit plan failed: {e}");
-                    }
+            match commit {
+                Ok(out) if out.status.success() => {
+                    msg.push_str(&format!("\nPlan auto-committed: \"{commit_msg}\""));
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    eprintln!("[write_plan] git commit plan (non-zero): {stderr}");
+                }
+                Err(e) => {
+                    eprintln!("[write_plan] git commit plan failed: {e}");
                 }
             }
         }

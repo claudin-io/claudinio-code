@@ -1,7 +1,6 @@
 import { onMount, onCleanup, createSignal, Show, type Component } from "solid-js";
 import * as monaco from "monaco-editor";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 
 interface TextEditorModalProps {
   initialText: string;
@@ -66,14 +65,14 @@ const TextEditorModal: Component<TextEditorModalProps> = (props) => {
     >
       <div class="flex w-[80vw] h-[80vh] flex-col rounded-xl bg-surface-0 shadow-2xl">
         <div class="flex items-center justify-between border-b border-border-subtle px-5 py-3">
-          <span class="font-semibold text-ink">{t("editor.title")}</span>
+          <span class="font-semibold text-ink">{"Editor"}</span>
           <div class="flex items-center gap-1">
             <Show when={props.onEnhance}>
               <button
                 onClick={handleEnhance}
                 disabled={isEnhancing()}
                 class="rounded-md p-1 text-ink-faint transition-colors hover:bg-surface-2 hover:text-accent disabled:opacity-50"
-                title={isEnhancing() ? t("enhance.enhancing") : t("enhance.button")}
+                title={isEnhancing() ? "Enhancing..." : "Enhance prompt"}
               >
                 <Show when={!isEnhancing()} fallback={<Icon name="loader" class="h-4 w-4 animate-spin" />}>
                   <Icon name="magic-button-outline" class="h-4 w-4" />

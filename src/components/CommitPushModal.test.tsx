@@ -35,9 +35,6 @@ vi.mock("../lib/ipc", () => ({
   submitAnswers: vi.fn(),
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 vi.mock("./Icon", () => ({
   Icon: (props: { name: string; class?: string }) => (
@@ -49,8 +46,11 @@ vi.mock("./QuestionCard", () => ({
   default: () => <div data-testid="question-card" />,
 }));
 
-vi.mock("marked", () => ({
-  marked: { parse: (text: string) => `<p>${text}</p>` },
+// Stub the markdown surface rather than `marked` itself: lib/markdown owns the
+// renderer registration and the sanitize pass, and its own guarantees are
+// covered by lib/markdown.test.ts.
+vi.mock("../lib/markdown", () => ({
+  renderMarkdown: (text: string) => `<p>${text}</p>`,
 }));
 
 // ── Imports (after mocks) ──────────────────────────────────────────
@@ -143,7 +143,7 @@ describe("CommitPushModal", () => {
     await flush();
 
     // The header should contain the modal title key
-    expect(document.body.textContent).toContain("commitPush.modalTitle");
+    expect(document.body.textContent).toContain("Commit & Push");
     // The fixed overlay should be present
     expect(document.querySelector(".fixed.inset-0")).not.toBeNull();
 
@@ -163,7 +163,7 @@ describe("CommitPushModal", () => {
     // Starting spinner + text
     expect(document.body.textContent).toContain("Starting...");
     // The badge should show "running" label
-    expect(document.body.textContent).toContain("commitPush.committing");
+    expect(document.body.textContent).toContain("Committing changes...");
 
     dispose();
   });
@@ -178,9 +178,9 @@ describe("CommitPushModal", () => {
     );
     await flush();
 
-    expect(document.body.textContent).toContain("commitPush.committing");
+    expect(document.body.textContent).toContain("Committing changes...");
     // Cancel button should be visible while running
-    expect(document.body.textContent).toContain("commitPush.cancel");
+    expect(document.body.textContent).toContain("Cancel");
 
     dispose();
   });
@@ -294,9 +294,9 @@ describe("CommitPushModal", () => {
 
     __test.emitEvent(doneEvent);
 
-    expect(document.body.textContent).toContain("commitPush.completed");
+    expect(document.body.textContent).toContain("Completed");
     // Cancel button should no longer be present
-    expect(document.body.textContent).not.toContain("commitPush.cancel");
+    expect(document.body.textContent).not.toContain("Cancel");
 
     dispose();
   });
@@ -313,8 +313,8 @@ describe("CommitPushModal", () => {
 
     __test.emitEvent(errorEvent);
 
-    expect(document.body.textContent).toContain("commitPush.failed");
-    expect(document.body.textContent).not.toContain("commitPush.cancel");
+    expect(document.body.textContent).toContain("Failed");
+    expect(document.body.textContent).not.toContain("Cancel");
 
     dispose();
   });
@@ -330,7 +330,7 @@ describe("CommitPushModal", () => {
     );
     await flush();
 
-    expect(document.body.textContent).toContain("commitPush.failed");
+    expect(document.body.textContent).toContain("Failed");
 
     dispose();
   });
@@ -347,7 +347,7 @@ describe("CommitPushModal", () => {
 
     // Find and click the cancel button
     const cancelBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("commitPush.cancel"),
+      (b) => b.textContent?.includes("Cancel"),
     );
     expect(cancelBtn).not.toBeNull();
     cancelBtn!.click();
@@ -367,11 +367,11 @@ describe("CommitPushModal", () => {
     await flush();
 
     const cancelBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("commitPush.cancel"),
+      (b) => b.textContent?.includes("Cancel"),
     )!;
     cancelBtn.click();
 
-    expect(document.body.textContent).toContain("commitPush.interrupted");
+    expect(document.body.textContent).toContain("Interrupted");
 
     dispose();
   });
@@ -457,7 +457,7 @@ describe("CommitPushModal", () => {
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 
-    expect(document.body.textContent).toContain("commitPush.interrupted");
+    expect(document.body.textContent).toContain("Interrupted");
 
     dispose();
   });
@@ -475,7 +475,7 @@ describe("CommitPushModal", () => {
 
     expect(__test.mockInterruptSession).not.toHaveBeenCalled();
     // Should still be in running state
-    expect(document.body.textContent).toContain("commitPush.committing");
+    expect(document.body.textContent).toContain("Committing changes...");
 
     dispose();
   });

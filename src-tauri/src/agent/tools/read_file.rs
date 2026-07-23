@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::sync::OnceLock;
-use tiktoken_rs::{cl100k_base, CoreBPE};
+use tiktoken_rs::{CoreBPE, cl100k_base};
 
 const MAX_TOKENS: usize = 25000;
 

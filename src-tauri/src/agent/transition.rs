@@ -4,22 +4,17 @@
 //! the new session gets a LinkedFrom back-pointer. Both share the same
 //! event channel so the frontend renders the chain as one continuous thread.
 
-use crate::agent::persist::{self, now_ms, SessionRecord, SessionStore};
+use crate::agent::persist as tasks_store;
+use crate::agent::persist::{self, SessionRecord, SessionStore, now_ms};
 use crate::agent::provider;
 use crate::agent::session::{AgentEvent, HandoffReason, HandoffSpec, ModeCtl, SteeringCtl};
-use crate::commands::tasks as tasks_cmd;
 use crate::state::{SessionHandle, WorkspaceState};
-use lru::LruCache;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 
-/// Shared LRU cache of parsed session records (same shape as
-/// `AppState.records_cache`).
-pub type RecordsCache = Arc<std::sync::Mutex<LruCache<PathBuf, (Vec<SessionRecord>, Instant)>>>;
+pub use crate::agent::persist::RecordsCache;
 
 /// The `AppState` maps a transition needs, cloned before `tokio::spawn` so the
 /// driver loop can link sessions without borrowing Tauri state.
@@ -78,10 +73,10 @@ pub async fn link_session(
     }
 
     // 5. Copy tasks snapshot (golden tasks included).
-    if let Ok(tasks) = tasks_cmd::load_last_tasks(&old_handle.store_path) {
-        if !tasks.is_empty() {
-            let _ = tasks_cmd::append_tasks(&new_path, &tasks);
-        }
+    if let Ok(tasks) = tasks_store::load_last_tasks(&old_handle.store_path)
+        && !tasks.is_empty()
+    {
+        let _ = tasks_store::append_tasks(&new_path, &tasks);
     }
 
     // 6. Append the Mode record for the new session.

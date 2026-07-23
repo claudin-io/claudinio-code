@@ -1,5 +1,4 @@
 import { Component, createSignal, createEffect, onCleanup, createMemo, For, Show, type Accessor, type Setter } from "solid-js";
-import { t, type LocaleId } from "../lib/grill-me";
 import type { ConnectedProviderInfo, McpServerStatus, ModelGroup } from "../lib/ipc";
 import { Icon } from "./Icon";
 import { SettingsGeneral } from "./settings/SettingsGeneral";
@@ -11,8 +10,6 @@ import { SettingsMcp } from "./settings/SettingsMcp";
 interface SettingsPanelProps {
   showConfig: Accessor<boolean>;
   setShowConfig: Setter<boolean>;
-  language: Accessor<string>;
-  setLanguage: Setter<LocaleId>;
   configBrainModel: Accessor<string>;
   setConfigBrainModel: Setter<string>;
   configBuilderModel: Accessor<string>;
@@ -85,16 +82,15 @@ type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'mcp';
 interface Category {
   id: CategoryId;
   icon: string;
-  labelKey: string;
-  searchKeys: string[];
+  searchTerms: string[];
 }
 
 const CATEGORIES: Category[] = [
-  { id: 'general', icon: 'sliders', labelKey: 'app.config.language', searchKeys: ['app.config.language','app.config.theme','app.config.keepAwake','app.config.planSavePath','app.config.preferredIde','app.config.autoCommitPlan','app.config.codeIntel'] },
-  { id: 'models', icon: 'brain', labelKey: 'app.config.brainModel', searchKeys: ['app.config.brainModel','app.config.builderModel','app.config.maxRounds','app.config.subMaxRounds','app.config.maxParallelAgents','settings.maxGoldenCycles','settings.maxGoldenStalls','settings.handoffThreshold','app.config.overrideBaseUrl','app.config.overrideApiKey'] },
-  { id: 'account', icon: 'key', labelKey: 'app.config.account', searchKeys: ['app.config.account','app.config.signIn','app.config.signOut','app.config.apiKey','app.config.support','settings.providers.title','settings.providers.more','settings.providers.connect','settings.providers.openrouterDesc'] },
-  { id: 'agent', icon: 'construction-worker', labelKey: 'app.config.yoloMode', searchKeys: ['app.config.yoloMode','app.config.yoloBlacklist'] },
-  { id: 'mcp', icon: 'package-process', labelKey: 'app.config.mcpServers', searchKeys: ['app.config.mcpServers','app.config.mcpAddServer','app.config.mcpTest'] },
+  { id: 'general', icon: 'sliders', searchTerms: ["Language","Theme","Keep awake while working","Plan save path","Preferred IDE","Auto-commit plan on finalize","Code intelligence"] },
+  { id: 'models', icon: 'brain', searchTerms: ["Brain Model","Builder Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override"] },
+  { id: 'account', icon: 'key', searchTerms: ["Account","Sign in with claudin.io","Sign out","API Key","Support","Providers","More providers\u2026","Connect","Access hundreds of models through one account, via OAuth."] },
+  { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)"] },
+  { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
 ];
 
 function getCategoryLabel(id: CategoryId): string {
@@ -120,7 +116,7 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
     if (!q) return CATEGORIES;
     return CATEGORIES.filter((cat) => {
       if (getCategoryLabel(cat.id).toLowerCase().includes(q)) return true;
-      return cat.searchKeys.some((key) => t(key).toLowerCase().includes(q));
+      return cat.searchTerms.some((term) => term.toLowerCase().includes(q));
     });
   });
 
@@ -243,8 +239,6 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
             <div class="settings-panel-content">
               <Show when={searchQuery() ? true : activeCategory() === 'general'}>
                 <SettingsGeneral
-                  language={props.language}
-                  setLanguage={props.setLanguage}
                   keepAwake={props.configKeepAwake}
                   setKeepAwake={props.setConfigKeepAwake}
                   planSavePath={props.configPlanSavePath}
@@ -337,13 +331,13 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                 onClick={() => props.setShowConfig(false)}
                 class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
               >
-                {t("app.config.cancel")}
+                {"Cancel"}
               </button>
               <button
                 onClick={() => props.saveConfig()}
                 class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
               >
-                {t("app.config.save")}
+                {"Save"}
               </button>
             </div>
           </div>

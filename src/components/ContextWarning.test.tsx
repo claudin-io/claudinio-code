@@ -15,11 +15,6 @@ vi.mock("../lib/ipc", () => ({
   getContextWarning: vi.fn(),
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-  locale: () => "pt-BR" as const,
-  setLocale: vi.fn(),
-}));
 
 // ── Imports (after mocks) ──────────────────────────────────────────
 import {
@@ -166,7 +161,7 @@ describe("ContextWarning component", () => {
     render(() => <ContextWarning workspace="/test" />, document.body);
     await flush();
 
-    const btn = document.querySelector('button[title="context.warning.title"]');
+    const btn = document.querySelector('button[title="Context Budget"]');
     expect(btn).not.toBeNull();
   });
 
@@ -190,7 +185,7 @@ describe("ContextWarning component", () => {
     render(() => <ContextWarning workspace="/test" />, document.body);
     await flush();
 
-    const btn = document.querySelector('button[title="context.warning.title"]');
+    const btn = document.querySelector('button[title="Context Budget"]');
     expect(btn).not.toBeNull();
     expect(btn!.className).toContain("text-amber-400");
   });
@@ -207,7 +202,7 @@ describe("ContextWarning component", () => {
 
     // Click warning button → open
     const btn = document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement;
     btn.click();
     await flush();
@@ -232,7 +227,7 @@ describe("ContextWarning component", () => {
 
     // Open
     (document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement).click();
     await flush();
     expect(document.querySelector(".fixed.inset-0")).not.toBeNull();
@@ -252,7 +247,7 @@ describe("ContextWarning component", () => {
 
     // Open
     (document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement).click();
     await flush();
     expect(document.querySelector(".fixed.inset-0")).not.toBeNull();
@@ -271,7 +266,7 @@ describe("ContextWarning component", () => {
 
     // Open
     (document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement).click();
     await flush();
     expect(document.querySelector(".fixed.inset-0")).not.toBeNull();
@@ -324,7 +319,7 @@ describe("ContextWarning component", () => {
     await flush();
 
     const btn = document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement;
     expect(btn.className).toContain("text-red-400");
   });
@@ -348,7 +343,7 @@ describe("ContextWarning component", () => {
 
     // Sanity: component is mounted
     expect(
-      document.querySelector('button[title="context.warning.title"]'),
+      document.querySelector('button[title="Context Budget"]'),
     ).not.toBeNull();
 
     // Dispose the component — triggers onCleanup which removes the listener
@@ -371,7 +366,7 @@ describe("ContextWarning component", () => {
 
     // Open the modal
     (document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement).click();
     await flush();
     expect(document.querySelector(".fixed.inset-0")).not.toBeNull();
@@ -402,7 +397,7 @@ describe("ContextWarning component", () => {
 
     // Open the modal
     (document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement).click();
     await flush();
 
@@ -425,12 +420,12 @@ describe("ContextWarning component", () => {
 
     // Open the modal
     (document.querySelector(
-      'button[title="context.warning.title"]',
+      'button[title="Context Budget"]',
     ) as HTMLElement).click();
     await flush();
 
     // The recommendation div should contain hintSkills (the false branch)
-    expect(document.body.textContent).toContain("context.warning.hintSkills");
-    expect(document.body.textContent).not.toContain("context.warning.hintAgents");
+    expect(document.body.textContent).toContain("\ud83d\udca1 Skills are injected into the system prompt as XML. Skills with large SKILL.md bodies increase the base context cost. Review if all skills are still needed.");
+    expect(document.body.textContent).not.toContain("\ud83d\udca1 The AGENTS.md/CLAUDE.md file is injected at the start of every new chat. Large files consume significant context budget. Consider trimming unnecessary sections.");
   });
 });

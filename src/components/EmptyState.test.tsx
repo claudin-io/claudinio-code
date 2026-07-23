@@ -2,9 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import { render } from "solid-js/web";
 import { EmptyState } from "./EmptyState";
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 describe("EmptyState", () => {
   afterEach(() => {
@@ -22,9 +19,9 @@ describe("EmptyState", () => {
       ),
       document.body,
     );
-    expect(document.body.textContent).toContain("empty.title");
-    expect(document.body.textContent).toContain("empty.subtitle");
-    expect(document.body.textContent).toContain("empty.openFolder");
+    expect(document.body.textContent).toContain("Claudinio Code");
+    expect(document.body.textContent).toContain("Open a project folder to start using the agent.");
+    expect(document.body.textContent).toContain("Open folder");
     dispose();
   });
 
@@ -40,7 +37,7 @@ describe("EmptyState", () => {
       document.body,
     );
 
-    expect(document.body.textContent).toContain("empty.recent");
+    expect(document.body.textContent).toContain("Recent");
     expect(document.body.textContent).toContain("alpha");
     expect(document.body.textContent).toContain("beta");
     dispose();
@@ -58,7 +55,7 @@ describe("EmptyState", () => {
       document.body,
     );
 
-    expect(document.body.textContent).not.toContain("empty.recent");
+    expect(document.body.textContent).not.toContain("Recent");
     dispose();
   });
 

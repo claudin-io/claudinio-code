@@ -1,7 +1,6 @@
 import { createSignal, createEffect, onMount, onCleanup, type Component } from "solid-js";
 import * as monaco from "monaco-editor";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 import { readFile, writeFile } from "../lib/ipc";
 import { defineMonacoThemes, getMonacoTheme } from "../lib/monacoThemes";
 import { theme } from "../lib/theme";
@@ -70,7 +69,7 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
 
   const handleClose = () => {
     if (isDirty()) {
-      const confirmed = window.confirm(t("fileEditor.unsavedMessage"));
+      const confirmed = window.confirm("You have unsaved changes. Are you sure you want to close?");
       if (!confirmed) return;
     }
     props.onClose();
@@ -186,7 +185,7 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
               class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium bg-accent text-accent-ink transition-colors hover:bg-accent-hover"
             >
               <Icon name="check" class="h-3.5 w-3.5" />
-              {t("fileEditor.save")}
+              {"Save"}
             </button>
             <button
               onClick={handleClose}

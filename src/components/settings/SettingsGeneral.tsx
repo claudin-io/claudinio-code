@@ -1,11 +1,8 @@
 import { Component, For, Show, type Accessor, type Setter } from "solid-js";
-import { t, SUPPORTED_LOCALES, FLAGS, LOCALE_LABELS, type LocaleId } from "../../lib/grill-me";
 import ThemePicker from "../ThemePicker";
 import { Icon } from "../Icon";
 
 interface SettingsGeneralProps {
-  language: Accessor<string>;
-  setLanguage: Setter<LocaleId>;
   keepAwake: Accessor<boolean>;
   setKeepAwake: Setter<boolean>;
   planSavePath: Accessor<string>;
@@ -23,24 +20,8 @@ interface SettingsGeneralProps {
 export const SettingsGeneral: Component<SettingsGeneralProps> = (props) => {
   return (
     <>
-      {/* Language */}
-      <label class="mb-1 block text-xs text-ink-muted">{t("app.config.language")}</label>
-      <select
-        value={props.language()}
-        onChange={(e) => props.setLanguage(e.currentTarget.value as LocaleId)}
-        class="mb-4 w-full appearance-none rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-      >
-        <For each={SUPPORTED_LOCALES}>
-          {(loc) => (
-            <option value={loc}>
-              {FLAGS[loc]} {LOCALE_LABELS[loc]}
-            </option>
-          )}
-        </For>
-      </select>
-
       {/* Theme */}
-      <label class="mb-1 block text-xs text-ink-muted">{t("app.config.theme")}</label>
+      <label class="mb-1 block text-xs text-ink-muted">{"Theme"}</label>
       <div class="mb-4">
         <ThemePicker />
       </div>
@@ -58,8 +39,8 @@ export const SettingsGeneral: Component<SettingsGeneralProps> = (props) => {
             <Icon name="coffee-cup" class="h-4 w-4 text-ink-faint" stroke />
           </div>
           <div class="min-w-0">
-            <span class="text-sm font-medium text-ink">{t("app.config.keepAwake")}</span>
-            <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.keepAwakeHint")}</span>
+            <span class="text-sm font-medium text-ink">{"Keep awake while working"}</span>
+            <span class="block text-[11px] leading-relaxed text-ink-faint">{"Prevents the system from sleeping while a session is running (display can still turn off)."}</span>
           </div>
         </label>
 
@@ -75,8 +56,8 @@ export const SettingsGeneral: Component<SettingsGeneralProps> = (props) => {
             <Icon name="notebook-pen" class="h-4 w-4 text-ink-faint" stroke />
           </div>
           <div class="min-w-0">
-            <span class="text-sm font-medium text-ink">{t("app.config.autoCommitPlan")}</span>
-            <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.autoCommitPlanHint")}</span>
+            <span class="text-sm font-medium text-ink">{"Auto-commit plan on finalize"}</span>
+            <span class="block text-[11px] leading-relaxed text-ink-faint">{"Automatically commits the plan file (git add + commit) when the final version is written or when exiting Brain mode."}</span>
           </div>
         </label>
 
@@ -92,8 +73,8 @@ export const SettingsGeneral: Component<SettingsGeneralProps> = (props) => {
             <Icon name="brain" class="h-4 w-4 text-ink-faint" />
           </div>
           <div class="min-w-0">
-            <span class="text-sm font-medium text-ink">{t("app.config.codeIntel")}</span>
-            <span class="block text-[11px] leading-relaxed text-ink-faint">{t("app.config.codeIntelHint")}</span>
+            <span class="text-sm font-medium text-ink">{"Code intelligence"}</span>
+            <span class="block text-[11px] leading-relaxed text-ink-faint">{"Enables LSP, FTS5 index, and semantic search. Turn off to save CPU and memory when not coding."}</span>
           </div>
         </label>
       </div>
@@ -101,7 +82,7 @@ export const SettingsGeneral: Component<SettingsGeneralProps> = (props) => {
       <hr class="mb-4 mt-4 border-border-subtle" />
 
       {/* Plan save path */}
-      <label class="mb-1 block text-xs text-ink-muted">{t("app.config.planSavePath")}</label>
+      <label class="mb-1 block text-xs text-ink-muted">{"Plan save path"}</label>
       <div class="mb-1 flex gap-1">
         <div class="relative flex-1">
           <input
@@ -132,17 +113,17 @@ export const SettingsGeneral: Component<SettingsGeneralProps> = (props) => {
       <div class="mb-4 flex items-center gap-2">
         <Show when={!props.planSavePath()}>
           <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">
-            {t("app.config.default")}
+            {"default"}
           </span>
         </Show>
-        <p class="text-[11px] text-ink-faint">{t("app.config.planSavePathHint")}</p>
+        <p class="text-[11px] text-ink-faint">{"Relative to workspace root. Leave empty to use default (.claudinio/plans)."}</p>
       </div>
 
       {/* Preferred IDE */}
-      <label class="mb-1 block text-xs text-ink-muted">{t("app.config.preferredIde")}</label>
+      <label class="mb-1 block text-xs text-ink-muted">{"Preferred IDE"}</label>
       <Show
         when={props.availableIdes().length > 0}
-        fallback={<p class="mb-1 text-[11px] text-ink-faint">{t("app.config.noIdesDetected")}</p>}
+        fallback={<p class="mb-1 text-[11px] text-ink-faint">{"No supported IDEs detected (VS Code / Cursor)."}</p>}
       >
         <select
           value={props.preferredIde()}
@@ -158,7 +139,7 @@ export const SettingsGeneral: Component<SettingsGeneralProps> = (props) => {
           </For>
         </select>
       </Show>
-      <p class="mb-4 text-[11px] text-ink-faint">{t("app.config.preferredIdeHint")}</p>
+      <p class="mb-4 text-[11px] text-ink-faint">{"Select which IDE to use when opening files. Auto-detected IDEs appear here."}</p>
     </>
   );
 };

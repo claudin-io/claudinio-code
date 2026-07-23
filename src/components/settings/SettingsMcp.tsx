@@ -1,5 +1,4 @@
 import { Component, For, Show, type Accessor, type Setter } from "solid-js";
-import { t } from "../../lib/grill-me";
 import type { McpServerStatus } from "../../lib/ipc";
 
 interface SettingsMcpProps {
@@ -17,20 +16,20 @@ export const SettingsMcp: Component<SettingsMcpProps> = (props) => {
     <>
       {/* Header */}
       <div class="mb-2 flex items-center justify-between">
-        <span class="text-sm font-medium text-ink">{t("app.config.mcpServers")}</span>
+        <span class="text-sm font-medium text-ink">{"MCP Servers"}</span>
         <div class="flex gap-2">
           <button
             onClick={props.onAddServer}
             class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
           >
-            {t("app.config.mcpAddServer")}
+            {"+ Add server"}
           </button>
           <button
             onClick={props.onTestAll}
             disabled={props.mcpTesting()}
             class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
           >
-            {props.mcpTesting() ? t("app.config.mcpTesting") : t("app.config.mcpTest")}
+            {props.mcpTesting() ? "Testing…" : "Test all"}
           </button>
         </div>
       </div>
@@ -49,7 +48,7 @@ export const SettingsMcp: Component<SettingsMcpProps> = (props) => {
       </Show>
 
       {/* Hint */}
-      <p class="mb-3 text-[11px] text-ink-faint">{t("app.config.mcpJsonHint")}</p>
+      <p class="mb-3 text-[11px] text-ink-faint">{"Edit the \"mcp\" block as JSON, keyed by server name. Example: { \"context7\": { \"type\": \"remote\", \"url\": \"https://mcp.context7.com/mcp\", \"headers\": { \"CONTEXT7_API_KEY\": \"...\" } } }"}</p>
 
       {/* Status list */}
       <Show when={Object.keys(props.mcpStatuses()).length > 0}>
@@ -67,8 +66,8 @@ export const SettingsMcp: Component<SettingsMcpProps> = (props) => {
                 <span class="font-medium text-ink">{name}</span>
                 <span class="text-ink-faint">
                   {status.connected
-                    ? t("app.config.mcpToolCount", String(status.toolCount))
-                    : (status.error ?? t("app.config.mcpNotConnected"))}
+                    ? `${String(status.toolCount)} tools`
+                    : (status.error ?? "not connected")}
                 </span>
               </div>
             )}

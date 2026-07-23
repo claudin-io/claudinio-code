@@ -6,16 +6,11 @@ use crate::state::{AppState, WorkspaceState};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::ipc::Channel;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
+use tauri::ipc::Channel;
 use tokio::task::spawn_blocking;
-
-// Only one workspace indexes at a time. Restoring several workspaces at
-// startup used to launch parallel scans + embedding runs that together
-// pegged every core (and hammered slow/network drives).
-pub(crate) static INDEX_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -193,10 +188,9 @@ pub async fn open_workspace(
         map.insert(root.clone(), early_workspace);
     }
     // Get a handle back to update fields later (lsp, watcher, index_progress)
-    let ws = state.workspace(&path).await.map_err(|e| {
+    let ws = state.workspace(&path).await.inspect_err(|_e| {
         // Clean up: if we somehow can't get it back, clear progress
         let _ = index_progress.lock().map(|mut p| *p = None);
-        e
     })?;
 
     let code_intel_enabled = state.config.lock().await.code_intel_enabled;
@@ -245,7 +239,7 @@ pub async fn open_workspace(
 
     // Serialize indexing across workspaces (see INDEX_SEMAPHORE above). The
     // permit is held through the async embedding phase below.
-    let index_permit = INDEX_SEMAPHORE
+    let index_permit = crate::code_intel::INDEX_SEMAPHORE
         .acquire()
         .await
         .map_err(|e| format!("index semaphore: {e}"))?;
@@ -304,7 +298,9 @@ pub async fn open_workspace(
                         }
                     },
                     None => {
-                        eprintln!("[open_workspace] embedding model not found (bundle, dev dir and cache all missing)");
+                        eprintln!(
+                            "[open_workspace] embedding model not found (bundle, dev dir and cache all missing)"
+                        );
                         None
                     }
                 }
@@ -315,8 +311,7 @@ pub async fn open_workspace(
     // Phase 3: Wait for scan to complete (this is what the user sees)
     let (files_count, symbols_count) = scan_handle
         .await
-        .map_err(|e| format!("scan task panicked: {e}"))?
-        .map_err(|e| e)?;
+        .map_err(|e| format!("scan task panicked: {e}"))??;
 
     // Index scan is done — clear the shared progress so tools know the index is ready
     {
@@ -448,10 +443,10 @@ pub async fn close_workspace(path: String, state: State<'_, AppState>) -> Result
         let mut map = state.workspaces.lock().await;
         map.remove(Path::new(&path))
     };
-    if let Some(ws) = removed {
-        if let Some(mcp) = ws.mcp.lock().await.take() {
-            mcp.shutdown().await;
-        }
+    if let Some(ws) = removed
+        && let Some(mcp) = ws.mcp.lock().await.take()
+    {
+        mcp.shutdown().await;
     }
     Ok(())
 }

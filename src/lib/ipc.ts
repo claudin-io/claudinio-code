@@ -45,10 +45,6 @@ export async function copyPath(path: string): Promise<void> {
   await navigator.clipboard.writeText(path);
 }
 
-export function getOsLocale(): Promise<string> {
-  return invoke<string>("get_os_locale");
-}
-
 export interface SessionStarted {
   sessionId: string;
 }
@@ -720,13 +716,39 @@ export function fileOutline(workspace: string, filePath: string): Promise<Symbol
 
 // --- File write ---
 
+/** Write inside an open workspace. Paths outside it are rejected by the backend. */
 export function writeFile(path: string, content: string): Promise<void> {
   return invoke<void>("write_file", { path, content });
 }
 
-/** Write binary content (base64-encoded) to disk — e.g. an exported PNG. */
+/** Write binary content (base64-encoded) inside an open workspace. */
 export function writeFileBytes(path: string, base64Data: string): Promise<void> {
   return invoke<void>("write_file_bytes", { path, base64Data });
+}
+
+// --- Export (save outside the workspace) ---
+//
+// The save dialog runs in Rust, so the destination never crosses IPC as an
+// argument this side could be tricked into supplying. That is what keeps
+// writeFile/writeFileBytes strictly workspace-scoped. Resolves false if the
+// user cancelled the dialog.
+
+export function exportFile(
+  defaultName: string,
+  filterName: string,
+  extension: string,
+  content: string,
+): Promise<boolean> {
+  return invoke<boolean>("export_file", { defaultName, filterName, extension, content });
+}
+
+export function exportFileBytes(
+  defaultName: string,
+  filterName: string,
+  extension: string,
+  base64Data: string,
+): Promise<boolean> {
+  return invoke<boolean>("export_file_bytes", { defaultName, filterName, extension, base64Data });
 }
 
 // --- LSP ---

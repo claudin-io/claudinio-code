@@ -8,9 +8,6 @@ vi.mock("../lib/ipc", () => ({
   checkGitAvailable: vi.fn(),
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string, ..._args: (string | number)[]) => key,
-}));
 
 vi.mock("./Icon", () => ({
   Icon: (props: { name: string; class?: string }) => (
@@ -139,8 +136,7 @@ describe("GitIndicator", () => {
     await drainMicrotasks();
 
     const btn = document.body.querySelector("button")!;
-    // t("git.changes", "2", "13", "1") returns the key "git.changes" per our mock
-    expect(btn.textContent).toContain("git.changes");
+    expect(btn.textContent).toContain("2 changes (+13 −1)");
     // Has-changes class: text-ink-muted, no opacity modifier
     expect(btn.className).toContain("text-ink-muted");
     expect(btn.className).not.toContain("opacity-50");
@@ -154,7 +150,7 @@ describe("GitIndicator", () => {
     await drainMicrotasks();
 
     const btn = document.body.querySelector("button")!;
-    expect(btn.textContent).toContain("git.noChanges");
+    expect(btn.textContent).toContain("0 changes");
     // No-changes class: text-ink-faint opacity-50
     expect(btn.className).toContain("text-ink-faint");
     expect(btn.className).toContain("opacity-50");
@@ -237,7 +233,7 @@ describe("GitIndicator", () => {
     await drainMicrotasks();
 
     const btn = document.body.querySelector("button")!;
-    expect(btn.textContent).toContain("git.noChanges");
+    expect(btn.textContent).toContain("0 changes");
     expect(btn.className).toContain("text-ink-faint");
     expect(btn.className).toContain("opacity-50");
   });

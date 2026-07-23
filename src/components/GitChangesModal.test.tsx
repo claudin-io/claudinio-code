@@ -7,9 +7,6 @@ vi.mock("../lib/ipc", () => ({
   gitFileDiff: vi.fn(),
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 vi.mock("./Icon", () => ({
   Icon: (props: { name: string; class?: string }) => (
@@ -141,9 +138,9 @@ describe("GitChangesModal", () => {
     expect(document.body.textContent).toContain("src/old.ts");
 
     // Status labels should be rendered
-    expect(document.body.textContent).toContain("git.modified");
-    expect(document.body.textContent).toContain("git.added");
-    expect(document.body.textContent).toContain("git.deleted");
+    expect(document.body.textContent).toContain("Modified");
+    expect(document.body.textContent).toContain("Added");
+    expect(document.body.textContent).toContain("Deleted");
 
     // Additions/deletions numbers
     expect(document.body.textContent).toContain("+3");
@@ -188,7 +185,7 @@ describe("GitChangesModal", () => {
     await flush();
 
     // Empty-state message should be shown
-    expect(document.body.textContent).toContain("git.noChanges");
+    expect(document.body.textContent).toContain("0 changes");
     // No file rows should be present
     expect(document.body.textContent).not.toContain("src/");
     // File count should be 0
@@ -215,7 +212,7 @@ describe("GitChangesModal", () => {
     await flush();
 
     // On error, status is null, loading is false, files = [] -> empty state
-    expect(document.body.textContent).toContain("git.noChanges");
+    expect(document.body.textContent).toContain("0 changes");
     // File count should be 0
     expect(document.body.textContent).toContain("(0)");
 
@@ -355,10 +352,10 @@ describe("GitChangesModal", () => {
     await flush();
 
     // All status labels rendered
-    expect(document.body.textContent).toContain("git.modified");
-    expect(document.body.textContent).toContain("git.added");
-    expect(document.body.textContent).toContain("git.deleted");
-    expect(document.body.textContent).toContain("git.untracked");
+    expect(document.body.textContent).toContain("Modified");
+    expect(document.body.textContent).toContain("Added");
+    expect(document.body.textContent).toContain("Deleted");
+    expect(document.body.textContent).toContain("Untracked");
 
     dispose();
   });
@@ -389,7 +386,7 @@ describe("GitChangesModal", () => {
 
     // Find and click the refresh button
     const refreshBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("git.refresh"),
+      (b) => b.textContent?.includes("Refresh"),
     )!;
     expect(refreshBtn).toBeTruthy();
     refreshBtn.click();
@@ -397,7 +394,7 @@ describe("GitChangesModal", () => {
     await flush();
 
     // Now empty state is shown
-    expect(document.body.textContent).toContain("git.noChanges");
+    expect(document.body.textContent).toContain("0 changes");
     expect(document.body.textContent).not.toContain("src/main.ts");
     // gitStatus should have been called twice (once on mount, once on refresh)
     expect(gitStatus).toHaveBeenCalledTimes(2);
@@ -424,7 +421,7 @@ describe("GitChangesModal", () => {
     );
 
     const refreshBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("git.refresh"),
+      (b) => b.textContent?.includes("Refresh"),
     )!;
     expect((refreshBtn as HTMLButtonElement).disabled).toBe(true);
 
@@ -452,7 +449,7 @@ describe("GitChangesModal", () => {
     await flush();
 
     const commitBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("git.commitPush"),
+      (b) => b.textContent?.includes("Commit & Push"),
     )!;
     expect(commitBtn).toBeTruthy();
 
@@ -481,7 +478,7 @@ describe("GitChangesModal", () => {
     await flush();
 
     const commitBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("git.commitPush"),
+      (b) => b.textContent?.includes("Commit & Push"),
     )!;
     expect((commitBtn as HTMLButtonElement).disabled).toBe(true);
 

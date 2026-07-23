@@ -3,9 +3,6 @@ import { render } from "solid-js/web";
 import type { AskUserData } from "../lib/ipc";
 
 // ── Module mocks ───────────────────────────────────────────────────
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 vi.mock("./Icon", () => ({
   Icon: (props: { name: string; class?: string }) => (
@@ -90,7 +87,7 @@ describe("QuestionCard", () => {
       () => <QuestionCard ask={singleAsk} onSubmit={vi.fn()} />,
       document.body,
     );
-    expect(document.body.textContent).toContain("chat.question.needsAnswer");
+    expect(document.body.textContent).toContain("The agent needs your answer");
     dispose();
   });
 
@@ -152,7 +149,7 @@ describe("QuestionCard", () => {
       () => <QuestionCard ask={singleAsk} onSubmit={vi.fn()} />,
       document.body,
     );
-    expect(document.body.textContent).toContain("chat.question.other");
+    expect(document.body.textContent).toContain("Other answer\u2026");
     dispose();
   });
 
@@ -161,7 +158,7 @@ describe("QuestionCard", () => {
       () => <QuestionCard ask={singleAsk} onSubmit={vi.fn()} />,
       document.body,
     );
-    expect(document.body.textContent).toContain("chat.question.submit");
+    expect(document.body.textContent).toContain("Submit");
 
     const buttons = document.body.querySelectorAll("button");
     const submitBtn = buttons[buttons.length - 1];
@@ -297,12 +294,12 @@ describe("QuestionCard", () => {
     );
     const buttons = document.body.querySelectorAll("button");
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
     otherBtn.click();
 
     const input = document.body.querySelector(
-      'input[placeholder="chat.question.typeAnswer"]',
+      'input[placeholder="Type your answer\u2026"]',
     ) as HTMLInputElement;
     expect(input).not.toBeNull();
     dispose();
@@ -315,20 +312,20 @@ describe("QuestionCard", () => {
     );
     const buttons = document.body.querySelectorAll("button");
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
 
     otherBtn.click();
     expect(
       document.body.querySelector(
-        'input[placeholder="chat.question.typeAnswer"]',
+        'input[placeholder="Type your answer\u2026"]',
       ),
     ).not.toBeNull();
 
     otherBtn.click();
     expect(
       document.body.querySelector(
-        'input[placeholder="chat.question.typeAnswer"]',
+        'input[placeholder="Type your answer\u2026"]',
       ),
     ).toBeNull();
     dispose();
@@ -344,7 +341,7 @@ describe("QuestionCard", () => {
       b.textContent?.includes("Red"),
     )!;
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
 
     redBtn.click();
@@ -365,20 +362,20 @@ describe("QuestionCard", () => {
       b.textContent?.includes("Red"),
     )!;
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
 
     otherBtn.click();
     expect(
       document.body.querySelector(
-        'input[placeholder="chat.question.typeAnswer"]',
+        'input[placeholder="Type your answer\u2026"]',
       ),
     ).not.toBeNull();
 
     redBtn.click();
     expect(
       document.body.querySelector(
-        'input[placeholder="chat.question.typeAnswer"]',
+        'input[placeholder="Type your answer\u2026"]',
       ),
     ).toBeNull();
     dispose();
@@ -394,7 +391,7 @@ describe("QuestionCard", () => {
       b.textContent?.includes("Option A"),
     )!;
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
 
     optA.click();
@@ -416,7 +413,7 @@ describe("QuestionCard", () => {
     );
     const buttons = document.body.querySelectorAll("button");
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
     otherBtn.click();
 
@@ -433,12 +430,12 @@ describe("QuestionCard", () => {
     );
     const buttons = document.body.querySelectorAll("button");
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
     otherBtn.click();
 
     const input = document.body.querySelector(
-      'input[placeholder="chat.question.typeAnswer"]',
+      'input[placeholder="Type your answer\u2026"]',
     ) as HTMLInputElement;
     input.value = "Custom answer";
     input.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -510,12 +507,12 @@ describe("QuestionCard", () => {
 
     const buttons = document.body.querySelectorAll("button");
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
     otherBtn.click();
 
     const input = document.body.querySelector(
-      'input[placeholder="chat.question.typeAnswer"]',
+      'input[placeholder="Type your answer\u2026"]',
     ) as HTMLInputElement;
     input.value = "Purple";
     input.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -555,12 +552,12 @@ describe("QuestionCard", () => {
     redBtn.click();
 
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
     otherBtn.click();
 
     const input = document.body.querySelector(
-      'input[placeholder="chat.question.typeAnswer"]',
+      'input[placeholder="Type your answer\u2026"]',
     ) as HTMLInputElement;
     input.value = "Green";
     input.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -639,12 +636,12 @@ describe("QuestionCard", () => {
 
     const buttons = document.body.querySelectorAll("button");
     const otherBtn = Array.from(buttons).find(
-      (b) => b.textContent === "chat.question.other",
+      (b) => b.textContent === "Other answer\u2026",
     )!;
     otherBtn.click();
 
     const input = document.body.querySelector(
-      'input[placeholder="chat.question.typeAnswer"]',
+      'input[placeholder="Type your answer\u2026"]',
     ) as HTMLInputElement;
     input.value = "Purple";
     input.dispatchEvent(new InputEvent("input", { bubbles: true }));

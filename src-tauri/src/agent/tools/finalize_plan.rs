@@ -12,14 +12,13 @@
 //!   when the model finished without calling the tool (journal is composed from
 //!   the done-task journals) so the plan is *always* fed.
 
-use lru::LruCache;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::agent::persist::{self, SessionRecord, SessionStore};
-use crate::agent::tools::{write_plan, ToolContext};
-use crate::commands::procutil::no_window;
+use crate::agent::tools::{ToolContext, write_plan};
+use crate::procutil::no_window;
 
 #[derive(Deserialize)]
 pub struct FinalizePlanArgs {
@@ -54,24 +53,18 @@ pub fn git_head(root: &str) -> Option<String> {
         return None;
     }
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
+    if sha.is_empty() { None } else { Some(sha) }
 }
 
 /// `<status>\t<path>` lines for what changed since `base`. Falls back to the
 /// working-tree porcelain status when no base is known or the range fails.
 fn changed_files(root: &str, base: Option<&str>) -> Vec<String> {
-    if let Some(base) = base {
-        if let Some(lines) =
+    if let Some(base) = base
+        && let Some(lines) =
             run_git_lines(root, &["diff", "--name-status", &format!("{base}..HEAD")])
-        {
-            if !lines.is_empty() {
-                return lines;
-            }
-        }
+        && !lines.is_empty()
+    {
+        return lines;
     }
     // Fallback: uncommitted working-tree changes.
     run_git_lines(root, &["status", "--porcelain"]).unwrap_or_default()
@@ -208,12 +201,11 @@ fn resolve_plan_file(ctx: &ToolContext, plan_file: Option<&str>) -> Result<PathB
 /// session (anchored at the true start of the plan's work), falling back to the
 /// commit captured at this run's start.
 fn resolve_base(ctx: &ToolContext) -> Option<String> {
-    if let Some(path) = ctx.session_store_path.as_deref() {
-        if let Ok(records) = persist::load_records(Path::new(path)) {
-            if let Some(sha) = persist::earliest_base_commit(&records) {
-                return Some(sha);
-            }
-        }
+    if let Some(path) = ctx.session_store_path.as_deref()
+        && let Ok(records) = persist::load_records(Path::new(path))
+        && let Some(sha) = persist::earliest_base_commit(&records)
+    {
+        return Some(sha);
     }
     ctx.base_commit.clone()
 }
@@ -300,7 +292,7 @@ fn collect_task_notes(ctx: &ToolContext) -> Vec<String> {
     let Some(path) = ctx.session_store_path.as_deref() else {
         return Vec::new();
     };
-    let tasks = crate::commands::tasks::load_last_tasks(Path::new(path)).unwrap_or_default();
+    let tasks = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
     tasks
         .iter()
         .filter(|t| t.status == "done" && !t.journal.is_empty())

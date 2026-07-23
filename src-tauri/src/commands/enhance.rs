@@ -176,20 +176,20 @@ async fn build_git_section(workspace: &str) -> Option<String> {
         section.push_str(&format!("branch: {}\n", branch));
         has_content = true;
     }
-    if let Some(status) = status {
-        if status.has_changes {
-            section.push_str("changed files:\n");
-            for f in status.files.iter().take(MAX_GIT_FILES) {
-                section.push_str(&format!("- [{}] {}\n", f.status, f.path));
-            }
-            if status.files.len() > MAX_GIT_FILES {
-                section.push_str(&format!(
-                    "... and {} more\n",
-                    status.files.len() - MAX_GIT_FILES
-                ));
-            }
-            has_content = true;
+    if let Some(status) = status
+        && status.has_changes
+    {
+        section.push_str("changed files:\n");
+        for f in status.files.iter().take(MAX_GIT_FILES) {
+            section.push_str(&format!("- [{}] {}\n", f.status, f.path));
         }
+        if status.files.len() > MAX_GIT_FILES {
+            section.push_str(&format!(
+                "... and {} more\n",
+                status.files.len() - MAX_GIT_FILES
+            ));
+        }
+        has_content = true;
     }
     has_content.then_some(section)
 }

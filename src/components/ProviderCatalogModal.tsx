@@ -1,5 +1,4 @@
 import { Component, For, Show, createMemo, createSignal, onCleanup, onMount, type Accessor } from "solid-js";
-import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 import {
   connectProvider,
@@ -127,12 +126,12 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
         {/* Header */}
         <div class="flex items-center justify-between border-b border-border-subtle px-4 py-3">
           <div class="flex items-center gap-2">
-            <span class="text-sm font-semibold text-ink">{t("providerCatalog.title")}</span>
+            <span class="text-sm font-semibold text-ink">{"Provider catalog"}</span>
             <span class="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-px text-[10px] text-amber-600">
-              {t("settings.providers.experimental")}
+              {"Experimental"}
             </span>
           </div>
-          <button onClick={props.onClose} class="text-ink-muted hover:text-ink" title={t("app.config.cancel")}>
+          <button onClick={props.onClose} class="text-ink-muted hover:text-ink" title={"Cancel"}>
             <Icon name="x" class="h-4 w-4" />
           </button>
         </div>
@@ -141,7 +140,7 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
           when={!loading()}
           fallback={
             <div class="flex flex-1 items-center justify-center text-sm text-ink-muted">
-              {t("providerCatalog.loading")}
+              {"Loading catalog…"}
             </div>
           }
         >
@@ -149,12 +148,12 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
             when={!loadError()}
             fallback={
               <div class="flex flex-1 flex-col items-center justify-center gap-3">
-                <p class="text-sm text-red-400">{t("providerCatalog.loadError")}</p>
+                <p class="text-sm text-red-400">{"Could not load the provider catalog."}</p>
                 <button
                   onClick={() => void load(true)}
                   class="rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-sm text-ink hover:bg-surface-2"
                 >
-                  {t("providerCatalog.retry")}
+                  {"Retry"}
                 </button>
               </div>
             }
@@ -167,14 +166,14 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
                     type="text"
                     value={query()}
                     onInput={(e) => setQuery(e.currentTarget.value)}
-                    placeholder={t("providerCatalog.search")}
+                    placeholder={"Search providers…"}
                     class="w-full rounded border border-border-subtle bg-surface-0 px-2 py-1 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none"
                   />
                 </div>
                 <div class="min-h-0 flex-1 overflow-y-auto py-1">
                   <Show
                     when={filtered().length > 0}
-                    fallback={<p class="px-3 py-2 text-xs text-ink-faint">{t("providerCatalog.empty")}</p>}
+                    fallback={<p class="px-3 py-2 text-xs text-ink-faint">{"No providers match your search."}</p>}
                   >
                     <For each={filtered()}>
                       {(p) => (
@@ -202,7 +201,7 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
               <div class="min-h-0 flex-1 overflow-y-auto p-4">
                 <Show
                   when={selected()}
-                  fallback={<p class="text-sm text-ink-faint">{t("providerCatalog.pickProvider")}</p>}
+                  fallback={<p class="text-sm text-ink-faint">{"Pick a provider from the list to connect it."}</p>}
                 >
                   {(p) => (
                     <>
@@ -211,7 +210,7 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
                         <Show when={isConnected(p().id)}>
                           <span class="flex items-center gap-1 text-[11px] text-green-500">
                             <Icon name="check-circle" class="h-3 w-3" />
-                            {t("settings.providers.connected")}
+                            {"Connected"}
                           </span>
                         </Show>
                       </div>
@@ -220,16 +219,16 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
                           onClick={() => openExternalUrl(p().doc!)}
                           class="mb-2 text-xs text-accent hover:underline"
                         >
-                          {t("providerCatalog.docs")}
+                          {"Documentation"}
                         </button>
                       </Show>
                       <Show when={p().env.length > 0}>
                         <p class="mb-3 text-[11px] text-ink-faint">
-                          {t("providerCatalog.envHint", p().env[0])}
+                          {`Usually stored in the ${p().env[0]} environment variable.`}
                         </p>
                       </Show>
 
-                      <label class="mb-1 block text-xs text-ink-muted">{t("providerCatalog.baseUrl")}</label>
+                      <label class="mb-1 block text-xs text-ink-muted">{"Base URL"}</label>
                       <input
                         type="text"
                         value={baseUrl()}
@@ -237,12 +236,12 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
                         class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                       />
 
-                      <label class="mb-1 block text-xs text-ink-muted">{t("providerCatalog.apiKey")}</label>
+                      <label class="mb-1 block text-xs text-ink-muted">{"API key"}</label>
                       <input
                         type="password"
                         value={apiKey()}
                         onInput={(e) => setApiKey(e.currentTarget.value)}
-                        placeholder={t("providerCatalog.apiKeyPlaceholder")}
+                        placeholder={"Paste your API key"}
                         class="mb-3 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                       />
 
@@ -252,29 +251,29 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
                           disabled={connecting() || !apiKey().trim()}
                           class="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
                         >
-                          {connecting() ? t("settings.providers.connecting") : t("settings.providers.connect")}
+                          {connecting() ? "Connecting…" : "Connect"}
                         </button>
                         <Show when={isConnected(p().id)}>
                           <button
                             onClick={() => void doDisconnect()}
                             class="rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-sm text-ink hover:bg-surface-2"
                           >
-                            {t("settings.providers.disconnect")}
+                            {"Disconnect"}
                           </button>
                         </Show>
                       </div>
 
                       <Show when={connectSuccess() !== null}>
                         <p class="mb-2 text-sm text-green-500">
-                          {t("providerCatalog.connectSuccess", String(connectSuccess()))}
+                          {`Connected — ${String(connectSuccess())} models available.`}
                         </p>
                       </Show>
                       <Show when={connectError()}>
-                        <p class="mb-2 text-sm text-red-400">{t("providerCatalog.connectError", connectError()!)}</p>
+                        <p class="mb-2 text-sm text-red-400">{`Could not connect: ${connectError()!}`}</p>
                       </Show>
 
                       <p class="mb-1 text-xs text-ink-muted">
-                        {t("providerCatalog.models", String(p().models.length))}
+                        {`${String(p().models.length)} models`}
                       </p>
                       <div class="overflow-hidden rounded-md border border-border-subtle">
                         <For each={p().models.slice(0, 50)}>

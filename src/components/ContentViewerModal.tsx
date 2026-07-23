@@ -2,7 +2,6 @@ import { createSignal, createEffect, onMount, onCleanup, Show, type Component } 
 import * as monaco from "monaco-editor";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 import { readFile, openExternal } from "../lib/ipc";
 import { defineMonacoThemes, getMonacoTheme } from "../lib/monacoThemes";
 import { detectLanguage } from "./FileEditorModal";
@@ -51,7 +50,7 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
       setContent(text);
     } catch (err) {
       if (!mounted) return;
-      setError(t("contentViewer.error"));
+      setError("Failed to load file");
     } finally {
       if (mounted) setLoading(false);
     }
@@ -118,7 +117,7 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
           <button
             onClick={props.onClose}
             class="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted hover:bg-surface-2 hover:text-ink"
-            title={t("contentViewer.close")}
+            title={"Close"}
           >
             <Icon name="x" class="h-4 w-4" />
           </button>
@@ -131,7 +130,7 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
               <div class="flex flex-1 items-center justify-center">
                 <div class="flex items-center gap-2 text-ink-muted">
                   <Icon name="loader" class="h-4 w-4 animate-spin" />
-                  <span class="text-sm">{t("contentViewer.loading")}</span>
+                  <span class="text-sm">{"Loading..."}</span>
                 </div>
               </div>
             </Show>
@@ -181,7 +180,7 @@ const ContentViewerModal: Component<ContentViewerModalProps> = (props) => {
               class="flex items-center gap-1.5 rounded-md bg-surface-2 px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-3 hover:text-ink"
             >
               <Icon name="external-link" class="h-3.5 w-3.5" />
-              {t("contentViewer.openExternally")}
+              {"Open Externally"}
             </button>
           </div>
         </Show>

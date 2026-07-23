@@ -281,13 +281,13 @@ impl CodeEmbedder {
                 }
             }
             if count > 0.0 {
-                for d in 0..hidden {
-                    sum[d] /= count;
+                for v in sum.iter_mut() {
+                    *v /= count;
                 }
             }
             let norm: f32 = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-            for d in 0..hidden {
-                sum[d] /= norm;
+            for v in sum.iter_mut() {
+                *v /= norm;
             }
             results.push(sum);
         }
@@ -386,25 +386,23 @@ fn resolve_i18n_keys(slice: &str, dict: &std::collections::HashMap<String, Strin
     let mut i = 0usize;
     while i < bytes.len() && total < MAX_I18N_CHARS {
         let b = bytes[i];
-        if b == b'"' || b == b'\'' {
-            if let Some(end) = slice[i + 1..].find(b as char) {
-                let literal = &slice[i + 1..i + 1 + end];
-                if !literal.is_empty()
-                    && literal.len() <= 128
-                    && literal
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
-                {
-                    if let Some(value) = dict.get(literal) {
-                        if !out.contains(&value.as_str()) {
-                            total += value.len() + 1;
-                            out.push(value);
-                        }
-                    }
-                }
-                i += 1 + end + 1;
-                continue;
+        if (b == b'"' || b == b'\'')
+            && let Some(end) = slice[i + 1..].find(b as char)
+        {
+            let literal = &slice[i + 1..i + 1 + end];
+            if !literal.is_empty()
+                && literal.len() <= 128
+                && literal
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+                && let Some(value) = dict.get(literal)
+                && !out.contains(&value.as_str())
+            {
+                total += value.len() + 1;
+                out.push(value);
             }
+            i += 1 + end + 1;
+            continue;
         }
         i += 1;
     }
@@ -455,6 +453,7 @@ fn build_fts_path_terms(file_path: &str, basename: &str, stem: &str) -> String {
 /// and appended to that chunk's text, so user-visible wording is searchable.
 /// Each chunk also carries `fts_*` mirrors of the same content for the BM25
 /// leg — see EmbedChunk.
+#[allow(clippy::too_many_arguments)]
 pub fn build_embedding_chunks(
     kind: &str,
     name: &str,
@@ -760,10 +759,12 @@ mod tests {
             assert!((norm - 1.0).abs() < 1e-3, "not normalized: {norm}");
         }
         // Distinct texts must not collapse to the same vector.
-        assert!(vecs[0]
-            .iter()
-            .zip(&vecs[1])
-            .any(|(a, b)| (a - b).abs() > 1e-3));
+        assert!(
+            vecs[0]
+                .iter()
+                .zip(&vecs[1])
+                .any(|(a, b)| (a - b).abs() > 1e-3)
+        );
     }
 
     #[test]
@@ -932,9 +933,10 @@ mod tests {
         );
         assert_eq!(chunks.len(), 1);
         let c = &chunks[0];
-        assert!(c
-            .text
-            .contains("function: buildEmbeddingChunks (build embedding chunks)"));
+        assert!(
+            c.text
+                .contains("function: buildEmbeddingChunks (build embedding chunks)")
+        );
         assert!(c.text.contains("file: embeddings"));
         assert_eq!(c.fts_name, "buildEmbeddingChunks build embedding chunks");
         assert!(c.fts_path.contains("embeddings.rs"));

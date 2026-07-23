@@ -3,7 +3,7 @@
 //! 24h TTL (stale cache is served when the network is down — the catalog has
 //! no SLA and inference must never depend on it).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
@@ -129,12 +129,11 @@ pub fn trim_catalog(raw: &Value) -> Value {
 /// short-circuits unless `force`; a network failure serves the stale cache
 /// when one exists.
 pub async fn fetch_catalog(force: bool) -> Result<Value, String> {
-    if !force {
-        if let Some((age, data)) = read_cache() {
-            if age < CACHE_TTL_SECS {
-                return Ok(data);
-            }
-        }
+    if !force
+        && let Some((age, data)) = read_cache()
+        && age < CACHE_TTL_SECS
+    {
+        return Ok(data);
     }
     match fetch_remote().await {
         Ok(trimmed) => {

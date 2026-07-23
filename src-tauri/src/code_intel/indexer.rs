@@ -1,12 +1,12 @@
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::{
-    build_embedding_chunks, build_embedding_text, CodeEmbedder, EmbedChunk, SharedEmbedder,
+    CodeEmbedder, EmbedChunk, SharedEmbedder, build_embedding_chunks, build_embedding_text,
 };
 use crate::code_intel::parser::{self, ParseResult};
 use serde::Serialize;
 use std::time::SystemTime;
-use tauri::ipc::Channel;
 use tauri::Emitter;
+use tauri::ipc::Channel;
 use xxhash_rust::xxh3::xxh3_64;
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,11 +125,11 @@ pub fn load_i18n_dict(root: &str) -> I18nDict {
             continue;
         };
         let lower = file.to_lowercase();
-        if lower.ends_with(".json") || lower.ends_with(".arb") {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
-                flatten_json_into("", &parsed, &mut dict);
-                continue;
-            }
+        if (lower.ends_with(".json") || lower.ends_with(".arb"))
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            flatten_json_into("", &parsed, &mut dict);
+            continue;
         }
         if lower.ends_with(".xml") {
             for cap in xml_re.captures_iter(&content) {
@@ -504,28 +504,28 @@ pub fn scan_workspace(
     for path_str in &all_paths {
         // Oversized files are recorded without ever being read — the
         // metadata-derived hash keeps the skip/prune machinery working.
-        if let Ok(meta) = std::fs::metadata(path_str) {
-            if meta.len() > MAX_INDEXED_FILE_BYTES {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let hash = format!("oversized:{}:{}", meta.len(), mtime);
-                let already = db
-                    .file_by_path(path_str)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|f| f.hash.as_deref() == Some(hash.as_str()));
-                if !already {
-                    let lang = parser::detect_language(path_str).unwrap_or("unknown");
-                    let _ = record_unindexed_file(db, path_str, lang, &hash, meta.len() as i64);
-                }
-                total_files += 1;
-                counted += 1;
-                continue;
+        if let Ok(meta) = std::fs::metadata(path_str)
+            && meta.len() > MAX_INDEXED_FILE_BYTES
+        {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let hash = format!("oversized:{}:{}", meta.len(), mtime);
+            let already = db
+                .file_by_path(path_str)
+                .ok()
+                .flatten()
+                .is_some_and(|f| f.hash.as_deref() == Some(hash.as_str()));
+            if !already {
+                let lang = parser::detect_language(path_str).unwrap_or("unknown");
+                let _ = record_unindexed_file(db, path_str, lang, &hash, meta.len() as i64);
             }
+            total_files += 1;
+            counted += 1;
+            continue;
         }
 
         let content = match std::fs::read_to_string(path_str) {
@@ -537,16 +537,16 @@ pub fn scan_workspace(
         // reparsing/re-embedding them here would be pure waste, and worse,
         // deletes their existing symbols/embeddings via cascade for nothing.
         let new_hash = compute_hash(&content);
-        if let Ok(Some(existing)) = db.file_by_path(path_str) {
-            if existing.hash.as_deref() == Some(new_hash.as_str()) {
-                total_files += 1;
-                total_symbols += db
-                    .symbols_in_file(path_str)
-                    .map(|s| s.len() as i64)
-                    .unwrap_or(0);
-                counted += 1;
-                continue;
-            }
+        if let Ok(Some(existing)) = db.file_by_path(path_str)
+            && existing.hash.as_deref() == Some(new_hash.as_str())
+        {
+            total_files += 1;
+            total_symbols += db
+                .symbols_in_file(path_str)
+                .map(|s| s.len() as i64)
+                .unwrap_or(0);
+            counted += 1;
+            continue;
         }
 
         match index_file(db, path_str, &content, embedder.as_deref_mut(), i18n) {
@@ -630,20 +630,20 @@ pub fn scan_workspace(
 
     for path_str in &doc_paths {
         // Same oversized guard as the code pass (huge .txt logs exist).
-        if let Ok(meta) = std::fs::metadata(path_str) {
-            if meta.len() > MAX_INDEXED_FILE_BYTES {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let hash = format!("oversized:{}:{}", meta.len(), mtime);
-                let lang = parser::detect_doc_language(path_str).unwrap_or("markdown");
-                let _ = record_unindexed_file(db, path_str, lang, &hash, meta.len() as i64);
-                total_files += 1;
-                continue;
-            }
+        if let Ok(meta) = std::fs::metadata(path_str)
+            && meta.len() > MAX_INDEXED_FILE_BYTES
+        {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let hash = format!("oversized:{}:{}", meta.len(), mtime);
+            let lang = parser::detect_doc_language(path_str).unwrap_or("markdown");
+            let _ = record_unindexed_file(db, path_str, lang, &hash, meta.len() as i64);
+            total_files += 1;
+            continue;
         }
 
         let content = match std::fs::read_to_string(path_str) {
@@ -767,25 +767,23 @@ pub fn generate_all_embeddings(
         // Only mark this file's content as "embedded" if nothing failed —
         // otherwise a transient encode error would permanently skip it. The
         // stored hash is the scan-time content hash the chunks came from.
-        if !encode_failed {
-            if let Some(ref hash) = file.hash {
-                let _ = db.set_embed_hash(file.id, hash);
-            }
+        if !encode_failed && let Some(ref hash) = file.hash {
+            let _ = db.set_embed_hash(file.id, hash);
         }
 
-        if processed % 10 == 0 {
-            if let Some(handle) = app_handle {
-                let _ = handle.emit(
-                    "index-progress",
-                    IndexProgress {
-                        status: "embedding".into(),
-                        files_indexed: processed,
-                        symbols_indexed: total_embeddings,
-                        total_files: total,
-                        workspace: workspace.to_string(),
-                    },
-                );
-            }
+        if processed % 10 == 0
+            && let Some(handle) = app_handle
+        {
+            let _ = handle.emit(
+                "index-progress",
+                IndexProgress {
+                    status: "embedding".into(),
+                    files_indexed: processed,
+                    symbols_indexed: total_embeddings,
+                    total_files: total,
+                    workspace: workspace.to_string(),
+                },
+            );
         }
     }
 
@@ -814,10 +812,10 @@ pub fn reindex_file(
     };
 
     let new_hash = compute_hash(&content);
-    if let Some(ref file) = existing {
-        if file.hash.as_deref() == Some(&new_hash) {
-            return Ok(None);
-        }
+    if let Some(ref file) = existing
+        && file.hash.as_deref() == Some(&new_hash)
+    {
+        return Ok(None);
     }
 
     // Cheap per-event reload (locale resources are few and small), so copy
@@ -872,10 +870,11 @@ mod size_cap_tests {
             file.hash, file.embed_hash,
             "must not count as embedding-pending"
         );
-        assert!(db
-            .symbols_in_file("dist-like/bundle.js")
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.symbols_in_file("dist-like/bundle.js")
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 

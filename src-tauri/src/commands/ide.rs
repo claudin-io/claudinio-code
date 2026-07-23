@@ -59,7 +59,7 @@ fn open_ide(cli: &str, app_name: &str, path: &str, goto_line: Option<u32>) -> Re
         // --goto requires the CLI on all platforms
         let mut cmd = Command::new(cli);
         cmd.arg("--goto").arg(format!("{path}:{line}:1"));
-        crate::commands::procutil::no_window(&mut cmd);
+        crate::procutil::no_window(&mut cmd);
         cmd.spawn()
             .map_err(|e| format!("Failed to open {app_name} with goto: {e}"))?;
     } else {
@@ -74,7 +74,7 @@ fn open_ide(cli: &str, app_name: &str, path: &str, goto_line: Option<u32>) -> Re
         {
             let mut cmd = Command::new("cmd");
             cmd.args(["/c", cli, path]);
-            crate::commands::procutil::no_window(&mut cmd);
+            crate::procutil::no_window(&mut cmd);
             cmd.spawn()
                 .map_err(|e| format!("Failed to open {app_name}: {e}"))?;
         }
@@ -83,7 +83,7 @@ fn open_ide(cli: &str, app_name: &str, path: &str, goto_line: Option<u32>) -> Re
             let login_path = crate::agent::tools::bash::login_path();
             let mut cmd = Command::new(cli);
             cmd.env("PATH", &login_path).arg(path);
-            crate::commands::procutil::no_window(&mut cmd);
+            crate::procutil::no_window(&mut cmd);
             cmd.spawn()
                 .map_err(|e| format!("Failed to open {app_name}: {e}"))?;
         }

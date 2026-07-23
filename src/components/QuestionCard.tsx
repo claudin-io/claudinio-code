@@ -1,6 +1,5 @@
 import { createSignal, For, Show, type Component } from "solid-js";
 import { type AskUserData, type UserAnswer } from "../lib/ipc";
-import { t } from "../lib/grill-me";
 import { Icon } from "./Icon";
 
 interface QuestionDraft {
@@ -60,7 +59,7 @@ const QuestionCard: Component<{
     <div class="rounded-lg border border-accent/50 bg-surface-1 p-3">
       <div class="mb-3 flex items-center gap-2">
         <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-          {t("chat.question.needsAnswer")}
+          {"The agent needs your answer"}
         </span>
       </div>
 
@@ -120,7 +119,7 @@ const QuestionCard: Component<{
                       <Icon name="check" class="h-2.5 w-2.5 text-accent-ink" />
                     </Show>
                   </span>
-                  {t("chat.question.other")}
+                  {"Other answer…"}
                 </button>
 
                 <Show when={draft().otherSelected}>
@@ -131,7 +130,7 @@ const QuestionCard: Component<{
                     onKeyDown={(e) => {
                       if (e.key === "Enter") submit();
                     }}
-                    placeholder={t("chat.question.typeAnswer")}
+                    placeholder={"Type your answer…"}
                     class="mt-1 rounded-md border border-border-subtle bg-surface-0 px-3 py-1.5 text-[13px] text-ink placeholder:text-ink-faint focus:border-accent/60 focus:outline-none"
                   />
                 </Show>
@@ -147,7 +146,7 @@ const QuestionCard: Component<{
         class="flex w-full items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover disabled:opacity-30"
       >
         <Icon name="send" class="h-4 w-4" />
-        {t("chat.question.submit")}
+        {"Submit"}
       </button>
     </div>
   );

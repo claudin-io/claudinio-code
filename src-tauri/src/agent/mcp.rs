@@ -4,7 +4,7 @@
 
 use crate::agent::provider::{McpServerEntry, McpTransportConfig};
 use crate::agent::tools::ToolDef;
-use crate::commands::procutil;
+use crate::procutil;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -305,9 +305,10 @@ mod tests {
     #[test]
     fn test_sanitize_tool_name_replaces_invalid_chars_and_caps_length() {
         let name = sanitize_tool_name("my server!", "do/thing");
-        assert!(name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
         assert!(name.len() <= 64);
         assert!(name.starts_with("mcp__"));
     }

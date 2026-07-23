@@ -1,7 +1,6 @@
 import { createSignal, createMemo, Show, type Component } from "solid-js";
 import { gitStatus, checkGitAvailable, type GitStatus } from "../lib/ipc";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 import { createVisibilityAwareInterval } from "../lib/visibility";
 
 export const GitIndicator: Component<{
@@ -64,14 +63,14 @@ export const GitIndicator: Component<{
   const label = createMemo(() => {
     if (loading_()) return "…";
     if (hasChanges()) {
-      return t("git.changes", String(fileCount()), String(additions()), String(deletions()));
+      return `${String(fileCount())} changes (+${String(additions())} −${String(deletions())})`;
     }
-    return t("git.noChanges");
+    return "0 changes";
   });
 
   const tooltip = createMemo(() => {
     const fc = fileCount();
-    return fc > 0 ? t("git.filesChanged", String(fc)) : t("git.noChanges");
+    return fc > 0 ? `${String(fc)} files changed` : "0 changes";
   });
 
   const btnClass = createMemo(() => {

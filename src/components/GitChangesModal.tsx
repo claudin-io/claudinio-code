@@ -1,7 +1,6 @@
 import { createSignal, createEffect, createMemo, For, Show, type Component } from "solid-js";
 import { gitStatus, gitFileDiff, type GitStatus, type ChangedFile } from "../lib/ipc";
 import { Icon } from "./Icon";
-import { t } from "../lib/grill-me";
 
 const diffStyles = `
   .diff-pre { font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.5; padding: 8px 16px; margin: 0; white-space: pre; overflow-x: auto; max-height: 24rem; }
@@ -30,10 +29,10 @@ function statusColor(status: string): string {
 
 function statusLabel(status: string): string {
   switch (status) {
-    case "M": return t("git.modified");
-    case "A": return t("git.added");
-    case "D": return t("git.deleted");
-    case "?": return t("git.untracked");
+    case "M": return "Modified";
+    case "A": return "Added";
+    case "D": return "Deleted";
+    case "?": return "Untracked";
     default: return status;
   }
 }
@@ -184,7 +183,7 @@ export const GitChangesModal: Component<{
           <div class="flex items-center gap-1.5">
               <Icon name="diff" class="h-4 w-4 text-ink-muted" />
               <h2 class="text-[13px] font-semibold text-ink">
-                {t("git.modalTitle")} <span class="text-ink-faint">({fileCount()})</span>
+                {"Changes"} <span class="text-ink-faint">({fileCount()})</span>
               </h2>
             </div>
             <button
@@ -209,7 +208,7 @@ export const GitChangesModal: Component<{
                 when={fileCount() > 0}
                 fallback={
                   <div class="flex items-center justify-center py-8 text-[12px] text-ink-faint">
-                    {t("git.noChanges")}
+                    {"0 changes"}
                   </div>
                 }
               >
@@ -237,7 +236,7 @@ export const GitChangesModal: Component<{
               class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2 disabled:opacity-30"
             >
               <Icon name="refresh" class="h-3 w-3" />
-              {t("git.refresh")}
+              {"Refresh"}
             </button>
             <button
               onClick={handleCommitPush}
@@ -245,7 +244,7 @@ export const GitChangesModal: Component<{
               class="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:bg-accent-hover disabled:opacity-30"
             >
               <Icon name="git-commit" class="h-4 w-4" stroke />
-              {t("git.commitPush")}
+              {"Commit & Push"}
             </button>
           </div>
         </div>

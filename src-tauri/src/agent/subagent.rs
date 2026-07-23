@@ -4,12 +4,17 @@ use crate::agent::session::{self, AgentEvent, AnswerMap, ApprovalMap, SteeringCt
 use crate::agent::tools::{self, ToolContext, ToolDef};
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tauri::ipc::Channel;
 
 pub const MAX_PARALLEL_AGENTS: usize = 4;
 pub const MAX_PARALLEL_AGENTS_CAP: usize = 8;
+
+// Invariants the rest of the module relies on, checked at compile time so a
+// bad edit fails the build rather than a test.
+const _: () = assert!(MAX_PARALLEL_AGENTS >= 1);
+const _: () = assert!(MAX_PARALLEL_AGENTS <= MAX_PARALLEL_AGENTS_CAP);
 
 /// Resolve the effective max-parallel-agents limit from config, clamped to
 /// [1, MAX_PARALLEL_AGENTS_CAP]. Returns `MAX_PARALLEL_AGENTS` (4) when
@@ -152,6 +157,7 @@ pub(crate) fn normalize_spawn_input(tool_input: Value) -> Value {
 /// Spawn 1-4 parallel subagents, each with their own fresh context.
 /// Returns a combined ContentBlock with each agent's report and aggregated
 /// token usage.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_spawn_agents(
     config: &AgentConfig,
     ctx: &ToolContext,
@@ -300,6 +306,7 @@ pub async fn run_spawn_agents(
 
 /// Run a single subagent: a simplified enxuto version of `run_workflow`.
 /// No steering injection, no persistence, no `AgentEvent::Done`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_subagent(
     config: &AgentConfig,
     ctx: &ToolContext,
@@ -532,6 +539,7 @@ pub async fn run_subagent(
 /// Spawn a summary subagent that reads the session JSONL file and produces a
 /// concise summary of the conversation. The subagent has a completely fresh
 /// context — zero knowledge of the current conversation.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_summary_agent(
     config: &AgentConfig,
     ctx: &ToolContext,
@@ -725,15 +733,15 @@ mod tests {
 
     #[test]
     fn test_max_parallel_constants() {
-        assert!(MAX_PARALLEL_AGENTS >= 1);
-        assert!(MAX_PARALLEL_AGENTS <= 4);
-        assert!(MAX_PARALLEL_AGENTS_CAP == 8);
-        // effective_max_parallel with None -> 4
+        // The constants themselves are asserted at compile time next to their
+        // definitions; this covers the resolution logic around them.
         let default_cfg = AgentConfig::default();
         assert_eq!(effective_max_parallel(&default_cfg), 4);
         // effective_max_parallel with Some(8) -> 8
-        let mut cfg = AgentConfig::default();
-        cfg.max_parallel_agents = Some(8);
+        let mut cfg = AgentConfig {
+            max_parallel_agents: Some(8),
+            ..Default::default()
+        };
         assert_eq!(effective_max_parallel(&cfg), 8);
         // effective_max_parallel with Some(0) -> clamped to 1
         cfg.max_parallel_agents = Some(0);

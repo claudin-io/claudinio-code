@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::path::Path;
 use tokio::process::Command;
 
-use super::procutil::no_window_tokio;
+use crate::procutil::no_window_tokio;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

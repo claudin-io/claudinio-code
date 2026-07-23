@@ -11,12 +11,6 @@ vi.mock("../lib/ipc", () => ({
   dismissGoldenTasks: vi.fn().mockResolvedValue([]),
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: vi.fn((key: string, ...args: (string | number)[]) => {
-    if (args.length > 0) return `${key}: ${args[0]}`;
-    return key;
-  }),
-}));
 
 // ── Fixtures ───────────────────────────────────────────────────────
 
@@ -184,7 +178,7 @@ describe("TasksPanel", () => {
     buttons[0].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
 
     expect(document.body.textContent).toContain("First Task");
-    expect(document.body.textContent).toContain("tasks.status.todo");
+    expect(document.body.textContent).toContain("Todo");
 
     dispose();
   });
@@ -198,7 +192,7 @@ describe("TasksPanel", () => {
     expect(document.body.textContent).toContain("Has description and journal");
     expect(document.body.textContent).toContain("Found the main function");
     expect(document.body.textContent).toContain("Refactored the module");
-    expect(document.body.textContent).toContain("tasks.panel.journal");
+    expect(document.body.textContent).toContain("Journal");
 
     dispose();
   });
@@ -210,7 +204,7 @@ describe("TasksPanel", () => {
     // golden-exec-1 (index 3) has empty journal
     buttons[3].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
 
-    expect(document.body.textContent).not.toContain("tasks.panel.journal");
+    expect(document.body.textContent).not.toContain("Journal");
 
     dispose();
   });
@@ -237,18 +231,18 @@ describe("TasksPanel", () => {
 
     buttons[2].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
 
-    expect(document.body.textContent).toContain("golden.task.badge");
+    expect(document.body.textContent).toContain("Golden \u2014 mandatory goal");
 
     dispose();
   });
 
-  it("formats golden task title via t() with phase key", async () => {
+  it("prefixes a golden task title with its phase", async () => {
     const dispose = await mount();
     const buttons = document.body.querySelectorAll("button");
 
-    // golden-plan-0 ends in -0 → "plan" phase → t("golden.task.plan", title)
+    // golden-plan-0 ends in -0 → "plan" phase → `Plan: ${title}`
     buttons[2].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
-    expect(document.body.textContent).toContain("golden.task.plan: Refactor auth flow");
+    expect(document.body.textContent).toContain("Plan: Refactor auth flow");
 
     dispose();
   });
@@ -261,7 +255,7 @@ describe("TasksPanel", () => {
 
     buttons[2].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     const dismissBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent === "golden.task.dismiss",
+      (b) => b.textContent === "Dismiss this goal",
     );
     expect(dismissBtn).toBeTruthy();
 
@@ -280,7 +274,7 @@ describe("TasksPanel", () => {
 
     buttons[0].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     const dismissBtn = Array.from(document.body.querySelectorAll("button")).find(
-      (b) => b.textContent === "golden.task.dismiss",
+      (b) => b.textContent === "Dismiss this goal",
     );
     expect(dismissBtn).toBeFalsy();
 
@@ -354,9 +348,9 @@ describe("TasksPanel", () => {
     const dispose = await mount();
 
     // The summary section renders three <span> elements identified by title
-    const todoDot = document.body.querySelector('[title="tasks.status.todo"]');
-    const doingDot = document.body.querySelector('[title="tasks.status.doing"]');
-    const doneDot = document.body.querySelector('[title="tasks.status.done"]');
+    const todoDot = document.body.querySelector('[title="Todo"]');
+    const doingDot = document.body.querySelector('[title="Doing"]');
+    const doneDot = document.body.querySelector('[title="Done"]');
 
     expect(todoDot).toBeTruthy();
     expect(todoDot!.className).toContain("bg-ink-faint");
@@ -373,7 +367,7 @@ describe("TasksPanel", () => {
     const dispose = render(() => <TasksPanel workspace="/test" />, document.body);
     await flush();
 
-    const todoDot = document.body.querySelector('[title="tasks.status.todo"]');
+    const todoDot = document.body.querySelector('[title="Todo"]');
     expect(todoDot).toBeNull();
 
     dispose();
@@ -405,8 +399,8 @@ describe("TasksPanel", () => {
     // No mouseenter event has fired → hoveredId is null
     // hoveredTask() → id is null → returns null (no popover rendered)
     // Verify no popover content is visible despite tasks existing
-    expect(document.body.textContent).not.toContain("tasks.panel.journal");
-    expect(document.body.textContent).not.toContain("tasks.panel.cycleStatus");
+    expect(document.body.textContent).not.toContain("Journal");
+    expect(document.body.textContent).not.toContain("Cycle status");
 
     dispose();
   });
@@ -425,7 +419,7 @@ describe("TasksPanel", () => {
     // Hover over task-1 → snapshot is frozen
     const buttons = document.body.querySelectorAll("button");
     buttons[0].dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
-    expect(document.body.textContent).toContain("tasks.panel.cycleStatus");
+    expect(document.body.textContent).toContain("Cycle status");
 
     // Advance timers to trigger the 3s poll interval → load() re-fetches tasks → empty array
     vi.advanceTimersByTime(3000);
@@ -434,7 +428,7 @@ describe("TasksPanel", () => {
     // hoveredTaskSnapshot is still the frozen task from mouseenter.
     // The popover stays visible despite the task list being empty now.
     // This is the fix: no more flicker on poll updates.
-    expect(document.body.textContent).toContain("tasks.panel.cycleStatus");
+    expect(document.body.textContent).toContain("Cycle status");
     expect(document.body.textContent).toContain("First Task");
 
     // Manually clear to prove it CAN be dismissed (e.g. via the backdrop or
@@ -444,7 +438,7 @@ describe("TasksPanel", () => {
     const popoverCard = document.body.querySelector('[class*="rounded-lg"]') as HTMLElement;
     popoverCard.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
     vi.advanceTimersByTime(200);
-    expect(document.body.textContent).not.toContain("tasks.panel.cycleStatus");
+    expect(document.body.textContent).not.toContain("Cycle status");
 
     vi.useRealTimers();
     dispose();

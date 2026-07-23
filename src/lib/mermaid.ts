@@ -4,11 +4,17 @@
 // actually needs to render — it never enters the main bundle or startup path.
 // This module is the ONLY place that imports mermaid.
 //
-// Markdown is rendered to HTML via `marked` + injected with SolidJS `innerHTML`,
-// so embedded scripts never run. The code-fence renderer (ChatPanel.tsx) emits a
-// placeholder <div class="mermaid-block" data-mermaid="<encoded source>"> for
-// every ```mermaid fence; renderMermaid() walks a container after injection and
+// The code-fence renderer (lib/markdown.ts) emits a placeholder
+// <div class="mermaid-block" data-mermaid="<encoded source>"> for every
+// ```mermaid fence; renderMermaid() walks a container after injection and
 // replaces each placeholder's contents with the rendered SVG.
+//
+// The SVG bypasses the markdown sanitizer — it is written straight to
+// `innerHTML` below — so it is mermaid's own `securityLevel: "strict"` that has
+// to hold. Do not relax that setting. (Note that "injected via innerHTML" is NOT
+// itself a safety property: <script> does not execute that way, but event-handler
+// attributes like onerror/onload do. Sanitizing is what makes the markdown path
+// safe; see lib/markdown.ts.)
 
 import { resolvedTheme, themeMetadata } from "./theme";
 

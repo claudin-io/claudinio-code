@@ -11,9 +11,6 @@ vi.mock("../lib/ipc", () => ({
   listDir: vi.fn(),
 }));
 
-vi.mock("../lib/grill-me", () => ({
-  t: vi.fn((key: string) => key),
-}));
 
 // ── Fixtures ───────────────────────────────────────────────────────
 

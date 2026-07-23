@@ -1,5 +1,4 @@
 import { Component, Show, type Accessor, type Setter } from "solid-js";
-import { t } from "../../lib/grill-me";
 
 interface SettingsAgentProps {
   yoloMode: Accessor<boolean>;
@@ -20,22 +19,22 @@ export const SettingsAgent: Component<SettingsAgentProps> = (props) => {
           class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
           disabled={props.workspaceConfigFields().has("yolo_mode")}
         />
-        <span class="text-sm font-medium text-ink">{t("app.config.yoloMode")}</span>
-        <span class="text-[11px] text-ink-faint">{t("app.config.yoloModeHint")}</span>
+        <span class="text-sm font-medium text-ink">{"⚡ YOLO Mode (auto-approve all)"}</span>
+        <span class="text-[11px] text-ink-faint">{"Auto-approves tool calls except those in the blacklist below."}</span>
         <Show when={props.workspaceConfigFields().has("yolo_mode")}>
           <span class="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] font-medium text-accent">
-            {t("app.config.sourceWorkspace")}
+            {"Workspace"}
           </span>
         </Show>
         <Show when={!props.workspaceConfigFields().has("yolo_mode")}>
           <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-faint">
-            {t("app.config.sourceLocal")}
+            {"Local"}
           </span>
         </Show>
       </label>
 
       <Show when={props.yoloMode()}>
-        <label class="mb-1 block text-xs text-ink-muted">{t("app.config.yoloBlacklist")}</label>
+        <label class="mb-1 block text-xs text-ink-muted">{"YOLO Blacklist (comma-separated tool names)"}</label>
         <textarea
           value={props.yoloBlacklist()}
           onInput={(e) => props.setYoloBlacklist(e.currentTarget.value)}
@@ -47,7 +46,7 @@ export const SettingsAgent: Component<SettingsAgentProps> = (props) => {
           }}
           disabled={props.workspaceConfigFields().has("yolo_blacklist")}
         />
-        <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{t("app.config.yoloBlacklistHint")}</p>
+        <p class="-mt-3 mb-4 text-[11px] text-ink-faint">{"These tools still require manual approval even with YOLO on. Ex: edit_file, bash"}</p>
       </Show>
     </>
   );

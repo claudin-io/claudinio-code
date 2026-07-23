@@ -3,9 +3,6 @@ import { render } from "solid-js/web";
 import { createSignal } from "solid-js";
 import type { ModelGroup } from "../lib/ipc";
 
-vi.mock("../lib/grill-me", () => ({
-  t: (key: string) => key,
-}));
 
 vi.mock("./Icon", () => ({
   Icon: (props: { name: string; class?: string }) => (
@@ -70,7 +67,7 @@ describe("ModelSelect", () => {
     expect(text).toContain("OpenRouter");
     // one badge for the openrouter group only
     const badges = Array.from(container.querySelectorAll("span")).filter(
-      (s) => s.textContent === "settings.providers.experimental",
+      (s) => s.textContent === "Experimental",
     );
     expect(badges.length).toBe(1);
     // external models display without their provider prefix
@@ -99,7 +96,7 @@ describe("ModelSelect", () => {
     search.value = "zzz-no-such-model";
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flush();
-    expect(container.textContent).toContain("modelSelect.empty");
+    expect(container.textContent).toContain("No models match your search.");
   });
 
   it("selecting a model calls onChange with the qualified id", async () => {

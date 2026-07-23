@@ -124,13 +124,13 @@ fn scan_skills_dir(
             Ok((meta, body)) => {
                 let name = meta.name.clone();
                 // Check if we already have this skill with a HIGHER priority scope
-                if let Some((_existing_entry, existing_scope)) = skills.get(&name) {
-                    if has_higher_priority(&existing_scope, &scope) {
-                        // Existing has higher priority — skip
-                        continue;
-                    }
-                    // Existing has lower priority — overwrite
+                if let Some((_existing_entry, existing_scope)) = skills.get(&name)
+                    && has_higher_priority(existing_scope, &scope)
+                {
+                    // Existing has higher priority — skip
+                    continue;
                 }
+                // Existing has lower priority — overwrite
 
                 let entry = SkillEntry {
                     name,
@@ -430,9 +430,7 @@ fn parse_markdown_link_line(line: &str) -> Option<RemoteSkill> {
 
     // Clean up the description: strip "colon dash" separators
     let description = desc_part
-        .trim_start_matches(|c: char| {
-            c == ':' || c == '—' || c == '-' || c == ' ' || c == '\u{2014}'
-        })
+        .trim_start_matches([':', '—', '-', ' '])
         .trim()
         .to_string();
 

@@ -33,7 +33,9 @@ security boundary matters when deciding what to report.
 
 | Boundary | Guarantee |
 |---|---|
-| Workspace containment | File tools canonicalize paths and reject anything outside the opened workspace (`validate_path` in `src-tauri/src/agent/tools/mod.rs`), including `..` traversal when a path cannot be canonicalized. Documented read-only exception: `~/.agents`, `~/.claudinio` and `~/.claude` skill directories. Write tools never get that exception. |
+| Workspace containment | File tools canonicalize paths and reject anything outside the opened workspace, including `..` traversal and symlinks that leave the root (`src-tauri/src/workspace_path.rs`, reached through `validate_path` in `agent/tools/mod.rs`). Documented read-only exception: `~/.agents`, `~/.claudinio` and `~/.claude` skill directories. Write tools never get that exception. |
+| IPC filesystem writes | The same containment applies to the commands the webview can call: `write_file` and `write_file_bytes` reject paths outside every open workspace (`src-tauri/src/commands/fs.rs`). Saving outside it goes through `export_file`, which opens the save dialog in Rust — the destination is chosen by the user and never crosses IPC as an argument. |
+| Webview rendering | Untrusted content (model output, file contents the agent quotes back, subagent reports) is sanitized before it becomes DOM: `src/lib/markdown.ts` is the only markdown→HTML path and runs DOMPurify with a tag/attribute allowlist. `<svg>` is not on it; Mermaid diagrams render through mermaid's own `securityLevel: "strict"`. A CSP without `script-src 'unsafe-inline'` is the second layer, so injected event-handler attributes cannot execute even if the first one is bypassed. |
 | Shell approval | `bash` requires explicit user approval, except for a read-only allowlist. A denylist blocks known-destructive commands (`src-tauri/src/agent/permissions.rs`). |
 | Edit approval | Every `edit_file` is shown as a diff and applied only after approval. |
 | Credentials at rest | API keys live in `config.json` under the OS config directory (`~/.config/claudinio-code` on Linux and equivalents elsewhere) — never in the workspace, never in session transcripts. They are stored as plaintext protected by file permissions, not in an OS keychain; a keychain backend is on the roadmap. |
@@ -59,3 +61,10 @@ A bug that breaks any row above is a vulnerability. Report it.
   you have granted a hostile server the agent's tool surface.
 - **Local attackers with your user account.** Anyone who can already run code as
   you can read the config directory.
+- **Reads through the IPC surface are not workspace-scoped.** `read_attachment`
+  can read any file your user can, because attaching a screenshot from the
+  Desktop or a spec from Downloads is the point of the feature and those paths
+  come from a native picker or a drag-and-drop. Writes *are* scoped (see the
+  table above); the mitigations on the read side are the sanitizer and the CSP's
+  `connect-src`, which gives the webview nowhere to send what it read — all
+  provider traffic happens in Rust, never from the page.

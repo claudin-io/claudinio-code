@@ -7,35 +7,7 @@ import {
   type SubagentNode,
   type TimelineNode,
 } from "../lib/subagentTimeline";
-
-// ── Pure functions extracted from ChatPanel for testing ────────────
-
-function formatTokens(n: number): string {
-  if (n < 1000) return `${n}`;
-  return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function summarizeArgs(args: Record<string, unknown>): string {
-  const path = args.path as string | undefined;
-  if (path) return path;
-  const pattern = args.pattern as string | undefined;
-  if (pattern) return `/${pattern}/`;
-  const content = args.content as string | undefined;
-  if (content) return `${content.slice(0, 60)}\u2026`;
-  return JSON.stringify(args).slice(0, 80);
-}
-
-function truncate(text: string, maxChars: number): string {
-  if (text.length > maxChars) {
-    return text.slice(0, maxChars) + "\u2026";
-  }
-  return text;
-}
+import { formatTokens, formatDuration, ellipsize } from "../lib/chatRecords";
 
 // ── formatTokens tests ─────────────────────────────────────────────
 
@@ -79,45 +51,23 @@ describe("formatDuration", () => {
 
 // ── summarizeArgs tests ────────────────────────────────────────────
 
-describe("summarizeArgs", () => {
-  it("returns path when present", () => {
-    expect(summarizeArgs({ path: "src/main.ts" })).toBe("src/main.ts");
-  });
+// ── ellipsize: the one-line previews in the timeline ──────────────
 
-  it("returns pattern when present", () => {
-    expect(summarizeArgs({ pattern: "function.*" })).toBe("/function.*/");
-  });
-
-  it("returns truncated content when present", () => {
-    const long = "a".repeat(100);
-    const result = summarizeArgs({ content: long });
-    expect(result).toBe(`${"a".repeat(60)}\u2026`);
-  });
-
-  it("returns JSON fallback for other args", () => {
-    const result = summarizeArgs({ foo: "bar", baz: 42 });
-    expect(result.length).toBeLessThanOrEqual(80);
-    expect(result).toContain("bar");
-  });
-});
-
-// ── truncate tests (simulates the inline logic in SubagentRow) ─────
-
-describe("truncate", () => {
+describe("ellipsize", () => {
   it("returns full text when within maxChars", () => {
-    expect(truncate("hello", 80)).toBe("hello");
-    expect(truncate("", 80)).toBe("");
+    expect(ellipsize("hello", 80)).toBe("hello");
+    expect(ellipsize("", 80)).toBe("");
   });
 
   it("truncates and appends ellipsis when over maxChars", () => {
     const long = "a".repeat(100);
-    expect(truncate(long, 80)).toBe("a".repeat(80) + "\u2026");
+    expect(ellipsize(long, 80)).toBe("a".repeat(80) + "\u2026");
   });
 
   it("uses 80 chars for goal truncation", () => {
     const goal = "Find the authentication flow and refactor it to use the new session management system with proper error handling";
     expect(goal.length).toBeGreaterThan(80);
-    const truncated = truncate(goal, 80);
+    const truncated = ellipsize(goal, 80);
     expect(truncated).toHaveLength(81); // 80 + ellipsis
     expect(truncated.endsWith("\u2026")).toBe(true);
   });
@@ -125,15 +75,15 @@ describe("truncate", () => {
   it("uses 120 chars for report truncation", () => {
     const report = "The authentication flow was found in src/auth/flow.ts. It uses session management from src/session/store.ts. Refactored to use new patterns.";
     expect(report.length).toBeGreaterThan(120);
-    const truncated = truncate(report, 120);
+    const truncated = ellipsize(report, 120);
     expect(truncated).toHaveLength(121); // 120 + ellipsis
     expect(truncated.endsWith("\u2026")).toBe(true);
   });
 
   it("returns full text when exactly at maxChars", () => {
     const text = "a".repeat(80);
-    expect(truncate(text, 80)).toBe(text);
-    expect(truncate(text, 80)).toHaveLength(80);
+    expect(ellipsize(text, 80)).toBe(text);
+    expect(ellipsize(text, 80)).toHaveLength(80);
   });
 });
 
