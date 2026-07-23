@@ -60,7 +60,8 @@ jobs:
             patchelf \
             libxdo-dev \
             libssl-dev \
-            xdg-utils
+            xdg-utils \
+            ripgrep
           # libappindicator3-dev was dropped in Ubuntu 24.04 (Noble);
           # libappindicator-sys still looks for 'libappindicator3' via
           # pkg-config, so provide a compatibility symlink.
