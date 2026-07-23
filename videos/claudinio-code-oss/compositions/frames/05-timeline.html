@@ -1,0 +1,492 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-900.woff2") format("woff2");
+      font-weight: 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+      color: #edeef5;
+
+      --surface-0: oklch(0.145 0.015 280);
+      --surface-1: oklch(0.17 0.015 280);
+      --surface-2: oklch(0.185 0.018 280);
+      --surface-3: oklch(0.23 0.02 280);
+      --border-subtle: oklch(0.28 0.02 280);
+      --ink: oklch(0.95 0.01 280);
+      --ink-muted: oklch(0.78 0.015 280);
+      --ink-faint: oklch(0.65 0.02 280);
+      --accent: oklch(0.62 0.19 277);
+      --accent-strong: oklch(0.562 0.199 276.6);
+      --success: oklch(0.72 0.17 155);
+      --warning: oklch(0.78 0.15 85);
+    }
+
+    .f05-bg {
+      background: #090910;
+    }
+    .f05-stage {
+      position: absolute;
+      inset: 0;
+    }
+
+    /* ── the transcript column ── */
+    .f05-turn {
+      position: absolute;
+      left: 80px;
+      top: 78px;
+      width: 980px;
+      height: 795px;
+      background: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: 0;
+      overflow: hidden;
+    }
+    .f05-runhead {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 15px 22px;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 20px;
+      color: var(--ink-faint);
+      background: var(--surface-1);
+    }
+    .f05-tri {
+      display: inline-block;
+      font-size: 16px;
+    }
+    .f05-scroll {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 60px;
+      bottom: 62px;
+      overflow: hidden;
+    }
+    .f05-rows {
+      padding: 16px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+    }
+    .f05-phase {
+      font-size: 19px;
+      color: var(--ink-faint);
+      margin-left: 4px;
+    }
+    .f05-think {
+      border-left: 3px solid color-mix(in oklch, var(--accent) 60%, transparent);
+      padding-left: 15px;
+      font-size: 20px;
+      line-height: 1.45;
+      color: var(--ink-muted);
+    }
+    .f05-tool {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-1);
+      border-radius: 0;
+      padding: 11px 15px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 20px;
+      color: var(--ink-muted);
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .f05-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--accent);
+      flex: none;
+    }
+    .f05-arg {
+      font-size: 17px;
+      color: var(--ink-faint);
+    }
+
+    /* the tasks block — the app's signature artifact */
+    .f05-tasks {
+      border: 1px solid var(--border-subtle);
+      border-radius: 0;
+      background: var(--surface-1);
+      padding: 14px 18px;
+    }
+    .f05-tasks-hd {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 20px;
+      color: var(--ink);
+      margin-bottom: 12px;
+    }
+    .f05-tasks-hd .cnt {
+      font-family: "JetBrains Mono", monospace;
+      color: var(--ink-faint);
+      font-size: 18px;
+    }
+    .f05-tasks-hd .done {
+      margin-left: auto;
+      color: var(--success);
+      font-size: 19px;
+    }
+    .f05-task {
+      display: flex;
+      gap: 11px;
+      padding: 5px 0;
+    }
+    .f05-tick {
+      width: 19px;
+      height: 19px;
+      flex: none;
+      margin-top: 3px;
+    }
+    .f05-tick svg {
+      width: 19px;
+      height: 19px;
+      fill: none;
+      stroke: var(--success);
+      stroke-width: 2;
+    }
+    .f05-task .tt {
+      font-size: 19px;
+      color: var(--ink);
+      line-height: 1.3;
+    }
+    .f05-task .ts {
+      font-size: 16px;
+      color: var(--ink-faint);
+      line-height: 1.35;
+    }
+    .f05-task.doing .tt {
+      color: var(--ink);
+    }
+    .f05-task.doing .f05-tick svg {
+      stroke: var(--accent);
+    }
+    .f05-raw {
+      margin-top: 8px;
+      font-size: 16px;
+      color: var(--ink-faint);
+      text-decoration: underline;
+    }
+
+    .f05-foot {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      border-top: 1px solid var(--border-subtle);
+      background: var(--surface-1);
+      padding: 14px 22px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .f05-tok {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 20px;
+      color: var(--ink-faint);
+    }
+    .f05-cost {
+      margin-left: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 20px;
+      color: var(--accent);
+      background: color-mix(in oklch, var(--accent) 14%, transparent);
+      border-radius: 999px;
+      padding: 5px 16px;
+    }
+
+    /* ── right column ── */
+    .f05-kicker {
+      color: #8b91f8;
+      position: absolute;
+      left: 1130px;
+      top: 86px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 25px;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .f05-stub {
+      display: inline-block;
+      width: 36px;
+      height: 2px;
+      background: #5c60e6;
+      margin-right: 18px;
+      vertical-align: 0.28em;
+    }
+    .f05-head {
+      position: absolute;
+      left: 1130px;
+      top: 150px;
+      width: 720px;
+      font-size: 112px;
+      line-height: 0.9;
+      letter-spacing: -0.04em;
+      font-weight: 900;
+      text-transform: lowercase;
+    }
+
+    /* subagent cards, in the app's real shape */
+    .f05-agents {
+      position: absolute;
+      left: 1130px;
+      top: 430px;
+      width: 710px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .f05-ag {
+      border-left: 2px solid var(--border-subtle);
+      background: var(--surface-1);
+      border-radius: 0 10px 10px 0;
+      padding: 14px 18px;
+    }
+    .f05-ag .hd {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 20px;
+      color: var(--ink);
+      white-space: nowrap;
+    }
+    .f05-ag .chip {
+      font-size: 15px;
+      color: var(--accent);
+      background: color-mix(in oklch, var(--accent) 16%, transparent);
+      border-radius: 5px;
+      padding: 2px 8px;
+    }
+    .f05-ag .state {
+      font-family: "Inter", sans-serif;
+      font-size: 17px;
+      color: var(--ink-faint);
+    }
+    .f05-ag .sdot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+    .f05-ag .goal {
+      margin-top: 7px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 16px;
+      color: var(--ink-faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .f05-ag .goal b {
+      color: var(--ink-muted);
+      font-weight: 500;
+    }
+  </style>
+
+  <div id="root" data-composition-id="05-timeline" data-start="0" data-duration="10.569" data-width="1920" data-height="1080">
+    <div class="clip f05-bg" id="05-timeline-bg" data-start="0" data-duration="10.569" data-track-index="0" style="position: absolute; inset: 0"></div>
+
+    <div class="clip f05-stage" id="05-timeline-stage" data-start="0" data-duration="10.569" data-track-index="1">
+      <div class="f05-turn" id="f05-turn">
+        <div class="f05-runhead">
+          <span class="f05-tri" id="f05-tri">▸</span>
+          <span>Worked for 2176.5s · 32 steps · 247k → 13k tokens</span>
+        </div>
+
+        <div class="f05-scroll">
+          <div class="f05-rows" id="f05-rows">
+            <div class="f05-phase" id="f05-r1">— plan —</div>
+            <div class="f05-think" id="f05-r2">
+              The handoff has to open a new session — otherwise the builder inherits every
+              exploration turn above it.
+            </div>
+            <div class="f05-tool" id="f05-r3">
+              <span class="f05-dot"></span>semantic_search <span class="f05-arg">"session persistence"</span>
+            </div>
+
+            <div class="f05-tasks" id="f05-r4">
+              <div class="f05-tasks-hd">
+                <span>Updated tasks</span><span class="cnt">9/10 done</span><span class="done">✓</span>
+              </div>
+              <div class="f05-task">
+                <span class="f05-tick"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" /></svg></span>
+                <span>
+                  <span class="tt" style="display: block">Seed the builder session from the plan</span>
+                  <span class="ts" style="display: block">handoff.rs now calls Session::seeded()</span>
+                </span>
+              </div>
+              <div class="f05-task">
+                <span class="f05-tick"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" /></svg></span>
+                <span>
+                  <span class="tt" style="display: block">Keep exploration out of the new context</span>
+                  <span class="ts" style="display: block">history rebuilt from the plan record only</span>
+                </span>
+              </div>
+              <div class="f05-task">
+                <span class="f05-tick"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" /></svg></span>
+                <span>
+                  <span class="tt" style="display: block">Record the link between both sessions</span>
+                  <span class="ts" style="display: block">linked_from / handoff_to in the JSONL</span>
+                </span>
+              </div>
+              <div class="f05-task doing">
+                <span class="f05-tick"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></span>
+                <span>
+                  <span class="tt" style="display: block">Verify with cargo test --all</span>
+                  <span class="ts" style="display: block">Doing</span>
+                </span>
+              </div>
+              <div class="f05-raw">Show raw JSON</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="f05-foot" id="f05-foot">
+          <span class="f05-tok">97k / 200k · total: 1035k</span>
+          <span class="f05-cost">$0.3755</span>
+        </div>
+      </div>
+
+      <div class="f05-kicker" id="f05-kicker"><span class="f05-stub"></span>FULLY INSPECTABLE</div>
+      <div class="f05-head" id="f05-head">Nothing is a black box.</div>
+
+      <div class="f05-agents" id="f05-agents">
+        <div class="f05-ag" id="f05-a1">
+          <div class="hd">
+            trace-session-loop <span class="chip">explore</span><span class="sdot"></span><span class="state">Working</span>
+          </div>
+          <div class="goal"><b>GOAL</b> Map every caller of run_phase across agent/…</div>
+        </div>
+        <div class="f05-ag" id="f05-a2">
+          <div class="hd">
+            audit-jsonl-records <span class="chip">explore</span><span class="sdot"></span><span class="state">Working</span>
+          </div>
+          <div class="goal"><b>GOAL</b> Check persist.rs writes linked_from on handoff…</div>
+        </div>
+        <div class="f05-ag" id="f05-a3">
+          <div class="hd">
+            seed-builder-session <span class="chip">code</span><span class="sdot"></span><span class="state">Working</span>
+          </div>
+          <div class="goal"><b>GOAL</b> Edit src/agent/handoff.rs: 1. Change `session…</div>
+        </div>
+        <div class="f05-ag" id="f05-a4">
+          <div class="hd">
+            add-handoff-tests <span class="chip">code</span><span class="sdot"></span><span class="state">Working</span>
+          </div>
+          <div class="goal"><b>GOAL</b> Add a golden test for the seeded handoff path…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      gsap.set(["#f05-r1", "#f05-r2", "#f05-r3", "#f05-r4"], { autoAlpha: 0 });
+      gsap.set(["#f05-foot", "#f05-kicker", "#f05-head"], { autoAlpha: 0 });
+      gsap.set(["#f05-a1", "#f05-a2", "#f05-a3", "#f05-a4"], { autoAlpha: 0 });
+      gsap.set(".f05-task", { autoAlpha: 0 });
+
+      // Scene 1 (0–2.72) — the collapsed turn OPENS on "a timeline you can
+      // open," (timeline@0.98 → open,@2.15): the panel unfolds downward.
+      tl.fromTo(
+        "#f05-turn",
+        { height: 74, autoAlpha: 0.85 },
+        { height: 795, autoAlpha: 1, duration: 1.2, ease: "expo.out" },
+        0.98,
+      );
+      tl.to("#f05-tri", { rotation: 90, transformOrigin: "50% 50%", duration: 0.45, ease: "expo.out" }, 0.98);
+      tl.fromTo("#f05-kicker", { autoAlpha: 0, x: -20 }, { autoAlpha: 1, x: 0, duration: 0.34, ease: "expo.out" }, 0.3);
+      tl.fromTo("#f05-head", { autoAlpha: 0, yPercent: 105, scale: 1.12, transformOrigin: "0% 100%" }, { autoAlpha: 1, yPercent: 0, scale: 1, duration: 0.36, ease: "expo.out" }, 0.62);
+
+      // Scene 2 (2.72–6.88) — each layer lights exactly as the voice names it:
+      // phases@2.72 · thinking@3.55 · each tool call@4.36 · tokens@5.41 / cost@5.84.
+      function row(sel, at) {
+        tl.fromTo(sel, { autoAlpha: 0, x: -16 }, { autoAlpha: 1, x: 0, duration: 0.4, ease: "expo.out" }, at);
+      }
+      row("#f05-r1", 2.72);
+      row("#f05-r2", 3.55);
+      row("#f05-r3", 4.36);
+
+      // the tasks block — the artifact the run keeps updating — checks off row
+      // by row, which is what "you can open it" actually buys you.
+      row("#f05-r4", 4.75);
+      tl.fromTo(
+        ".f05-task",
+        { autoAlpha: 0, x: -12 },
+        { autoAlpha: 1, x: 0, duration: 0.32, stagger: 0.14, ease: "expo.out" },
+        4.9,
+      );
+
+      // one constant-velocity travel down the column — no re-push in the back half
+      tl.fromTo("#f05-rows", { y: 0 }, { y: -96, duration: 1.9, ease: "none" }, 4.9);
+
+      tl.fromTo("#f05-foot", { autoAlpha: 0, x: -20 }, { autoAlpha: 1, x: 0, duration: 0.34, ease: "expo.out" }, 5.41);
+
+      // Scene 3 (6.88–8.49) — four subagents fan out, staggered by index
+      // (Subagents@6.88 · parallel@7.53), each in the app's own card shape.
+      tl.fromTo(
+        ["#f05-a1", "#f05-a2", "#f05-a3", "#f05-a4"],
+        { autoAlpha: 0, x: 60, scale: 0.94 },
+        { autoAlpha: 1, x: 0, scale: 1, duration: 0.38, stagger: 0.15, ease: "expo.out" },
+        6.88,
+      );
+
+      // Scene 4 (8.49–10.069) — "each keeps its own": the status dots pulse
+      // through once, finite, then the whole frame holds still.
+      var p = { v: 0 };
+      tl.to(
+        p,
+        {
+          v: Math.PI * 2,
+          duration: 1.1,
+          ease: "none",
+          onUpdate: function () {
+            var a = 0.45 + 0.55 * Math.abs(Math.sin(p.v));
+            gsap.set(".f05-ag .sdot", { opacity: a });
+          },
+        },
+        8.49,
+      );
+
+      window.__timelines["05-timeline"] = tl;
+    })();
+  </script>
+</template>

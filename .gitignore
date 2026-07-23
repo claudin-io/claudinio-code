@@ -11,3 +11,28 @@ src-tauri/2026-07-04-*
 __pycache__/
 # Stray Claude Code / agent session transcripts dumped into the repo root
 [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
+
+# Agent skill bundles — third-party, reinstalled via `npx hyperframes skills update`
+# and pinned by skills-lock.json; never vendored into history.
+.agents/skills/
+.claude/
+
+# HyperFrames video projects: keep the source (storyboard, script, brief, frame
+# spec, compositions), drop everything the pipeline regenerates.
+videos/*/node_modules/
+videos/*/renders/
+videos/*/snapshots/
+videos/*/assets/bgm/
+videos/*/assets/voice/
+videos/*/assets/fonts/
+videos/*/assets/img/
+videos/*/.hyperframes/frame-packets/
+videos/*/.hyperframes/backup/
+videos/*/.thumbnails/
+videos/*/.media/
+videos/*/.waveform-cache/
+videos/*/assets/sfx/
+videos/*/assets/logo.png
+videos/*/capture/assets/
+videos/*/audio_meta.json
+videos/*/audio_engine_meta.json

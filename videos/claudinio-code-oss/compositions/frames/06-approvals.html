@@ -1,0 +1,461 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-900.woff2") format("woff2");
+      font-weight: 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+      color: #090910;
+
+      --surface-0: oklch(0.145 0.015 280);
+      --surface-1: oklch(0.17 0.015 280);
+      --surface-2: oklch(0.185 0.018 280);
+      --surface-3: oklch(0.23 0.02 280);
+      --border-subtle: oklch(0.28 0.02 280);
+      --ink: oklch(0.95 0.01 280);
+      --ink-muted: oklch(0.78 0.015 280);
+      --ink-faint: oklch(0.65 0.02 280);
+      --accent: oklch(0.62 0.19 277);
+      --accent-strong: oklch(0.562 0.199 276.6);
+      --accent-ink: oklch(0.99 0 0);
+      --success: oklch(0.72 0.17 155);
+      --danger: oklch(0.68 0.19 25);
+      --warning: oklch(0.78 0.15 85);
+    }
+
+    .f06-bg {
+      background: #5c60e6;
+    }
+    .f06-stage {
+      position: absolute;
+      inset: 0;
+    }
+
+    .f06-kicker {
+      color: #edeef5;
+      position: absolute;
+      left: 80px;
+      top: 74px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 26px;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .f06-stub {
+      display: inline-block;
+      width: 36px;
+      height: 2px;
+      background: #5c60e6;
+      margin-right: 18px;
+      vertical-align: 0.28em;
+    }
+    .f06-head {
+      position: absolute;
+      left: 80px;
+      top: 136px;
+      font-size: 134px;
+      line-height: 0.9;
+      letter-spacing: -0.04em;
+      font-weight: 900;
+      text-transform: lowercase;
+      white-space: nowrap;
+    }
+
+    /* ── left: the running agent, then the approval card ── */
+    .f06-panel {
+      position: absolute;
+      left: 80px;
+      top: 300px;
+      width: 760px;
+      height: 570px;
+      background: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .f06-running {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 20px 24px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 21px;
+      color: var(--ink-muted);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .f06-spin {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      border: 3px solid color-mix(in oklch, var(--warning) 30%, transparent);
+      border-top-color: var(--warning);
+      flex: none;
+    }
+    .f06-body {
+      flex: 1;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+    }
+    .f06-line {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 19px;
+      color: var(--ink-faint);
+    }
+
+    /* the approval card — accent border + accent tint, per ChatPanel */
+    .f06-approve {
+      margin-top: auto;
+      border-top: 1px solid color-mix(in oklch, var(--accent) 40%, transparent);
+      background: color-mix(in oklch, var(--accent) 10%, transparent);
+      padding: 22px 24px;
+    }
+    .f06-approve .top {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 21px;
+      color: var(--accent);
+    }
+    .f06-approve .top .req {
+      font-family: "Inter", sans-serif;
+      font-size: 19px;
+      color: var(--ink-muted);
+    }
+    .f06-cmd {
+      margin-top: 14px;
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-2);
+      border-radius: 8px;
+      padding: 15px 18px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 25px;
+      color: var(--ink);
+    }
+    .f06-wait {
+      margin-top: 14px;
+      font-size: 20px;
+      color: var(--warning);
+    }
+    .f06-btns {
+      margin-top: 16px;
+      display: flex;
+      gap: 14px;
+      position: relative;
+    }
+    .f06-btn {
+      border-radius: 8px;
+      padding: 13px 30px;
+      font-size: 21px;
+      letter-spacing: 0.04em;
+    }
+    .f06-allow {
+      background: var(--accent-strong);
+      color: var(--accent-ink);
+    }
+    .f06-deny {
+      border: 1px solid var(--border-subtle);
+      color: var(--ink-muted);
+    }
+
+    /* the cursor + its ripple */
+    .f06-cursor {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 30px;
+      height: 30px;
+      z-index: 5;
+      pointer-events: none;
+    }
+    .f06-cursor svg {
+      width: 30px;
+      height: 30px;
+      fill: #edeef5;
+      stroke: #090910;
+      stroke-width: 1.4;
+    }
+    .f06-ripple {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 34px;
+      height: 34px;
+      margin: -17px 0 0 -17px;
+      border-radius: 999px;
+      border: 3px solid #5c60e6;
+      z-index: 4;
+      pointer-events: none;
+    }
+
+    /* ── right: the diff ── */
+    .f06-diff {
+      position: absolute;
+      left: 900px;
+      top: 300px;
+      width: 940px;
+      height: 570px;
+      background: var(--surface-0);
+      border: 1px solid var(--border-subtle);
+      border-radius: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .f06-diffhead {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 22px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--surface-1);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 20px;
+      color: var(--accent);
+    }
+    .f06-diffhead .f {
+      color: var(--ink-faint);
+    }
+    .f06-panes {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--border-subtle);
+      min-height: 0;
+    }
+    .f06-pane {
+      background: var(--surface-1);
+      padding: 16px 0;
+      overflow: hidden;
+    }
+    .f06-cl {
+      display: flex;
+      gap: 16px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 17px;
+      line-height: 1.85;
+      padding: 0 18px;
+      white-space: nowrap;
+      color: var(--ink-muted);
+    }
+    .f06-cl .g {
+      color: var(--ink-faint);
+      width: 26px;
+      flex: none;
+      text-align: right;
+    }
+    .f06-cl.del {
+      background: color-mix(in oklch, var(--danger) 14%, transparent);
+      color: var(--ink);
+    }
+    .f06-cl.add {
+      background: color-mix(in oklch, var(--success) 14%, transparent);
+      color: var(--ink);
+    }
+    .f06-note {
+      border-top: 1px solid var(--border-subtle);
+      padding: 13px 22px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 18px;
+      color: var(--ink-faint);
+    }
+    .f06-note.done {
+      color: var(--success);
+    }
+  </style>
+
+  <div id="root" data-composition-id="06-approvals" data-start="0" data-duration="6.72" data-width="1920" data-height="1080">
+    <div class="clip f06-bg" data-start="0" data-duration="6.72" data-track-index="0" style="position: absolute; inset: 0"></div>
+
+    <div class="clip f06-stage" id="06-approvals-stage" data-start="0" data-duration="6.72" data-track-index="1">
+      <div class="f06-kicker" id="f06-kicker"><span class="f06-stub"></span>APPROVAL GATES</div>
+      <div class="f06-head" id="f06-head">It asks first.</div>
+
+      <div class="f06-panel" id="f06-panel">
+        <div class="f06-running">
+          <span class="f06-spin" id="f06-spin"></span>
+          <span id="f06-runlabel">running · 32 steps</span>
+        </div>
+        <div class="f06-body">
+          <div class="f06-line">▸ read_file src/agent/handoff.rs</div>
+          <div class="f06-line">▸ edit_file src/agent/handoff.rs</div>
+          <div class="f06-line">▸ bash</div>
+        </div>
+
+        <div class="f06-approve" id="f06-approve">
+          <div class="top">bash <span class="req">requires approval</span></div>
+          <div class="f06-cmd">cargo test --all</div>
+          <div class="f06-wait" id="f06-wait">waiting on you</div>
+          <div class="f06-btns">
+            <span class="f06-btn f06-allow" id="f06-allow">Allow</span>
+            <span class="f06-btn f06-deny">Deny</span>
+            <span class="f06-ripple" id="f06-ripple"></span>
+            <span class="f06-cursor" id="f06-cursor">
+              <svg viewBox="0 0 24 24"><path d="M5 2.5 19 12l-6.2 1.2L9.6 20Z" /></svg>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="f06-diff" id="f06-diff">
+        <div class="f06-diffhead">edit_file <span class="f">src/agent/handoff.rs</span></div>
+        <div class="f06-panes">
+          <div class="f06-pane">
+            <div class="f06-cl"><span class="g">58</span><span>let session = self.current();</span></div>
+            <div class="f06-cl"><span class="g">59</span><span>let plan = plan_doc(&amp;path)?;</span></div>
+            <div class="f06-cl del" id="f06-del1"><span class="g">60</span><span>session.push(plan);</span></div>
+            <div class="f06-cl del" id="f06-del2"><span class="g">61</span><span>session.run(Mode::Builder)</span></div>
+            <div class="f06-cl"><span class="g">62</span><span>}</span></div>
+          </div>
+          <div class="f06-pane">
+            <div class="f06-cl"><span class="g">58</span><span>let session = self.current();</span></div>
+            <div class="f06-cl"><span class="g">59</span><span>let plan = plan_doc(&amp;path)?;</span></div>
+            <div class="f06-cl add" id="f06-add1"><span class="g">60</span><span>let fresh = Session::seeded(plan);</span></div>
+            <div class="f06-cl add" id="f06-add2"><span class="g">61</span><span>fresh.run(Mode::Builder)</span></div>
+            <div class="f06-cl"><span class="g">62</span><span>}</span></div>
+          </div>
+        </div>
+        <div class="f06-note" id="f06-note">proposed — nothing written yet</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      gsap.set(["#f06-approve", "#f06-diff"], { autoAlpha: 0 });
+      gsap.set(["#f06-cursor"], { autoAlpha: 0, x: 330, y: 150 });
+      gsap.set("#f06-ripple", { autoAlpha: 0, x: 60, y: 22, scale: 0.2 });
+      gsap.set(["#f06-del1", "#f06-del2", "#f06-add1", "#f06-add2"], { autoAlpha: 0 });
+
+      tl.fromTo("#f06-kicker", { autoAlpha: 0, x: -20 }, { autoAlpha: 1, x: 0, duration: 0.34, ease: "expo.out" }, 0);
+      tl.fromTo("#f06-head", { autoAlpha: 0, yPercent: 105, scale: 1.12, transformOrigin: "0% 100%" }, { autoAlpha: 1, yPercent: 0, scale: 1, duration: 0.36, ease: "expo.out" }, 0.06);
+      tl.fromTo("#f06-panel", { autoAlpha: 0, y: 26 }, { autoAlpha: 1, y: 0, duration: 0.55, ease: "expo.out" }, 0.06);
+
+      // Scene 1 (0–1.79) — the agent is working: the spinner turns. On
+      // "Shell commands stop and ask" the card slides up and the spinner STOPS
+      // mid-rotation (stop@1.22 · ask.@1.79). A finite tween, never a repeat.
+      var spin = { r: 0 };
+      tl.to(
+        spin,
+        {
+          r: 900,
+          duration: 1.22,
+          ease: "none",
+          onUpdate: function () {
+            gsap.set("#f06-spin", { rotation: spin.r });
+          },
+        },
+        0,
+      );
+      tl.fromTo(
+        "#f06-approve",
+        { autoAlpha: 0, y: 60 },
+        { autoAlpha: 1, y: 0, duration: 0.6, ease: "expo.out" },
+        0.45,
+      );
+      tl.to("#f06-runlabel", { autoAlpha: 0.45, duration: 0.3, ease: "none" }, 1.22);
+      tl.to("#f06-spin", { borderTopColor: "oklch(0.65 0.02 280)", duration: 0.3, ease: "none" }, 1.22);
+
+      // Scene 2 (1.79–2.40) — HELD. The single most important beat in the video:
+      // the agent has stopped and is waiting. Only a low-amplitude jitter moves.
+      var jit = { p: 0 };
+      tl.to(
+        jit,
+        {
+          p: Math.PI * 2 * 2,
+          duration: 0.61,
+          ease: "none",
+          onUpdate: function () {
+            gsap.set("#f06-wait", { y: Math.sin(jit.p) * 1.4 });
+          },
+        },
+        1.79,
+      );
+
+      // Scene 3 (2.40–4.14) — the diff opens to the right with a book-open tilt;
+      // the changed lines land staggered, nothing written yet.
+      tl.fromTo(
+        "#f06-diff",
+        { autoAlpha: 0, rotationY: -14, transformOrigin: "0% 50%", x: -40 },
+        { autoAlpha: 1, rotationY: 0, x: 0, duration: 0.72, ease: "expo.out" },
+        2.4,
+      );
+      tl.fromTo(
+        ["#f06-del1", "#f06-del2"],
+        { autoAlpha: 0, x: -14 },
+        { autoAlpha: 1, x: 0, duration: 0.34, stagger: 0.11, ease: "expo.out" },
+        3.05,
+      );
+      tl.fromTo(
+        ["#f06-add1", "#f06-add2"],
+        { autoAlpha: 0, x: 14 },
+        { autoAlpha: 1, x: 0, duration: 0.34, stagger: 0.11, ease: "expo.out" },
+        3.4,
+      );
+
+      // Scene 4 (4.14–4.94) — the cursor travels to Allow and PRESSES:
+      // compression, spring recovery, one expanding ripple. Accent fires here.
+      tl.to("#f06-cursor", { autoAlpha: 1, duration: 0.15, ease: "none" }, 4.14);
+      tl.to("#f06-cursor", { x: 74, y: 34, duration: 0.5, ease: "expo.out" }, 4.14);
+      tl.to("#f06-allow", { scale: 0.93, duration: 0.1, ease: "power2.in" }, 4.72);
+      tl.to("#f06-allow", { scale: 1, duration: 0.4, ease: "expo.out" }, 4.82);
+      tl.fromTo(
+        "#f06-ripple",
+        { autoAlpha: 0.85, scale: 0.2 },
+        { autoAlpha: 0, scale: 2.6, duration: 0.55, ease: "expo.out" },
+        4.76,
+      );
+
+      // Scene 5 (4.94–6.72) — only NOW does the write land: the gutters clear
+      // and the note flips to written. Then it holds, still.
+      tl.to("#f06-cursor", { autoAlpha: 0, duration: 0.25, ease: "none" }, 5.2);
+      tl.to(["#f06-del1", "#f06-del2"], { autoAlpha: 0.25, duration: 0.5, ease: "expo.out" }, 5.1);
+      tl.to(
+        ["#f06-add1", "#f06-add2"],
+        { backgroundColor: "rgba(0,0,0,0)", duration: 0.6, ease: "expo.out" },
+        5.25,
+      );
+      tl.set("#f06-note", { innerText: "written to src/agent/handoff.rs", className: "f06-note done" }, 5.35);
+      tl.fromTo("#f06-note", { autoAlpha: 0.2 }, { autoAlpha: 1, duration: 0.4, ease: "none" }, 5.35);
+
+      window.__timelines["06-approvals"] = tl;
+    })();
+  </script>
+</template>

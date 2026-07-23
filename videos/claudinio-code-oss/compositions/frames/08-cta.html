@@ -1,0 +1,299 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-900.woff2") format("woff2");
+      font-weight: 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+      color: #090910;
+    }
+
+    /* indigo register — the end card declares */
+    .f08-bg {
+      background: #5c60e6;
+    }
+    .f08-stage {
+      position: absolute;
+      inset: 0;
+    }
+
+    .f08-label {
+      position: absolute;
+      left: 106px;
+      top: 96px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 27px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #edeef5;
+      white-space: nowrap;
+    }
+    .f08-stub {
+      display: block;
+      width: 36px;
+      height: 2px;
+      background: #edeef5;
+    }
+
+    /* the mark sits on an ink plate so it survives the indigo ground */
+    .f08-plate {
+      position: absolute;
+      left: 106px;
+      top: 232px;
+      width: 150px;
+      height: 150px;
+      background: #090910;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .f08-plate img {
+      width: 104px;
+      height: 104px;
+      display: block;
+    }
+
+    .f08-name {
+      position: absolute;
+      left: 300px;
+      top: 226px;
+      width: 1520px;
+      overflow: hidden;
+    }
+    .f08-name span {
+      display: block;
+      font-size: 172px;
+      font-weight: 900;
+      line-height: 0.98;
+      letter-spacing: -0.045em;
+      text-transform: lowercase;
+      color: #090910;
+      white-space: nowrap;
+    }
+
+    .f08-rule {
+      position: absolute;
+      left: 106px;
+      right: 106px;
+      top: 452px;
+      height: 2px;
+      background: rgba(9, 9, 16, 0.24);
+    }
+
+    .f08-url {
+      position: absolute;
+      left: 106px;
+      top: 512px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 62px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      color: #090910;
+      white-space: nowrap;
+      min-height: 74px;
+    }
+    .f08-caret {
+      display: inline-block;
+      width: 22px;
+      height: 1em;
+      vertical-align: -0.14em;
+      background: #090910;
+    }
+
+    .f08-chips {
+      position: absolute;
+      left: 106px;
+      top: 636px;
+      display: flex;
+      gap: 18px;
+    }
+    .f08-chip {
+      border: 2px solid #090910;
+      padding: 14px 32px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 26px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #090910;
+      white-space: nowrap;
+    }
+    .f08-chip.mit {
+      background: #090910;
+      color: #5c60e6;
+    }
+
+    /* the ask — the largest thing on the plane */
+    .f08-ask {
+      position: absolute;
+      left: 106px;
+      top: 740px;
+      overflow: hidden;
+      width: 1720px;
+    }
+    .f08-ask span {
+      display: block;
+      font-size: 132px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      text-transform: lowercase;
+      color: #090910;
+      white-space: nowrap;
+    }
+  </style>
+
+  <div id="root" data-composition-id="08-cta" data-start="0" data-duration="6.421" data-width="1920" data-height="1080">
+    <div class="clip f08-bg" id="08-cta-bg" data-start="0" data-duration="6.421" data-track-index="0" style="position: absolute; inset: 0"></div>
+
+    <div class="clip f08-stage" id="08-cta-stage" data-start="0" data-duration="6.421" data-track-index="1">
+      <div class="f08-label" id="f08-label"><span class="f08-stub" id="f08-stub"></span>open source</div>
+
+      <div class="f08-plate" id="f08-plate"><img src="assets/img/logo.png" alt=""></div>
+
+      <div class="f08-name"><span id="f08-nametext">claudinio code.</span></div>
+
+      <div class="f08-rule" id="f08-rule"></div>
+
+      <div class="f08-url"><span id="f08-urltext"></span><span class="f08-caret" id="f08-urlcaret"></span></div>
+
+      <div class="f08-chips">
+        <span class="f08-chip mit" id="f08-ch1">MIT</span>
+        <span class="f08-chip" id="f08-ch2">macOS</span>
+        <span class="f08-chip" id="f08-ch3">Windows</span>
+        <span class="f08-chip" id="f08-ch4">Linux</span>
+      </div>
+
+      <div class="f08-ask"><span id="f08-asktext">go read the source.</span></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      gsap.set(["#f08-nametext", "#f08-asktext"], { autoAlpha: 0 });
+      gsap.set(["#f08-ch1", "#f08-ch2", "#f08-ch3", "#f08-ch4"], { autoAlpha: 0 });
+      gsap.set(["#f08-url", "#f08-rule"], { autoAlpha: 0 });
+
+      function slam(sel, at, dur) {
+        tl.fromTo(
+          sel,
+          { yPercent: 106, scale: 1.12, autoAlpha: 0, transformOrigin: "0% 100%" },
+          { yPercent: 0, scale: 1, autoAlpha: 1, duration: dur || 0.4, ease: "expo.out" },
+          at,
+        );
+      }
+
+      // Scene 1 (0–0.99) — the ink plate hits first and the mark lands in it.
+      tl.fromTo("#f08-label", { autoAlpha: 0, x: -20 }, { autoAlpha: 1, x: 0, duration: 0.34, ease: "expo.out" }, 0);
+      tl.fromTo("#f08-stub", { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.44, ease: "expo.out" }, 0);
+      tl.fromTo(
+        "#f08-plate",
+        { scaleY: 0, autoAlpha: 1, transformOrigin: "50% 100%" },
+        { scaleY: 1, duration: 0.36, ease: "expo.out" },
+        0.11,
+      );
+      tl.fromTo(
+        "#f08-plate img",
+        { autoAlpha: 0, scale: 0.6 },
+        { autoAlpha: 1, scale: 1, duration: 0.4, ease: "expo.out" },
+        0.4,
+      );
+
+      // Scene 2 (0.99–1.73) — the wordmark slams out of its clipped box.
+      slam("#f08-nametext", 0.99, 0.44);
+
+      // Scene 3 (1.73–3.54) — the rule wipes, then the URL types on steadily
+      // and holds untouched: the one thing the viewer has to retype.
+      tl.fromTo("#f08-rule", { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.5, ease: "expo.out" }, 1.62);
+      tl.to("#f08-url", { autoAlpha: 1, duration: 0.15, ease: "none" }, 1.73);
+
+      var URL_STATES = [
+        { t: 0.0, text: "" },
+        { t: 0.12, text: "github.com/" },
+        { t: 0.42, text: "github.com/claudin-io/" },
+        { t: 0.78, text: "github.com/claudin-io/claudinio-code" },
+      ];
+      var urlEl = document.getElementById("f08-urltext");
+      var caretEl = document.getElementById("f08-urlcaret");
+      var last = null;
+      var d = { t: 0 };
+      tl.to(
+        d,
+        {
+          t: 1.2,
+          duration: 1.2,
+          ease: "none",
+          onUpdate: function () {
+            var v = "";
+            for (var i = URL_STATES.length - 1; i >= 0; i--) {
+              if (d.t >= URL_STATES[i].t) {
+                v = URL_STATES[i].text;
+                break;
+              }
+            }
+            if (v !== last) {
+              urlEl.textContent = v;
+              last = v;
+            }
+          },
+        },
+        1.73,
+      );
+      var blink = { p: 0 };
+      tl.to(
+        blink,
+        {
+          p: Math.PI * 2 * 4,
+          duration: 1.4,
+          ease: "none",
+          onUpdate: function () {
+            caretEl.style.opacity = Math.sin(blink.p) > 0 ? "1" : "0";
+          },
+        },
+        1.73,
+      );
+      tl.to(caretEl, { autoAlpha: 0, duration: 0.18, ease: "none" }, 3.2);
+
+      // Scene 4 (3.54–5.31) — the platform chips hit left to right, each on its
+      // spoken platform (Mac@3.54 · OS@3.81 · Windows,@3.99 · Linux,@4.81).
+      tl.fromTo("#f08-ch1", { autoAlpha: 0, scale: 1.14, transformOrigin: "0% 50%" }, { autoAlpha: 1, scale: 1, duration: 0.26, ease: "expo.out" }, 3.3);
+      tl.fromTo("#f08-ch2", { autoAlpha: 0, scale: 1.14, transformOrigin: "0% 50%" }, { autoAlpha: 1, scale: 1, duration: 0.26, ease: "expo.out" }, 3.54);
+      tl.fromTo("#f08-ch3", { autoAlpha: 0, scale: 1.14, transformOrigin: "0% 50%" }, { autoAlpha: 1, scale: 1, duration: 0.26, ease: "expo.out" }, 3.99);
+      tl.fromTo("#f08-ch4", { autoAlpha: 0, scale: 1.14, transformOrigin: "0% 50%" }, { autoAlpha: 1, scale: 1, duration: 0.26, ease: "expo.out" }, 4.81);
+
+      // Scene 5 (5.31–6.421) — the ask lands hardest, then everything stops.
+      // This is the only frame with a real exit: it settles and holds.
+      slam("#f08-asktext", 5.31, 0.46);
+
+      window.__timelines["08-cta"] = tl;
+    })();
+  </script>
+</template>

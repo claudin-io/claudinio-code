@@ -1,0 +1,489 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-900.woff2") format("woff2");
+      font-weight: 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+      color: #edeef5;
+
+      --surface-0: oklch(0.145 0.015 280);
+      --surface-1: oklch(0.17 0.015 280);
+      --surface-2: oklch(0.185 0.018 280);
+      --surface-3: oklch(0.23 0.02 280);
+      --border-subtle: oklch(0.28 0.02 280);
+      --ink: oklch(0.95 0.01 280);
+      --ink-muted: oklch(0.78 0.015 280);
+      --ink-faint: oklch(0.65 0.02 280);
+      --accent: oklch(0.62 0.19 277);
+      --accent-strong: oklch(0.562 0.199 276.6);
+      --success: oklch(0.72 0.17 155);
+    }
+
+    .f04-bg {
+      background: #090910;
+    }
+    .f04-stage {
+      position: absolute;
+      inset: 0;
+    }
+
+    .f04-kicker {
+      color: #8b91f8;
+      position: absolute;
+      left: 80px;
+      top: 80px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .f04-stub {
+      display: inline-block;
+      width: 36px;
+      height: 2px;
+      background: #5c60e6;
+      margin-right: 18px;
+      vertical-align: 0.28em;
+    }
+    .f04-head {
+      position: absolute;
+      left: 80px;
+      top: 158px;
+      font-size: 148px;
+      line-height: 0.9;
+      letter-spacing: -0.04em;
+      font-weight: 900;
+      text-transform: lowercase;
+      white-space: nowrap;
+    }
+
+    /* index strip */
+    .f04-index {
+      position: absolute;
+      left: 80px;
+      top: 336px;
+      width: 1760px;
+      height: 128px;
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-1);
+      border-radius: 0;
+      display: flex;
+      align-items: center;
+      padding: 0 40px;
+      box-sizing: border-box;
+      gap: 56px;
+    }
+    .f04-stat {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .f04-stat .n {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 46px;
+      font-weight: 500;
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+    .f04-stat .l {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 20px;
+      color: var(--ink-faint);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .f04-stat.hero .n {
+      color: #6d74f5;
+      font-size: 58px;
+    }
+    .f04-fill {
+      margin-left: auto;
+      width: 420px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--surface-3);
+      overflow: hidden;
+    }
+    .f04-fill i {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: var(--success);
+    }
+
+    /* query cards */
+    .f04-queries {
+      position: absolute;
+      left: 80px;
+      top: 500px;
+      width: 1760px;
+      height: 250px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+    }
+    .f04-q {
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-1);
+      border-radius: 0;
+      padding: 22px 26px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      overflow: hidden;
+    }
+    .f04-q .tag {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 18px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+    .f04-q .qtext {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 27px;
+      color: var(--ink);
+      white-space: nowrap;
+      min-height: 36px;
+    }
+    .f04-caret {
+      height: 1em;
+      vertical-align: -0.14em;
+      display: inline-block;
+      width: 12px;
+      background: var(--accent);
+    }
+    .f04-hit {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      border-left: 2px solid var(--border-subtle);
+      padding-left: 12px;
+    }
+    .f04-hit .f {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 21px;
+      color: var(--ink-muted);
+    }
+    .f04-hit .s {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 17px;
+      color: var(--ink-faint);
+    }
+
+    /* fused ranking */
+    .f04-fused {
+      position: absolute;
+      left: 470px;
+      top: 500px;
+      width: 980px;
+      height: 250px;
+      border: 1px solid var(--accent-strong);
+      background: var(--surface-1);
+      border-radius: 0;
+      padding: 20px 26px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .f04-fused .hd {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 19px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #6d74f5;
+    }
+    .f04-row {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 23px;
+      color: var(--ink-muted);
+    }
+    .f04-row .rank {
+      color: var(--ink-faint);
+      font-size: 18px;
+      width: 26px;
+    }
+    .f04-row.top {
+      color: #fff;
+    }
+    .f04-row.top .rank {
+      color: #6d74f5;
+    }
+
+    /* local-only seal */
+    .f04-seal {
+      position: absolute;
+      right: 80px;
+      top: 790px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      border: 2px solid #5c60e6;
+      border-radius: 999px;
+      padding: 18px 38px;
+      color: #5c60e6;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .f04-seal svg {
+      width: 34px;
+      height: 34px;
+      fill: none;
+      stroke: #5c60e6;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+  </style>
+
+  <div id="root" data-composition-id="04-codebase" data-start="0" data-duration="13.781" data-width="1920" data-height="1080">
+    <div class="clip f04-bg" id="04-codebase-bg" data-start="0" data-duration="13.781" data-track-index="0" style="position: absolute; inset: 0"></div>
+
+    <div class="clip f04-stage" id="04-codebase-stage" data-start="0" data-duration="13.781" data-track-index="1">
+      <div class="f04-kicker" id="f04-kicker"><span class="f04-stub"></span>CODE INTELLIGENCE</div>
+      <div class="f04-head" id="f04-head">Not just grep.</div>
+
+      <div class="f04-index" id="f04-index">
+        <div class="f04-stat hero">
+          <span class="n" id="f04-langs">0</span><span class="l">languages</span>
+        </div>
+        <div class="f04-stat"><span class="n" id="f04-files">0</span><span class="l">files</span></div>
+        <div class="f04-stat"><span class="n" id="f04-syms">0</span><span class="l">symbols</span></div>
+        <div class="f04-stat">
+          <span class="n" id="f04-embs">0</span><span class="l">embeddings</span>
+        </div>
+        <div class="f04-fill"><i id="f04-fill"></i></div>
+      </div>
+
+      <div class="f04-queries" id="f04-queries">
+        <div class="f04-q" id="f04-q1">
+          <span class="tag">semantic_search</span>
+          <div class="qtext"><span id="f04-q1t"></span><span class="f04-caret" id="f04-q1c"></span></div>
+          <div class="f04-hit" id="f04-h1">
+            <span class="f">src/agent/queue.rs</span>
+            <span class="s">pub fn enqueue(&amp;mut self, msg: Message)</span>
+          </div>
+        </div>
+        <div class="f04-q" id="f04-q2">
+          <span class="tag">code_search</span>
+          <div class="qtext"><span id="f04-q2t"></span><span class="f04-caret" id="f04-q2c"></span></div>
+          <div class="f04-hit" id="f04-h2">
+            <span class="f">src/code_intel/embed.rs</span>
+            <span class="s">std::env::set_var("TOKENIZERS_PARALLELISM", "false")</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="f04-fused" id="f04-fused">
+        <span class="hd">one ranking · reciprocal rank fusion</span>
+        <div class="f04-row top"><span class="rank">1</span><span>src/agent/queue.rs</span></div>
+        <div class="f04-row"><span class="rank">2</span><span>src/code_intel/embed.rs</span></div>
+        <div class="f04-row"><span class="rank">3</span><span>src/agent/session.rs</span></div>
+        <div class="f04-row"><span class="rank">4</span><span>src/code_intel/indexer.rs</span></div>
+      </div>
+
+      <div class="f04-seal" id="f04-seal">
+        <svg viewBox="0 0 24 24" id="f04-sealpath">
+          <rect x="4" y="10.5" width="16" height="10" rx="2" />
+          <path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />
+        </svg>
+        Embeddings run locally
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      gsap.set(["#f04-index", "#f04-queries", "#f04-fused", "#f04-seal"], { autoAlpha: 0 });
+      gsap.set(["#f04-h1", "#f04-h2"], { autoAlpha: 0 });
+
+      function countUp(el, to, at, dur) {
+        var o = { v: 0 };
+        tl.to(
+          o,
+          {
+            v: to,
+            duration: dur,
+            ease: "power3.out",
+            onUpdate: function () {
+              el.textContent = Math.round(o.v).toLocaleString("en-US");
+            },
+          },
+          at,
+        );
+      }
+
+      // Scene 1 (0–2.47) — the line alone on the cream field.
+      tl.fromTo("#f04-kicker", { autoAlpha: 0, x: -20 }, { autoAlpha: 1, x: 0, duration: 0.34, ease: "expo.out" }, 0.03);
+      tl.fromTo("#f04-head", { autoAlpha: 0, yPercent: 105, scale: 1.12, transformOrigin: "0% 100%" }, { autoAlpha: 1, yPercent: 0, scale: 1, duration: 0.36, ease: "expo.out" }, 0.23);
+
+      // Scene 2 (2.47–5.83) — the index fills; the language counter lands on 77
+      // exactly as the voice says it (77@4.21), and settles by languages.@4.92.
+      tl.fromTo("#f04-index", { autoAlpha: 0, yPercent: 105, scale: 1.12, transformOrigin: "0% 100%" }, { autoAlpha: 1, yPercent: 0, scale: 1, duration: 0.36, ease: "expo.out" }, 2.47);
+      countUp(document.getElementById("f04-files"), 1058, 2.8, 1.5);
+      countUp(document.getElementById("f04-syms"), 944, 3.1, 1.5);
+      countUp(document.getElementById("f04-embs"), 935, 3.4, 1.6);
+      countUp(document.getElementById("f04-langs"), 77, 3.55, 0.85);
+      tl.fromTo("#f04-fill", { width: "0%" }, { width: "100%", duration: 2.2, ease: "expo.out" }, 2.8);
+
+      // Scene 3 (5.83–8.27) — two queries type on, left then right.
+      tl.fromTo("#f04-queries", { autoAlpha: 0, y: 26 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: "expo.out" }, 5.83);
+
+      function typeOn(states, elId, caretId, at, dur, blinks) {
+        var el = document.getElementById(elId);
+        var caret = document.getElementById(caretId);
+        var last = null;
+        var d = { t: 0 };
+        tl.to(
+          d,
+          {
+            t: dur,
+            duration: dur,
+            ease: "none",
+            onUpdate: function () {
+              var v = "";
+              for (var i = states.length - 1; i >= 0; i--) {
+                if (d.t >= states[i].t) {
+                  v = states[i].text;
+                  break;
+                }
+              }
+              if (v !== last) {
+                el.textContent = v;
+                last = v;
+              }
+            },
+          },
+          at,
+        );
+        var b = { p: 0 };
+        tl.to(
+          b,
+          {
+            p: Math.PI * 2 * blinks,
+            duration: dur,
+            ease: "none",
+            onUpdate: function () {
+              caret.style.opacity = Math.sin(b.p) > 0 ? "1" : "0";
+            },
+          },
+          at,
+        );
+      }
+
+      typeOn(
+        [
+          { t: 0.0, text: "" },
+          { t: 0.14, text: '"where do we' },
+          { t: 0.38, text: '"where do we queue' },
+          { t: 0.62, text: '"where do we queue messages?"' },
+        ],
+        "f04-q1t",
+        "f04-q1c",
+        5.83,
+        1.0,
+        3,
+      );
+      typeOn(
+        [
+          { t: 0.0, text: "" },
+          { t: 0.16, text: "TOKENIZERS" },
+          { t: 0.4, text: "TOKENIZERS_PARALL" },
+          { t: 0.62, text: "TOKENIZERS_PARALLELISM" },
+        ],
+        "f04-q2t",
+        "f04-q2c",
+        7.05,
+        0.95,
+        3,
+      );
+
+      tl.fromTo("#f04-h1", { autoAlpha: 0, x: -14 }, { autoAlpha: 1, x: 0, duration: 0.4, ease: "expo.out" }, 6.7);
+      tl.fromTo("#f04-h2", { autoAlpha: 0, x: -14 }, { autoAlpha: 1, x: 0, duration: 0.4, ease: "expo.out" }, 7.85);
+
+      // Scene 4 (8.27–9.99) — the payoff: the two columns collapse INWARD into
+      // one ranking (centre-outward expansion, run in reverse).
+      tl.to("#f04-q1", { x: 300, scale: 0.94, duration: 0.55, ease: "power3.in" }, 8.27);
+      tl.to("#f04-q2", { x: -300, scale: 0.94, duration: 0.55, ease: "power3.in" }, 8.27);
+      tl.to(["#f04-q1", "#f04-q2"], { autoAlpha: 0, duration: 0.26, ease: "none" }, 8.44);
+      tl.fromTo(
+        "#f04-fused",
+        { autoAlpha: 0, scale: 0.94 },
+        { autoAlpha: 1, scale: 1, duration: 0.6, ease: "expo.out" },
+        8.6,
+      );
+      tl.fromTo(
+        "#f04-fused .f04-row",
+        { autoAlpha: 0, x: -18 },
+        { autoAlpha: 1, x: 0, duration: 0.38, stagger: 0.09, ease: "expo.out" },
+        8.86,
+      );
+
+      // Scene 5 (9.99–13.781) — the seal draws on and the frame holds, still.
+      tl.fromTo(
+        "#f04-seal",
+        { autoAlpha: 0, scale: 0.9 },
+        { autoAlpha: 1, scale: 1, duration: 0.7, ease: "expo.out" },
+        10.39,
+      );
+
+      var jit = { p: 0 };
+      tl.to(
+        jit,
+        {
+          p: Math.PI * 2 * 2,
+          duration: 1.6,
+          ease: "none",
+          onUpdate: function () {
+            gsap.set("#f04-seal", { y: Math.sin(jit.p) * 1.4 });
+          },
+        },
+        12.1,
+      );
+
+      window.__timelines["04-codebase"] = tl;
+    })();
+  </script>
+</template>

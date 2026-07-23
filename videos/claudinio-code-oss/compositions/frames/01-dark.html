@@ -1,0 +1,268 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-900.woff2") format("woff2");
+      font-weight: 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+      color: #edeef5;
+    }
+
+    /* dark register — the documentation surface */
+    .f01-bg {
+      background: #090910;
+    }
+    .f01-stage {
+      position: absolute;
+      inset: 0;
+    }
+
+    .f01-label {
+      position: absolute;
+      left: 106px;
+      top: 96px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 22px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #8b91f8;
+      white-space: nowrap;
+    }
+    .f01-stub {
+      display: block;
+      width: 36px;
+      height: 2px;
+      background: #5c60e6;
+    }
+
+    /* the oversized title — lowercase Inter 900 as graphic primitive */
+    .f01-title {
+      position: absolute;
+      left: 106px;
+      top: 286px;
+      width: 880px;
+      font-size: 196px;
+      font-weight: 900;
+      line-height: 0.98;
+      letter-spacing: -0.04em;
+      text-transform: lowercase;
+    }
+    .f01-tw {
+      display: block;
+      overflow: hidden;
+    }
+    .f01-tw span {
+      display: block;
+    }
+
+    /* three stacked words, 1.0 / 0.5 / accent */
+    .f01-list {
+      position: absolute;
+      right: 106px;
+      top: 258px;
+      width: 760px;
+      text-align: right;
+    }
+    .f01-item {
+      font-size: 146px;
+      font-weight: 900;
+      line-height: 1.02;
+      letter-spacing: -0.03em;
+      text-transform: lowercase;
+      display: block;
+    }
+    .f01-i2 {
+      opacity: 0.5;
+    }
+    .f01-i3 {
+      color: #5c60e6;
+    }
+
+    .f01-rule {
+      position: absolute;
+      left: 106px;
+      right: 106px;
+      top: 792px;
+      height: 1px;
+      background: #272833;
+    }
+    .f01-code {
+      position: absolute;
+      left: 106px;
+      top: 826px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 32px;
+      font-weight: 500;
+      color: #b5b7c1;
+      white-space: nowrap;
+    }
+    .f01-caret {
+      display: inline-block;
+      width: 16px;
+      height: 1em;
+      vertical-align: -0.14em;
+      background: #5c60e6;
+    }
+    .f01-tag {
+      position: absolute;
+      right: 106px;
+      top: 832px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 22px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #8c8e9c;
+      white-space: nowrap;
+    }
+  </style>
+
+  <div id="root" data-composition-id="01-dark" data-start="0" data-duration="7.839" data-width="1920" data-height="1080">
+    <div class="clip f01-bg" id="01-dark-bg" data-start="0" data-duration="7.839" data-track-index="0" style="position: absolute; inset: 0"></div>
+
+    <div class="clip f01-stage" id="01-dark-stage" data-start="0" data-duration="7.839" data-track-index="1">
+      <div class="f01-label" id="f01-label"><span class="f01-stub" id="f01-stub"></span>the problem</div>
+
+      <div class="f01-title">
+        <span class="f01-tw"><span id="f01-t1">in the</span></span>
+        <span class="f01-tw"><span id="f01-t2">dark.</span></span>
+      </div>
+
+      <div class="f01-list">
+        <span class="f01-item" id="f01-l1">grep.</span>
+        <span class="f01-item f01-i2" id="f01-l2">guess.</span>
+        <span class="f01-item f01-i3" id="f01-l3">edit.</span>
+      </div>
+
+      <div class="f01-rule" id="f01-rule"></div>
+      <div class="f01-code" id="f01-codewrap">
+        <span id="f01-codetext"></span><span class="f01-caret" id="f01-caret"></span>
+      </div>
+      <div class="f01-tag" id="f01-tag">no one watching</div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      gsap.set(["#f01-l1", "#f01-l2", "#f01-l3"], { autoAlpha: 0 });
+      gsap.set(["#f01-rule", "#f01-codewrap", "#f01-tag"], { autoAlpha: 0 });
+
+      // SLAM — this system's entrance. A hard, fast arrival on expo.out: the
+      // word rises out of its own clipped line-box while an oversize scale
+      // collapses to 1. No overshoot anywhere — the impact is the speed.
+      function slam(sel, at) {
+        tl.fromTo(
+          sel,
+          { yPercent: 110, scale: 1.16, autoAlpha: 0, transformOrigin: "0% 100%" },
+          { yPercent: 0, scale: 1, autoAlpha: 1, duration: 0.34, ease: "expo.out" },
+          at,
+        );
+      }
+      function slamRight(sel, at) {
+        tl.fromTo(
+          sel,
+          { xPercent: 7, scale: 1.12, autoAlpha: 0, transformOrigin: "100% 50%" },
+          { xPercent: 0, scale: 1, autoAlpha: 1, duration: 0.3, ease: "expo.out" },
+          at,
+        );
+      }
+
+      // Scene 1 (0–2.40) — the stub rules out, then the title slams line by
+      // line on its spoken word (in@1.64 · dark.@2.08).
+      tl.fromTo("#f01-label", { autoAlpha: 0, x: -22 }, { autoAlpha: 1, x: 0, duration: 0.4, ease: "expo.out" }, 0.05);
+      tl.fromTo("#f01-stub", { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.5, ease: "expo.out" }, 0.05);
+      slam("#f01-t1", 1.64);
+      slam("#f01-t2", 2.08);
+
+      // Scene 2 (2.40–4.30) — one word per spoken cue (grep,@2.76 · guess,@3.66).
+      slamRight("#f01-l1", 2.76);
+      slamRight("#f01-l2", 3.66);
+
+      // Scene 3 (4.30–5.49) — the edit lands, in indigo: the only colour here.
+      slamRight("#f01-l3", 4.47);
+
+      // Scene 4 (5.49–7.339) — the file rewrites itself, unwatched. Discrete
+      // state schedule reverse-searched by one linear driver: the display JUMPS
+      // between states, and the DOM is touched only on a transition.
+      tl.fromTo("#f01-rule", { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.5, ease: "expo.out" }, 5.35);
+      tl.to(["#f01-codewrap", "#f01-tag"], { autoAlpha: 1, duration: 0.18, ease: "none" }, 5.45);
+
+      var SEQ = [
+        { t: 0.0, text: "" },
+        { t: 0.3, text: "run_phase(&hist" },
+        { t: 0.58, text: "run_phase(&history)?;" },
+        { t: 1.0, text: "run_phase(&history)" },
+        { t: 1.22, text: "run_phase(&history, " },
+        { t: 1.55, text: "run_phase(&history, &mode)?;" },
+      ];
+      var textEl = document.getElementById("f01-codetext");
+      var caretEl = document.getElementById("f01-caret");
+      var last = null;
+      var d = { t: 0 };
+      tl.to(
+        d,
+        {
+          t: 1.85,
+          duration: 1.85,
+          ease: "none",
+          onUpdate: function () {
+            var v = "";
+            for (var i = SEQ.length - 1; i >= 0; i--) {
+              if (d.t >= SEQ[i].t) {
+                v = SEQ[i].text;
+                break;
+              }
+            }
+            if (v !== last) {
+              textEl.textContent = v;
+              last = v;
+            }
+          },
+        },
+        5.49,
+      );
+      var blink = { p: 0 };
+      tl.to(
+        blink,
+        {
+          p: Math.PI * 2 * 5,
+          duration: 1.85,
+          ease: "none",
+          onUpdate: function () {
+            caretEl.style.opacity = Math.sin(blink.p) > 0 ? "1" : "0";
+          },
+        },
+        5.49,
+      );
+
+      window.__timelines["01-dark"] = tl;
+    })();
+  </script>
+</template>

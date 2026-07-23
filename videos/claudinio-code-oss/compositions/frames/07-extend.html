@@ -1,0 +1,258 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-900.woff2") format("woff2");
+      font-weight: 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+      color: #edeef5;
+
+      --surface-1: oklch(0.17 0.015 280);
+      --surface-2: oklch(0.185 0.018 280);
+      --surface-3: oklch(0.23 0.02 280);
+      --border-subtle: oklch(0.28 0.02 280);
+      --ink: oklch(0.95 0.01 280);
+      --ink-muted: oklch(0.78 0.015 280);
+      --ink-faint: oklch(0.65 0.02 280);
+      --accent: oklch(0.62 0.19 277);
+      --accent-strong: oklch(0.562 0.199 276.6);
+      --success: oklch(0.72 0.17 155);
+    }
+
+    .f07-bg {
+      background: #090910;
+    }
+    .f07-stage {
+      position: absolute;
+      inset: 0;
+    }
+
+    .f07-kicker {
+      color: #8b91f8;
+      position: absolute;
+      left: 80px;
+      top: 80px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .f07-stub {
+      display: inline-block;
+      width: 36px;
+      height: 2px;
+      background: #5c60e6;
+      margin-right: 18px;
+      vertical-align: 0.28em;
+    }
+    .f07-head {
+      position: absolute;
+      left: 80px;
+      top: 150px;
+      font-size: 150px;
+      line-height: 0.9;
+      letter-spacing: -0.04em;
+      font-weight: 900;
+      text-transform: lowercase;
+      white-space: nowrap;
+    }
+
+    .f07-grid {
+      position: absolute;
+      left: 80px;
+      top: 350px;
+      width: 1760px;
+      height: 500px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 36px;
+    }
+    .f07-card {
+      background: var(--surface-1);
+      border: 1px solid var(--border-subtle);
+      border-radius: 0;
+      padding: 36px 34px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      overflow: hidden;
+    }
+    .f07-card.focal {
+      border-color: var(--accent-strong);
+    }
+    .f07-card h2 {
+      margin: 0;
+      font-size: 48px;
+      font-weight: 400;
+      letter-spacing: -0.014em;
+      color: var(--ink);
+    }
+    .f07-card.focal h2 {
+      color: #6d74f5;
+    }
+    .f07-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .f07-row {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 24px;
+      color: var(--ink-muted);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      white-space: nowrap;
+    }
+    .f07-row .b {
+      color: #6d74f5;
+    }
+    .f07-chip {
+      align-self: flex-start;
+      margin-top: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 22px;
+      color: var(--ink);
+      background: var(--surface-3);
+      border-radius: 8px;
+      padding: 10px 18px;
+    }
+    .f07-link {
+      margin-top: auto;
+      height: 40px;
+      width: 100%;
+    }
+    .f07-link svg {
+      width: 100%;
+      height: 40px;
+      fill: none;
+      stroke: var(--success);
+      stroke-width: 2;
+    }
+    .f07-node {
+      fill: var(--success);
+      stroke: none;
+    }
+  </style>
+
+  <div id="root" data-composition-id="07-extend" data-start="0" data-duration="9.225" data-width="1920" data-height="1080">
+    <div class="clip f07-bg" id="07-extend-bg" data-start="0" data-duration="9.225" data-track-index="0" style="position: absolute; inset: 0"></div>
+
+    <div class="clip f07-stage" id="07-extend-stage" data-start="0" data-duration="9.225" data-track-index="1">
+      <div class="f07-kicker" id="f07-kicker"><span class="f07-stub"></span>OPEN BY DESIGN</div>
+      <div class="f07-head" id="f07-head">Yours to extend.</div>
+
+      <div class="f07-grid">
+        <div class="f07-card" id="f07-c1">
+          <h2>Skills</h2>
+          <div class="f07-rows">
+            <div class="f07-row r1"><span class="b">—</span>.agents/skills/</div>
+            <div class="f07-row r1"><span class="b">—</span>.claudinio/skills/</div>
+            <div class="f07-row r1"><span class="b">—</span>found automatically</div>
+          </div>
+          <div class="f07-chip" id="f07-skillchip">SKILL.md</div>
+        </div>
+
+        <div class="f07-card" id="f07-c2">
+          <h2>MCP</h2>
+          <div class="f07-rows">
+            <div class="f07-row r2"><span class="b">—</span>stdio servers</div>
+            <div class="f07-row r2"><span class="b">—</span>HTTP servers</div>
+            <div class="f07-row r2"><span class="b">—</span>same tool loop</div>
+          </div>
+          <div class="f07-link">
+            <svg viewBox="0 0 300 40" preserveAspectRatio="none">
+              <path id="f07-wire" d="M10 30 C 90 30, 90 10, 150 10 S 220 30, 290 30" />
+              <circle class="f07-node" cx="10" cy="30" r="5" />
+              <circle class="f07-node" cx="290" cy="30" r="5" />
+            </svg>
+          </div>
+        </div>
+
+        <div class="f07-card focal" id="f07-c3">
+          <h2>Any provider</h2>
+          <div class="f07-rows">
+            <div class="f07-row r3" id="f07-p1"><span class="b">—</span>claudin.io</div>
+            <div class="f07-row r3" id="f07-p2"><span class="b">—</span>OpenRouter</div>
+            <div class="f07-row r3" id="f07-p3"><span class="b">—</span>Anthropic</div>
+            <div class="f07-row r3" id="f07-p4"><span class="b">—</span>any compatible API</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      gsap.set(["#f07-c1", "#f07-c2", "#f07-c3"], { autoAlpha: 0 });
+      gsap.set([".f07-row", "#f07-skillchip", ".f07-link"], { autoAlpha: 0 });
+
+      // Scene 1 (0–0.60) — the line alone; the VO names card 1 almost at once.
+      tl.fromTo("#f07-kicker", { autoAlpha: 0, x: -20 }, { autoAlpha: 1, x: 0, duration: 0.34, ease: "expo.out" }, 0);
+      tl.fromTo("#f07-head", { autoAlpha: 0, yPercent: 105, scale: 1.12, transformOrigin: "0% 100%" }, { autoAlpha: 1, yPercent: 0, scale: 1, duration: 0.36, ease: "expo.out" }, 0.08);
+
+      // Scene 2 (0.60–2.98) — card 1 self-assembles: body, then rows staggered
+      // downward; the SKILL.md chip drops in on "discovered."@1.99.
+      tl.fromTo("#f07-c1", { autoAlpha: 0, y: 40, scale: 0.96 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.6, ease: "expo.out" }, 0.6);
+      tl.fromTo(".r1", { autoAlpha: 0, x: -16 }, { autoAlpha: 1, x: 0, duration: 0.38, stagger: 0.13, ease: "expo.out" }, 0.95);
+      tl.fromTo(
+        "#f07-skillchip",
+        { autoAlpha: 0, y: -22 },
+        { autoAlpha: 1, y: 0, duration: 0.5, ease: "expo.out" },
+        1.99,
+      );
+
+      // Scene 3 (2.98–5.42) — card 2, same shape; the wire draws itself.
+      tl.fromTo("#f07-c2", { autoAlpha: 0, y: 40, scale: 0.96 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.6, ease: "expo.out" }, 2.98);
+      tl.fromTo(".r2", { autoAlpha: 0, x: -16 }, { autoAlpha: 1, x: 0, duration: 0.38, stagger: 0.13, ease: "expo.out" }, 3.3);
+      tl.fromTo(".f07-link", { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.2, ease: "none" }, 3.97);
+
+      var wire = document.getElementById("f07-wire");
+      if (wire && wire.getTotalLength) {
+        var len = wire.getTotalLength();
+        gsap.set(wire, { strokeDasharray: len, strokeDashoffset: len });
+        tl.to(wire, { strokeDashoffset: 0, duration: 0.85, ease: "expo.out" }, 3.97);
+      }
+
+      // Scene 4 (5.42–8.21) — the focal card; claudin.io first and in accent.
+      tl.fromTo("#f07-c3", { autoAlpha: 0, y: 40, scale: 0.96 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.6, ease: "expo.out" }, 5.42);
+      tl.fromTo(".r3", { autoAlpha: 0, x: -16 }, { autoAlpha: 1, x: 0, duration: 0.4, stagger: 0.17, ease: "expo.out" }, 5.84);
+
+      // Scene 5 (8.21–8.725) — the triptych holds, three equal weights, still.
+      window.__timelines["07-extend"] = tl;
+    })();
+  </script>
+</template>

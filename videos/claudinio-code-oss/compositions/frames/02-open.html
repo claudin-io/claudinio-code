@@ -1,0 +1,699 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-600.woff2") format("woff2");
+      font-weight: 600;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Inter";
+      src: url("assets/fonts/Inter-900.woff2") format("woff2");
+      font-weight: 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: url("assets/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-display: block;
+    }
+
+    #root {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+      color: #090910;
+
+      /* the app's own tokens, verbatim from src/App.css :root */
+      --surface-0: oklch(0.145 0.015 280);
+      --surface-1: oklch(0.17 0.015 280);
+      --surface-2: oklch(0.185 0.018 280);
+      --surface-3: oklch(0.23 0.02 280);
+      --border-subtle: oklch(0.28 0.02 280);
+      --ink: oklch(0.95 0.01 280);
+      --ink-muted: oklch(0.78 0.015 280);
+      --ink-faint: oklch(0.65 0.02 280);
+      --accent: oklch(0.62 0.19 277);
+      --accent-strong: oklch(0.562 0.199 276.6);
+      --success: oklch(0.72 0.17 155);
+    }
+
+    .f02-bg {
+      background: #5c60e6;
+    }
+    .f02-viewport {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+    }
+
+    .f02-world {
+      position: absolute;
+      left: 370px;
+      top: 58px;
+      width: 1180px;
+      height: 620px;
+    }
+
+    /* ── the real window: titlebar · header · [projects | agent | rail] ── */
+    .f02-win {
+      width: 1180px;
+      height: 620px;
+      background: var(--surface-0);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .f02-titlebar {
+      height: 30px;
+      flex: none;
+      background: #000;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-left: 14px;
+    }
+    .f02-tl {
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+    }
+
+    .f02-header {
+      height: 50px;
+      flex: none;
+      display: flex;
+      align-items: center;
+      padding: 0 12px 0 10px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--surface-1);
+    }
+    .f02-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid color-mix(in oklch, var(--accent) 30%, transparent);
+      border-radius: 999px;
+      padding: 4px 11px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+    .f02-pill .mark {
+      width: 20px;
+      height: 20px;
+      border-radius: 6px;
+      background: var(--accent-strong);
+      display: block;
+    }
+    .f02-pill .accent {
+      color: var(--accent);
+    }
+    .f02-pill .ver {
+      font-size: 9px;
+      font-weight: 300;
+      color: var(--ink-faint);
+      margin-left: 2px;
+    }
+    .f02-headright {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .f02-path {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+    .f02-path .p {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 12px;
+      color: var(--ink-faint);
+    }
+    .f02-path .b {
+      font-size: 10px;
+      color: var(--ink-faint);
+    }
+    .f02-icon {
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .f02-icon svg {
+      width: 17px;
+      height: 17px;
+      fill: none;
+      stroke: var(--ink-muted);
+      stroke-width: 1.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .f02-body {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+    }
+
+    /* projects sidebar */
+    .f02-side {
+      width: 200px;
+      flex: none;
+      border-right: 1px solid var(--border-subtle);
+      background: var(--surface-1);
+      display: flex;
+      flex-direction: column;
+    }
+    .f02-side-hd {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .f02-proj {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+    }
+    .f02-folder {
+      width: 16px;
+      height: 14px;
+      flex: none;
+      position: relative;
+    }
+    .f02-folder svg {
+      width: 16px;
+      height: 14px;
+      fill: none;
+      stroke: var(--ink-muted);
+      stroke-width: 1.5;
+      stroke-linejoin: round;
+    }
+    .f02-proj .nm {
+      font-size: 13px;
+      color: var(--ink);
+      line-height: 1.25;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .f02-proj .pt {
+      font-size: 11px;
+      color: var(--ink-faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .f02-live {
+      position: absolute;
+      right: -3px;
+      top: -3px;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--success);
+    }
+    .f02-side-ft {
+      margin-top: auto;
+      border-top: 1px solid var(--border-subtle);
+      padding: 8px;
+    }
+    .f02-open {
+      border: 1px dashed var(--border-subtle);
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 12px;
+      color: var(--ink-muted);
+    }
+    .f02-stats {
+      padding: 8px 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 10px;
+      color: var(--ink-faint);
+    }
+
+    /* agent column */
+    .f02-agent {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--surface-0);
+    }
+    .f02-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 8px 14px;
+      font-size: 12px;
+      color: var(--ink-muted);
+    }
+    .f02-bar .agentlbl {
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: var(--ink-muted);
+    }
+    .f02-bar .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--success);
+    }
+    .f02-bar .right {
+      margin-left: auto;
+      display: flex;
+      gap: 14px;
+      color: var(--ink-faint);
+    }
+
+    .f02-conv {
+      flex: 1;
+      min-height: 0;
+      padding: 12px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+      overflow: hidden;
+    }
+    .f02-run {
+      font-size: 12px;
+      color: var(--ink-faint);
+    }
+    .f02-msg {
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--ink);
+    }
+    .f02-you {
+      border-left: 2px solid var(--accent);
+      padding-left: 11px;
+    }
+    .f02-you .lbl {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+    .f02-you .txt {
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--ink-muted);
+    }
+    .f02-code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 13px;
+      color: var(--accent);
+      background: var(--surface-2);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+
+    .f02-input {
+      margin: 0 14px 10px;
+      border: 1px solid var(--border-subtle);
+      background: var(--surface-2);
+      border-radius: 9px;
+      padding: 11px 12px 9px;
+      flex: none;
+    }
+    .f02-ph {
+      font-size: 13px;
+      color: var(--ink-faint);
+    }
+    .f02-inputrow {
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .f02-ibtn {
+      width: 23px;
+      height: 23px;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .f02-ibtn svg {
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: var(--ink-faint);
+      stroke-width: 1.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .f02-ibtn.on {
+      background: var(--accent-strong);
+    }
+    .f02-ibtn.on svg {
+      stroke: #fff;
+    }
+    .f02-send svg {
+      stroke: var(--ink-faint);
+    }
+    .f02-inputrow .far {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--ink-faint);
+    }
+    .f02-slider {
+      width: 92px;
+      height: 3px;
+      border-radius: 999px;
+      background: var(--surface-3);
+      position: relative;
+    }
+    .f02-slider::after {
+      content: "";
+      position: absolute;
+      left: 6px;
+      top: -3px;
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+
+    .f02-status {
+      flex: none;
+      border-top: 1px solid var(--border-subtle);
+      padding: 6px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .f02-prog {
+      flex: 1;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      overflow: hidden;
+    }
+    .f02-prog i {
+      display: block;
+      width: 62%;
+      height: 100%;
+      background: var(--success);
+    }
+    .f02-ctx {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 11px;
+      color: var(--ink-faint);
+    }
+
+    .f02-rail {
+      width: 26px;
+      flex: none;
+      border-left: 1px solid var(--border-subtle);
+      background: var(--surface-0);
+      padding-top: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 9px;
+    }
+    .f02-rail span {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--success);
+    }
+
+    /* ── declaration type: ink on the indigo plane ── */
+    .f02-decl {
+      position: absolute;
+      left: 106px;
+      top: 700px;
+      overflow: hidden;
+    }
+    .f02-name {
+      display: block;
+      font-size: 156px;
+      font-weight: 900;
+      line-height: 0.9;
+      letter-spacing: -0.04em;
+      text-transform: lowercase;
+      color: #090910;
+      white-space: nowrap;
+    }
+    .f02-oss {
+      position: absolute;
+      right: 106px;
+      top: 742px;
+      text-align: right;
+    }
+    .f02-oss .big {
+      display: block;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 44px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #090910;
+      white-space: nowrap;
+    }
+    .f02-oss .sub {
+      display: block;
+      margin-top: 10px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 22px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: rgba(9, 9, 16, 0.62);
+      white-space: nowrap;
+    }
+  </style>
+
+  <div id="root" data-composition-id="02-open" data-start="0" data-duration="8.533" data-width="1920" data-height="1080">
+    <div class="clip f02-bg" id="02-open-bg" data-start="0" data-duration="8.533" data-track-index="0" style="position: absolute; inset: 0"></div>
+
+    <div class="clip f02-viewport" id="02-open-viewport" data-start="0" data-duration="8.533" data-track-index="1">
+      <div class="f02-world" id="f02-world">
+        <div class="f02-win">
+          <div class="f02-titlebar">
+            <span class="f02-tl" style="background: #ff5f57"></span>
+            <span class="f02-tl" style="background: #febc2e"></span>
+            <span class="f02-tl" style="background: #28c840"></span>
+          </div>
+
+          <div class="f02-header">
+            <div class="f02-pill">
+              <img class="mark" src="assets/img/logo.png" alt="">
+              Claudinio <span class="accent">Code</span><span class="ver">· v0.1.15</span>
+            </div>
+            <div class="f02-headright">
+              <div class="f02-path">
+                <span class="p">/Users/victortavernari/claudinio_code</span>
+                <span class="b">⎇ main</span>
+              </div>
+              <span class="f02-icon"><svg viewBox="0 0 24 24">
+                  <path d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" /></svg></span>
+              <span class="f02-icon"><svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="3.2" />
+                  <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6L18 18M18 6l-1.4 1.4M7.4 16.6L6 18" /></svg></span>
+            </div>
+          </div>
+
+          <div class="f02-body">
+            <div class="f02-side">
+              <div class="f02-side-hd">Projects</div>
+              <div class="f02-proj">
+                <span class="f02-folder"><svg viewBox="0 0 24 22"><path d="M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z" /></svg></span>
+                <span style="min-width: 0">
+                  <span class="nm" style="display: block">claudinio_code</span>
+                  <span class="pt" style="display: block">/Users/victortavernari/cla…</span>
+                </span>
+              </div>
+              <div class="f02-proj">
+                <span class="f02-folder"><svg viewBox="0 0 24 22"><path d="M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z" /></svg></span>
+                <span style="min-width: 0">
+                  <span class="nm" style="display: block">llm-coding-benchmark</span>
+                  <span class="pt" style="display: block">/Users/victortavernari/llm…</span>
+                </span>
+              </div>
+              <div class="f02-proj">
+                <span class="f02-folder"><svg viewBox="0 0 24 22"><path d="M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z" /></svg><span class="f02-live"></span></span>
+                <span style="min-width: 0">
+                  <span class="nm" style="display: block">main-work</span>
+                  <span class="pt" style="display: block">/Users/victortavernari/cla…</span>
+                </span>
+              </div>
+              <div class="f02-side-ft">
+                <div class="f02-open">+ Open folder</div>
+              </div>
+              <div class="f02-stats">
+                <span>1058 files</span>
+                <span>944 symbols</span>
+                <span>935 embeddings</span>
+              </div>
+            </div>
+
+            <div class="f02-agent">
+              <div class="f02-bar">
+                <span class="agentlbl">AGENT</span><span class="dot"></span><span>Done</span>
+                <span class="right">
+                  <span>+ New</span><span>History</span><span>Plans</span>
+                  <span>3 changes (+12 −7)</span><span>CPU 0% · MEM 338MB</span>
+                </span>
+              </div>
+
+              <div class="f02-conv">
+                <div class="f02-run" id="f02-run1">▸ Worked for 41.2s · 9 steps · 88k → 3.1k tokens</div>
+                <div class="f02-msg">
+                  Indexed the workspace and traced the session loop through
+                  <span class="f02-code">run_phase</span>.
+                </div>
+                <div class="f02-you">
+                  <div class="lbl">YOU</div>
+                  <div class="txt">Now make the handoff start a fresh session seeded with the plan.</div>
+                </div>
+                <!-- the row the shot opens tight on -->
+                <div class="f02-run" id="f02-hero">▸ Worked for 2176.5s · 32 steps · 247k → 13k tokens</div>
+                <div class="f02-msg" id="f02-heromsg"></div>
+              </div>
+
+              <div class="f02-input">
+                <div class="f02-ph">Write anything… | @file | &lt;tag&gt; | &lt;skill&gt;</div>
+                <div class="f02-inputrow">
+                  <span class="f02-ibtn"><svg viewBox="0 0 24 24"><path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.4 3.4 0 0 1 4.8 4.8l-8 8a1.8 1.8 0 0 1-2.5-2.5l7.4-7.4" /></svg></span><span class="f02-ibtn"><svg viewBox="0 0 24 24"><path d="M11 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6" /><path d="m18.5 2.5 3 3L13 14l-3.5.5L10 11Z" /></svg></span><span class="f02-ibtn"><svg viewBox="0 0 24 24"><path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.5A3 3 0 0 0 8 18a3 3 0 0 0 4 1V4.5A2.5 2.5 0 0 0 9 4Z" /><path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 1 5.5A3 3 0 0 1 16 18a3 3 0 0 1-4 1" /></svg></span><span class="f02-ibtn on"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="12" rx="2" /><path d="M9 8V6a3 3 0 0 1 6 0v2M3 13.5h18" /></svg></span>
+                  <span class="far"><span class="f02-slider"></span><span>Low</span><span class="f02-ibtn f02-send"><svg viewBox="0 0 24 24"><path d="M5 12h13M12 6l6 6-6 6" /></svg></span></span>
+                </div>
+              </div>
+
+              <div class="f02-status">
+                <span class="f02-prog"><i></i></span>
+                <span class="f02-ctx">88k / 200k · total: 960k · $0.3386</span>
+              </div>
+            </div>
+
+            <div class="f02-rail">
+              <span></span><span></span><span></span><span></span><span></span><span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="f02-decl"><span class="f02-name" id="f02-name">claudinio code.</span></div>
+
+      <div class="f02-oss">
+        <span class="big" id="f02-oss1">open source</span>
+        <span class="sub" id="f02-oss2">MIT · github.com/claudin-io</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      // The run-summary row sits at ~(560, 470) inside the 1180×740 window,
+      // placed at (370, 62) → (930, 532) in canvas space. Scaling about that
+      // origin pins it while we offset it to canvas centre.
+      var OX = 560,
+        OY = 470;
+      var startX = 960 - (370 + OX);
+      var startY = 540 - (62 + OY);
+
+      gsap.set("#f02-world", { transformOrigin: OX + "px " + OY + "px" });
+      gsap.set(["#f02-name", "#f02-oss1", "#f02-oss2"], { autoAlpha: 0 });
+      gsap.set("#f02-world", { scale: 11, x: startX, y: startY });
+
+      // Scene 1 (0–1.29) — held tight on the one row while the answer streams.
+      var OUT = [
+        { t: 0.0, text: "" },
+        { t: 0.22, text: "Done. The handoff now" },
+        { t: 0.52, text: "Done. The handoff now opens a new session" },
+        { t: 0.86, text: "Done. The handoff now opens a new session seeded with the plan." },
+      ];
+      var outEl = document.getElementById("f02-heromsg");
+      var lastOut = null;
+      var d = { t: 0 };
+      tl.to(
+        d,
+        {
+          t: 1.29,
+          duration: 1.29,
+          ease: "none",
+          onUpdate: function () {
+            var v = "";
+            for (var i = OUT.length - 1; i >= 0; i--) {
+              if (d.t >= OUT[i].t) {
+                v = OUT[i].text;
+                break;
+              }
+            }
+            if (v !== lastOut) {
+              outEl.textContent = v;
+              lastOut = v;
+            }
+          },
+        },
+        0,
+      );
+
+      // Scene 2 (1.29–4.40) — ONE continuous decelerating zoom-OUT. Never
+      // reverses, never re-pushes: the whole argument of the frame.
+      tl.fromTo(
+        "#f02-world",
+        { scale: 11, x: startX, y: startY },
+        { scale: 1, x: 0, y: 0, duration: 3.11, ease: "power3.out" },
+        1.29,
+      );
+
+      // Scene 3 (4.40–6.20) — the declaration SLAMS up out of its own clipped
+      // line-box: hard arrival on expo.out, oversize scale collapsing to 1.
+      tl.fromTo(
+        "#f02-name",
+        { yPercent: 108, scale: 1.1, autoAlpha: 0, transformOrigin: "0% 100%" },
+        { yPercent: 0, scale: 1, autoAlpha: 1, duration: 0.42, ease: "expo.out" },
+        4.4,
+      );
+
+      // Scene 4 (6.20–8.533) — "open source" hits on its spoken word (open@6.20),
+      // MIT lands under it (MIT.@7.55). Then the plane holds, flat and still.
+      tl.fromTo(
+        "#f02-oss1",
+        { xPercent: 8, scale: 1.14, autoAlpha: 0, transformOrigin: "100% 50%" },
+        { xPercent: 0, scale: 1, autoAlpha: 1, duration: 0.3, ease: "expo.out" },
+        6.2,
+      );
+      tl.fromTo("#f02-oss2", { autoAlpha: 0, x: 22 }, { autoAlpha: 1, x: 0, duration: 0.36, ease: "expo.out" }, 7.55);
+
+      window.__timelines["02-open"] = tl;
+    })();
+  </script>
+</template>
