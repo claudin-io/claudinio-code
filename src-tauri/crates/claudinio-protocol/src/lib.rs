@@ -18,6 +18,7 @@
 //! claudinio-protocol = { git = "...", default-features = false }
 //! ```
 
+pub mod sas;
 pub mod wire;
 
 #[cfg(feature = "inner")]
