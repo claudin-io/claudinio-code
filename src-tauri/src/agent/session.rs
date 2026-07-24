@@ -784,7 +784,11 @@ pub struct EditProposalData {
     pub unified_diff: String,
 }
 
-pub type ApprovalMap = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
+pub use crate::agent::approval::ApprovalRegistry;
+
+/// Kept as an alias so the many `&ApprovalMap` signatures below read the same;
+/// the type behind it now resolves once and records who answered.
+pub type ApprovalMap = ApprovalRegistry;
 
 /// One answered question from the ask_user tool: the frontend echoes the
 /// question text back with the option the user picked (or typed).
@@ -2777,11 +2781,10 @@ pub(crate) async fn run_tool(
                 }
                 permissions::PermissionLevel::RequiresApproval => {
                     let approval_key = format!("{session_id}:{tool_use_id}");
-                    let (approve_tx, approve_rx) = oneshot::channel::<bool>();
-                    {
-                        let mut map = approvals.lock().await;
-                        map.insert(approval_key.clone(), approve_tx);
-                    }
+                    // No TTL while the only answerer is the local user standing
+                    // at the machine. Remote peers get one — see the remote
+                    // access plan, phase 4.
+                    let gate = approvals.register(&approval_key, None).await;
 
                     let _ = event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
@@ -2792,8 +2795,8 @@ pub(crate) async fn run_tool(
                         edit_proposal: None,
                     });
 
-                    match approve_rx.await {
-                        Ok(true) => {
+                    match gate.wait().await {
+                        Ok(decision) if decision.approved => {
                             match tools::execute(tool_name, tool_input.clone(), ctx).await {
                                 Ok(ToolOutput::Text { content }) => {
                                     let truncated = truncate(&content, 2000);
@@ -2827,8 +2830,8 @@ pub(crate) async fn run_tool(
                                 }
                             }
                         }
-                        Ok(false) => {
-                            let msg = "Command rejected by user".to_string();
+                        Ok(decision) => {
+                            let msg = decision.rejection_message("Command");
                             let _ = event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
@@ -2848,11 +2851,7 @@ pub(crate) async fn run_tool(
         // own approve-before-execute arm here, same shape as the bash one.
         permissions::PermissionLevel::RequiresApproval if tool_name.starts_with("mcp__") => {
             let approval_key = format!("{session_id}:{tool_use_id}");
-            let (approve_tx, approve_rx) = oneshot::channel::<bool>();
-            {
-                let mut map = approvals.lock().await;
-                map.insert(approval_key.clone(), approve_tx);
-            }
+            let gate = approvals.register(&approval_key, None).await;
 
             let _ = event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
@@ -2863,40 +2862,42 @@ pub(crate) async fn run_tool(
                 edit_proposal: None,
             });
 
-            match approve_rx.await {
-                Ok(true) => match tools::execute(tool_name, tool_input.clone(), ctx).await {
-                    Ok(ToolOutput::Text { content }) => {
-                        let truncated = truncate(&content, 2000);
-                        let _ = event_tx.send(AgentEvent::ToolResult {
-                            tool_id: tool_use_id.to_string(),
-                            tool_name: tool_name.to_string(),
-                            output: truncated,
-                            error: None,
-                        });
-                        tool_result_block(tool_use_id, &content)
+            match gate.wait().await {
+                Ok(decision) if decision.approved => {
+                    match tools::execute(tool_name, tool_input.clone(), ctx).await {
+                        Ok(ToolOutput::Text { content }) => {
+                            let truncated = truncate(&content, 2000);
+                            let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                output: truncated,
+                                error: None,
+                            });
+                            tool_result_block(tool_use_id, &content)
+                        }
+                        Ok(ToolOutput::EditProposal { .. }) => {
+                            let err_msg = "MCP tools should not produce edit proposals".to_string();
+                            let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                output: err_msg.clone(),
+                                error: Some("unexpected output type".into()),
+                            });
+                            ContentBlock::tool_result(tool_use_id, &err_msg)
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(AgentEvent::ToolResult {
+                                tool_id: tool_use_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                output: String::new(),
+                                error: Some(e.clone()),
+                            });
+                            ContentBlock::tool_result(tool_use_id, format!("Error: {e}"))
+                        }
                     }
-                    Ok(ToolOutput::EditProposal { .. }) => {
-                        let err_msg = "MCP tools should not produce edit proposals".to_string();
-                        let _ = event_tx.send(AgentEvent::ToolResult {
-                            tool_id: tool_use_id.to_string(),
-                            tool_name: tool_name.to_string(),
-                            output: err_msg.clone(),
-                            error: Some("unexpected output type".into()),
-                        });
-                        ContentBlock::tool_result(tool_use_id, &err_msg)
-                    }
-                    Err(e) => {
-                        let _ = event_tx.send(AgentEvent::ToolResult {
-                            tool_id: tool_use_id.to_string(),
-                            tool_name: tool_name.to_string(),
-                            output: String::new(),
-                            error: Some(e.clone()),
-                        });
-                        ContentBlock::tool_result(tool_use_id, format!("Error: {e}"))
-                    }
-                },
-                Ok(false) => {
-                    let msg = "Tool call rejected by user".to_string();
+                }
+                Ok(decision) => {
+                    let msg = decision.rejection_message("Tool call");
                     let _ = event_tx.send(AgentEvent::ToolResult {
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
@@ -2933,11 +2934,10 @@ pub(crate) async fn run_tool(
                     };
 
                     let approval_key = format!("{session_id}:{tool_use_id}");
-                    let (approve_tx, approve_rx) = oneshot::channel::<bool>();
-                    {
-                        let mut map = approvals.lock().await;
-                        map.insert(approval_key.clone(), approve_tx);
-                    }
+                    // No TTL while the only answerer is the local user standing
+                    // at the machine. Remote peers get one — see the remote
+                    // access plan, phase 4.
+                    let gate = approvals.register(&approval_key, None).await;
 
                     let _ = event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
@@ -2948,32 +2948,34 @@ pub(crate) async fn run_tool(
                         edit_proposal: Some(proposal),
                     });
 
-                    match approve_rx.await {
-                        Ok(true) => match tools::apply_edit_with_ctx(tool_input, ctx).await {
-                            Ok(msg) => {
-                                let _ = event_tx.send(AgentEvent::ToolResult {
-                                    tool_id: tool_use_id.to_string(),
-                                    tool_name: tool_name.to_string(),
-                                    output: msg.clone(),
-                                    error: None,
-                                });
-                                ContentBlock::tool_result(tool_use_id, &msg)
+                    match gate.wait().await {
+                        Ok(decision) if decision.approved => {
+                            match tools::apply_edit_with_ctx(tool_input, ctx).await {
+                                Ok(msg) => {
+                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                        tool_id: tool_use_id.to_string(),
+                                        tool_name: tool_name.to_string(),
+                                        output: msg.clone(),
+                                        error: None,
+                                    });
+                                    ContentBlock::tool_result(tool_use_id, &msg)
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                        tool_id: tool_use_id.to_string(),
+                                        tool_name: tool_name.to_string(),
+                                        output: String::new(),
+                                        error: Some(e.clone()),
+                                    });
+                                    ContentBlock::tool_result(
+                                        tool_use_id,
+                                        format!("Error applying: {e}"),
+                                    )
+                                }
                             }
-                            Err(e) => {
-                                let _ = event_tx.send(AgentEvent::ToolResult {
-                                    tool_id: tool_use_id.to_string(),
-                                    tool_name: tool_name.to_string(),
-                                    output: String::new(),
-                                    error: Some(e.clone()),
-                                });
-                                ContentBlock::tool_result(
-                                    tool_use_id,
-                                    format!("Error applying: {e}"),
-                                )
-                            }
-                        },
-                        Ok(false) => {
-                            let msg = "Edit rejected by user".to_string();
+                        }
+                        Ok(decision) => {
+                            let msg = decision.rejection_message("Edit");
                             let _ = event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),

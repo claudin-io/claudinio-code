@@ -111,7 +111,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             config: Mutex::new(crate::agent::provider::load_config()),
-            approvals: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            approvals: ApprovalMap::new(),
             answers: Arc::new(Mutex::new(std::collections::HashMap::new())),
             workspaces: Mutex::new(HashMap::new()),
             steering: Arc::new(Mutex::new(HashMap::new())),

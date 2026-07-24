@@ -544,6 +544,10 @@ pub async fn new_session(workspace: String, state: State<'_, AppState>) -> Resul
     if let Some(h) = guard.as_ref() {
         state.remove_steering(&h.id).await;
         state.modes.lock().await.remove(&h.id);
+        // Gates belonging to the old session are dead the moment it is: an
+        // unanswered one used to sit in the map forever, because the only thing
+        // that removed an entry was answering it.
+        state.approvals.abandon_session(&h.id).await;
         // A session abandoned before any real content (only meta/mode records,
         // e.g. created lazily by a mode toggle) is noise on disk — delete it
         // instead of leaving an "(empty session)" orphan in the list.
@@ -660,27 +664,45 @@ pub struct ApproveArgs {
 
 #[tauri::command]
 pub async fn approve_tool(args: ApproveArgs, state: State<'_, AppState>) -> Result<(), String> {
-    let key = format!("{}:{}", args.session_id, args.tool_id);
-    let mut map = state.approvals.lock().await;
-    if let Some(sender) = map.remove(&key) {
-        sender
-            .send(true)
-            .map_err(|_| "session already closed".into())
-    } else {
-        Err("approval request not found or already handled".into())
-    }
+    resolve_approval(&args, true, &state).await
 }
 
 #[tauri::command]
 pub async fn reject_tool(args: ApproveArgs, state: State<'_, AppState>) -> Result<(), String> {
+    resolve_approval(&args, false, &state).await
+}
+
+/// Answer a gate on behalf of the local user.
+///
+/// Losing a race is not an error the UI should show as a failure: it means
+/// someone else — another window today, a paired phone later — answered first,
+/// and the right response is to close this gate showing *their* decision. The
+/// error string therefore names the winner instead of claiming the request does
+/// not exist.
+async fn resolve_approval(
+    args: &ApproveArgs,
+    approved: bool,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::agent::approval::{Actor, ResolveError};
+
     let key = format!("{}:{}", args.session_id, args.tool_id);
-    let mut map = state.approvals.lock().await;
-    if let Some(sender) = map.remove(&key) {
-        sender
-            .send(false)
-            .map_err(|_| "session already closed".into())
-    } else {
-        Err("approval request not found or already handled".into())
+    match state.approvals.resolve(&key, approved, Actor::Local).await {
+        Ok(_) => Ok(()),
+        Err(ResolveError::AlreadyResolved(decision)) => Err(format!(
+            "already {} by {}",
+            if decision.approved {
+                "approved"
+            } else {
+                "rejected"
+            },
+            match decision.actor {
+                Actor::Local => "this device".to_string(),
+                Actor::Peer(label) => label,
+                Actor::Expired => "expiry".to_string(),
+            }
+        )),
+        Err(ResolveError::NotFound) => Err("approval request not found".into()),
     }
 }
 
