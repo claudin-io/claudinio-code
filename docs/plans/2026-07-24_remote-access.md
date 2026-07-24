@@ -30,11 +30,22 @@ Not a skin on a desktop design. Four things move:
    floor. §6.2's suite survives Phase 0 on desktop; it is not confirmed until it
    runs on a real iPhone. This is now the gating measurement for Phase 2, not a
    nice-to-have.
-2. **Web Push on iOS only works for a PWA installed to the home screen.** §8
-   Phase 4 uses Web Push so a remote approval does not stall silently. On iOS
-   that makes home-screen install a *functional prerequisite*, not a
-   convenience — so the pairing flow of §6.3 must end by prompting for it, and
-   the PWA leaves §8 Phase 6 ("Optional") for Phase 3.
+2. **The browser tab is the baseline; the PWA is a required upgrade, not a
+   gate.** Everything must work in mobile Safari with nothing installed —
+   confirmed on a real iPhone 2026-07-24, straight in the browser. The one
+   capability that cannot work that way is **Web Push, which on iOS fires only
+   for a PWA installed to the home screen**, and §8 Phase 4 uses push so a
+   remote approval does not stall silently.
+
+   So the PWA is a must-have and leaves §8 Phase 6 ("Optional") for Phase 3 —
+   but it buys notifications, not access. Two rules follow, and they are easy to
+   violate by accident:
+
+   - The pairing flow of §6.3 *offers* install, and never requires it.
+   - **No approval may depend on push to be answerable.** An uninstalled peer
+     must still see pending approvals on its next foreground, and `expires_at`
+     with a local-side deny is what keeps a forgotten one from hanging. Push is
+     what makes it timely, not what makes it possible.
 3. **A backgrounded phone drops its socket constantly.** §7 treats reconnect as
    an exception; on mobile it is the steady state. The `Gap` → re-`Subscribe`
    → replay-from-JSONL path becomes the common case and has to be cheap, not
@@ -244,15 +255,17 @@ Non-extractable browser keys matter: an XSS on `app.claudin.io` can *use* the ke
 
 > **Verify before committing (Phase 0):** WebCrypto X25519 availability across the browser matrix we intend to support. If coverage is insufficient, fall back to `@noble/curves` + `@noble/ciphers` (audited, ~10 KB) and switch the suite to ChaChaPoly. Do not assume — measure on real browsers.
 >
-> **Status 2026-07-24:** interop with `snow` proved end to end, and the suite
-> confirmed on desktop macOS. **iOS Safari is not yet measured, and per §0.1 it
-> is the binding case** — every iOS browser is WebKit, so its version floor is
-> the product's floor. Until an iPhone runs the probe, the fallback branch stays
-> open. Findings: `claudinio-relay/spikes/phase-0/FINDINGS.md`.
+> **Resolved 2026-07-24. This decision is closed.** Interop with `snow` proved
+> end to end; the suite confirmed on desktop macOS and, more to the point, on a
+> real iPhone in mobile Safari with nothing installed. iOS was the binding case
+> per §0.1 — every iOS browser is WebKit — and it passed, so the fallback to
+> `@noble/curves` + ChaChaPoly is **not needed** and no crypto ships in
+> JavaScript. Findings: `claudinio-relay/spikes/phase-0/FINDINGS.md`.
 >
-> One practical trap when measuring: WebCrypto requires a **secure context**, so
-> a phone loading the probe over `http://` on the LAN reports `crypto.subtle`
-> missing — which reads as "no X25519" and is not. Serve it over TLS.
+> One practical trap for anyone re-measuring: WebCrypto requires a **secure
+> context**, so a phone loading the probe over `http://` on the LAN reports
+> `crypto.subtle` missing — which reads as "no X25519" and is not. Serve it over
+> TLS.
 
 ### 6.3 Pairing
 
@@ -373,7 +386,7 @@ The highest-value phase, and it ships value even if remote is cancelled.
 - `remote/policy.rs` + the local policy editor UI.
 - `app.claudin.io`: **its own origin**, separate from the dashboard/billing origin. Strict CSP, no inline script, and the same DOMPurify allowlist as the desktop. XSS here costs more than XSS in a Tauri webview, because here it is adjacent to a session cookie.
 - Web UI is **read-only** in this phase: timeline, diffs, subagents. It cannot send anything.
-- **Mobile-first (§0.1):** `timeline-ui` is touch-first from its first commit, and the PWA manifest plus service worker land here rather than in Phase 6 — Web Push in Phase 4 depends on home-screen install on iOS, so the install path has to exist before the write path does.
+- **Mobile-first (§0.1):** `timeline-ui` is touch-first from its first commit, and the PWA manifest plus service worker land here rather than in Phase 6 — Web Push in Phase 4 depends on home-screen install on iOS, so the install path has to exist before the write path does. It is offered, never required: the uninstalled browser tab stays a fully working peer.
 
 **Prova real:** the SAS matches on both screens; a pairing revoked locally drops the channel in under one second **with the relay deliberately unreachable**; a frame tampered with in transit is rejected and logged rather than processed; **a diff is legible and approvable on a phone held in one hand**, checked on a real device rather than in a narrow desktop window.
 
