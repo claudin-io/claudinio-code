@@ -6,6 +6,8 @@ pub(crate) mod http;
 mod lsp;
 pub(crate) mod net_activity;
 pub(crate) mod procutil;
+#[cfg(feature = "remote")]
+mod remote;
 mod state;
 pub(crate) mod workspace_path;
 

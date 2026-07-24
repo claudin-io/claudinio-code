@@ -754,6 +754,7 @@ dependencies = [
  "agent-client-protocol",
  "base64 0.22.1",
  "chrono",
+ "claudinio-protocol",
  "csv",
  "diffy",
  "dirs",

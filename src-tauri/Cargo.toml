@@ -11,6 +11,11 @@ edition = "2024"
 [workspace]
 members = ["crates/claudinio-protocol"]
 
+[features]
+# Remote access. Off by default: a build without it carries none of the
+# transport, none of the protocol, and no way to reach the network.
+remote = ["dep:claudinio-protocol"]
+
 [lib]
 name = "claudinio_code_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -19,6 +24,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+claudinio-protocol = { path = "crates/claudinio-protocol", optional = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"

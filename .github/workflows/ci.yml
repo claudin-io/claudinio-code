@@ -108,6 +108,15 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # `remote` is off by default, so nothing above compiles a line of it. An
+      # off-by-default feature that CI never builds rots silently and is then
+      # discovered by whoever turns it on.
+      - name: Remote feature
+        working-directory: src-tauri
+        run: |
+          cargo clippy --lib --all-targets --features remote -- -D warnings
+          cargo test --lib --features remote
+
       # src-tauri is the workspace root *and* a package, so the commands above
       # only cover it. Workspace members need naming.
       - name: Protocol crate
