@@ -1,3 +1,4 @@
+use crate::agent::eventbus::{EventTx, SubagentSink};
 use crate::agent::permissions;
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
 use crate::agent::session::{self, AgentEvent, AnswerMap, ApprovalMap, SteeringCtl};
@@ -6,7 +7,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tauri::ipc::Channel;
 
 pub const MAX_PARALLEL_AGENTS: usize = 4;
 pub const MAX_PARALLEL_AGENTS_CAP: usize = 8;
@@ -115,29 +115,15 @@ fn api_tools(
         .collect()
 }
 
-/// Create a channel that wraps every event from the subagent into
-/// `AgentEvent::Subagent { subagent_id, event }` and forwards it to the parent
-/// channel. The subagent sends events to this wrapped channel; the Tauri IPC
-/// serializes them, the callback catches them, wraps them, and re-sends on the
-/// parent channel that goes to the frontend.
-fn wrap_channel(parent: &Channel<AgentEvent>, subagent_id: &str) -> Channel<AgentEvent> {
-    let sid = subagent_id.to_string();
-    let parent = parent.clone();
-    Channel::new(
-        move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
-            let json_str = match &body {
-                tauri::ipc::InvokeResponseBody::Json(s) => s.clone(),
-                _ => return Ok(()),
-            };
-            if let Ok(event) = serde_json::from_str::<AgentEvent>(&json_str) {
-                let _ = parent.send(AgentEvent::Subagent {
-                    subagent_id: sid.clone(),
-                    event: Box::new(event),
-                });
-            }
-            Ok(())
-        },
-    )
+/// A sink that tags every event a subagent emits as
+/// `AgentEvent::Subagent { subagent_id, event }` before it reaches the parent.
+///
+/// This used to build a second Tauri channel and let the IPC layer serialize
+/// each event to JSON, only to parse it straight back out of the string, wrap
+/// it and re-send. The tagging was always the only part that mattered, and a
+/// subagent that emitted an event the parser choked on lost it silently.
+fn wrap_channel(parent: &EventTx, subagent_id: &str) -> EventTx {
+    Arc::new(SubagentSink::new(parent.clone(), subagent_id))
 }
 
 /// Leniency: models trained on per-agent tools sometimes flatten a single
@@ -163,7 +149,7 @@ pub async fn run_spawn_agents(
     ctx: &ToolContext,
     parent_tool_use_id: &str,
     tool_input: Value,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -187,7 +173,7 @@ pub async fn run_spawn_agents(
                     max
                 ),
             };
-            let _ = event_tx.send(AgentEvent::ToolResult {
+            event_tx.send(AgentEvent::ToolResult {
                 tool_id: parent_tool_use_id.to_string(),
                 tool_name: "spawn_agents".into(),
                 output: msg.clone(),
@@ -209,7 +195,7 @@ pub async fn run_spawn_agents(
 
     if specs.len() != agents.len() {
         let msg = "failed to parse one or more agent specs".to_string();
-        let _ = event_tx.send(AgentEvent::ToolResult {
+        event_tx.send(AgentEvent::ToolResult {
             tool_id: parent_tool_use_id.to_string(),
             tool_name: "spawn_agents".into(),
             output: msg.clone(),
@@ -237,7 +223,7 @@ pub async fn run_spawn_agents(
         let sid = subagent_id.clone();
         let steer = steering.clone();
 
-        let _ = parent_tx.send(AgentEvent::SubagentStarted {
+        parent_tx.send(AgentEvent::SubagentStarted {
             subagent_id: subagent_id.clone(),
             parent_tool_id: parent_tool_use_id.to_string(),
             name: spec.name.clone(),
@@ -272,7 +258,7 @@ pub async fn run_spawn_agents(
         };
 
         let subagent_id = format!("{session_id}:sub:{parent_tool_use_id}:{i}");
-        let _ = parent_tx.send(AgentEvent::SubagentDone {
+        parent_tx.send(AgentEvent::SubagentDone {
             subagent_id: subagent_id.clone(),
             status: result.status.into(),
             rounds: result.rounds,
@@ -311,7 +297,7 @@ pub async fn run_subagent(
     config: &AgentConfig,
     ctx: &ToolContext,
     spec: &SubagentSpec,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -456,7 +442,7 @@ pub async fn run_subagent(
 
         if !assistant_text.is_empty() {
             tool_assistant_blocks.push(ContentBlock::text(&assistant_text));
-            let _ = event_tx.send(AgentEvent::TextStep {
+            event_tx.send(AgentEvent::TextStep {
                 text: assistant_text.clone(),
             });
         }
@@ -471,7 +457,7 @@ pub async fn run_subagent(
                     tool_use.get("input").cloned().unwrap_or(Value::Null),
                 ));
                 let msg = "Interrupted by user — tool not executed.";
-                let _ = event_tx.send(AgentEvent::ToolResult {
+                event_tx.send(AgentEvent::ToolResult {
                     tool_id: tid.to_string(),
                     tool_name: tname.to_string(),
                     output: msg.into(),
@@ -545,7 +531,7 @@ pub async fn run_summary_agent(
     ctx: &ToolContext,
     jsonl_path: &str,
     tail_turns: usize,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,

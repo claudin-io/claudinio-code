@@ -4,6 +4,7 @@
 //! the new session gets a LinkedFrom back-pointer. Both share the same
 //! event channel so the frontend renders the chain as one continuous thread.
 
+use crate::agent::eventbus::EventTx;
 use crate::agent::persist as tasks_store;
 use crate::agent::persist::{self, SessionRecord, SessionStore, now_ms};
 use crate::agent::provider;
@@ -11,7 +12,6 @@ use crate::agent::session::{AgentEvent, HandoffReason, HandoffSpec, ModeCtl, Ste
 use crate::state::{SessionHandle, WorkspaceState};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 
 pub use crate::agent::persist::RecordsCache;
@@ -33,7 +33,7 @@ pub async fn link_session(
     ws: &Arc<WorkspaceState>,
     old_handle: &SessionHandle,
     spec: &HandoffSpec,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
 ) -> Result<SessionHandle, String> {
     let workspace_root = Some(ws.root.to_string_lossy().to_string());
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -117,7 +117,7 @@ pub async fn link_session(
     }
 
     // 10. Notify the frontend so it stitches the new session into the thread.
-    let _ = event_tx.send(AgentEvent::SessionLinked {
+    event_tx.send(AgentEvent::SessionLinked {
         prev_session_id: old_handle.id.clone(),
         session_id: new_id.clone(),
         reason: spec.reason.as_str().into(),

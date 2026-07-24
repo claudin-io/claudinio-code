@@ -1,3 +1,4 @@
+use crate::agent::eventbus::EventTx;
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
@@ -10,7 +11,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tauri::ipc::Channel;
 use tokio::sync::{Mutex, oneshot};
 
 /// Context window of the supported models (claudinio and claudius: 256K).
@@ -132,7 +132,7 @@ pub async fn compact_history(
     config: &AgentConfig,
     store: &SessionStore,
     ctx: &ToolContext,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -900,7 +900,7 @@ fn inject_steering(
     store: &SessionStore,
     ctx: &ToolContext,
     steering: &SteeringCtl,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
 ) -> bool {
     let entries = steering.drain();
     if entries.is_empty() {
@@ -921,7 +921,7 @@ fn inject_steering(
         });
         crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
         push_user_blocks(history, store, ctx, blocks);
-        let _ = event_tx.send(AgentEvent::SteeringInjected {
+        event_tx.send(AgentEvent::SteeringInjected {
             text: entry.text.clone(),
             attachments: Some(attachment_metas),
         });
@@ -1146,7 +1146,7 @@ async fn stream_message_with_retry(
     messages: &[Message],
     tools: &[ToolDescription],
     system: Option<&str>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     assistant_text: &mut String,
     interrupt: &AtomicBool,
@@ -1179,7 +1179,7 @@ async fn stream_message_with_retry(
                     return Err(e);
                 }
                 let delay_ms = BACKOFFS_MS[attempt];
-                let _ = event_tx.send(AgentEvent::Retrying {
+                event_tx.send(AgentEvent::Retrying {
                     attempt: (attempt + 1) as u32,
                     max_attempts: BACKOFFS_MS.len() as u32,
                     delay_ms,
@@ -1228,7 +1228,7 @@ async fn maybe_context_handoff(
     system: &str,
     store: &SessionStore,
     ctx: &ToolContext,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     steering: &Arc<SteeringCtl>,
     mode_ctl: &Arc<ModeCtl>,
@@ -1241,7 +1241,7 @@ async fn maybe_context_handoff(
     if estimated < config.effective_handoff_threshold() {
         return None;
     }
-    let _ = event_tx.send(AgentEvent::TextStep {
+    event_tx.send(AgentEvent::TextStep {
         text: format!(
             "__handoff_start__:{}/{}",
             estimated / 1000,
@@ -1289,7 +1289,7 @@ async fn maybe_context_handoff(
         {
             Ok(o) => o,
             Err(e) => {
-                let _ = event_tx.send(AgentEvent::TextStep {
+                event_tx.send(AgentEvent::TextStep {
                     text: format!("__handoff_fail__:{e}"),
                 });
                 return None;
@@ -1335,7 +1335,7 @@ async fn maybe_context_handoff(
         }
     }
     if handoff_text.is_empty() {
-        let _ = event_tx.send(AgentEvent::TextStep {
+        event_tx.send(AgentEvent::TextStep {
             text: "__handoff_fail__:empty or malformed handoff document".into(),
         });
         return None;
@@ -1367,7 +1367,7 @@ async fn maybe_context_handoff(
         ccc,
         Some(estimated),
     );
-    let _ = event_tx.send(AgentEvent::TextStep {
+    event_tx.send(AgentEvent::TextStep {
         text: format!(
             "__handoff_done__:{}/{}",
             estimated / 1000,
@@ -1412,7 +1412,7 @@ pub async fn run_workflow(
     history: &mut Vec<Message>,
     user_message: String,
     attachment_blocks: Vec<ContentBlock>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -1448,7 +1448,7 @@ pub async fn run_workflow_with_profile(
     history: &mut Vec<Message>,
     user_message: String,
     attachment_blocks: Vec<ContentBlock>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -1510,7 +1510,7 @@ pub async fn run_workflow_with_profile(
         return Ok(outcome);
     }
     if estimated >= effective_compact_threshold(config, profile) {
-        let _ = event_tx.send(AgentEvent::TextStep {
+        event_tx.send(AgentEvent::TextStep {
             text: format!(
                 "__compact_start__:{}/{}",
                 estimated / 1000,
@@ -1547,7 +1547,7 @@ pub async fn run_workflow_with_profile(
                     ccc,
                     Some(new_context),
                 );
-                let _ = event_tx.send(AgentEvent::SessionStats {
+                event_tx.send(AgentEvent::SessionStats {
                     input_tokens: ci as u32,
                     output_tokens: co as u32,
                     cumulative_cost: cc,
@@ -1558,7 +1558,7 @@ pub async fn run_workflow_with_profile(
                     max_context_tokens: MAX_CONTEXT_TOKENS,
                     compact_threshold: COMPACT_THRESHOLD,
                 });
-                let _ = event_tx.send(AgentEvent::TextStep {
+                event_tx.send(AgentEvent::TextStep {
                     text: format!(
                         "__compact_done__:{}/{}",
                         estimated / 1000,
@@ -1567,7 +1567,7 @@ pub async fn run_workflow_with_profile(
                 });
             }
             Err(e) => {
-                let _ = event_tx.send(AgentEvent::TextStep {
+                event_tx.send(AgentEvent::TextStep {
                     text: format!("__compact_fail__:{e}"),
                 });
             }
@@ -1601,7 +1601,7 @@ pub async fn run_workflow_with_profile(
     );
     let mut ledger = CostLedger::resuming(cumul);
     let emit_final_stats = |ledger: &CostLedger, last_context: u64| {
-        let _ = event_tx.send(AgentEvent::SessionStats {
+        event_tx.send(AgentEvent::SessionStats {
             input_tokens: ledger.cumul_in as u32,
             output_tokens: ledger.cumul_out as u32,
             cumulative_cost: ledger.cumul_cost,
@@ -1707,7 +1707,7 @@ pub async fn run_workflow_with_profile(
             return Ok(outcome);
         }
         if pre_tokens >= effective_compact_threshold(config, profile) {
-            let _ = event_tx.send(AgentEvent::TextStep {
+            event_tx.send(AgentEvent::TextStep {
                 text: format!(
                     "__compact_start__:{}/{}",
                     pre_tokens / 1000,
@@ -1761,7 +1761,7 @@ pub async fn run_workflow_with_profile(
                         ccc,
                         Some(new_ctx),
                     );
-                    let _ = event_tx.send(AgentEvent::SessionStats {
+                    event_tx.send(AgentEvent::SessionStats {
                         input_tokens: ci as u32,
                         output_tokens: co as u32,
                         cumulative_cost: cc,
@@ -1772,12 +1772,12 @@ pub async fn run_workflow_with_profile(
                         max_context_tokens: MAX_CONTEXT_TOKENS,
                         compact_threshold: COMPACT_THRESHOLD,
                     });
-                    let _ = event_tx.send(AgentEvent::TextStep {
+                    event_tx.send(AgentEvent::TextStep {
                         text: format!("__compact_done__:{}/{}", pre_tokens / 1000, new_ctx / 1000),
                     });
                 }
                 Err(e) => {
-                    let _ = event_tx.send(AgentEvent::TextStep {
+                    event_tx.send(AgentEvent::TextStep {
                         text: format!("__compact_fail__:{e}"),
                     });
                 }
@@ -1871,7 +1871,7 @@ pub async fn run_workflow_with_profile(
         let live_cost_input = ledger.cumul_cost_input.unwrap_or(0.0) + round_ci;
         let live_cost_output = ledger.cumul_cost_output.unwrap_or(0.0) + round_co;
         let live_cost_cache = ledger.cumul_cost_cache.unwrap_or(0.0) + round_cc;
-        let _ = event_tx.send(AgentEvent::SessionStats {
+        event_tx.send(AgentEvent::SessionStats {
             input_tokens: ledger.total_in + ledger.cumul_in as u32,
             output_tokens: ledger.total_out + ledger.cumul_out as u32,
             cumulative_cost: Some(
@@ -1920,7 +1920,7 @@ pub async fn run_workflow_with_profile(
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
             emit_final_stats(&ledger, last_context);
-            let _ = event_tx.send(AgentEvent::Done {
+            event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
                 input_tokens: ledger.total_in,
@@ -1985,7 +1985,7 @@ pub async fn run_workflow_with_profile(
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
             emit_final_stats(&ledger, last_context);
-            let _ = event_tx.send(AgentEvent::Done {
+            event_tx.send(AgentEvent::Done {
                 stop_reason: "max_tokens".into(),
                 text_output: last_text,
                 input_tokens: ledger.total_in,
@@ -2130,7 +2130,7 @@ pub async fn run_workflow_with_profile(
                     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                     ledger.roll(resolved_model);
                     ledger.write_status(store, ctx, session_id, Some(last_context));
-                    let _ = event_tx.send(AgentEvent::GoldenLoop {
+                    event_tx.send(AgentEvent::GoldenLoop {
                         cycle: golden.cycle,
                         max_cycles: max_cycles as u32,
                         pending: golden_pending.clone(),
@@ -2206,7 +2206,7 @@ pub async fn run_workflow_with_profile(
                     }
                     // The model still skipped it — record the log ourselves.
                     if let Some(outcome) = crate::agent::tools::finalize_plan::auto_finalize(ctx) {
-                        let _ = event_tx.send(AgentEvent::TextStep {
+                        event_tx.send(AgentEvent::TextStep {
                             text: format!(
                                 "📝 Implementation Log recorded to {}",
                                 outcome.plan_file
@@ -2230,7 +2230,7 @@ pub async fn run_workflow_with_profile(
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
             emit_final_stats(&ledger, last_context);
-            let _ = event_tx.send(AgentEvent::Done {
+            event_tx.send(AgentEvent::Done {
                 stop_reason: stop_reason.into(),
                 text_output: last_text,
                 input_tokens: ledger.total_in,
@@ -2250,7 +2250,7 @@ pub async fn run_workflow_with_profile(
         let mut tool_assistant_blocks: Vec<ContentBlock> = Vec::new();
         if !text_output.is_empty() {
             tool_assistant_blocks.push(ContentBlock::text(&text_output));
-            let _ = event_tx.send(AgentEvent::TextStep {
+            event_tx.send(AgentEvent::TextStep {
                 text: text_output.clone(),
             });
         }
@@ -2278,7 +2278,7 @@ pub async fn run_workflow_with_profile(
                         remaining.get("input").cloned().unwrap_or(Value::Null),
                     ));
                     let msg = "Interrupted by the user — the tool was not run.";
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                    event_tx.send(AgentEvent::ToolResult {
                         tool_id: tid.clone(),
                         tool_name: tname,
                         output: msg.into(),
@@ -2551,7 +2551,7 @@ pub async fn run_workflow_with_profile(
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
             emit_final_stats(&ledger, last_context);
-            let _ = event_tx.send(AgentEvent::Done {
+            event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
                 input_tokens: ledger.total_in,
@@ -2580,7 +2580,7 @@ pub async fn run_workflow_with_profile(
     ledger.roll(config.model_for_mode(cur_mode.as_str()));
     ledger.write_status(store, ctx, session_id, Some(last_context));
     emit_final_stats(&ledger, last_context);
-    let _ = event_tx.send(AgentEvent::Done {
+    event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
         input_tokens: ledger.total_in,
@@ -2599,7 +2599,7 @@ pub(crate) async fn run_tool(
     tool_use_id: &str,
     tool_input: Value,
     perm: permissions::PermissionLevel,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     approvals: &ApprovalMap,
     answers: &AnswerMap,
     session_id: &str,
@@ -2644,7 +2644,7 @@ pub(crate) async fn run_tool(
 
     match effective_perm {
         permissions::PermissionLevel::Auto => {
-            let _ = event_tx.send(AgentEvent::ToolCall {
+            event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
                 tool_id: tool_use_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -2656,7 +2656,7 @@ pub(crate) async fn run_tool(
             match tools::execute(tool_name, tool_input, ctx).await {
                 Ok(ToolOutput::Text { content }) => {
                     let truncated = truncate(&content, 2000);
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                    event_tx.send(AgentEvent::ToolResult {
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
                         output: truncated,
@@ -2682,7 +2682,7 @@ pub(crate) async fn run_tool(
                         "old_string": old_string,
                         "new_string": new_string,
                     });
-                    let _ = event_tx.send(AgentEvent::ToolCall {
+                    event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
@@ -2692,7 +2692,7 @@ pub(crate) async fn run_tool(
                     });
                     match tools::apply_edit_with_ctx(args, ctx).await {
                         Ok(msg) => {
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: msg.clone(),
@@ -2701,7 +2701,7 @@ pub(crate) async fn run_tool(
                             ContentBlock::tool_result(tool_use_id, &msg)
                         }
                         Err(e) => {
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: String::new(),
@@ -2712,7 +2712,7 @@ pub(crate) async fn run_tool(
                     }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                    event_tx.send(AgentEvent::ToolResult {
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
                         output: String::new(),
@@ -2731,7 +2731,7 @@ pub(crate) async fn run_tool(
             match permissions::bash_permission(command, ctx.auto_approve_git) {
                 permissions::PermissionLevel::Denied => {
                     let msg = format!("Command blocked by security policy: {command}");
-                    let _ = event_tx.send(AgentEvent::ToolCall {
+                    event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
@@ -2739,7 +2739,7 @@ pub(crate) async fn run_tool(
                         permission: "denied".into(),
                         edit_proposal: None,
                     });
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                    event_tx.send(AgentEvent::ToolResult {
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
                         output: msg.clone(),
@@ -2748,7 +2748,7 @@ pub(crate) async fn run_tool(
                     ContentBlock::tool_result(tool_use_id, &msg)
                 }
                 permissions::PermissionLevel::Auto => {
-                    let _ = event_tx.send(AgentEvent::ToolCall {
+                    event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
@@ -2759,7 +2759,7 @@ pub(crate) async fn run_tool(
                     match tools::execute(tool_name, tool_input.clone(), ctx).await {
                         Ok(ToolOutput::Text { content }) => {
                             let truncated = truncate(&content, 2000);
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: truncated,
@@ -2769,7 +2769,7 @@ pub(crate) async fn run_tool(
                         }
                         _ => {
                             let err = "unexpected output type from bash".to_string();
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: err.clone(),
@@ -2786,7 +2786,7 @@ pub(crate) async fn run_tool(
                     // access plan, phase 4.
                     let gate = approvals.register(&approval_key, None).await;
 
-                    let _ = event_tx.send(AgentEvent::ToolCall {
+                    event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
@@ -2800,7 +2800,7 @@ pub(crate) async fn run_tool(
                             match tools::execute(tool_name, tool_input.clone(), ctx).await {
                                 Ok(ToolOutput::Text { content }) => {
                                     let truncated = truncate(&content, 2000);
-                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                    event_tx.send(AgentEvent::ToolResult {
                                         tool_id: tool_use_id.to_string(),
                                         tool_name: tool_name.to_string(),
                                         output: truncated,
@@ -2811,7 +2811,7 @@ pub(crate) async fn run_tool(
                                 Ok(ToolOutput::EditProposal { .. }) => {
                                     let err_msg: String =
                                         "bash should not produce edit proposals".into();
-                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                    event_tx.send(AgentEvent::ToolResult {
                                         tool_id: tool_use_id.to_string(),
                                         tool_name: tool_name.to_string(),
                                         output: err_msg.clone(),
@@ -2820,7 +2820,7 @@ pub(crate) async fn run_tool(
                                     ContentBlock::tool_result(tool_use_id, &err_msg)
                                 }
                                 Err(e) => {
-                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                    event_tx.send(AgentEvent::ToolResult {
                                         tool_id: tool_use_id.to_string(),
                                         tool_name: tool_name.to_string(),
                                         output: String::new(),
@@ -2832,7 +2832,7 @@ pub(crate) async fn run_tool(
                         }
                         Ok(decision) => {
                             let msg = decision.rejection_message("Command");
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: msg.clone(),
@@ -2853,7 +2853,7 @@ pub(crate) async fn run_tool(
             let approval_key = format!("{session_id}:{tool_use_id}");
             let gate = approvals.register(&approval_key, None).await;
 
-            let _ = event_tx.send(AgentEvent::ToolCall {
+            event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
                 tool_id: tool_use_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -2867,7 +2867,7 @@ pub(crate) async fn run_tool(
                     match tools::execute(tool_name, tool_input.clone(), ctx).await {
                         Ok(ToolOutput::Text { content }) => {
                             let truncated = truncate(&content, 2000);
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: truncated,
@@ -2877,7 +2877,7 @@ pub(crate) async fn run_tool(
                         }
                         Ok(ToolOutput::EditProposal { .. }) => {
                             let err_msg = "MCP tools should not produce edit proposals".to_string();
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: err_msg.clone(),
@@ -2886,7 +2886,7 @@ pub(crate) async fn run_tool(
                             ContentBlock::tool_result(tool_use_id, &err_msg)
                         }
                         Err(e) => {
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: String::new(),
@@ -2898,7 +2898,7 @@ pub(crate) async fn run_tool(
                 }
                 Ok(decision) => {
                     let msg = decision.rejection_message("Tool call");
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                    event_tx.send(AgentEvent::ToolResult {
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
                         output: msg.clone(),
@@ -2912,7 +2912,7 @@ pub(crate) async fn run_tool(
         permissions::PermissionLevel::RequiresApproval => {
             match tools::execute(tool_name, tool_input.clone(), ctx).await {
                 Ok(ToolOutput::Text { content }) => {
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                    event_tx.send(AgentEvent::ToolResult {
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
                         output: content.clone(),
@@ -2939,7 +2939,7 @@ pub(crate) async fn run_tool(
                     // access plan, phase 4.
                     let gate = approvals.register(&approval_key, None).await;
 
-                    let _ = event_tx.send(AgentEvent::ToolCall {
+                    event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
@@ -2952,7 +2952,7 @@ pub(crate) async fn run_tool(
                         Ok(decision) if decision.approved => {
                             match tools::apply_edit_with_ctx(tool_input, ctx).await {
                                 Ok(msg) => {
-                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                    event_tx.send(AgentEvent::ToolResult {
                                         tool_id: tool_use_id.to_string(),
                                         tool_name: tool_name.to_string(),
                                         output: msg.clone(),
@@ -2961,7 +2961,7 @@ pub(crate) async fn run_tool(
                                     ContentBlock::tool_result(tool_use_id, &msg)
                                 }
                                 Err(e) => {
-                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                    event_tx.send(AgentEvent::ToolResult {
                                         tool_id: tool_use_id.to_string(),
                                         tool_name: tool_name.to_string(),
                                         output: String::new(),
@@ -2976,7 +2976,7 @@ pub(crate) async fn run_tool(
                         }
                         Ok(decision) => {
                             let msg = decision.rejection_message("Edit");
-                            let _ = event_tx.send(AgentEvent::ToolResult {
+                            event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 output: msg.clone(),
@@ -2988,7 +2988,7 @@ pub(crate) async fn run_tool(
                     }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(AgentEvent::ToolResult {
+                    event_tx.send(AgentEvent::ToolResult {
                         tool_id: tool_use_id.to_string(),
                         tool_name: tool_name.to_string(),
                         output: String::new(),
@@ -3000,7 +3000,7 @@ pub(crate) async fn run_tool(
         }
         permissions::PermissionLevel::Denied => {
             let msg = format!("Command '{tool_name}' is blocked by security policy");
-            let _ = event_tx.send(AgentEvent::ToolCall {
+            event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
                 tool_id: tool_use_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -3008,7 +3008,7 @@ pub(crate) async fn run_tool(
                 permission: "denied".into(),
                 edit_proposal: None,
             });
-            let _ = event_tx.send(AgentEvent::ToolResult {
+            event_tx.send(AgentEvent::ToolResult {
                 tool_id: tool_use_id.to_string(),
                 tool_name: tool_name.to_string(),
                 output: msg.clone(),
@@ -3026,10 +3026,10 @@ fn deny_tool(
     tool_use_id: &str,
     tool_input: &Value,
     msg: &str,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
 ) -> ContentBlock {
-    let _ = event_tx.send(AgentEvent::ToolCall {
+    event_tx.send(AgentEvent::ToolCall {
         session_id: session_id.to_string(),
         tool_id: tool_use_id.to_string(),
         tool_name: tool_name.to_string(),
@@ -3037,7 +3037,7 @@ fn deny_tool(
         permission: "denied".into(),
         edit_proposal: None,
     });
-    let _ = event_tx.send(AgentEvent::ToolResult {
+    event_tx.send(AgentEvent::ToolResult {
         tool_id: tool_use_id.to_string(),
         tool_name: tool_name.to_string(),
         output: msg.to_string(),
@@ -3074,11 +3074,11 @@ fn handle_mode_switch(
     mode_ctl: &Arc<ModeCtl>,
     store: &SessionStore,
     ctx: &ToolContext,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     pending_handoff: &mut Option<HandoffSpec>,
 ) -> ContentBlock {
-    let _ = event_tx.send(AgentEvent::ToolCall {
+    event_tx.send(AgentEvent::ToolCall {
         session_id: session_id.to_string(),
         tool_id: tool_use_id.to_string(),
         tool_name: tool_name.to_string(),
@@ -3104,7 +3104,7 @@ fn handle_mode_switch(
                     ts: now_ms(),
                 });
                 crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-                let _ = event_tx.send(AgentEvent::ModeChanged {
+                event_tx.send(AgentEvent::ModeChanged {
                     mode: SessionMode::Brain.as_str().into(),
                     origin: ModeOrigin::Agent.as_str().into(),
                     reason,
@@ -3194,7 +3194,7 @@ fn handle_mode_switch(
         _ => ("unknown mode tool".into(), Some("invalid".into())),
     };
 
-    let _ = event_tx.send(AgentEvent::ToolResult {
+    event_tx.send(AgentEvent::ToolResult {
         tool_id: tool_use_id.to_string(),
         tool_name: tool_name.to_string(),
         output: result.clone(),
@@ -3384,11 +3384,11 @@ async fn ask_user(
     tool_name: &str,
     tool_use_id: &str,
     tool_input: Value,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     answers: &AnswerMap,
     session_id: &str,
 ) -> ContentBlock {
-    let _ = event_tx.send(AgentEvent::ToolCall {
+    event_tx.send(AgentEvent::ToolCall {
         session_id: session_id.to_string(),
         tool_id: tool_use_id.to_string(),
         tool_name: tool_name.to_string(),
@@ -3402,7 +3402,7 @@ async fn ask_user(
         Ok(q) => q,
         Err(detail) => {
             let msg = ask_user_error_with_example(&detail, &raw_questions);
-            let _ = event_tx.send(AgentEvent::ToolResult {
+            event_tx.send(AgentEvent::ToolResult {
                 tool_id: tool_use_id.to_string(),
                 tool_name: tool_name.to_string(),
                 output: String::new(),
@@ -3412,7 +3412,7 @@ async fn ask_user(
         }
     };
 
-    let _ = event_tx.send(AgentEvent::AskUser {
+    event_tx.send(AgentEvent::AskUser {
         session_id: session_id.to_string(),
         tool_id: tool_use_id.to_string(),
         questions,
@@ -3420,7 +3420,7 @@ async fn ask_user(
 
     let compiled = await_user_answer(answers, session_id, tool_use_id).await;
 
-    let _ = event_tx.send(AgentEvent::ToolResult {
+    event_tx.send(AgentEvent::ToolResult {
         tool_id: tool_use_id.to_string(),
         tool_name: tool_name.to_string(),
         output: compiled.clone(),

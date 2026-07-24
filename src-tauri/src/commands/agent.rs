@@ -203,6 +203,63 @@ pub fn process_attachments(atts: &[AttachmentInput]) -> Vec<(ContentBlock, Attac
     results
 }
 
+/// Bridges a Tauri IPC channel into the agent's sink abstraction.
+///
+/// This is the only place left that knows agent events travel over Tauri IPC.
+/// Everything in `agent/` writes to an `EventSink` and cannot name a webview,
+/// which is what allows a second watcher — another window, and later a paired
+/// peer — to exist at all.
+struct ChannelSink(Channel<AgentEvent>);
+
+impl crate::agent::eventbus::EventSink for ChannelSink {
+    fn send(&self, event: AgentEvent) {
+        // A closed webview makes this fail; that is not the agent's problem.
+        let _ = self.0.send(event);
+    }
+}
+
+/// How far a watcher may fall behind before it is dropped into a `Gap`.
+///
+/// Sized for token streaming, the only thing that produces events faster than a
+/// webview consumes them. Bounded rather than generous on purpose: the cost of
+/// a gap is a re-read of the transcript, and the cost of an unbounded buffer is
+/// the agent process.
+const EVENT_BUS_CAPACITY: usize = 1024;
+
+/// Put a run's events on a fan-out bus and attach this window to it.
+///
+/// The agent publishes into the bus and never learns who is listening, so a
+/// second watcher becomes an extra `subscribe()` rather than a change to the
+/// agent. A watcher that cannot keep up is dropped into a `Gap` and the run
+/// carries on — a slow reader must never be able to stall the agent loop.
+fn sink_from(channel: Channel<AgentEvent>) -> crate::agent::eventbus::EventTx {
+    use crate::agent::eventbus::{Delivery, EventBus};
+
+    let bus = EventBus::new(EVENT_BUS_CAPACITY);
+    let mut watcher = bus.subscribe();
+    let sink = ChannelSink(channel);
+
+    tokio::spawn(async move {
+        use crate::agent::eventbus::EventSink;
+        loop {
+            match watcher.recv().await {
+                Delivery::Event(event) => sink.send(*event),
+                Delivery::Gap { missed } => {
+                    // Visible rather than silent. Recovering the missed span is
+                    // a transcript replay — `persist::replay` exists for it —
+                    // and wiring that into the UI belongs with the remote work.
+                    eprintln!("[eventbus] a window fell behind and missed {missed} events");
+                }
+                // The run ended and the bus was dropped. Buffered events are
+                // delivered before this, so the tail of a run is not lost.
+                Delivery::Closed => break,
+            }
+        }
+    });
+
+    Arc::new(bus)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStarted {
@@ -386,7 +443,7 @@ pub async fn send_message(
         maps: transition_maps(&state),
         approvals: state.approvals.clone(),
         answers: state.answers.clone(),
-        chan: event_channel,
+        chan: sink_from(event_channel),
         handle,
         store,
         ctx,
@@ -416,7 +473,7 @@ struct RunLoopArgs {
     maps: transition::TransitionMaps,
     approvals: session::ApprovalMap,
     answers: session::AnswerMap,
-    chan: Channel<AgentEvent>,
+    chan: crate::agent::eventbus::EventTx,
     handle: SessionHandle,
     store: SessionStore,
     ctx: ToolContext,
@@ -511,7 +568,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
                                 message: e.clone(),
                                 ts: now_ms(),
                             });
-                            let _ = chan.send(AgentEvent::Error(e));
+                            chan.send(AgentEvent::Error(e));
                             break;
                         }
                     }
@@ -521,7 +578,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
                         message: e.clone(),
                         ts: now_ms(),
                     });
-                    let _ = chan.send(AgentEvent::Error(e));
+                    chan.send(AgentEvent::Error(e));
                     break;
                 }
             }
@@ -1051,7 +1108,7 @@ pub async fn compact_session(
         &config,
         &store,
         &ctx,
-        &event_channel,
+        &sink_from(event_channel.clone()),
         &state.approvals,
         &state.answers,
         &handle.id,
@@ -1172,8 +1229,14 @@ pub async fn continue_with_builder(
     );
 
     let maps = transition_maps(&state);
-    let new_handle =
-        transition::link_session(&maps, &ws, &old_handle, &spec, &event_channel).await?;
+    let new_handle = transition::link_session(
+        &maps,
+        &ws,
+        &old_handle,
+        &spec,
+        &sink_from(event_channel.clone()),
+    )
+    .await?;
 
     // Fresh run on the new session: build its ToolContext from scratch (no old
     // running context exists — this command fires from an idle Brain session).
@@ -1216,7 +1279,7 @@ pub async fn continue_with_builder(
         maps,
         approvals: state.approvals.clone(),
         answers: state.answers.clone(),
-        chan: event_channel,
+        chan: sink_from(event_channel),
         handle: new_handle,
         store,
         ctx,
@@ -1459,7 +1522,7 @@ pub async fn commit_and_push(
     let mode_ctl = state.mode_for(&id, &store.path).await;
 
     let sid = id.clone();
-    let chan = event_channel;
+    let chan = sink_from(event_channel);
     let appr = state.approvals.clone();
     let answ = state.answers.clone();
     let steering_map = state.steering_map();
@@ -1486,7 +1549,7 @@ pub async fn commit_and_push(
                 message: e.clone(),
                 ts: now_ms(),
             });
-            let _ = chan.send(AgentEvent::Error(e));
+            chan.send(AgentEvent::Error(e));
         }
         // Clean up steering entry on completion
         let mut map = steering_map.lock().await;
