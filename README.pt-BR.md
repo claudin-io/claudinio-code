@@ -181,6 +181,27 @@ aprovação resolvem por oneshot channels → resultados alimentam o round segui
 [ONNX Runtime](https://github.com/pykeio/ort) ·
 [tokio](https://tokio.rs)
 
+## Ícones
+
+Os ícones da interface são paths SVG portados à mão, obtidos pelo
+[Icônes](https://icones.js.org), um navegador dos conjuntos de ícones
+open-source agregados pelo [Iconify](https://iconify.design). Obrigado às
+coleções e seus autores:
+
+| Coleção | Autor | Licença |
+| --- | --- | --- |
+| [Lucide](https://icones.js.org/collection/lucide) | Lucide Contributors | ISC |
+| [Codicons](https://icones.js.org/collection/codicon) | Microsoft | CC BY 4.0 |
+| [Carbon](https://icones.js.org/collection/carbon) | IBM | Apache 2.0 |
+| [Pixel Icon Library](https://icones.js.org/collection/pixel) | HackerNoon | CC BY 4.0 |
+| [Octicons](https://icones.js.org/collection/octicon) | GitHub | MIT |
+| [Bootstrap Icons](https://icones.js.org/collection/bi) | The Bootstrap Authors | MIT |
+| [Hugeicons](https://icones.js.org/collection/hugeicons) | Hugeicons | MIT |
+| [Pixelarticons](https://icones.js.org/collection/pixelarticons) | Gerrit Halfmann | MIT |
+| [Dinkie Icons](https://icones.js.org/collection/dinkie) | atelierAnchor | MIT |
+| [Game Icons](https://icones.js.org/collection/game-icons) | GameIcons | CC BY 3.0 |
+| [Streamline Ultimate](https://icones.js.org/collection/streamline-ultimate) | Streamline | CC BY 4.0 |
+
 ## Contribuindo
 
 Issues e pull requests são bem-vindos — comece pelo
