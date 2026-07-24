@@ -38,6 +38,9 @@ pub struct Connection<A: DeviceActions + Sync> {
     pub peer_label: String,
     pub policy: Policy,
     pub command_log: PathBuf,
+    /// The session's JSONL. `Subscribe` is answered from this file, which is why
+    /// the relay needs no durable storage of its own.
+    pub store_path: PathBuf,
     pub bus: EventBus,
     pub actions: A,
 }
@@ -107,6 +110,7 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
         connection.policy.clone(),
         CommandLog::open(&connection.command_log),
         &connection.actions,
+        &connection.store_path,
     );
 
     let mut watcher = connection.bus.subscribe();

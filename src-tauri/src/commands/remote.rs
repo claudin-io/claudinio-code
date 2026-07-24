@@ -162,6 +162,9 @@ pub async fn remote_create_identity(_state: State<'_, AppState>) -> Result<Strin
 #[serde(rename_all = "camelCase")]
 pub struct EnableArgs {
     pub relay_url: String,
+    /// The workspace whose active session is being served. Needed to resolve the
+    /// transcript that answers `Subscribe`.
+    pub workspace: String,
     /// Hex, 32 characters. Comes from the pairing exchange.
     pub channel: String,
     pub session_id: String,
@@ -184,6 +187,17 @@ pub async fn remote_enable(args: EnableArgs, state: State<'_, AppState>) -> Resu
     let identity = std::sync::Arc::new(DeviceIdentity::load_or_create(&identity_path()?)?);
     let bus = state.bus_for(&args.session_id).await;
 
+    // The transcript is the source of truth for replay, so a peer can only be
+    // served a session the app actually has open.
+    let ws = state.workspace(&args.workspace).await?;
+    let store_path = {
+        let active = ws.active_session.lock().await;
+        match active.as_ref() {
+            Some(handle) if handle.id == args.session_id => handle.store_path.clone(),
+            _ => return Err("that session is not the workspace's active one".into()),
+        }
+    };
+
     let command_log = identity_path()?
         .parent()
         .ok_or_else(|| "no config directory".to_string())?
@@ -198,6 +212,7 @@ pub async fn remote_enable(args: EnableArgs, state: State<'_, AppState>) -> Resu
         peer_label: args.peer_label,
         policy: claudinio_protocol::inner::Policy::default(),
         command_log,
+        store_path,
         bus,
         actions: AppActions::new(&state),
     };

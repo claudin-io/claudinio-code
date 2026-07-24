@@ -128,6 +128,9 @@ pub struct Bridge<A: DeviceActions> {
     log: CommandLog,
     actions: A,
     event_seq: u64,
+    /// The session's JSONL. `Subscribe` is answered out of this rather than from
+    /// a buffer, which is what lets the relay hold no state at all.
+    store_path: std::path::PathBuf,
 }
 
 impl<A: DeviceActions> Bridge<A> {
@@ -137,6 +140,7 @@ impl<A: DeviceActions> Bridge<A> {
         policy: Policy,
         log: CommandLog,
         actions: A,
+        store_path: impl Into<std::path::PathBuf>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -145,7 +149,63 @@ impl<A: DeviceActions> Bridge<A> {
             log,
             actions,
             event_seq: 0,
+            store_path: store_path.into(),
         }
+    }
+
+    /// Answer `Subscribe` by replaying the transcript from `from_seq`.
+    ///
+    /// Chunked, because one session can be far larger than a frame. Each chunk
+    /// carries the highest `seq` it contains, so a peer that is cut off partway
+    /// resumes from the last chunk it actually received rather than starting over.
+    fn snapshot(&self, from_seq: u64) -> Vec<DeviceToPeer> {
+        let records = match crate::agent::persist::replay(&self.store_path, from_seq) {
+            Ok(records) => records,
+            Err(e) => {
+                return vec![DeviceToPeer::Error {
+                    cmd_id: String::new(),
+                    code: "replay_failed".into(),
+                    message: e,
+                }];
+            }
+        };
+
+        let mut chunks = Vec::new();
+        let mut batch: Vec<serde_json::Value> = Vec::new();
+        let mut batch_bytes = 0usize;
+        let mut highest = from_seq.saturating_sub(1);
+
+        for record in records {
+            let value = match serde_json::to_value(&record.record) {
+                Ok(value) => value,
+                // One unserialisable record must not sink the whole replay.
+                Err(_) => continue,
+            };
+            let size = value.to_string().len();
+
+            // Flush before the batch would outgrow a frame, not after.
+            if !batch.is_empty() && batch_bytes + size > SNAPSHOT_BUDGET {
+                chunks.push(DeviceToPeer::Snapshot {
+                    session_id: self.session_id.clone(),
+                    records: std::mem::take(&mut batch),
+                    seq: highest,
+                });
+                batch_bytes = 0;
+            }
+
+            highest = record.seq;
+            batch_bytes += size;
+            batch.push(value);
+        }
+
+        // Always send a final chunk, even when empty: a peer asking to resume
+        // from the end must be told it is up to date rather than left waiting.
+        chunks.push(DeviceToPeer::Snapshot {
+            session_id: self.session_id.clone(),
+            records: batch,
+            seq: highest,
+        });
+        chunks
     }
 
     /// Turn something off the bus into something for the wire.
@@ -188,14 +248,21 @@ impl<A: DeviceActions> Bridge<A> {
     /// issue is never recorded as having been attempted, so a denied command
     /// stays retryable after the policy widens.
     pub async fn handle(&mut self, message: PeerToDevice) -> Vec<DeviceToPeer> {
+        // Queries carry no cmd_id because they have no side effect, so they skip
+        // deduplication entirely — replaying a read is harmless.
         let Some(cmd_id) = command_id(&message) else {
-            // Queries carry no cmd_id because they have no side effect. Nothing
-            // in phase 2 answers them yet.
-            return vec![DeviceToPeer::Error {
-                cmd_id: String::new(),
-                code: "unsupported".into(),
-                message: "queries are not implemented yet".into(),
-            }];
+            return match message {
+                PeerToDevice::Subscribe { from_seq, .. } => self.snapshot(from_seq),
+                // The peer is told what it may do so its UI can grey out the
+                // rest, rather than offering actions that will be refused.
+                PeerToDevice::GetPolicy => vec![DeviceToPeer::Policy(self.policy.clone())],
+                PeerToDevice::Unsubscribe { .. } => vec![],
+                other => vec![DeviceToPeer::Error {
+                    cmd_id: String::new(),
+                    code: "unsupported".into(),
+                    message: format!("{} is not implemented yet", tag_of(&other)),
+                }],
+            };
         };
 
         if let Some((rule, why)) = self.denied_by_policy(&message) {
@@ -359,6 +426,13 @@ impl<A: DeviceActions> Bridge<A> {
     }
 }
 
+/// How much JSON to put in one `Snapshot`.
+///
+/// Well under the 256 KiB frame ceiling: the frame also carries Noise overhead
+/// and the MessagePack envelope, and a chunk that overflowed would be dropped
+/// rather than split.
+const SNAPSHOT_BUDGET: usize = 64 * 1024;
+
 /// The dedup key, for commands that have one.
 fn command_id(message: &PeerToDevice) -> Option<String> {
     match message {
@@ -462,12 +536,30 @@ mod tests {
     }
 
     fn bridge(policy: Policy) -> (tempfile::TempDir, Bridge<Spy>) {
+        bridge_with_transcript(policy, &[])
+    }
+
+    fn bridge_with_transcript(policy: Policy, lines: &[&str]) -> (tempfile::TempDir, Bridge<Spy>) {
         let dir = tempfile::tempdir().unwrap();
         let log = CommandLog::open(dir.path().join("commands.jsonl"));
+        let store = dir.path().join("session.jsonl");
+        std::fs::write(
+            &store,
+            if lines.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", lines.join("\n"))
+            },
+        )
+        .unwrap();
         (
             dir,
-            Bridge::new("session-1", "iPhone", policy, log, Spy::default()),
+            Bridge::new("session-1", "iPhone", policy, log, Spy::default(), store),
         )
+    }
+
+    fn user_record(text: &str) -> String {
+        serde_json::json!({ "kind": "user", "text": text, "ts": 1 }).to_string()
     }
 
     fn approve(cmd_id: &str) -> PeerToDevice {
@@ -555,7 +647,14 @@ mod tests {
             fail: true,
             ..Default::default()
         };
-        let mut bridge = Bridge::new("session-1", "iPhone", permissive(), log, spy);
+        let mut bridge = Bridge::new(
+            "session-1",
+            "iPhone",
+            permissive(),
+            log,
+            spy,
+            dir.path().join("session.jsonl"),
+        );
 
         let first = bridge.handle(approve("cmd-1")).await;
         let second = bridge.handle(approve("cmd-1")).await;
@@ -583,6 +682,7 @@ mod tests {
             permissive(),
             CommandLog::open(&path),
             Spy::default(),
+            dir.path().join("session.jsonl"),
         );
 
         let reply = bridge.handle(approve("cmd-1")).await;
@@ -607,7 +707,14 @@ mod tests {
             already_resolved: Some(approval::Decision::denied_by(approval::Actor::Local)),
             ..Default::default()
         };
-        let mut bridge = Bridge::new("session-1", "iPhone", permissive(), log, spy);
+        let mut bridge = Bridge::new(
+            "session-1",
+            "iPhone",
+            permissive(),
+            log,
+            spy,
+            dir.path().join("session.jsonl"),
+        );
 
         let reply = bridge.handle(approve("cmd-1")).await;
 
@@ -714,6 +821,7 @@ mod tests {
             Policy::default(),
             CommandLog::open(&path),
             Spy::default(),
+            dir.path().join("session.jsonl"),
         );
         assert!(matches!(
             strict.handle(approve("cmd-1")).await[0],
@@ -726,6 +834,7 @@ mod tests {
             permissive(),
             CommandLog::open(&path),
             Spy::default(),
+            dir.path().join("session.jsonl"),
         );
         assert!(matches!(
             relaxed.handle(approve("cmd-1")).await[0],
@@ -823,17 +932,163 @@ mod tests {
         }
     }
 
+    // --- subscribe and replay ----------------------------------------------
+
+    fn snapshots(replies: &[DeviceToPeer]) -> Vec<(usize, u64)> {
+        replies
+            .iter()
+            .map(|reply| match reply {
+                DeviceToPeer::Snapshot { records, seq, .. } => (records.len(), *seq),
+                other => panic!("expected a Snapshot, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The resume path, and the reason the relay needs no storage: a peer asks
+    /// for what it missed and the device reads it back off disk.
+    #[tokio::test]
+    async fn subscribing_from_zero_replays_the_whole_transcript() {
+        let (_d, mut bridge) = bridge_with_transcript(
+            permissive(),
+            &[
+                &user_record("one"),
+                &user_record("two"),
+                &user_record("three"),
+            ],
+        );
+
+        let replies = bridge
+            .handle(PeerToDevice::Subscribe {
+                session_id: "session-1".into(),
+                from_seq: 0,
+            })
+            .await;
+
+        assert_eq!(snapshots(&replies), vec![(3, 3)]);
+    }
+
+    #[tokio::test]
+    async fn subscribing_from_a_seq_replays_only_what_follows() {
+        let (_d, mut bridge) = bridge_with_transcript(
+            permissive(),
+            &[
+                &user_record("one"),
+                &user_record("two"),
+                &user_record("three"),
+            ],
+        );
+
+        let replies = bridge
+            .handle(PeerToDevice::Subscribe {
+                session_id: "session-1".into(),
+                from_seq: 3,
+            })
+            .await;
+
+        assert_eq!(snapshots(&replies), vec![(1, 3)]);
+    }
+
+    /// A peer that has everything must be told so. Sending nothing would leave it
+    /// waiting for a reply that never comes, which on a phone looks like a hang.
+    #[tokio::test]
+    async fn a_peer_that_is_up_to_date_still_gets_an_empty_snapshot() {
+        let (_d, mut bridge) = bridge_with_transcript(permissive(), &[&user_record("one")]);
+
+        let replies = bridge
+            .handle(PeerToDevice::Subscribe {
+                session_id: "session-1".into(),
+                from_seq: 2,
+            })
+            .await;
+
+        assert_eq!(snapshots(&replies), vec![(0, 1)]);
+    }
+
+    /// One session can be far larger than one frame, so a replay is chunked. Each
+    /// chunk carries the highest seq it holds, so a peer cut off partway resumes
+    /// from the last chunk it received instead of starting again.
+    #[tokio::test]
+    async fn a_large_transcript_is_split_across_frames() {
+        let big = user_record(&"x".repeat(20 * 1024));
+        let lines: Vec<&str> = (0..8).map(|_| big.as_str()).collect();
+        let (_d, mut bridge) = bridge_with_transcript(permissive(), &lines);
+
+        let replies = bridge
+            .handle(PeerToDevice::Subscribe {
+                session_id: "session-1".into(),
+                from_seq: 0,
+            })
+            .await;
+
+        assert!(replies.len() > 1, "expected chunking, got one frame");
+
+        // Every record arrives exactly once, and the sequence numbers climb.
+        let chunks = snapshots(&replies);
+        assert_eq!(chunks.iter().map(|(n, _)| n).sum::<usize>(), 8);
+        let seqs: Vec<u64> = chunks.iter().map(|(_, seq)| *seq).collect();
+        assert!(seqs.windows(2).all(|w| w[0] <= w[1]), "{seqs:?}");
+        assert_eq!(*seqs.last().unwrap(), 8);
+
+        // And no chunk is big enough to be refused by the wire.
+        for reply in &replies {
+            let encoded = rmp_serde::to_vec_named(reply).unwrap();
+            assert!(
+                encoded.len() < claudinio_protocol::wire::MAX_FRAME,
+                "a chunk of {} bytes would not fit a frame",
+                encoded.len()
+            );
+        }
+    }
+
+    /// A read has no side effect, so replaying one is harmless and must not be
+    /// deduplicated — otherwise a reconnecting peer could never re-subscribe.
+    #[tokio::test]
+    async fn subscribing_twice_replays_twice() {
+        let (_d, mut bridge) = bridge_with_transcript(permissive(), &[&user_record("one")]);
+        let subscribe = || PeerToDevice::Subscribe {
+            session_id: "session-1".into(),
+            from_seq: 0,
+        };
+
+        let first = bridge.handle(subscribe()).await;
+        let second = bridge.handle(subscribe()).await;
+
+        assert_eq!(snapshots(&first), snapshots(&second));
+    }
+
+    /// The peer is told what it may do, so its UI can grey out the rest instead of
+    /// offering actions that will be refused.
+    #[tokio::test]
+    async fn asking_for_the_policy_returns_it() {
+        let (_d, mut bridge) = bridge(Policy::default());
+
+        let replies = bridge.handle(PeerToDevice::GetPolicy).await;
+
+        match &replies[0] {
+            DeviceToPeer::Policy(policy) => {
+                assert!(!policy.send_message, "the default grants nothing");
+                assert_eq!(policy.approve_bash, BashApproval::Never);
+            }
+            other => panic!("expected Policy, got {other:?}"),
+        }
+    }
+
     // --- unimplemented surface ---------------------------------------------
 
-    /// Phase 2 does not answer queries. It must say so rather than silently
-    /// dropping them, or a peer waits forever for a reply that is never coming.
+    /// A query phase 2 does not answer must say so rather than being dropped, or
+    /// a peer waits forever for a reply that is never coming.
     #[tokio::test]
     async fn an_unimplemented_query_is_answered_with_an_error() {
         let (_d, mut bridge) = bridge(permissive());
 
-        let reply = bridge.handle(PeerToDevice::GetPolicy).await;
+        let reply = bridge.handle(PeerToDevice::ListWorkspaces).await;
 
-        assert!(matches!(reply[0], DeviceToPeer::Error { .. }), "{reply:?}");
+        match &reply[0] {
+            DeviceToPeer::Error { message, .. } => {
+                assert!(message.contains("list_workspaces"), "{message}")
+            }
+            other => panic!("expected an Error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

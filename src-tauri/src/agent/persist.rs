@@ -344,11 +344,13 @@ pub fn load_records(path: &Path) -> Result<Vec<SessionRecord>, String> {
 /// A record together with its position in the session file.
 #[derive(Debug, Clone)]
 pub struct SeqRecord {
-    // Read by the event bus, which lands in the next commit of this phase, and
-    // then by the remote bridge in phase 2. Until then nothing in the app reads
-    // it — `load_records` discards it — so the lint is correct and this is a
-    // temporary suppression rather than a claim that a caller exists.
-    #[allow(dead_code)]
+    /// The record's position in the file. Read by the remote bridge to answer
+    /// `Subscribe`; `load_records` discards it.
+    ///
+    // Its only reader is behind the `remote` feature, so in a build without it the
+    // lint is right. Scoped to that configuration rather than blanket-allowed, so
+    // it starts failing again if the reader ever goes away.
+    #[cfg_attr(not(feature = "remote"), allow(dead_code))]
     pub seq: u64,
     pub record: SessionRecord,
 }
