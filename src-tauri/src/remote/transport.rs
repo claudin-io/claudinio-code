@@ -85,11 +85,16 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
 
     // --- handshake --------------------------------------------------------
     //
-    // The device is the responder, so it waits. A peer that never arrives just
-    // leaves the socket idle, which costs nothing.
-    let msg1 = next_payload(&mut stream, connection.channel)
+    // The device is the responder, so it waits indefinitely. Only the initiator
+    // retries — bounding both sides makes them wake and sleep alternately and miss
+    // each other, which the relay's prova real demonstrated. A device with no peer
+    // sits attached and idle, and that costs nothing.
+    let (kind, msg1) = next_frame(&mut stream, connection.channel)
         .await?
         .ok_or_else(|| "closed before the handshake".to_string())?;
+    if !matches!(kind, OuterKind::Hello) {
+        return Err("first frame was not a handshake".into());
+    }
 
     let (mut session, msg2) = noise::accept(&connection.identity, &msg1)?;
     send_frame(
@@ -140,9 +145,26 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
             }
 
             // Commands from the peer, inbound.
-            frame = next_payload(&mut stream, connection.channel) => {
-                let Some(ciphertext) = frame? else { return Ok(()) };
+            frame = next_frame(&mut stream, connection.channel) => {
+                let Some((kind, payload)) = frame? else { return Ok(()) };
 
+                // A `Hello` on an established session means the peer gave up
+                // mid-handshake and came back. Treating it as transport data —
+                // which is what ignoring `kind` does — fails to decrypt and then
+                // rejects every frame after it, leaving a session that cannot
+                // recover until one side restarts. The relay's prova real found
+                // exactly that; `kind` exists so it is distinguishable.
+                if matches!(kind, OuterKind::Hello) {
+                    let (fresh, msg2) = noise::accept(&connection.identity, &payload)?;
+                    send_frame(&mut sink, connection.channel, OuterKind::HelloAck, 0, 0, msg2)
+                        .await?;
+                    eprintln!("[remote] re-paired, SAS: {}", fresh.sas());
+                    session = fresh;
+                    out_seq = 0;
+                    continue;
+                }
+
+                let ciphertext = payload;
                 let plaintext = match session.decrypt(&ciphertext) {
                     Ok(plaintext) => plaintext,
                     Err(e) => {
@@ -213,8 +235,15 @@ where
         .map_err(|_| "relay connection lost".to_string())
 }
 
-/// The next frame's payload, or `None` when the socket closes.
-async fn next_payload<S>(stream: &mut S, channel: ChannelId) -> Result<Option<Vec<u8>>, String>
+/// The next frame's kind and payload, or `None` when the socket closes.
+///
+/// The kind is returned rather than discarded because the caller has to act on it:
+/// a `Hello` is not data, and a device that cannot tell the difference cannot
+/// recover from a peer that reconnected.
+async fn next_frame<S>(
+    stream: &mut S,
+    channel: ChannelId,
+) -> Result<Option<(OuterKind, Vec<u8>)>, String>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
@@ -230,7 +259,7 @@ where
             eprintln!("[remote] dropped a frame for another channel");
             continue;
         }
-        return Ok(Some(frame.payload.into_vec()));
+        return Ok(Some((frame.kind, frame.payload.into_vec())));
     }
     Ok(None)
 }
