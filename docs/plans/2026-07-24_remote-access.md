@@ -19,6 +19,32 @@ repo map in §9, the layering rule in §4.1 and both `SECURITY.md` citations in
 | Where `remote/` lives | **`src-tauri/src/remote/`**, as §9 specifies. | Sibling of `agent/`, guarded by the architecture test in `lib.rs`. |
 | Open question §11.1 — headless-first or GUI-first | **GUI-first**, phase order unchanged. | `claudiniod` stays in Phase 5. |
 | Where the devices/pairings API lives (§9, `claudin.io`) | **The existing dashboard** (`claudinio_litellm`). | It already has accounts, Stripe, Postgres, Caddy and blue-green deploys. No new service; the `/v1/devices` endpoints and the `devices`/`pairings`/`pairing_tokens` tables are added there. |
+| Target surface | **Mobile-first, always.** | The peer is assumed to be a phone until proven otherwise. Consequences are folded into §1.1, §6.2, §7 and §8 rather than left as a styling note — see §0.1. |
+
+### 0.1 What mobile-first changes
+
+Not a skin on a desktop design. Four things move:
+
+1. **WebKit is the binding constraint on the crypto suite, not a footnote.**
+   Every browser on iOS is WebKit, so the iOS version floor *is* the X25519
+   floor. §6.2's suite survives Phase 0 on desktop; it is not confirmed until it
+   runs on a real iPhone. This is now the gating measurement for Phase 2, not a
+   nice-to-have.
+2. **Web Push on iOS only works for a PWA installed to the home screen.** §8
+   Phase 4 uses Web Push so a remote approval does not stall silently. On iOS
+   that makes home-screen install a *functional prerequisite*, not a
+   convenience — so the pairing flow of §6.3 must end by prompting for it, and
+   the PWA leaves §8 Phase 6 ("Optional") for Phase 3.
+3. **A backgrounded phone drops its socket constantly.** §7 treats reconnect as
+   an exception; on mobile it is the steady state. The `Gap` → re-`Subscribe`
+   → replay-from-JSONL path becomes the common case and has to be cheap, not
+   merely correct. The 60 ms coalescing tick of §5.5 also deserves a lower rate
+   on cellular — it was sized for a desktop socket.
+4. **The approval gate is a thumb target.** §7 of the threat model rests on a
+   human reading a diff before approving. On a phone, a diff that cannot be read
+   produces reflexive approval, which is worse than no remote approval at all.
+   Phase 3's `packages/timeline-ui` must therefore be touch-first from its first
+   commit; retrofitting is how the gate gets quietly defeated.
 
 One correction to the plan as originally written is folded into §8 Phase 3: the
 pnpm workspace does **not** exist yet.
@@ -41,7 +67,7 @@ Naming these now, because each one is a plausible-sounding scope explosion:
 - **Not** turning the desktop app into a multi-tenant server. One device serves the peers *its user* paired, and nothing else.
 - **Not** a web IDE. The browser gets the timeline, the composer, the approval gates and diffs — not a file editor.
 - **Not** making `claudin.io` a required dependency. The relay is self-hostable and the URL is configurable; remote access is opt-in and the app works fully offline without it.
-- **Not** shipping a mobile app. A responsive PWA is the mobile story.
+- **Not** shipping a *native* mobile app. A responsive PWA is the mobile story — but per §0.1 that PWA is the primary surface, not a fallback, and it ships in Phase 3 rather than Phase 6.
 
 ### 1.2 The one-sentence architecture
 
@@ -217,6 +243,16 @@ Non-extractable browser keys matter: an XSS on `app.claudin.io` can *use* the ke
 `AESGCM` rather than the more usual ChaChaPoly because the browser side is then implementable on **plain WebCrypto** — X25519 + HKDF-SHA256 + AES-GCM, all natively supported in current Chrome/Safari/Firefox, with no crypto shipped in JavaScript. Rust side is `snow`, which supports the suite directly.
 
 > **Verify before committing (Phase 0):** WebCrypto X25519 availability across the browser matrix we intend to support. If coverage is insufficient, fall back to `@noble/curves` + `@noble/ciphers` (audited, ~10 KB) and switch the suite to ChaChaPoly. Do not assume — measure on real browsers.
+>
+> **Status 2026-07-24:** interop with `snow` proved end to end, and the suite
+> confirmed on desktop macOS. **iOS Safari is not yet measured, and per §0.1 it
+> is the binding case** — every iOS browser is WebKit, so its version floor is
+> the product's floor. Until an iPhone runs the probe, the fallback branch stays
+> open. Findings: `claudinio-relay/spikes/phase-0/FINDINGS.md`.
+>
+> One practical trap when measuring: WebCrypto requires a **secure context**, so
+> a phone loading the probe over `http://` on the LAN reports `crypto.subtle`
+> missing — which reads as "no X25519" and is not. Serve it over TLS.
 
 ### 6.3 Pairing
 
@@ -337,8 +373,9 @@ The highest-value phase, and it ships value even if remote is cancelled.
 - `remote/policy.rs` + the local policy editor UI.
 - `app.claudin.io`: **its own origin**, separate from the dashboard/billing origin. Strict CSP, no inline script, and the same DOMPurify allowlist as the desktop. XSS here costs more than XSS in a Tauri webview, because here it is adjacent to a session cookie.
 - Web UI is **read-only** in this phase: timeline, diffs, subagents. It cannot send anything.
+- **Mobile-first (§0.1):** `timeline-ui` is touch-first from its first commit, and the PWA manifest plus service worker land here rather than in Phase 6 — Web Push in Phase 4 depends on home-screen install on iOS, so the install path has to exist before the write path does.
 
-**Prova real:** the SAS matches on both screens; a pairing revoked locally drops the channel in under one second **with the relay deliberately unreachable**; a frame tampered with in transit is rejected and logged rather than processed.
+**Prova real:** the SAS matches on both screens; a pairing revoked locally drops the channel in under one second **with the relay deliberately unreachable**; a frame tampered with in transit is rejected and logged rather than processed; **a diff is legible and approvable on a phone held in one hand**, checked on a real device rather than in a narrow desktop window.
 
 ### Phase 4 — Write path (~3 weeks)
 
@@ -362,7 +399,9 @@ The highest-value phase, and it ships value even if remote is cancelled.
 
 ### Phase 6 — Optional
 
-WebRTC data channel with the relay as signalling and TURN fallback (cuts latency and relay bandwidth); PWA install and mobile-shaped approval UI; self-hosted relay documentation and a `docker-compose.yml`.
+WebRTC data channel with the relay as signalling and TURN fallback (cuts latency and relay bandwidth); self-hosted relay documentation and a `docker-compose.yml`.
+
+*(PWA install and the mobile-shaped approval UI moved out of this phase — see §0.1. They are Phase 3.)*
 
 **Rough total: 12–16 weeks of focused work.** Phases 0–2 carry most of the technical risk; 3–5 carry most of the surface area.
 
@@ -459,7 +498,8 @@ Postgres: `devices`, `pairings`, `pairing_tokens` (hashed, TTL, single-use), `au
 
 ## 12. Definition of done for v1
 
-- [ ] A session running on a machine in Resende is driven from a browser in São Paulo, over CGNAT, with no port forwarding.
+- [ ] A session running on a machine in Resende is driven **from a phone** in São Paulo, over CGNAT and over cellular, with no port forwarding.
+- [ ] An approval is raised, pushed to that phone, read and answered there — with the diff legible on the first look, not after pinch-zooming.
 - [ ] A packet capture at the relay and the relay's own logs contain no plaintext prompt, code, diff or output.
 - [ ] Revoking a pairing kills the channel in under a second, with the relay unreachable.
 - [ ] Killing the relay mid-run loses zero events; `seq` contiguity is asserted automatically.
