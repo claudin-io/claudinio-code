@@ -62,6 +62,24 @@ pnpm workspace does **not** exist yet.
 
 Open questions §11.2 through §11.5 remain open.
 
+### 0.2 Deviations found while building (kept current)
+
+This plan was written before the code. Where the code disagreed and the code was
+right, it is recorded here rather than left buried in a commit message.
+
+| § | Plan said | What was built, and why |
+|---|---|---|
+| §9 | `crates/claudinio-protocol` at the repo root | `src-tauri/crates/claudinio-protocol`, a member of the existing workspace. The repo root has no manifest **on purpose** — see the comment in `src-tauri/Cargo.toml` — and adding one to satisfy a path in a document would undo that. |
+| §9 | one protocol crate | It is **split along the security boundary**: `wire` (the outer frame) always available, `inner` (the end-to-end messages) behind a default feature the relay turns off. I2 stops being a convention any later commit could quietly break in review and becomes a compile error — the relay has no inner types at all. CI builds the crate that way so the guarantee stays real. |
+| §5.4 | `cmd_id` dedup as an LRU of seen ids | An LRU of ids cannot be correct on its own. Recording an id *after* executing lets a replay run the side effect twice; recording it *before* lets a crash swallow a legitimate retry. The log records **both edges**, and a command that started and never finished returns `Indeterminate` — the caller refuses and says why. Re-running an `rm` is worse than making someone tap approve again. |
+| §5.2 | eight frame kinds | Plus `Other(u8)`, so a kind this build has never seen still decodes and can still be routed. The component in the middle is the one that must never need deploying in lockstep with the peers. |
+| §8 Phase 1 | four items | Five. Event buses had to be keyed by session in a registry, or a second watcher could never find a running one — which is also the first thing the bridge needs. |
+| §5.3 | a shared `Actor` | Deliberately **duplicated**. The agent owns the concept of who answered a gate; the protocol crate owns its wire form. Making `agent/` depend on the remote protocol to express a *local* approval would be the agent knowing remote access exists, which §4.1 forbids. The conversion lives in `remote/`, which may know both, and is tested there. |
+
+Two temporary `#[allow(dead_code)]` suppressions exist while their consumers are
+still being written — `persist::SeqRecord::seq` and the `remote/` module. Both
+carry their reason in the code, and both come off with `remote/bridge.rs`.
+
 ---
 
 ## 1. Objective
