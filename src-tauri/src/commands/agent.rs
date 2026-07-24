@@ -203,55 +203,47 @@ pub fn process_attachments(atts: &[AttachmentInput]) -> Vec<(ContentBlock, Attac
     results
 }
 
-/// Bridges a Tauri IPC channel into the agent's sink abstraction.
+/// Attach this window to a session's event bus, and hand the run a sink that
+/// publishes into it.
 ///
-/// This is the only place left that knows agent events travel over Tauri IPC.
-/// Everything in `agent/` writes to an `EventSink` and cannot name a webview,
-/// which is what allows a second watcher — another window, and later a paired
-/// peer — to exist at all.
-struct ChannelSink(Channel<AgentEvent>);
-
-impl crate::agent::eventbus::EventSink for ChannelSink {
-    fn send(&self, event: AgentEvent) {
-        // A closed webview makes this fail; that is not the agent's problem.
-        let _ = self.0.send(event);
-    }
-}
-
-/// How far a watcher may fall behind before it is dropped into a `Gap`.
+/// This function is the only place left that knows agent events travel over
+/// Tauri IPC — everything in `agent/` writes to an `EventSink` and cannot name
+/// a webview. Because the bus is keyed by session rather than owned by the
+/// caller, a second watcher is another call to this function, not a change to
+/// the agent.
 ///
-/// Sized for token streaming, the only thing that produces events faster than a
-/// webview consumes them. Bounded rather than generous on purpose: the cost of
-/// a gap is a re-read of the transcript, and the cost of an unbounded buffer is
-/// the agent process.
-const EVENT_BUS_CAPACITY: usize = 1024;
+/// A watcher that cannot keep up is dropped into a `Gap` and the run carries
+/// on. That direction matters: a slow reader must never be able to stall the
+/// agent loop, which is exactly the failure a remote peer on a bad connection
+/// would otherwise cause on the developer's own machine.
+async fn window_sink(
+    state: &AppState,
+    session_id: &str,
+    channel: Channel<AgentEvent>,
+) -> crate::agent::eventbus::EventTx {
+    use crate::agent::eventbus::Delivery;
 
-/// Put a run's events on a fan-out bus and attach this window to it.
-///
-/// The agent publishes into the bus and never learns who is listening, so a
-/// second watcher becomes an extra `subscribe()` rather than a change to the
-/// agent. A watcher that cannot keep up is dropped into a `Gap` and the run
-/// carries on — a slow reader must never be able to stall the agent loop.
-fn sink_from(channel: Channel<AgentEvent>) -> crate::agent::eventbus::EventTx {
-    use crate::agent::eventbus::{Delivery, EventBus};
-
-    let bus = EventBus::new(EVENT_BUS_CAPACITY);
+    let bus = state.bus_for(session_id).await;
     let mut watcher = bus.subscribe();
-    let sink = ChannelSink(channel);
 
     tokio::spawn(async move {
-        use crate::agent::eventbus::EventSink;
         loop {
             match watcher.recv().await {
-                Delivery::Event(event) => sink.send(*event),
+                Delivery::Event(event) => {
+                    // A send failure means the webview is gone. Stop pumping
+                    // rather than looping forever against a dead channel.
+                    if channel.send(*event).is_err() {
+                        break;
+                    }
+                }
                 Delivery::Gap { missed } => {
                     // Visible rather than silent. Recovering the missed span is
                     // a transcript replay — `persist::replay` exists for it —
                     // and wiring that into the UI belongs with the remote work.
                     eprintln!("[eventbus] a window fell behind and missed {missed} events");
                 }
-                // The run ended and the bus was dropped. Buffered events are
-                // delivered before this, so the tail of a run is not lost.
+                // The session ended and its bus was dropped. Buffered events
+                // are delivered before this, so the tail of a run is not lost.
                 Delivery::Closed => break,
             }
         }
@@ -443,7 +435,7 @@ pub async fn send_message(
         maps: transition_maps(&state),
         approvals: state.approvals.clone(),
         answers: state.answers.clone(),
-        chan: sink_from(event_channel),
+        chan: window_sink(&state, &session_id, event_channel).await,
         handle,
         store,
         ctx,
@@ -605,6 +597,8 @@ pub async fn new_session(workspace: String, state: State<'_, AppState>) -> Resul
         // unanswered one used to sit in the map forever, because the only thing
         // that removed an entry was answering it.
         state.approvals.abandon_session(&h.id).await;
+        // Closing the bus is what tells attached windows the stream ended.
+        state.close_bus(&h.id).await;
         // A session abandoned before any real content (only meta/mode records,
         // e.g. created lazily by a mode toggle) is noise on disk — delete it
         // instead of leaving an "(empty session)" orphan in the list.
@@ -1108,7 +1102,7 @@ pub async fn compact_session(
         &config,
         &store,
         &ctx,
-        &sink_from(event_channel.clone()),
+        &window_sink(&state, &handle.id, event_channel.clone()).await,
         &state.approvals,
         &state.answers,
         &handle.id,
@@ -1234,7 +1228,7 @@ pub async fn continue_with_builder(
         &ws,
         &old_handle,
         &spec,
-        &sink_from(event_channel.clone()),
+        &window_sink(&state, &old_handle.id, event_channel.clone()).await,
     )
     .await?;
 
@@ -1279,7 +1273,7 @@ pub async fn continue_with_builder(
         maps,
         approvals: state.approvals.clone(),
         answers: state.answers.clone(),
-        chan: sink_from(event_channel),
+        chan: window_sink(&state, &new_handle.id, event_channel).await,
         handle: new_handle,
         store,
         ctx,
@@ -1522,7 +1516,7 @@ pub async fn commit_and_push(
     let mode_ctl = state.mode_for(&id, &store.path).await;
 
     let sid = id.clone();
-    let chan = sink_from(event_channel);
+    let chan = window_sink(&state, &id, event_channel).await;
     let appr = state.approvals.clone();
     let answ = state.answers.clone();
     let steering_map = state.steering_map();

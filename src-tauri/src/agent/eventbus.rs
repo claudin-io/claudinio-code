@@ -53,7 +53,19 @@ pub enum Delivery {
     Closed,
 }
 
+/// How far a watcher may fall behind before it is dropped into a `Gap`.
+///
+/// Sized for token streaming, the only thing that produces events faster than a
+/// watcher consumes them. Bounded rather than generous on purpose: the cost of a
+/// gap is a re-read of the transcript, and the cost of an unbounded buffer is
+/// the agent process.
+pub const DEFAULT_CAPACITY: usize = 1024;
+
 /// Fan-out of agent events to any number of watchers.
+///
+/// Cloning shares the same stream — the registry in `AppState` keeps one per
+/// live session so a second watcher attaches to the run instead of needing its
+/// own.
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<AgentEvent>,
@@ -97,6 +109,35 @@ impl Subscriber {
             Err(broadcast::error::RecvError::Lagged(missed)) => Delivery::Gap { missed },
             Err(broadcast::error::RecvError::Closed) => Delivery::Closed,
         }
+    }
+}
+
+/// The live buses, keyed by session id.
+///
+/// The point of keying by session is that attaching is idempotent: two watchers
+/// naming the same session get the same stream, so a window opened mid-run joins
+/// what is already happening instead of being handed a private channel nobody
+/// else can see. The remote bridge attaches the same way.
+#[derive(Default)]
+pub struct BusRegistry {
+    buses: tokio::sync::Mutex<std::collections::HashMap<String, EventBus>>,
+}
+
+impl BusRegistry {
+    /// The bus for a session, created on first attach.
+    pub async fn bus_for(&self, session_id: &str) -> EventBus {
+        self.buses
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_insert_with(|| EventBus::new(DEFAULT_CAPACITY))
+            .clone()
+    }
+
+    /// Forget a session's bus. Attached watchers see the stream close once the
+    /// run also drops its handle.
+    pub async fn close(&self, session_id: &str) {
+        self.buses.lock().await.remove(session_id);
     }
 }
 
@@ -266,5 +307,56 @@ mod tests {
     #[test]
     fn the_null_sink_swallows_everything() {
         NullSink.send(text("into the void"));
+    }
+
+    /// The property the registry exists for: attaching twice to one session
+    /// yields one stream. If this were false, a second window would silently get
+    /// its own empty bus and render nothing while the run went on elsewhere.
+    #[tokio::test]
+    async fn two_watchers_of_one_session_share_the_stream() {
+        let registry = BusRegistry::default();
+
+        let first = registry.bus_for("session-1").await;
+        let mut window_a = first.subscribe();
+        let mut window_b = registry.bus_for("session-1").await.subscribe();
+
+        first.send(text("one run, two windows"));
+
+        assert_eq!(text_of(&window_a.recv().await), "one run, two windows");
+        assert_eq!(text_of(&window_b.recv().await), "one run, two windows");
+    }
+
+    #[tokio::test]
+    async fn different_sessions_do_not_share_a_stream() {
+        let registry = BusRegistry::default();
+        let one = registry.bus_for("session-1").await;
+        let mut watcher = registry.bus_for("session-2").await.subscribe();
+
+        one.send(text("for session 1 only"));
+
+        // Nothing crossed over. A recv here would block, so assert on the
+        // synchronous emptiness instead of awaiting a message that must not come.
+        assert!(matches!(
+            watcher.rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    /// Closing forgets the bus, so the next attach is a fresh stream rather than
+    /// one still holding a finished run's watchers.
+    #[tokio::test]
+    async fn closing_a_session_forgets_its_bus() {
+        let registry = BusRegistry::default();
+        let before = registry.bus_for("session-1").await;
+        let mut stale = before.subscribe();
+
+        registry.close("session-1").await;
+        let after = registry.bus_for("session-1").await;
+        after.send(text("new run"));
+
+        assert!(matches!(
+            stale.rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 }
