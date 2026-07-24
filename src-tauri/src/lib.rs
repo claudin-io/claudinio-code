@@ -131,6 +131,33 @@ mod architecture_tests {
         );
     }
 
+    /// The same rule, one layer out, for remote access.
+    ///
+    /// `remote/` subscribes to the agent's event bus and implements its approval
+    /// resolver; the agent must never learn that a remote peer exists. Keeping
+    /// the arrow pointing one way is what lets remote be feature-gated off
+    /// entirely, and what stops "just check if a peer is connected" from
+    /// appearing inside the agent loop — which is where the capability rules
+    /// would then quietly stop being enforced in one place.
+    ///
+    /// The directory does not exist yet. The test is written first on purpose:
+    /// it costs nothing now and it is the guard for every phase after this one.
+    #[test]
+    fn the_agent_does_not_depend_on_the_remote_bridge() {
+        let mut offenders = Vec::new();
+        for dir in ["src/agent", "src/code_intel", "src/lsp"] {
+            visit(Path::new(dir), &mut |path, body| {
+                if body.contains("crate::remote") {
+                    offenders.push(path.display().to_string());
+                }
+            });
+        }
+        assert!(
+            offenders.is_empty(),
+            "these core files import crate::remote; the agent must not know remote access exists: {offenders:?}"
+        );
+    }
+
     fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
