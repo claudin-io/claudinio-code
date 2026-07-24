@@ -100,10 +100,6 @@ impl DeviceIdentity {
     pub fn public_hex(&self) -> String {
         self.public.iter().map(|b| format!("{b:02x}")).collect()
     }
-
-    pub fn public_bytes(&self) -> &[u8] {
-        &self.public
-    }
 }
 
 /// A completed Noise session.
@@ -182,6 +178,10 @@ impl Session {
     /// The peer's static key, for the revocation list: revoking a pairing has to
     /// work with the relay unreachable, which means matching on this rather than
     /// asking anyone.
+    ///
+    // No caller until the revocation list exists, which is phase 3. Kept because
+    // the key is only available here, at handshake time.
+    #[allow(dead_code)]
     pub fn peer_static(&self) -> Option<Vec<u8>> {
         self.transport.get_remote_static().map(|k| k.to_vec())
     }
@@ -269,9 +269,15 @@ mod tests {
         }
     }
 
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
     fn paired() -> (Session, Initiator) {
         let identity = DeviceIdentity::generate().unwrap();
-        let mut initiator = Initiator::new(identity.public_bytes());
+        let mut initiator = Initiator::new(&hex_to_bytes(&identity.public_hex()));
         let (session, msg2) = accept(&identity, &initiator.msg1()).unwrap();
         initiator.finish(&msg2);
         (session, initiator)
@@ -280,7 +286,7 @@ mod tests {
     #[test]
     fn a_handshake_completes_and_both_sides_agree_on_the_sas() {
         let identity = DeviceIdentity::generate().unwrap();
-        let mut initiator = Initiator::new(identity.public_bytes());
+        let mut initiator = Initiator::new(&hex_to_bytes(&identity.public_hex()));
 
         let (session, msg2) = accept(&identity, &initiator.msg1()).unwrap();
         let peer_sas = initiator.finish(&msg2);
@@ -313,7 +319,7 @@ mod tests {
         let impostor = DeviceIdentity::generate().unwrap();
 
         // The browser was given the impostor's key, as a hostile relay would.
-        let mut initiator = Initiator::new(impostor.public_bytes());
+        let mut initiator = Initiator::new(&hex_to_bytes(&impostor.public_hex()));
 
         assert!(
             accept(&real, &initiator.msg1()).is_err(),

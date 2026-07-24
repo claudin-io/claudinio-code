@@ -59,6 +59,12 @@ pub fn run() {
             commands::providers::disconnect_provider,
             commands::providers::list_provider_models,
             commands::providers::list_all_models,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_status,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_create_identity,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_enable,
             commands::clipboard::write_clipboard_blob,
             commands::git::git_status,
             commands::git::git_file_diff,

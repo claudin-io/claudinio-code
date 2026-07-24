@@ -20,17 +20,6 @@
 //!                        agent/ NEVER imports remote/ ◄─────────────┘
 //! ```
 
-// Every item here is reachable only from tests until something constructs a
-// `Bridge`, which is the transport's job. The lint is right, so this is one
-// suppression at the module boundary rather than a scattering of them.
-//
-// This was previously annotated as coming off "when the bridge lands". That was
-// wrong: the bridge consumes `dedup`, but nothing consumes the bridge, so the
-// module stayed unreachable. It comes off when `transport.rs` drives a bridge —
-// and if that turns out to be wrong again, the fix is to stop writing this
-// module ahead of its caller, not to widen this comment a third time.
-#![allow(dead_code)]
-
 pub mod bridge;
 pub mod dedup;
 pub mod noise;
