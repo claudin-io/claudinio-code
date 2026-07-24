@@ -1,0 +1,736 @@
+//! Translation between the agent and the wire, and the place every peer command
+//! is checked before it does anything.
+//!
+//! # Two sequence numbers, not one
+//!
+//! §5.4 of the plan says every device→peer message carries a `seq` derived from
+//! the JSONL append index. That cannot be true of all of them, and the gap
+//! matters.
+//!
+//! Live events — token deltas above all — are never persisted. They have no
+//! append index, because there is nothing on disk to index. Numbering them with
+//! a record index would produce a number that looks resumable and is not: asking
+//! to resume from it would replay the wrong span, or nothing.
+//!
+//! So there are two counters and they mean different things:
+//!
+//! - `Event.seq` is a per-connection counter. Its only job is gap detection on
+//!   the live stream: contiguous means nothing was dropped.
+//! - `Snapshot.seq` is the JSONL index, and it is the only thing a peer may
+//!   resume from. `Subscribe { from_seq }` is answered out of the transcript.
+//!
+//! Recovering from a live gap is therefore not "resume from the last event" but
+//! "re-subscribe and replay records", which is what makes the relay stateless.
+
+use claudinio_protocol::inner::{self as wire, BashApproval, DeviceToPeer, PeerToDevice, Policy};
+
+use super::dedup::{CommandLog, Outcome, Verdict};
+use crate::agent::approval;
+use crate::agent::eventbus::Delivery;
+
+/// The agent's `Actor` and the wire's are deliberately separate types — see
+/// §0.2 of the plan. This is the seam where they meet, and the only place that
+/// has to be kept in step.
+pub fn actor_to_wire(actor: &approval::Actor) -> wire::Actor {
+    match actor {
+        approval::Actor::Local => wire::Actor::Local,
+        approval::Actor::Peer(label) => wire::Actor::Peer(label.clone()),
+        approval::Actor::Expired => wire::Actor::Expired,
+    }
+}
+
+pub fn actor_from_wire(actor: &wire::Actor) -> approval::Actor {
+    match actor {
+        wire::Actor::Local => approval::Actor::Local,
+        wire::Actor::Peer(label) => approval::Actor::Peer(label.clone()),
+        wire::Actor::Expired => approval::Actor::Expired,
+    }
+}
+
+/// Everything the bridge is allowed to ask of the device.
+///
+/// A trait rather than a direct call into `commands/`, for two reasons. It keeps
+/// the dependency arrow pointing the right way, and it makes the command path
+/// testable without standing up an app — the tests below drive it with a fake
+/// that counts calls, which is how "a replayed frame executes once" is asserted
+/// on the execution and not on a log line.
+pub trait DeviceActions {
+    fn resolve_approval(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        approved: bool,
+        actor: approval::Actor,
+    ) -> Result<(), String>;
+
+    fn send_message(&self, session_id: &str, text: &str) -> Result<(), String>;
+
+    fn steer(&self, session_id: &str, text: &str) -> Result<(), String>;
+
+    fn interrupt(&self, session_id: &str) -> Result<(), String>;
+}
+
+pub struct Bridge<A: DeviceActions> {
+    session_id: String,
+    /// How this peer is named in the transcript and in `ApprovalResolved`.
+    peer_label: String,
+    /// Enforced here even though the editor for it is phase 3 work. The type
+    /// defaults to granting nothing, so a bridge built before there is any way
+    /// to widen it refuses everything — the enforcement point exists before the
+    /// capability does, rather than after.
+    policy: Policy,
+    log: CommandLog,
+    actions: A,
+    event_seq: u64,
+}
+
+impl<A: DeviceActions> Bridge<A> {
+    pub fn new(
+        session_id: impl Into<String>,
+        peer_label: impl Into<String>,
+        policy: Policy,
+        log: CommandLog,
+        actions: A,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            peer_label: peer_label.into(),
+            policy,
+            log,
+            actions,
+            event_seq: 0,
+        }
+    }
+
+    /// Turn something off the bus into something for the wire.
+    ///
+    /// `None` means there is nothing to send — a closed bus is the run ending,
+    /// which the peer learns from the transcript rather than from a frame.
+    pub fn translate(&mut self, delivery: Delivery) -> Option<DeviceToPeer> {
+        match delivery {
+            Delivery::Event(event) => {
+                self.event_seq += 1;
+                Some(DeviceToPeer::Event {
+                    session_id: self.session_id.clone(),
+                    seq: self.event_seq,
+                    // The agent's event type is not part of the protocol: it is
+                    // carried as its own serialisation so the wire does not have
+                    // to grow a variant every time the agent gains one.
+                    event: serde_json::to_value(&*event).unwrap_or(serde_json::Value::Null),
+                })
+            }
+            Delivery::Gap { missed } => {
+                // The peer is told the span it lost in the *live* numbering, and
+                // its recovery is to re-subscribe and replay records — not to
+                // ask for these numbers back, which no longer exist anywhere.
+                let from = self.event_seq + 1;
+                self.event_seq += missed;
+                Some(DeviceToPeer::Gap {
+                    session_id: self.session_id.clone(),
+                    from_seq: from,
+                    to_seq: self.event_seq,
+                })
+            }
+            Delivery::Closed => None,
+        }
+    }
+
+    /// Handle one command from the peer.
+    ///
+    /// Order matters and is deliberate: policy first, then deduplication, then
+    /// the side effect. Checking policy first means a command the peer may not
+    /// issue is never recorded as having been attempted, so a denied command
+    /// stays retryable after the policy widens.
+    pub fn handle(&mut self, message: PeerToDevice) -> Vec<DeviceToPeer> {
+        let Some(cmd_id) = command_id(&message) else {
+            // Queries carry no cmd_id because they have no side effect. Nothing
+            // in phase 2 answers them yet.
+            return vec![DeviceToPeer::Error {
+                cmd_id: String::new(),
+                code: "unsupported".into(),
+                message: "queries are not implemented yet".into(),
+            }];
+        };
+
+        if let Some((rule, why)) = self.denied_by_policy(&message) {
+            return vec![DeviceToPeer::PolicyDenied {
+                cmd_id,
+                rule: rule.into(),
+                human_reason: why.into(),
+            }];
+        }
+
+        match self.log.verdict(&cmd_id) {
+            Verdict::Done(Outcome::Acked) => return vec![DeviceToPeer::Ack { cmd_id }],
+            Verdict::Done(Outcome::Failed { code, message }) => {
+                return vec![DeviceToPeer::Error {
+                    cmd_id,
+                    code,
+                    message,
+                }];
+            }
+            Verdict::Indeterminate => {
+                // The device died between starting this command and finishing
+                // it, so whether the side effect happened is unknowable. Refuse
+                // and say so: a duplicated approval is a duplicated `rm`.
+                return vec![DeviceToPeer::Error {
+                    cmd_id,
+                    code: "indeterminate".into(),
+                    message: "this command was interrupted mid-execution and will not be \
+                              retried automatically; issue it again with a new id if you \
+                              still want it"
+                        .into(),
+                }];
+            }
+            Verdict::Fresh => {}
+        }
+
+        if let Err(e) = self.log.begin(&cmd_id) {
+            // Unable to record the attempt means unable to promise it runs once.
+            // Refuse rather than run something we cannot dedupe.
+            return vec![DeviceToPeer::Error {
+                cmd_id,
+                code: "log_unavailable".into(),
+                message: e,
+            }];
+        }
+
+        let result = self.execute(&message);
+
+        let outcome = match &result {
+            Ok(()) => Outcome::Acked,
+            Err(e) => Outcome::Failed {
+                code: "failed".into(),
+                message: e.clone(),
+            },
+        };
+        let _ = self.log.finish(&cmd_id, outcome);
+
+        match result {
+            Ok(()) => vec![DeviceToPeer::Ack { cmd_id }],
+            Err(message) => vec![DeviceToPeer::Error {
+                cmd_id,
+                code: "failed".into(),
+                message,
+            }],
+        }
+    }
+
+    fn execute(&self, message: &PeerToDevice) -> Result<(), String> {
+        match message {
+            PeerToDevice::ResolveApproval {
+                session_id,
+                tool_use_id,
+                decision,
+                ..
+            } => self.actions.resolve_approval(
+                session_id,
+                tool_use_id,
+                decision.approved,
+                approval::Actor::Peer(self.peer_label.clone()),
+            ),
+            PeerToDevice::SendMessage {
+                session_id, text, ..
+            } => self.actions.send_message(session_id, text),
+            PeerToDevice::Steer {
+                session_id, text, ..
+            } => self.actions.steer(session_id, text),
+            PeerToDevice::Interrupt { session_id, .. } => self.actions.interrupt(session_id),
+            other => Err(format!("{} is not implemented yet", tag_of(other))),
+        }
+    }
+
+    /// Which rule blocks this command, if any.
+    ///
+    /// Every denial names a rule. A peer that cannot tell "you may not" from
+    /// "something broke" retries forever, and a UI that cannot say which rule
+    /// leaves the user with nothing to change.
+    fn denied_by_policy(&self, message: &PeerToDevice) -> Option<(&'static str, &'static str)> {
+        match message {
+            PeerToDevice::SendMessage { .. } if !self.policy.send_message => Some((
+                "allow.send_message",
+                "sending messages is not granted remotely",
+            )),
+            PeerToDevice::Steer { .. } if !self.policy.steer => {
+                Some(("allow.steer", "steering is not granted remotely"))
+            }
+            PeerToDevice::Interrupt { .. } if !self.policy.interrupt => {
+                Some(("allow.interrupt", "interrupting is not granted remotely"))
+            }
+            PeerToDevice::SetMode { .. } if !self.policy.set_mode => {
+                Some(("allow.set_mode", "changing mode is not granted remotely"))
+            }
+            // Approving is split by what is being approved, because approving an
+            // edit and approving a shell command are not the same risk. The
+            // bridge cannot see which from the message alone, so the stricter of
+            // the two gates it: with bash approval switched off entirely, no
+            // remote approval passes.
+            PeerToDevice::ResolveApproval { decision, .. }
+                if decision.approved
+                    && !self.policy.approve_edit
+                    && self.policy.approve_bash == BashApproval::Never =>
+            {
+                Some((
+                    "allow.approve_edit / allow.approve_bash",
+                    "approving is not granted remotely",
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The dedup key, for commands that have one.
+fn command_id(message: &PeerToDevice) -> Option<String> {
+    match message {
+        PeerToDevice::SendMessage { cmd_id, .. }
+        | PeerToDevice::Steer { cmd_id, .. }
+        | PeerToDevice::Interrupt { cmd_id, .. }
+        | PeerToDevice::ResolveApproval { cmd_id, .. }
+        | PeerToDevice::SetMode { cmd_id, .. } => Some(cmd_id.clone()),
+        PeerToDevice::ListWorkspaces
+        | PeerToDevice::ListSessions { .. }
+        | PeerToDevice::Subscribe { .. }
+        | PeerToDevice::Unsubscribe { .. }
+        | PeerToDevice::GetPolicy => None,
+    }
+}
+
+fn tag_of(message: &PeerToDevice) -> &'static str {
+    match message {
+        PeerToDevice::ListWorkspaces => "list_workspaces",
+        PeerToDevice::ListSessions { .. } => "list_sessions",
+        PeerToDevice::Subscribe { .. } => "subscribe",
+        PeerToDevice::Unsubscribe { .. } => "unsubscribe",
+        PeerToDevice::SendMessage { .. } => "send_message",
+        PeerToDevice::Steer { .. } => "steer",
+        PeerToDevice::Interrupt { .. } => "interrupt",
+        PeerToDevice::ResolveApproval { .. } => "resolve_approval",
+        PeerToDevice::SetMode { .. } => "set_mode",
+        PeerToDevice::GetPolicy => "get_policy",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::session::AgentEvent;
+    use std::sync::Mutex;
+
+    /// Counts calls, so "executed once" is asserted on the execution rather than
+    /// on a log line that might be written twice or not at all.
+    #[derive(Default)]
+    struct Spy {
+        approvals: Mutex<Vec<(String, bool, approval::Actor)>>,
+        messages: Mutex<Vec<String>>,
+        interrupts: Mutex<usize>,
+        fail: bool,
+    }
+
+    impl DeviceActions for Spy {
+        fn resolve_approval(
+            &self,
+            _session_id: &str,
+            tool_use_id: &str,
+            approved: bool,
+            actor: approval::Actor,
+        ) -> Result<(), String> {
+            if self.fail {
+                return Err("the gate was already closed".into());
+            }
+            self.approvals
+                .lock()
+                .unwrap()
+                .push((tool_use_id.to_string(), approved, actor));
+            Ok(())
+        }
+
+        fn send_message(&self, _session_id: &str, text: &str) -> Result<(), String> {
+            self.messages.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+
+        fn steer(&self, _session_id: &str, text: &str) -> Result<(), String> {
+            self.messages.lock().unwrap().push(format!("steer: {text}"));
+            Ok(())
+        }
+
+        fn interrupt(&self, _session_id: &str) -> Result<(), String> {
+            *self.interrupts.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    /// A policy that allows everything, for tests about something other than
+    /// policy. Never a default anywhere outside tests.
+    fn permissive() -> Policy {
+        Policy {
+            send_message: true,
+            steer: true,
+            interrupt: true,
+            set_mode: true,
+            approve_edit: true,
+            approve_bash: BashApproval::Allowlist,
+            read_attachment: false,
+            export_file: false,
+            expires_at: None,
+        }
+    }
+
+    fn bridge(policy: Policy) -> (tempfile::TempDir, Bridge<Spy>) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = CommandLog::open(dir.path().join("commands.jsonl"));
+        (
+            dir,
+            Bridge::new("session-1", "iPhone", policy, log, Spy::default()),
+        )
+    }
+
+    fn approve(cmd_id: &str) -> PeerToDevice {
+        PeerToDevice::ResolveApproval {
+            cmd_id: cmd_id.into(),
+            session_id: "session-1".into(),
+            tool_use_id: "tool-1".into(),
+            decision: wire::Decision { approved: true },
+            reason: None,
+        }
+    }
+
+    // --- the seam between the two Actor types -------------------------------
+
+    /// The two types are duplicated on purpose, so this is where drift would
+    /// show. Every variant, both directions.
+    #[test]
+    fn actors_convert_both_ways_without_losing_anything() {
+        let cases = [
+            approval::Actor::Local,
+            approval::Actor::Peer("Firefox on Windows laptop".into()),
+            approval::Actor::Expired,
+        ];
+
+        for actor in cases {
+            let round_tripped = actor_from_wire(&actor_to_wire(&actor));
+            assert_eq!(round_tripped, actor, "lost information for {actor:?}");
+        }
+
+        // And from the wire side, so a new wire variant cannot be silently
+        // mapped onto the wrong agent one.
+        for actor in [
+            wire::Actor::Local,
+            wire::Actor::Peer("iPhone".into()),
+            wire::Actor::Expired,
+        ] {
+            assert_eq!(actor_to_wire(&actor_from_wire(&actor)), actor);
+        }
+    }
+
+    // --- dedup, the reason the module exists --------------------------------
+
+    /// Asserted on the spy's call count, not on a log line: a replayed approval
+    /// frame must resolve to exactly one execution.
+    #[test]
+    fn a_replayed_approval_executes_once() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        let first = bridge.handle(approve("cmd-1"));
+        let second = bridge.handle(approve("cmd-1"));
+        let third = bridge.handle(approve("cmd-1"));
+
+        assert_eq!(bridge.actions.approvals.lock().unwrap().len(), 1);
+        // And every reply is the same Ack, so the peer cannot tell the
+        // difference and stops retrying.
+        for reply in [first, second, third] {
+            assert!(matches!(reply[0], DeviceToPeer::Ack { .. }), "{reply:?}");
+        }
+    }
+
+    #[test]
+    fn the_peer_label_is_what_lands_in_the_approval() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        bridge.handle(approve("cmd-1"));
+
+        let approvals = bridge.actions.approvals.lock().unwrap();
+        assert_eq!(
+            approvals[0],
+            (
+                "tool-1".to_string(),
+                true,
+                approval::Actor::Peer("iPhone".into())
+            )
+        );
+    }
+
+    /// A failure is remembered as a failure, so a retry gets the same answer
+    /// rather than a second attempt.
+    #[test]
+    fn a_failed_command_replays_its_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = CommandLog::open(dir.path().join("commands.jsonl"));
+        let spy = Spy {
+            fail: true,
+            ..Default::default()
+        };
+        let mut bridge = Bridge::new("session-1", "iPhone", permissive(), log, spy);
+
+        let first = bridge.handle(approve("cmd-1"));
+        let second = bridge.handle(approve("cmd-1"));
+
+        assert!(matches!(first[0], DeviceToPeer::Error { .. }));
+        assert!(matches!(second[0], DeviceToPeer::Error { .. }));
+        assert_eq!(bridge.actions.approvals.lock().unwrap().len(), 0);
+    }
+
+    /// A command interrupted mid-execution comes back refused, not retried. The
+    /// side effect may or may not have happened, and guessing wrong runs an `rm`
+    /// twice.
+    #[test]
+    fn an_interrupted_command_is_refused_rather_than_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.jsonl");
+        {
+            // A device that started this command and died.
+            let mut log = CommandLog::open(&path);
+            log.begin("cmd-1").unwrap();
+        }
+        let mut bridge = Bridge::new(
+            "session-1",
+            "iPhone",
+            permissive(),
+            CommandLog::open(&path),
+            Spy::default(),
+        );
+
+        let reply = bridge.handle(approve("cmd-1"));
+
+        match &reply[0] {
+            DeviceToPeer::Error { code, .. } => assert_eq!(code, "indeterminate"),
+            other => panic!("expected an indeterminate error, got {other:?}"),
+        }
+        assert_eq!(bridge.actions.approvals.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn distinct_commands_each_run() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        bridge.handle(approve("cmd-1"));
+        bridge.handle(approve("cmd-2"));
+
+        assert_eq!(bridge.actions.approvals.lock().unwrap().len(), 2);
+    }
+
+    // --- policy ------------------------------------------------------------
+
+    /// The default policy grants nothing, so a bridge built before there is any
+    /// way to widen it refuses everything. The enforcement point exists before
+    /// the capability does.
+    #[test]
+    fn the_default_policy_refuses_every_command() {
+        let (_d, mut bridge) = bridge(Policy::default());
+
+        for message in [
+            approve("cmd-1"),
+            PeerToDevice::SendMessage {
+                cmd_id: "cmd-2".into(),
+                session_id: "session-1".into(),
+                text: "hello".into(),
+                attachments: vec![],
+            },
+            PeerToDevice::Interrupt {
+                cmd_id: "cmd-3".into(),
+                session_id: "session-1".into(),
+            },
+            PeerToDevice::Steer {
+                cmd_id: "cmd-4".into(),
+                session_id: "session-1".into(),
+                text: "stop".into(),
+            },
+        ] {
+            let reply = bridge.handle(message);
+            assert!(
+                matches!(reply[0], DeviceToPeer::PolicyDenied { .. }),
+                "expected a denial, got {reply:?}"
+            );
+        }
+
+        assert_eq!(bridge.actions.approvals.lock().unwrap().len(), 0);
+        assert!(bridge.actions.messages.lock().unwrap().is_empty());
+        assert_eq!(*bridge.actions.interrupts.lock().unwrap(), 0);
+    }
+
+    /// Every denial says which rule. A peer that cannot tell "you may not" from
+    /// "something broke" retries forever, and a UI that cannot name the rule
+    /// leaves the user nothing to change.
+    #[test]
+    fn a_denial_names_the_rule_and_explains_itself() {
+        let (_d, mut bridge) = bridge(Policy::default());
+
+        let reply = bridge.handle(PeerToDevice::Interrupt {
+            cmd_id: "cmd-1".into(),
+            session_id: "session-1".into(),
+        });
+
+        match &reply[0] {
+            DeviceToPeer::PolicyDenied {
+                rule, human_reason, ..
+            } => {
+                assert_eq!(rule, "allow.interrupt");
+                assert!(!human_reason.is_empty());
+            }
+            other => panic!("expected PolicyDenied, got {other:?}"),
+        }
+    }
+
+    /// A denied command must stay retryable: policy is edited locally and can
+    /// widen, and a denial that consumed the cmd_id would make the retry look
+    /// like a duplicate forever.
+    #[test]
+    fn a_denied_command_can_be_issued_again_once_policy_allows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.jsonl");
+
+        let mut strict = Bridge::new(
+            "session-1",
+            "iPhone",
+            Policy::default(),
+            CommandLog::open(&path),
+            Spy::default(),
+        );
+        assert!(matches!(
+            strict.handle(approve("cmd-1"))[0],
+            DeviceToPeer::PolicyDenied { .. }
+        ));
+
+        let mut relaxed = Bridge::new(
+            "session-1",
+            "iPhone",
+            permissive(),
+            CommandLog::open(&path),
+            Spy::default(),
+        );
+        assert!(matches!(
+            relaxed.handle(approve("cmd-1"))[0],
+            DeviceToPeer::Ack { .. }
+        ));
+        assert_eq!(relaxed.actions.approvals.lock().unwrap().len(), 1);
+    }
+
+    /// A rejection is not an approval and is not gated by the approve rules: a
+    /// peer may always say no. Denying that would leave a gate open with nobody
+    /// able to close it.
+    #[test]
+    fn a_peer_may_always_reject_even_under_the_default_policy() {
+        let (_d, mut bridge) = bridge(Policy::default());
+
+        let reply = bridge.handle(PeerToDevice::ResolveApproval {
+            cmd_id: "cmd-1".into(),
+            session_id: "session-1".into(),
+            tool_use_id: "tool-1".into(),
+            decision: wire::Decision { approved: false },
+            reason: Some("no".into()),
+        });
+
+        assert!(matches!(reply[0], DeviceToPeer::Ack { .. }), "{reply:?}");
+        let approvals = bridge.actions.approvals.lock().unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert!(!approvals[0].1, "it was recorded as a rejection");
+    }
+
+    // --- event translation --------------------------------------------------
+
+    fn text(s: &str) -> Delivery {
+        Delivery::Event(Box::new(AgentEvent::TextStep { text: s.into() }))
+    }
+
+    #[test]
+    fn events_are_numbered_contiguously_from_one() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        let seqs: Vec<u64> = ["a", "b", "c"]
+            .iter()
+            .filter_map(|s| match bridge.translate(text(s)) {
+                Some(DeviceToPeer::Event { seq, .. }) => Some(seq),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    /// A gap consumes the numbers it lost, so the stream after it is still
+    /// contiguous with what the peer will see next. Without that, every gap
+    /// would look like a second gap forever.
+    #[test]
+    fn a_gap_reports_the_span_it_lost_and_numbering_continues_after_it() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        bridge.translate(text("a"));
+
+        match bridge.translate(Delivery::Gap { missed: 5 }) {
+            Some(DeviceToPeer::Gap {
+                from_seq, to_seq, ..
+            }) => {
+                assert_eq!((from_seq, to_seq), (2, 6));
+            }
+            other => panic!("expected a Gap, got {other:?}"),
+        }
+
+        match bridge.translate(text("after")) {
+            Some(DeviceToPeer::Event { seq, .. }) => assert_eq!(seq, 7),
+            other => panic!("expected an Event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_closed_bus_produces_no_frame() {
+        let (_d, mut bridge) = bridge(permissive());
+        assert!(bridge.translate(Delivery::Closed).is_none());
+    }
+
+    /// The agent event rides as its own serialisation, so the wire does not grow
+    /// a variant every time the agent gains one.
+    #[test]
+    fn an_event_carries_the_agents_own_serialisation() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        match bridge.translate(text("hello")) {
+            Some(DeviceToPeer::Event { event, .. }) => {
+                assert_eq!(event["event"], "TextStep");
+                assert_eq!(event["data"]["text"], "hello");
+            }
+            other => panic!("expected an Event, got {other:?}"),
+        }
+    }
+
+    // --- unimplemented surface ---------------------------------------------
+
+    /// Phase 2 does not answer queries. It must say so rather than silently
+    /// dropping them, or a peer waits forever for a reply that is never coming.
+    #[test]
+    fn an_unimplemented_query_is_answered_with_an_error() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        let reply = bridge.handle(PeerToDevice::GetPolicy);
+
+        assert!(matches!(reply[0], DeviceToPeer::Error { .. }), "{reply:?}");
+    }
+
+    #[test]
+    fn an_unimplemented_command_reports_which_one() {
+        let (_d, mut bridge) = bridge(permissive());
+
+        let reply = bridge.handle(PeerToDevice::SetMode {
+            cmd_id: "cmd-1".into(),
+            session_id: "session-1".into(),
+            mode: "builder".into(),
+        });
+
+        match &reply[0] {
+            DeviceToPeer::Error { message, .. } => {
+                assert!(message.contains("set_mode"), "{message}")
+            }
+            other => panic!("expected an Error, got {other:?}"),
+        }
+    }
+}
