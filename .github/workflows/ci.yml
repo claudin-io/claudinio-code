@@ -107,3 +107,32 @@ jobs:
       - name: Test
         working-directory: src-tauri
         run: cargo test
+
+      # src-tauri is the workspace root *and* a package, so the commands above
+      # only cover it. Workspace members need naming.
+      - name: Protocol crate
+        working-directory: src-tauri
+        run: |
+          cargo fmt -p claudinio-protocol --check
+          cargo clippy -p claudinio-protocol --all-targets --all-features -- -D warnings
+          cargo test -p claudinio-protocol --all-features
+
+      # The relay depends on claudinio-protocol with default-features off, so
+      # the end-to-end message types are not merely unused there — they are
+      # absent, and reaching for one fails to compile. That guarantee is only
+      # real if the crate genuinely builds that way, so it is built that way.
+      - name: Protocol builds without the inner messages
+        working-directory: src-tauri
+        run: cargo build -p claudinio-protocol --no-default-features
+
+      # One definition, three consumers. A hand-maintained TypeScript mirror
+      # would diverge, and the divergence would be found in production.
+      - name: TypeScript bindings are not stale
+        run: |
+          cd src-tauri && cargo test -p claudinio-protocol --features ts && cd ..
+          if ! git diff --exit-code -- src-tauri/crates/claudinio-protocol/bindings; then
+            echo "::error::Generated TypeScript bindings are stale. Run"
+            echo "  cargo test -p claudinio-protocol --features ts"
+            echo "in src-tauri and commit the bindings/ directory."
+            exit 1
+          fi

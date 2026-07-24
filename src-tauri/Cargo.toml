@@ -9,6 +9,7 @@ edition = "2024"
 # Declaring the (empty) workspace here stops cargo from walking further up and
 # being absorbed by an unrelated manifest above the checkout.
 [workspace]
+members = ["crates/claudinio-protocol"]
 
 [lib]
 name = "claudinio_code_lib"
