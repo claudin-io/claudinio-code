@@ -10,11 +10,28 @@ That is not a style preference. The web peer has no Tauri, so a dependency on it
 is a build error there — and the moment this package is unbuildable for the web,
 someone will copy a file instead of fixing it, and the copy will diverge.
 
-`markdown.ts` is here first for that exact reason. It owns the sanitize pass that
-stops injected HTML in model output from executing (see `SECURITY.md`), and §10 of
-the plan names XSS on the web origin as a high risk. Two copies of a sanitizer is
-one sanitizer and one liability: the fix goes into whichever the author was
-looking at.
+Checked by `nothing in packages/ reaches into the app` in
+`src/lib/source-hygiene.test.ts`, because a rule stated only in a README does not
+fail a build.
+
+## What is here
+
+`markdown.ts` came first because it owns the sanitize pass that stops injected
+HTML in model output from executing (see `SECURITY.md`), and §10 of the plan names
+XSS on the web origin as a high risk. Two copies of a sanitizer is one sanitizer
+and one liability: the fix goes into whichever the author was looking at.
+
+`records.ts` is the shape a session is persisted and streamed in — types and two
+normalizers, nothing else. It was carved out of `lib/ipc.ts`, where every type sat
+next to an `invoke` call. `lib/ipc.ts` re-exports it so the forty-odd existing
+call sites did not have to churn; the boundary that matters is the direction of
+the dependency, not which module a caller names.
+
+Without this, the web peer would grow its own guess at the record format — and a
+guess renders an old transcript subtly wrong rather than failing.
+
+`chatRecords.ts` translates those records into what the timeline draws. Pure, and
+now importing `./records` instead of the app.
 
 ## What has not moved yet, and why
 
@@ -23,7 +40,3 @@ imports five sibling components and calls `openExternalUrl` from `lib/ipc`, whic
 is Tauri. Moving it means inverting that dependency into a prop the host supplies
 — real work rather than a move, and it belongs with the read-only web UI that will
 be its second consumer.
-
-`chatRecords.ts` is portable in substance but imports its record types from
-`lib/ipc.ts`, which mixes types with `invoke` calls. It moves once those types are
-split out.

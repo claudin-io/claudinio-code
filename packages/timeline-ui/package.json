@@ -5,7 +5,9 @@
   "description": "Timeline rendering shared by the desktop app and the web peer. Nothing here may depend on Tauri.",
   "type": "module",
   "exports": {
-    "./markdown": "./src/markdown.ts"
+    "./markdown": "./src/markdown.ts",
+    "./records": "./src/records.ts",
+    "./chatRecords": "./src/chatRecords.ts"
   },
   "dependencies": {
     "dompurify": "^3.2.7",

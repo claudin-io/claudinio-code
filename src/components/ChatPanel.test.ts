@@ -7,7 +7,7 @@ import {
   type SubagentNode,
   type TimelineNode,
 } from "../lib/subagentTimeline";
-import { formatTokens, formatDuration, ellipsize } from "../lib/chatRecords";
+import { formatTokens, formatDuration, ellipsize } from "@claudinio/timeline-ui/chatRecords";
 
 // ── formatTokens tests ─────────────────────────────────────────────
 

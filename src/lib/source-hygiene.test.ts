@@ -25,4 +25,26 @@ describe("source hygiene", () => {
     }
     expect(offenders, `NUL byte(s) found in: ${offenders.join(", ")}`).toEqual([]);
   });
+
+  /// `packages/` is shared with the web peer at `app.claudin.io`, which has no
+  /// Tauri and no `src/`. An import of either compiles fine here and breaks only
+  /// over there — and at that point the cheapest-looking fix is to copy the file,
+  /// which is how a sanitizer ends up existing twice and diverging.
+  ///
+  /// The rule is stated in the package README. It is checked here because a
+  /// README does not fail a build.
+  it("nothing in packages/ reaches into the app", () => {
+    const offenders: string[] = [];
+    for (const file of walk(join(process.cwd(), "packages"))) {
+      const body = readFileSync(file, "utf8");
+      // Covers `from "…"` and `import("…")`, which is every way a module
+      // specifier names something outside the file.
+      for (const [, spec] of body.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+        if (spec.startsWith("@tauri-apps") || spec.includes("../src/")) {
+          offenders.push(`${file} imports ${spec}`);
+        }
+      }
+    }
+    expect(offenders, offenders.join("\n")).toEqual([]);
+  });
 });

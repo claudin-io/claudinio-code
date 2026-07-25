@@ -29,7 +29,7 @@ import {
   type ChatMessage,
   type SubagentTimelineState,
   type TimelineItem,
-} from "../../lib/chatRecords";
+} from "@claudinio/timeline-ui/chatRecords";
 import { openExternalUrl } from "../../lib/ipc";
 import type {
   EditProposalData,

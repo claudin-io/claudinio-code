@@ -78,7 +78,7 @@ import {
   type Status,
   type SubagentTimelineState,
   type TimelineItem,
-} from "../lib/chatRecords";
+} from "@claudinio/timeline-ui/chatRecords";
 import {
   ApprovalCard,
   ArchivedBlock,

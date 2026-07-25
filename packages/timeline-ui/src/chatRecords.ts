@@ -14,7 +14,7 @@ import {
   type SessionRecord,
   type ToolCallData,
   type ToolResultData,
-} from "./ipc";
+} from "./records";
 
 export type Status = "idle" | "thinking" | "awaiting_approval" | "awaiting_input" | "done" | "error";
 
