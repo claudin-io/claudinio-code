@@ -42,6 +42,23 @@ FILES = {
     ),
 }
 
+# Weights for the pure-Rust candle backend (the "embeddings-candle" Cargo
+# feature, used by the pre-Haswell baseline build). candle loads safetensors
+# rather than ONNX, and Xenova's ONNX-conversion repo does not host them, so
+# these come from the upstream sentence-transformers repo — pinned to a commit
+# for the same reproducibility reason as REVISION above.
+# Only fetched when --with-candle is passed, so the default ORT build does not
+# download ~87 MB it will never load.
+CANDLE_REPO = "sentence-transformers/all-MiniLM-L6-v2"
+CANDLE_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+CANDLE_FILES = {
+    "model.safetensors": (
+        "model.safetensors",
+        "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+        90_868_376,
+    ),
+}
+
 ATTEMPTS = 3
 BACKOFF_SECONDS = [2, 4]
 CHUNK = 1 << 20
@@ -78,14 +95,13 @@ def download(url: str, dest: str, expected_sha: str, expected_size: int) -> None
     os.replace(part, dest)
 
 
-def main() -> int:
-    os.makedirs(DEST, exist_ok=True)
-    for remote, (local, sha, expected_size) in FILES.items():
+def fetch_group(repo: str, revision: str, files: dict) -> int:
+    for remote, (local, sha, expected_size) in files.items():
         dest = os.path.join(DEST, local)
         if os.path.exists(dest) and sha256_of(dest) == sha:
             print(f"[fetch-model] {local}: up to date")
             continue
-        url = f"https://huggingface.co/{REPO}/resolve/{REVISION}/{remote}"
+        url = f"https://huggingface.co/{repo}/resolve/{revision}/{remote}"
         last_error: Exception | None = None
         for attempt in range(ATTEMPTS):
             try:
@@ -103,6 +119,20 @@ def main() -> int:
         if last_error is not None:
             print(f"[fetch-model] FAILED to fetch {local}: {last_error}", file=sys.stderr)
             return 1
+    return 0
+
+
+def main() -> int:
+    os.makedirs(DEST, exist_ok=True)
+    rc = fetch_group(REPO, REVISION, FILES)
+    if rc != 0:
+        return rc
+    # --with-candle: also fetch safetensors weights for the candle backend
+    # (baseline / pre-Haswell build). Skipped by default.
+    if "--with-candle" in sys.argv[1:]:
+        rc = fetch_group(CANDLE_REPO, CANDLE_REVISION, CANDLE_FILES)
+        if rc != 0:
+            return rc
     print(f"[fetch-model] model ready at {DEST}")
     return 0
 
