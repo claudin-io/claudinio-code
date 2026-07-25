@@ -40,9 +40,10 @@ describe("parsePairingCode", () => {
   });
 
   it("works whether or not the leading hash is included", () => {
-    const withHash = parse(fragment());
-    const without = parse(fragment().slice(1));
-    expect(withHash).toEqual(without);
+    // One fragment, parsed twice. Building it twice let a millisecond tick between the
+    // two calls and change the expiry, which failed about one run in three.
+    const raw = fragment();
+    expect(parse(raw)).toEqual(parse(raw.slice(1)));
   });
 
   /// Opening the app directly is the ordinary case, not an error. It needs a

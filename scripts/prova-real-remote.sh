@@ -15,7 +15,8 @@
 #   3. Every transcript record reaches the browser.
 #   4. The pairing was written to the device's book, by the real admit path.
 #   5. A read-only peer never reaches the app through DeviceActions.
-#   6. No transcript text appears in the relay's log.
+#   6. The browser computes a diff from a transcript that contains no diff.
+#   7. No transcript text appears in the relay's log.
 #
 # Usage: scripts/prova-real-remote.sh [records]
 #
@@ -148,6 +149,13 @@ echo
 
 [ "$PEER_OK" = 1 ] || { tail -30 "$WORK/peer.log"; fail "the browser peer failed"; }
 pass "every transcript record reached the browser ($RECORDS)"
+
+# The transcript carries an edit_file call and no diff. Computing one in the browser is
+# what §7's "a human reads the change before approving" rests on, so it is checked here
+# rather than assumed from the unit tests.
+grep -q '^PEER_DIFF=src/main.rs +2 -2 hunks=1' "$WORK/peer.log" \
+  || { grep '^PEER_DIFF' "$WORK/peer.log" || true; fail "the browser did not compute the edit's diff"; }
+pass "the browser computed a diff from the device's transcript"
 
 grep -q '^PROVA_DEVICE_CONFIRMED=1' "$WORK/device.log" || fail "the device never saw a confirmation"
 pass "the device served only after the confirmation"

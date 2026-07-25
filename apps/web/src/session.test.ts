@@ -92,8 +92,57 @@ async function harness(over: Partial<PairingCode> = {}): Promise<Harness> {
   return { session, sockets, states, messages, socket: () => sockets[sockets.length - 1] };
 }
 
-/// The handshake is several awaits deep, so give the microtask queue a turn.
-const settle = () => new Promise((r) => setTimeout(r, 0));
+/// Yield to the event loop, on a timer the tests have not faked.
+///
+/// It cannot be `setTimeout`: these tests fake that so they can advance the backoff and
+/// the handshake deadline on purpose. With `shouldAdvanceTime` the fake clock also ran on
+/// its own, so a wait loop could quietly cross the five-second handshake timeout — the
+/// connection redialled, the reply went to a socket the test was no longer holding, and
+/// the handshake "never completed". `setImmediate` stays real, so waiting costs no fake
+/// time at all.
+const settle = () => new Promise((r) => setImmediate(r));
+
+/// Wait until a state arrives, rather than for a fixed tick.
+///
+/// A single `settle()` was racing the handshake: it is a chain of WebCrypto awaits, and
+/// under fake timers a `setTimeout(0)` does not reliably outlast it. About one run in
+/// three, `confirm()` was called before the handshake completed, silently did nothing,
+/// and the test then saw `confirming` where it expected `live`. Waiting for the
+/// condition is the fix; waiting longer would only make the flake rarer.
+/// Wait until something is true, rather than for a number of ticks.
+///
+/// Every flake in this file came from the same mistake in a different costume: waiting a
+/// fixed amount for an asynchronous chain. The handshake is several WebCrypto awaits
+/// deep, and how many turns of the loop that takes is not something a test can know — so
+/// nothing here waits an amount, only for a condition.
+async function waitUntil(done: () => boolean, what: string) {
+  for (let i = 0; i < 500; i++) {
+    if (done()) return;
+    await settle();
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+const waitForSent = (socket: () => FakeSocket, count: number) =>
+  waitUntil(
+    () => socket().sent.length >= count,
+    `${count} frames to be sent (saw ${socket().sent.length})`,
+  );
+
+/// `live` arrives before the subscribe does — `confirm()` emits the state and then
+/// encrypts, which is async. So waiting for the state and asserting on the send is the
+/// same mistake again: wait for the thing being asserted.
+const waitForState = (states: SessionState[], kind: SessionState["kind"]) =>
+  waitUntil(
+    () => states.some((state) => state.kind === kind),
+    `state ${kind} (saw ${states.map((s) => s.kind).join(", ")})`,
+  );
+
+const waitForMessages = (messages: DeviceMessage[], count: number) =>
+  waitUntil(() => messages.length >= count, `${count} messages`);
+
+const waitForSockets = (sockets: FakeSocket[], count: number) =>
+  waitUntil(() => sockets.length >= count, `${count} sockets`);
 
 /// The most recent state. `Array.prototype.at` would need a newer `lib` than this
 /// tsconfig selects, and bumping that belongs in its own change.
@@ -116,14 +165,16 @@ async function upToConfirming(over: Partial<PairingCode> = {}) {
   const h = await harness(over);
   h.session.start();
   h.socket().open();
-  await settle();
+  await waitForSent(h.socket, 1);
   h.socket().deliver(helloAck());
-  await settle();
+  await waitForState(h.states, "confirming");
   return h;
 }
 
 beforeEach(() => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
+  // Only the timers the tests drive. Faking everything would take `setImmediate` with
+  // it, and then nothing could yield to the event loop for the crypto to resolve.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 });
 
 afterEach(() => {
@@ -155,7 +206,7 @@ describe("the handshake", () => {
     const h = await harness();
     h.session.start();
     h.socket().open();
-    await settle();
+    await waitForSent(h.socket, 1);
 
     expect(h.socket().sent).toHaveLength(1);
     const frame = decodeFrame(h.socket().sent[0]);
@@ -176,6 +227,7 @@ describe("the handshake", () => {
     const h = await upToConfirming();
     h.session.subscribe("golden", 0);
     await settle();
+    await settle();
 
     // Only the Hello.
     expect(h.socket().sent).toHaveLength(1);
@@ -185,7 +237,7 @@ describe("the handshake", () => {
     const h = await upToConfirming();
     h.session.subscribe("golden", 0);
     h.session.confirm();
-    await settle();
+    await waitForSent(h.socket, 2);
 
     expect(last(h.states)).toEqual({ kind: "live", sas: GOLDEN.sas });
     expect(h.socket().sent).toHaveLength(2);
@@ -205,7 +257,7 @@ describe("the handshake", () => {
     const h = await upToConfirming();
     h.session.confirm();
     h.session.subscribe("golden", 0);
-    await settle();
+    await waitForSent(h.socket, 2);
 
     expect(h.socket().sent).toHaveLength(2);
   });
@@ -218,7 +270,7 @@ describe("the handshake", () => {
     const h2 = await harness();
     h2.session.start();
     h2.socket().open();
-    await settle();
+    await waitForSent(h2.socket, 1);
 
     const tampered = bytesFromHex(GOLDEN.msg2);
     tampered[tampered.length - 1] ^= 0xff;
@@ -234,7 +286,7 @@ describe("the handshake", () => {
         }),
       ),
     );
-    await settle();
+    await waitForState(h2.states, "failed");
 
     expect(last(h2.states)).toMatchObject({ kind: "failed" });
     expect(h2.socket().closed).toBe(true);
@@ -251,11 +303,11 @@ describe("the handshake", () => {
     const h = await harness();
     h.session.start();
     h.socket().open();
-    await settle();
+    await waitForSent(h.socket, 1);
     expect(h.sockets).toHaveLength(1);
 
     vi.advanceTimersByTime(HANDSHAKE_TIMEOUT_MS + 1);
-    await settle();
+    await waitForSockets(h.sockets, 2);
 
     expect(h.sockets).toHaveLength(2);
   });
@@ -266,7 +318,7 @@ describe("receiving", () => {
     const h = await upToConfirming();
     h.session.confirm();
     h.session.subscribe("golden", 0);
-    await settle();
+    await waitForSent(h.socket, 2);
     return h;
   }
 
@@ -274,7 +326,7 @@ describe("receiving", () => {
   it("decodes a snapshot the device actually sent", async () => {
     const h = await live();
     h.socket().deliver(GOLDEN.snapshotFrame);
-    await settle();
+    await waitForMessages(h.messages, 1);
 
     expect(h.messages).toHaveLength(1);
     const snapshot = h.messages[0];
@@ -289,7 +341,7 @@ describe("receiving", () => {
   it("carries the transcript records through unchanged", async () => {
     const h = await live();
     h.socket().deliver(GOLDEN.snapshotFrame);
-    await settle();
+    await waitForMessages(h.messages, 1);
 
     const records = h.messages[0].records as Record<string, unknown>[];
     expect(records[0]).toEqual({ kind: "meta", sessionId: "golden" });
@@ -301,9 +353,9 @@ describe("receiving", () => {
   it("reports a close with its reason and does not reconnect", async () => {
     const h = await live();
     h.socket().deliver(GOLDEN.snapshotFrame);
-    await settle();
+    await waitForMessages(h.messages, 1);
     h.socket().deliver(GOLDEN.closedFrame);
-    await settle();
+    await waitForState(h.states, "closed");
 
     expect(last(h.states)).toEqual({ kind: "closed", reason: "turned_off_locally" });
     // Not delivered as a message: nothing in the timeline should render it.
@@ -333,10 +385,11 @@ describe("receiving", () => {
     tampered[tampered.length - 1] ^= 0xff;
     h.socket().onmessage?.(tampered);
     await settle();
+    await settle();
     expect(h.messages).toHaveLength(0);
 
     h.socket().deliver(GOLDEN.snapshotFrame);
-    await settle();
+    await waitForMessages(h.messages, 1);
     expect(h.messages).toHaveLength(1);
   });
 
@@ -373,7 +426,7 @@ describe("reconnecting", () => {
 
     h.socket().onclose?.();
     vi.advanceTimersByTime(60_000);
-    await settle();
+    await waitForSockets(h.sockets, 2);
 
     expect(h.sockets.length).toBeGreaterThan(1);
   });
@@ -386,15 +439,15 @@ describe("reconnecting", () => {
     const h = await upToConfirming();
     h.session.confirm();
     h.session.subscribe("golden", 0);
-    await settle();
+    await waitForSent(h.socket, 2);
 
     h.socket().onclose?.();
     vi.advanceTimersByTime(60_000);
-    await settle();
+    await waitForSockets(h.sockets, 2);
     h.socket().open();
-    await settle();
+    await waitForSent(h.socket, 1);
     h.socket().deliver(helloAck());
-    await settle();
+    await waitForSent(h.socket, 2);
 
     expect(h.states.filter((s) => s.kind === "confirming")).toHaveLength(1);
     expect(last(h.states)).toMatchObject({ kind: "live" });
@@ -406,17 +459,17 @@ describe("reconnecting", () => {
     const h = await upToConfirming();
     h.session.confirm();
     h.session.subscribe("golden", 0);
-    await settle();
+    await waitForSent(h.socket, 2);
     h.socket().deliver(GOLDEN.snapshotFrame);
     await settle();
 
     h.socket().onclose?.();
     vi.advanceTimersByTime(60_000);
-    await settle();
+    await waitForSockets(h.sockets, 2);
     h.socket().open();
-    await settle();
+    await waitForSent(h.socket, 1);
     h.socket().deliver(helloAck());
-    await settle();
+    await waitForSent(h.socket, 2);
 
     // The resubscribe is the second thing this socket sent, after its Hello.
     expect(h.socket().sent).toHaveLength(2);
@@ -431,6 +484,7 @@ describe("reconnecting", () => {
     h.session.stop();
 
     vi.advanceTimersByTime(60_000);
+    await settle();
     await settle();
 
     expect(h.sockets).toHaveLength(1);

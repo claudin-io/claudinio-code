@@ -35,6 +35,10 @@ const server = await createServer({
 
 const { parsePairingCode, isStale } = await server.ssrLoadModule("/src/pairing.ts");
 const { Session } = await server.ssrLoadModule("/src/session.ts");
+const { findEdits } = await server.ssrLoadModule("/src/edits.ts");
+const { diffLines } = await server.ssrLoadModule(
+  "/../../packages/timeline-ui/src/diff.ts",
+);
 
 /// The one place this harness bends reality, and it bends it outside the code under
 /// test.
@@ -160,8 +164,20 @@ console.log(`PEER_CONFIRMED=${matched ? 1 : 0}`);
 if (closedReason) console.log(`PEER_CLOSED=${closedReason}`);
 if (failed) console.log(`PEER_FAILED=${failed}`);
 
+// The diffs, computed in the browser from the device's transcript. The device never
+// sent one — an `edit_file` call carries the before and after — so this is the whole
+// path §7 depends on, exercised rather than assumed.
+const diffs = records
+  .flatMap((record) => findEdits(record))
+  .map((edit) => ({ path: edit.path, ...diffLines(edit.oldText, edit.newText) }));
+for (const diff of diffs) {
+  console.log(`PEER_DIFF=${diff.path} +${diff.added} -${diff.removed} hunks=${diff.hunks.length}`);
+}
+console.log(`PEER_DIFFS=${diffs.length}`);
+
 // The transcript, so the script can check it is the device's and not an artefact.
 writeFileSync(`${dir}/peer-records.json`, JSON.stringify(records, null, 2));
+writeFileSync(`${dir}/peer-diffs.json`, JSON.stringify(diffs, null, 2));
 
 session.stop();
 await server.close();

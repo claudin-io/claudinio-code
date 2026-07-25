@@ -10,6 +10,10 @@
 
 import { For, Show, createSignal, onCleanup, onMount, type Component } from "solid-js";
 import { render } from "solid-js/web";
+import { DiffView } from "@claudinio/timeline-ui/DiffView";
+import { diffLines } from "@claudinio/timeline-ui/diff";
+import "@claudinio/timeline-ui/diff.css";
+import { findEdits } from "./edits";
 import {
   explainCodeError,
   explainStaleCode,
@@ -91,9 +95,7 @@ const App: Component = () => {
       <Show when={live()}>
         <p class="faint">{`Following this session, read-only. ${sas()}`}</p>
         <div class="records">
-          <For each={records()}>
-            {(record) => <div class="record">{summariseRecord(record)}</div>}
-          </For>
+          <For each={records()}>{(record) => <RecordRow record={record} />}</For>
           <div class="count">
             {records().length === 0
               ? "Waiting for the transcript…"
@@ -102,6 +104,25 @@ const App: Component = () => {
         </div>
       </Show>
     </main>
+  );
+};
+
+/// One transcript record: its summary, and any diff it is about to apply.
+///
+/// The diff is the reason this is not just a line of text. §7 of the threat model rests
+/// on a human reading a change before approving it, and the transcript carries the
+/// before and after rather than a diff — so it is computed here, from what the tool call
+/// actually said it would do.
+const RecordRow: Component<{ record: Record<string, unknown> }> = (props) => {
+  const edits = () => findEdits(props.record);
+
+  return (
+    <div class="record">
+      <div>{summariseRecord(props.record)}</div>
+      <For each={edits()}>
+        {(edit) => <DiffView path={edit.path} diff={diffLines(edit.oldText, edit.newText)} />}
+      </For>
+    </div>
   );
 };
 

@@ -120,8 +120,22 @@ fn write_transcript(path: &Path, records: usize) {
         r#"{{"kind":"meta","session_id":"prova-real","created_at":{ts},"workspace":null}}"#
     )
     .unwrap();
-    for i in 1..records {
+    for i in 1..records.saturating_sub(1) {
         writeln!(file, r#"{{"kind":"user","text":"record {i}","ts":{ts}}}"#).unwrap();
+    }
+
+    // One real edit, so the browser's diff path is exercised end to end. The transcript
+    // carries `old_string` and `new_string` and no diff at all, and computing one from
+    // them in the browser is what §7's "a human reads the change before approving"
+    // rests on. Shaped exactly as a session file writes an `edit_file` call.
+    if records >= 2 {
+        let edit = concat!(
+            r#"{"kind":"turn","role":"assistant","content":[{"type":"tool_use","#,
+            r#""id":"toolu_prova","name":"edit_file","input":{"path":"src/main.rs","#,
+            r#""old_string":"let timeout = 30;\nreturn go(timeout);","#,
+            r#""new_string":"let timeout = 60;\nreturn go(timeout, 2);"}}],"ts":"#
+        );
+        writeln!(file, "{edit}{ts}}}").unwrap();
     }
 }
 

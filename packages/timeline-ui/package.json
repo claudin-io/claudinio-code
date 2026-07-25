@@ -6,11 +6,15 @@
   "type": "module",
   "exports": {
     "./markdown": "./src/markdown.ts",
+    "./diff": "./src/diff.ts",
+    "./DiffView": "./src/DiffView.tsx",
+    "./diff.css": "./src/diff.css",
     "./records": "./src/records.ts",
     "./chatRecords": "./src/chatRecords.ts"
   },
   "dependencies": {
     "dompurify": "^3.2.7",
+    "solid-js": "^1.9.3",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.5"
   }
