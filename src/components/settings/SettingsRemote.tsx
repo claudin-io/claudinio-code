@@ -1,4 +1,4 @@
-import { Component, For, Show, type Accessor } from "solid-js";
+import { Component, For, Show, createSignal, type Accessor } from "solid-js";
 import type { Pairing, RemotePolicyView } from "../../lib/ipc";
 
 interface SettingsRemoteProps {
@@ -11,7 +11,7 @@ interface SettingsRemoteProps {
   onCreateIdentity: () => void;
   onRevoke: (peerKey: string) => void;
   onUnrevoke: (peerKey: string) => void;
-  onRename: (peerKey: string) => void;
+  onRename: (peerKey: string, label: string) => void;
 }
 
 /// A key is 64 hex characters, which is unreadable and also the thing the user has
@@ -22,6 +22,24 @@ const shortKey = (key: string) => `${key.slice(0, 8)}…${key.slice(-8)}`;
 const formatWhen = (ms: number) => new Date(ms).toLocaleString();
 
 export const SettingsRemote: Component<SettingsRemoteProps> = (props) => {
+  /// The key of the pairing being renamed, and the label being typed. Renaming
+  /// is done in place rather than through `window.prompt`, which is unstyled,
+  /// modal, and on a phone covers the list you are trying to read.
+  const [renaming, setRenaming] = createSignal<string | null>(null);
+  const [draft, setDraft] = createSignal("");
+
+  const startRename = (pairing: Pairing) => {
+    setRenaming(pairing.peer_key);
+    setDraft(pairing.label);
+  };
+
+  const commitRename = (peerKey: string) => {
+    const label = draft().trim();
+    setRenaming(null);
+    // An empty name would leave a browser identified only by 64 hex characters.
+    if (label) props.onRename(peerKey, label);
+  };
+
   return (
     <>
       <div class="mb-2 flex items-center justify-between">
@@ -185,7 +203,23 @@ export const SettingsRemote: Component<SettingsRemoteProps> = (props) => {
               {(pairing) => (
                 <div class="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-1 px-2 py-1.5 text-xs">
                   <div class="min-w-0 flex-1">
-                    <div class="truncate text-ink">{pairing.label}</div>
+                    <Show
+                      when={renaming() === pairing.peer_key}
+                      fallback={<div class="truncate text-ink">{pairing.label}</div>}
+                    >
+                      <input
+                        type="text"
+                        value={draft()}
+                        autofocus
+                        onInput={(e) => setDraft(e.currentTarget.value)}
+                        onBlur={() => commitRename(pairing.peer_key)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitRename(pairing.peer_key);
+                          if (e.key === "Escape") setRenaming(null);
+                        }}
+                        class="w-full rounded-md border border-border-subtle bg-surface-2 px-1.5 py-0.5 text-xs text-ink"
+                      />
+                    </Show>
                     <div class="font-mono text-[11px] text-ink-faint">
                       {shortKey(pairing.peer_key)}
                       {" · paired "}
@@ -196,7 +230,7 @@ export const SettingsRemote: Component<SettingsRemoteProps> = (props) => {
                     </div>
                   </div>
                   <button
-                    onClick={() => props.onRename(pairing.peer_key)}
+                    onClick={() => startRename(pairing)}
                     disabled={props.busy()}
                     class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-2 py-0.5 text-[11px] text-ink hover:bg-surface-3 disabled:opacity-50"
                   >

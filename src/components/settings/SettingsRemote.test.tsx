@@ -52,7 +52,7 @@ interface Handlers {
   onCreateIdentity?: () => void;
   onRevoke?: (key: string) => void;
   onUnrevoke?: (key: string) => void;
-  onRename?: (key: string) => void;
+  onRename?: (key: string, label: string) => void;
 }
 
 async function mount(
@@ -205,6 +205,64 @@ describe("SettingsRemote", () => {
     const root = await mount({ pairings: [] });
 
     expect(root.textContent).toContain("physical access");
+  });
+
+  /// Renaming happens in place: `window.prompt` is unstyled, blocking, and on a
+  /// phone it covers the list the name is being compared against.
+  it("renames in place, without a prompt dialog", async () => {
+    const onRename = vi.fn();
+    const mine = pairing({ peer_key: "44".repeat(32), label: "old name" });
+    const root = await mount({ pairings: [mine] }, { onRename });
+
+    button(root, "Rename")!.click();
+    await flush();
+
+    const input = root.querySelector("input") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    expect(input.value).toBe("old name");
+
+    input.value = "iPhone in the kitchen";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+
+    expect(onRename).toHaveBeenCalledWith("44".repeat(32), "iPhone in the kitchen");
+    expect(root.querySelector("input")).toBeNull();
+  });
+
+  /// A browser named with 64 hex characters and nothing else is unidentifiable,
+  /// which defeats the point of the list.
+  it("refuses to rename a pairing to nothing", async () => {
+    const onRename = vi.fn();
+    const root = await mount({ pairings: [pairing()] }, { onRename });
+
+    button(root, "Rename")!.click();
+    await flush();
+
+    const input = root.querySelector("input") as HTMLInputElement;
+    input.value = "   ";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flush();
+
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  it("abandons a rename on Escape", async () => {
+    const onRename = vi.fn();
+    const root = await mount({ pairings: [pairing()] }, { onRename });
+
+    button(root, "Rename")!.click();
+    await flush();
+
+    const input = root.querySelector("input") as HTMLInputElement;
+    input.value = "typed then thought better of it";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+
+    expect(onRename).not.toHaveBeenCalled();
+    expect(root.querySelector("input")).toBeNull();
   });
 
   it("surfaces an error rather than swallowing it", async () => {
