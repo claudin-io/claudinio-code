@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@claudinio/timeline-ui':
+        specifier: workspace:*
+        version: link:packages/timeline-ui
       '@tailwindcss/vite':
         specifier: ^4.3.2
         version: 4.3.2(vite@6.4.3(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.32.0))
@@ -84,6 +87,18 @@ importers:
       vitest:
         specifier: ^4.1.9
         version: 4.1.9(@types/node@26.1.1)(@vitest/coverage-v8@4.1.10)(jsdom@29.1.1)(vite@6.4.3(@types/node@26.1.1)(jiti@2.7.0)(lightningcss@1.32.0))
+
+  packages/timeline-ui:
+    dependencies:
+      dompurify:
+        specifier: ^3.2.7
+        version: 3.4.12
+      highlight.js:
+        specifier: ^11.11.1
+        version: 11.11.1
+      marked:
+        specifier: ^18.0.5
+        version: 18.0.5
 
 packages:
 

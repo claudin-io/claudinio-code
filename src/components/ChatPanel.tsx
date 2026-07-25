@@ -46,7 +46,7 @@ import {
 } from "../lib/ipc";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
-import { renderMarkdown, renderLiveMarkdown } from "../lib/markdown";
+import { renderMarkdown, renderLiveMarkdown } from "@claudinio/timeline-ui/markdown";
 import { ProseContent } from "./ProseContent";
 import { Icon } from "./Icon";
 import TextEditorModal from "./TextEditorModal";

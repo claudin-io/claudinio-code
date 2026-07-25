@@ -18,7 +18,7 @@ import {
   toolHeader,
   toolSummary,
 } from "../tool-renderers/toolPresentation";
-import { renderMarkdown } from "../../lib/markdown";
+import { renderMarkdown } from "@claudinio/timeline-ui/markdown";
 import {
   ellipsize,
   formatDuration,

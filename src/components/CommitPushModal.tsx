@@ -2,7 +2,7 @@ import { Component, createSignal, createMemo, Show, For, onMount, onCleanup } fr
 import { commitAndPush, interruptSession, AgentEvent, ToolCallData, ToolResultData, AskUserData, UserAnswer, submitAnswers } from "../lib/ipc";
 import { Icon } from "./Icon";
 import { ProseContent } from "./ProseContent";
-import { renderMarkdown } from "../lib/markdown";
+import { renderMarkdown } from "@claudinio/timeline-ui/markdown";
 import QuestionCard from "./QuestionCard";
 
 interface TimelineStep {

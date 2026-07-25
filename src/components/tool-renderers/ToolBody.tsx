@@ -23,7 +23,7 @@ import type { ToolCallData, ToolResultData } from "../../lib/ipc";
 import { Icon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
-import { renderMarkdown, escapeHtml } from "../../lib/markdown";
+import { renderMarkdown, escapeHtml } from "@claudinio/timeline-ui/markdown";
 import { detectLanguageFromPath } from "./toolPresentation";
 
 // The result goes straight to `innerHTML`, and both inputs are untrusted: the
