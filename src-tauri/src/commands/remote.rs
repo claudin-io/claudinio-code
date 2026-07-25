@@ -185,6 +185,14 @@ pub async fn remote_pairings(
 /// server would fail exactly when someone needs it.
 #[tauri::command]
 pub async fn remote_revoke(peer_key: String, _state: State<'_, AppState>) -> Result<(), String> {
+    // The live session goes first. Writing the book only bites at the next
+    // handshake, so a peer that stays connected would keep being served after being
+    // revoked — which is the one moment revocation has to work. Done before the
+    // write, so a failed write still leaves the peer disconnected rather than
+    // connected and believed revoked.
+    crate::remote::control::shared()
+        .stop_peer(&peer_key, claudinio_protocol::inner::CloseReason::Revoked);
+
     let mut pairings = crate::remote::pairing::Pairings::load(pairings_path()?)?;
     pairings.revoke(&peer_key)
 }
@@ -451,6 +459,7 @@ async fn open_connection(
         actions: AppActions::new(&state),
         notices: notice_sink(app),
         confirmations: crate::remote::pairing::shared().clone(),
+        control: crate::remote::control::shared().clone(),
     };
 
     // Detached: the connection outlives this call and must survive the relay
@@ -573,6 +582,20 @@ struct NoticePayload {
     label: Option<String>,
     /// Only on the two notices that carry words to compare.
     sas: Option<String>,
+    /// Only on `stopped`. Why it stopped, so the panel can say so.
+    reason: Option<&'static str>,
+}
+
+/// The wire tag for a close reason, so the panel can explain rather than just going
+/// grey.
+fn close_reason_tag(reason: claudinio_protocol::inner::CloseReason) -> &'static str {
+    use claudinio_protocol::inner::CloseReason;
+    match reason {
+        CloseReason::PeerAsked => "peerAsked",
+        CloseReason::TurnedOffLocally => "turnedOffLocally",
+        CloseReason::GrantExpired => "grantExpired",
+        CloseReason::Revoked => "revoked",
+    }
 }
 
 /// Bridge `remote/`'s notices onto Tauri events.
@@ -593,18 +616,28 @@ fn notice_sink(app: tauri::AppHandle) -> crate::remote::transport::NoticeSink {
                 peer_key,
                 label: Some(label),
                 sas: Some(sas),
+                reason: None,
             },
             Notice::Paired { peer_key, label } => NoticePayload {
                 kind: "paired",
                 peer_key,
                 label: Some(label),
                 sas: None,
+                reason: None,
             },
             Notice::PairingRefused { peer_key } => NoticePayload {
                 kind: "pairingRefused",
                 peer_key,
                 label: None,
                 sas: None,
+                reason: None,
+            },
+            Notice::Stopped { reason } => NoticePayload {
+                kind: "stopped",
+                peer_key: String::new(),
+                label: None,
+                sas: None,
+                reason: Some(close_reason_tag(reason)),
             },
             Notice::Connected {
                 peer_key,
@@ -615,6 +648,7 @@ fn notice_sink(app: tauri::AppHandle) -> crate::remote::transport::NoticeSink {
                 peer_key,
                 label: Some(label),
                 sas: Some(sas),
+                reason: None,
             },
         };
         // A dropped event means the window went away. Nothing to recover: the
@@ -640,4 +674,30 @@ pub async fn remote_confirm_pairing(
     _state: State<'_, AppState>,
 ) -> Result<(), String> {
     crate::remote::pairing::shared().resolve(&peer_key, matched)
+}
+
+/// Turn remote access off, now.
+///
+/// Every live connection is stopped and none of them redial. The pairing survives:
+/// this is the switch, not a revocation. Turning it back on serves the same paired
+/// browsers without a new code — which is why the peer's own "close" sends
+/// `EndRemote` rather than asking to be revoked.
+///
+/// Works with the relay unreachable, because the stop is a local signal to a local
+/// task. The same property §6.5 gives revocation, for the same reason: a switch that
+/// needed a server would fail exactly when someone wanted it.
+#[tauri::command]
+pub async fn remote_disable(_state: State<'_, AppState>) -> Result<usize, String> {
+    use claudinio_protocol::inner::CloseReason;
+    Ok(crate::remote::control::shared().stop_all(CloseReason::TurnedOffLocally))
+}
+
+/// Which channels are being served.
+///
+/// Read from the registry rather than from a flag set when it was switched on: a
+/// connection that stopped by itself — a revoked pairing, a lapsed grant — must not
+/// leave the panel claiming remote access is live.
+#[tauri::command]
+pub async fn remote_running(_state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(crate::remote::control::shared().running())
 }

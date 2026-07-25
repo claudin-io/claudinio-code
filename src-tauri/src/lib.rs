@@ -83,6 +83,10 @@ pub fn run() {
             commands::remote::remote_confirm_pairing,
             #[cfg(feature = "remote")]
             commands::remote::remote_start_pairing,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_disable,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_running,
             commands::clipboard::write_clipboard_blob,
             commands::git::git_status,
             commands::git::git_file_diff,

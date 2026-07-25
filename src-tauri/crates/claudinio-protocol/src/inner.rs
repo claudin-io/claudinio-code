@@ -77,6 +77,16 @@ pub enum PeerToDevice {
     /// its own policy would grant itself everything the moment it was
     /// compromised.
     GetPolicy,
+    /// End remote access from this side.
+    ///
+    /// The pairing survives; only the connection stops, and the device will not
+    /// redial. Turning it back on takes a local action on the machine — which is
+    /// the point, and which the peer has to warn about before sending this.
+    ///
+    /// Deliberately not a revocation. A peer that could revoke its own pairing
+    /// could also lock the user out of a device they are away from, and would make
+    /// "close this" a decision that costs a new QR code to undo.
+    EndRemote,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +153,30 @@ pub enum DeviceToPeer {
         code: String,
         message: String,
     },
+    /// Remote access has stopped, and why.
+    ///
+    /// Sent as a courtesy before the socket goes: a peer that only sees the
+    /// connection drop cannot tell "you were turned off" from "the relay
+    /// hiccuped", and would sit reconnecting against a device that is never going
+    /// to answer.
+    Closed {
+        reason: CloseReason,
+    },
+}
+
+/// Why the device stopped serving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    /// The peer asked, via `EndRemote`.
+    PeerAsked,
+    /// Someone turned remote access off on the machine.
+    TurnedOffLocally,
+    /// The grant lapsed, or was narrowed to nothing.
+    GrantExpired,
+    /// This pairing was revoked. The peer needs a new pairing code, not a retry.
+    Revoked,
 }
 
 /// Who answered an approval gate.

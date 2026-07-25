@@ -445,6 +445,9 @@ fn command_id(message: &PeerToDevice) -> Option<String> {
         | PeerToDevice::ListSessions { .. }
         | PeerToDevice::Subscribe { .. }
         | PeerToDevice::Unsubscribe { .. }
+        // Stopping twice is stopping once, so there is nothing to deduplicate —
+        // and the transport intercepts it before the bridge is asked anyway.
+        | PeerToDevice::EndRemote
         | PeerToDevice::GetPolicy => None,
     }
 }
@@ -461,6 +464,7 @@ fn tag_of(message: &PeerToDevice) -> &'static str {
         PeerToDevice::ResolveApproval { .. } => "resolve_approval",
         PeerToDevice::SetMode { .. } => "set_mode",
         PeerToDevice::GetPolicy => "get_policy",
+        PeerToDevice::EndRemote => "end_remote",
     }
 }
 

@@ -12,12 +12,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use claudinio_protocol::inner::{DeviceToPeer, PeerToDevice, Policy};
+use claudinio_protocol::inner::{CloseReason, DeviceToPeer, PeerToDevice, Policy};
 use claudinio_protocol::wire::{self, ChannelId, OuterFrame, OuterKind};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::bridge::{Bridge, DeviceActions};
+use super::control::Control;
 use super::dedup::CommandLog;
 use super::noise::{self, DeviceIdentity};
 use super::pairing::{Confirmations, Pairings, Refusal};
@@ -61,6 +62,8 @@ pub struct Connection<A: DeviceActions + Sync> {
     pub notices: NoticeSink,
     /// The registry that human's answer comes back through.
     pub confirmations: Arc<Confirmations>,
+    /// Where the switch that turns this off lives.
+    pub control: Arc<Control>,
 }
 
 /// Something the local user needs to see. Deliberately not on the wire: a peer
@@ -93,6 +96,11 @@ pub enum Notice {
         label: String,
         sas: String,
     },
+    /// Remote access stopped and will not redial. The panel needs this to show
+    /// "off" truthfully rather than from a flag set when it was switched on.
+    Stopped {
+        reason: CloseReason,
+    },
 }
 
 /// How notices reach the UI. A closure rather than a Tauri handle, so this module
@@ -104,10 +112,14 @@ pub type NoticeSink = Arc<dyn Fn(Notice) + Send + Sync>;
 enum Served {
     /// The peer went away. It may come back, so the channel is redialled.
     PeerLeft,
-    /// Do not retry. The pairing was refused, which revoked the key — every
-    /// further attempt would be turned away by `admit`, so retrying would be an
-    /// endless loop whose only effect is noise in the log.
-    Abandoned,
+    /// Do not redial, and this is why.
+    ///
+    /// Three different things end a connection for good — the user turning it off,
+    /// the peer asking, a refused pairing that revoked the key — and all three need
+    /// the same handling. A refused pairing in particular *must* stop: the key is
+    /// revoked by then, so every further attempt would be turned away by `admit`
+    /// and the loop would run forever producing nothing but log lines.
+    Stop(CloseReason),
 }
 
 /// An open invitation for one new peer.
@@ -134,35 +146,73 @@ pub struct PairingOffer {
 /// logged and retried.
 pub async fn run<A: DeviceActions + Sync>(connection: Connection<A>) {
     let mut backoff = Backoff::default();
+    let channel = connection.channel.to_hex();
+
+    // Registered out here rather than inside `serve_once`, so the switch survives
+    // a reconnect: a user who turns remote access off while the relay happens to be
+    // unreachable must not find it back on when the relay returns.
+    let mut stop = connection.control.register(&channel);
 
     loop {
-        match serve_once(&connection).await {
+        // Sequential rather than selected against the stop: `serve_once` watches the
+        // same receiver itself, and it is the only place with a socket to send
+        // `Closed` on.
+        match serve_once(&connection, &mut stop).await {
             Ok(Served::PeerLeft) => {
                 // A clean close means the peer went away, not that anything is
                 // wrong, so the next attempt starts from the bottom of the curve.
                 backoff.reset();
             }
-            Ok(Served::Abandoned) => return,
+            Ok(Served::Stop(reason)) => {
+                connection.control.forget(&channel);
+                (connection.notices)(Notice::Stopped { reason });
+                eprintln!("[remote] stopped: {reason:?}");
+                return;
+            }
             Err(e) => {
                 eprintln!("[remote] connection ended: {e}");
             }
         }
 
-        let delay = backoff.next_delay();
-        eprintln!("[remote] reconnecting in {delay:?}");
-        tokio::time::sleep(delay).await;
+        // The backoff sleep is interruptible too. Without this, turning remote
+        // access off during a 60-second wait would appear to do nothing for up to a
+        // minute — and the user would reasonably press it again.
+        tokio::select! {
+            biased;
+            _ = stop.changed() => {
+                let reason = stopped_because(&stop);
+                connection.control.forget(&channel);
+                (connection.notices)(Notice::Stopped { reason });
+                return;
+            }
+            _ = tokio::time::sleep(backoff.next_delay()) => {}
+        }
     }
 }
 
 /// One connection, from dial to disconnect.
-async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Result<Served, String> {
+///
+/// Takes the stop signal rather than leaving it to `run`, because only in here is
+/// there a socket to send `Closed` on. `run` watches it as well, for the stretches
+/// where there is no session to notify — the dial, and the indefinite wait for a
+/// peer's first frame.
+async fn serve_once<A: DeviceActions + Sync>(
+    connection: &Connection<A>,
+    stop: &mut tokio::sync::watch::Receiver<Option<CloseReason>>,
+) -> Result<Served, String> {
     let url = format!(
         "{}?channel={}&role=device",
         connection.relay_url, connection.channel
     );
-    let (socket, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .map_err(|e| format!("dial relay: {e}"))?;
+    // The dial is interruptible: a relay that is refusing connections must not make
+    // the off switch wait for it.
+    let (socket, _) = tokio::select! {
+        biased;
+        _ = stop.changed() => return Ok(Served::Stop(stopped_because(stop))),
+        dialled = tokio_tungstenite::connect_async(&url) => {
+            dialled.map_err(|e| format!("dial relay: {e}"))?
+        }
+    };
     let (mut sink, mut stream) = socket.split();
 
     // --- handshake --------------------------------------------------------
@@ -171,9 +221,15 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
     // retries — bounding both sides makes them wake and sleep alternately and miss
     // each other, which the relay's prova real demonstrated. A device with no peer
     // sits attached and idle, and that costs nothing.
-    let (kind, msg1) = next_frame(&mut stream, connection.channel)
-        .await?
-        .ok_or_else(|| "closed before the handshake".to_string())?;
+    // And so is the wait. This one is unbounded by design — a device with no peer
+    // sits attached and idle — which is exactly why it has to be stoppable, or the
+    // most common state remote access is ever in would be the one you cannot leave.
+    let first = tokio::select! {
+        biased;
+        _ = stop.changed() => return Ok(Served::Stop(stopped_because(stop))),
+        frame = next_frame(&mut stream, connection.channel) => frame?,
+    };
+    let (kind, msg1) = first.ok_or_else(|| "closed before the handshake".to_string())?;
     if !matches!(kind, OuterKind::Hello) {
         return Err("first frame was not a handshake".into());
     }
@@ -207,6 +263,13 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
     // went to stderr and the channel opened regardless, which made them
     // decoration. A peer waits here, attached and served nothing.
     let peer_key = peer_key_hex(&session)?;
+    // Told to the registry now the handshake has said who this is, so a revocation
+    // can find this connection and drop it — §6.5 says revoking takes effect
+    // immediately, and the pairing book alone only bites at the next handshake.
+    connection
+        .control
+        .attach_peer(&connection.channel.to_hex(), &peer_key);
+
     if connection.pairing_offer.is_some() {
         let answer = connection.confirmations.expect(&peer_key);
         (connection.notices)(Notice::ConfirmPairing {
@@ -226,7 +289,7 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
                 peer_key: peer_key.clone(),
             });
             eprintln!("[remote] pairing refused at the word check; key revoked");
-            return Ok(Served::Abandoned);
+            return Ok(Served::Stop(CloseReason::Revoked));
         }
 
         (connection.notices)(Notice::Paired {
@@ -258,9 +321,46 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
     let mut rekey = tokio::time::interval(REKEY_INTERVAL);
     rekey.tick().await; // the first tick completes immediately
 
+    // A grant that lapses has to end the session it is already serving.
+    //
+    // `expires_at` was only ever read when the connection was opened, which made it
+    // a rule about *starting* rather than an expiry: a peer connected before the
+    // deadline kept being served indefinitely after it. Which is backwards — the
+    // long-lived connection is exactly the one an expiry is for.
+    let lapse = grant_deadline(&connection.policy);
+
     // --- serve ------------------------------------------------------------
     loop {
         tokio::select! {
+            // Biased: a stop already pending wins over a frame that arrived in the
+            // same wake-up. Serving one more command after the user said "off" is
+            // the wrong way round.
+            biased;
+
+            // Turned off locally, or revoked. The peer is told why before the
+            // socket goes: one that only sees a drop cannot tell this from the
+            // relay hiccuping, and would reconnect against a device that is never
+            // going to answer.
+            _ = stop.changed() => {
+                let reason = stopped_because(stop);
+                out_seq += 1;
+                let _ = send_message(
+                    &mut sink, connection.channel, &mut session, out_seq,
+                    &DeviceToPeer::Closed { reason },
+                ).await;
+                return Ok(Served::Stop(reason));
+            }
+
+            // The grant ran out mid-session.
+            _ = maybe_sleep_until(lapse) => {
+                out_seq += 1;
+                let _ = send_message(
+                    &mut sink, connection.channel, &mut session, out_seq,
+                    &DeviceToPeer::Closed { reason: CloseReason::GrantExpired },
+                ).await;
+                return Ok(Served::Stop(CloseReason::GrantExpired));
+            }
+
             // Both ends advance on their own clock and nothing is sent, which is
             // why the interval is a shared constant rather than negotiated.
             _ = rekey.tick() => session.rekey(),
@@ -328,6 +428,18 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
                     }
                 };
 
+                // Handled here rather than in the bridge: the bridge turns peer
+                // commands into actions on the app, and ending a connection is not
+                // one — it is this loop's own business.
+                if matches!(command, PeerToDevice::EndRemote) {
+                    out_seq += 1;
+                    let _ = send_message(
+                        &mut sink, connection.channel, &mut session, out_seq,
+                        &DeviceToPeer::Closed { reason: CloseReason::PeerAsked },
+                    ).await;
+                    return Ok(Served::Stop(CloseReason::PeerAsked));
+                }
+
                 for reply in bridge.handle(command).await {
                     out_seq += 1;
                     send_message(&mut sink, connection.channel, &mut session, out_seq, &reply).await?;
@@ -335,6 +447,41 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
             }
         }
     }
+}
+
+/// How long until the grant lapses, or `None` when it never does.
+///
+/// A deadline already in the past yields `Some(ZERO)` rather than `None`, so an
+/// expired grant closes the session at once instead of being served forever by a
+/// timer that was never set.
+fn grant_deadline(policy: &Policy) -> Option<Duration> {
+    let at = policy.expires_at?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some(Duration::from_millis(at.saturating_sub(now)))
+}
+
+/// Sleep for `after`, or never when there is nothing to wait for.
+///
+/// `None` has to park forever rather than return, because this sits in a `select!`:
+/// an arm that completes immediately would spin the loop at full speed for every
+/// connection whose grant does not expire — which is most of them.
+async fn maybe_sleep_until(after: Option<Duration>) {
+    match after {
+        Some(delay) => tokio::time::sleep(delay).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Why a stop signal fired.
+///
+/// `None` should not happen — the sender always supplies a reason — but defaulting
+/// to "turned off locally" is the honest answer for a signal with no reason
+/// attached, and it keeps this off the list of things that can panic.
+fn stopped_because(stop: &tokio::sync::watch::Receiver<Option<CloseReason>>) -> CloseReason {
+    (*stop.borrow()).unwrap_or(CloseReason::TurnedOffLocally)
 }
 
 /// The peer's static public key, hex — the form the pairing book and the UI both
@@ -550,6 +697,79 @@ fn jitter(ceiling: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    fn policy_expiring(at: Option<u64>) -> Policy {
+        Policy {
+            send_message: true,
+            steer: false,
+            interrupt: true,
+            set_mode: false,
+            approve_edit: false,
+            approve_bash: claudinio_protocol::inner::BashApproval::Never,
+            read_attachment: false,
+            export_file: false,
+            expires_at: at,
+        }
+    }
+
+    /// A grant with no expiry must not schedule one. The arm parks forever instead,
+    /// because an arm that completed immediately would spin the serve loop for every
+    /// connection that never expires — which is most of them.
+    #[test]
+    fn a_grant_without_an_expiry_has_no_deadline() {
+        assert_eq!(grant_deadline(&policy_expiring(None)), None);
+    }
+
+    #[test]
+    fn a_future_expiry_becomes_the_time_remaining() {
+        let deadline =
+            grant_deadline(&policy_expiring(Some(now_ms() + 60_000))).expect("there is a deadline");
+        assert!(deadline <= Duration::from_secs(60));
+        assert!(deadline > Duration::from_secs(55));
+    }
+
+    /// The one that matters. A grant that lapsed before the connection opened must
+    /// close it at once — `None` here would have meant "no timer", i.e. served
+    /// forever on an expired grant.
+    #[test]
+    fn an_expiry_already_past_closes_immediately() {
+        assert_eq!(
+            grant_deadline(&policy_expiring(Some(now_ms() - 10_000))),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn an_expiry_at_the_epoch_does_not_underflow() {
+        assert_eq!(
+            grant_deadline(&policy_expiring(Some(0))),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deadline_of_none_never_fires() {
+        let waited =
+            tokio::time::timeout(Duration::from_secs(86_400), maybe_sleep_until(None)).await;
+        assert!(waited.is_err(), "it should still be waiting a day later");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deadline_fires_when_it_is_due() {
+        let waited = tokio::time::timeout(
+            Duration::from_secs(120),
+            maybe_sleep_until(Some(Duration::from_secs(60))),
+        )
+        .await;
+        assert!(waited.is_ok());
+    }
 
     #[test]
     fn the_ceiling_doubles_from_the_base() {
