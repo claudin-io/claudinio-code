@@ -27,4 +27,8 @@ pub mod dedup;
 pub mod noise;
 pub mod pairing;
 pub mod policy;
+/// The phase-3 prova real's device half. Test-only: it drives the real stack against a
+/// real relay, which is the one thing units cannot do.
+#[cfg(test)]
+mod prova_real;
 pub mod transport;
