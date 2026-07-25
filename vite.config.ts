@@ -56,12 +56,20 @@ export default defineConfig(async () => ({
   test: {
     environment: "jsdom",
     globals: true,
-    include: ["src/**/*.test.{ts,tsx}", "packages/*/src/**/*.test.{ts,tsx}"],
+    include: [
+      "src/**/*.test.{ts,tsx}",
+      "packages/*/src/**/*.test.{ts,tsx}",
+      "apps/*/src/**/*.test.{ts,tsx}",
+    ],
     setupFiles: ["src/test-setup.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
-      include: ["src/**/*.{ts,tsx}", "packages/*/src/**/*.{ts,tsx}"],
+      include: [
+        "src/**/*.{ts,tsx}",
+        "packages/*/src/**/*.{ts,tsx}",
+        "apps/*/src/**/*.{ts,tsx}",
+      ],
       exclude: [
         "src/**/*.test.*",
         "src/vite-env.d.ts",

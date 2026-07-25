@@ -375,3 +375,49 @@ mod tests {
         assert!(ChannelId::from_hex(&"z".repeat(32)).is_err());
     }
 }
+
+#[cfg(test)]
+mod golden {
+    use super::*;
+
+    /// Prints a frame as hex, so the browser codec can be tested against bytes this
+    /// encoder actually produced rather than against the browser's own idea of the
+    /// format.
+    ///
+    /// Cross-language agreement is not something a round-trip test can show: two
+    /// implementations that agree with themselves and disagree with each other pass
+    /// every round trip. Run with `--ignored --nocapture` to regenerate.
+    #[test]
+    #[ignore = "prints a golden vector for apps/web/src/wire.test.ts"]
+    fn print_golden_frame() {
+        let frame = OuterFrame {
+            v: PROTOCOL_VERSION,
+            kind: OuterKind::Data,
+            channel: ChannelId::from_bytes([
+                0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45,
+                0x67, 0x89,
+            ]),
+            seq: 300,
+            ack: 7,
+            payload: serde_bytes::ByteBuf::from(vec![0xde, 0xad, 0xbe, 0xef]),
+        };
+        let bytes = encode(&frame).unwrap();
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        println!("GOLDEN_DATA_FRAME={hex}");
+
+        let hello = OuterFrame {
+            v: PROTOCOL_VERSION,
+            kind: OuterKind::Hello,
+            channel: ChannelId::from_bytes([0x11; 16]),
+            seq: 0,
+            ack: 0,
+            payload: serde_bytes::ByteBuf::from(vec![0u8; 48]),
+        };
+        let hex: String = encode(&hello)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("GOLDEN_HELLO_FRAME={hex}");
+    }
+}

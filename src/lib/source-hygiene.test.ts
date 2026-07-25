@@ -26,16 +26,18 @@ describe("source hygiene", () => {
     expect(offenders, `NUL byte(s) found in: ${offenders.join(", ")}`).toEqual([]);
   });
 
-  /// `packages/` is shared with the web peer at `app.claudin.io`, which has no
-  /// Tauri and no `src/`. An import of either compiles fine here and breaks only
-  /// over there — and at that point the cheapest-looking fix is to copy the file,
-  /// which is how a sanitizer ends up existing twice and diverging.
+  /// `packages/` is shared with the web peer, and `apps/web` *is* the web peer.
+  /// Neither has Tauri, and neither has `src/`.
   ///
-  /// The rule is stated in the package README. It is checked here because a
-  /// README does not fail a build.
-  it("nothing in packages/ reaches into the app", () => {
+  /// This is checked rather than left to the build for a specific reason: every
+  /// `@tauri-apps/*` module is mocked in `test-setup.ts`, so an import that would
+  /// fail in production passes silently in tests. Without this the failure surfaces
+  /// at deploy, and the cheapest-looking fix at that point is to copy a file — which
+  /// is how a sanitizer ends up existing twice and diverging.
+  it("nothing in packages/ or apps/ imports Tauri", () => {
     const offenders: string[] = [];
-    for (const file of walk(join(process.cwd(), "packages"))) {
+    const roots = ["packages", "apps"].map((dir) => join(process.cwd(), dir));
+    for (const file of roots.flatMap((root) => walk(root))) {
       const body = readFileSync(file, "utf8");
       // Covers `from "…"` and `import("…")`, which is every way a module
       // specifier names something outside the file.
