@@ -23,4 +23,6 @@
 pub mod bridge;
 pub mod dedup;
 pub mod noise;
+pub mod pairing;
+pub mod policy;
 pub mod transport;

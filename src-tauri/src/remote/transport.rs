@@ -20,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::bridge::{Bridge, DeviceActions};
 use super::dedup::CommandLog;
 use super::noise::{self, DeviceIdentity};
+use super::pairing::{Pairings, Refusal};
 use crate::agent::eventbus::EventBus;
 
 /// How often session keys are rolled. §6.1.
@@ -30,19 +31,48 @@ pub const REKEY_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Everything a connection needs. Bundled because threading nine arguments
 /// through a reconnect loop is how one of them ends up stale.
+///
+/// Note what is *not* here: the peer's label. It comes from the pairing book at
+/// handshake time, so a caller cannot pass one that disagrees with what the user
+/// named the device — and the transcript records the name the user chose rather
+/// than whatever the connection was started with.
 pub struct Connection<A: DeviceActions + Sync> {
     pub relay_url: String,
     pub channel: ChannelId,
     pub identity: Arc<DeviceIdentity>,
     pub session_id: String,
-    pub peer_label: String,
     pub policy: Policy,
     pub command_log: PathBuf,
     /// The session's JSONL. `Subscribe` is answered from this file, which is why
     /// the relay needs no durable storage of its own.
     pub store_path: PathBuf,
+    /// The pairing book, consulted at handshake time. On the device, so revocation
+    /// works with the relay unreachable — §6.5.
+    pub pairings_path: PathBuf,
+    /// Set only while the user is actively pairing a new peer.
+    ///
+    /// Without a window like this a device could never accept a first-time key,
+    /// and with a permanent one it would accept every key. The window is opened by
+    /// an explicit local action and closes on its own.
+    pub pairing_offer: Option<PairingOffer>,
     pub bus: EventBus,
     pub actions: A,
+}
+
+/// An open invitation for one new peer.
+///
+/// The relay already refuses an attach without the channel token, so a peer that
+/// got this far holds it. What this adds is the device's own consent: a first-time
+/// key is admitted once, inside a window the user opened, and the human check is
+/// the SAS both screens show.
+#[derive(Clone)]
+pub struct PairingOffer {
+    /// What to call the peer once it is paired.
+    pub label: String,
+    /// Unix millis. §6.3 gives a pairing code 120 s.
+    pub expires_at: u64,
+    /// How long the pairing itself lasts. `None` is a deliberate local choice.
+    pub pairing_expires_at: Option<u64>,
 }
 
 /// Dial the relay and serve one peer, reconnecting for as long as the caller
@@ -97,6 +127,11 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
     }
 
     let (mut session, msg2) = noise::accept(&connection.identity, &msg1)?;
+    let peer_label = admit(
+        &connection.pairings_path,
+        &session,
+        connection.pairing_offer.as_ref(),
+    )?;
     send_frame(
         &mut sink,
         connection.channel,
@@ -111,7 +146,7 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
 
     let mut bridge = Bridge::new(
         connection.session_id.clone(),
-        connection.peer_label.clone(),
+        peer_label.clone(),
         connection.policy.clone(),
         CommandLog::open(&connection.command_log),
         &connection.actions,
@@ -156,6 +191,13 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
                 // exactly that; `kind` exists so it is distinguishable.
                 if matches!(kind, OuterKind::Hello) {
                     let (fresh, msg2) = noise::accept(&connection.identity, &payload)?;
+                    // Checked again, not just on the first handshake: a peer
+                    // revoked while it was disconnected must not be let back in by
+                    // reconnecting.
+                    // No pairing offer on a re-handshake: an offer is consumed by
+                    // the peer it paired. Otherwise a single pairing window could
+                    // admit a different key on every reconnect.
+                    admit(&connection.pairings_path, &fresh, None)?;
                     send_frame(&mut sink, connection.channel, OuterKind::HelloAck, 0, 0, msg2)
                         .await?;
                     eprintln!("[remote] re-paired, SAS: {}", fresh.sas());
@@ -190,6 +232,65 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
                     send_message(&mut sink, connection.channel, &mut session, out_seq, &reply).await?;
                 }
             }
+        }
+    }
+}
+
+/// Is this peer still allowed in, and under what name?
+///
+/// Consulted after the handshake, because the peer's static key only becomes known
+/// once it completes. Reading the book from disk on every handshake rather than
+/// caching it is deliberate: a revocation made a moment ago has to take effect on
+/// the next connection, and a cache is how it would not.
+fn admit(
+    pairings_path: &PathBuf,
+    session: &noise::Session,
+    offer: Option<&PairingOffer>,
+) -> Result<String, String> {
+    let key = session
+        .peer_static()
+        .ok_or_else(|| "the peer sent no static key".to_string())?;
+    let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+
+    let mut pairings = Pairings::load(pairings_path)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // A first-time key, inside a window the user opened, becomes a pairing.
+    //
+    // Checked *after* `admit` below would have refused it, and only for `Unknown`
+    // — a revoked key is never re-admitted by pairing again, which would make
+    // revocation something a peer could undo by asking twice.
+    if let Some(offer) = offer.filter(|offer| now < offer.expires_at)
+        && matches!(pairings.admit(&key_hex, now), Err(Refusal::Unknown))
+    {
+        pairings.add(super::pairing::Pairing {
+            peer_key: key_hex.clone(),
+            label: offer.label.clone(),
+            paired_at: now,
+            expires_at: offer.pairing_expires_at,
+        })?;
+        eprintln!(
+            "[remote] paired a new peer as \"{}\" — confirm the SAS on both screens",
+            offer.label
+        );
+        return Ok(offer.label.clone());
+    }
+
+    match pairings.admit(&key_hex, now) {
+        Ok(pairing) => Ok(pairing.label.clone()),
+        // The reason is logged locally and not sent: a peer that could tell
+        // "revoked" from "unknown" learns whether it was ever paired.
+        Err(refusal) => {
+            let why = match refusal {
+                Refusal::Unknown => "not paired",
+                Refusal::Revoked => "revoked",
+                Refusal::Expired => "pairing expired",
+            };
+            eprintln!("[remote] refused a peer: {why}");
+            Err("peer refused".into())
         }
     }
 }

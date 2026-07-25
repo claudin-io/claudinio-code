@@ -65,6 +65,18 @@ pub fn run() {
             commands::remote::remote_create_identity,
             #[cfg(feature = "remote")]
             commands::remote::remote_enable,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_pairings,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_revoke,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_rename_pairing,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_revoked,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_unrevoke,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_policy,
             commands::clipboard::write_clipboard_blob,
             commands::git::git_status,
             commands::git::git_file_diff,

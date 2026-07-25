@@ -158,6 +158,119 @@ pub async fn remote_create_identity(_state: State<'_, AppState>) -> Result<Strin
     Ok(identity.public_hex())
 }
 
+/// Where the pairing book lives, next to the device key.
+fn pairings_path() -> Result<std::path::PathBuf, String> {
+    Ok(identity_path()?
+        .parent()
+        .ok_or_else(|| "no config directory".to_string())?
+        .join("remote")
+        .join("pairings.json"))
+}
+
+/// The paired peers, for the local list.
+#[tauri::command]
+pub async fn remote_pairings(
+    _state: State<'_, AppState>,
+) -> Result<Vec<crate::remote::pairing::Pairing>, String> {
+    Ok(crate::remote::pairing::Pairings::load(pairings_path()?)?
+        .list()
+        .to_vec())
+}
+
+/// Revoke a pairing.
+///
+/// Local only, and it takes effect without asking anyone: the book is on the
+/// device and is consulted at handshake time, so this works with the relay
+/// unreachable — which is the whole point of §6.5. A revocation that needed a
+/// server would fail exactly when someone needs it.
+#[tauri::command]
+pub async fn remote_revoke(peer_key: String, _state: State<'_, AppState>) -> Result<(), String> {
+    let mut pairings = crate::remote::pairing::Pairings::load(pairings_path()?)?;
+    pairings.revoke(&peer_key)
+}
+
+/// The keys that were paired and are not any more.
+///
+/// Shown so the local list can say "you revoked this" rather than making a
+/// revoked device look like a stranger, which reads like a bug.
+#[tauri::command]
+pub async fn remote_revoked(_state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(crate::remote::pairing::Pairings::load(pairings_path()?)?
+        .revoked()
+        .to_vec())
+}
+
+/// Un-revoke a key so it can be paired again.
+///
+/// Deliberately separate from pairing: if pairing silently un-revoked, a peer that
+/// simply kept trying would let itself back in, and revocation would be something
+/// the revoked party could undo.
+#[tauri::command]
+pub async fn remote_unrevoke(peer_key: String, _state: State<'_, AppState>) -> Result<(), String> {
+    let mut pairings = crate::remote::pairing::Pairings::load(pairings_path()?)?;
+    pairings.unrevoke(&peer_key)
+}
+
+/// Rename a pairing, so the list reads as prose rather than as key material.
+#[tauri::command]
+pub async fn remote_rename_pairing(
+    peer_key: String,
+    label: String,
+    _state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut pairings = crate::remote::pairing::Pairings::load(pairings_path()?)?;
+    pairings.rename(&peer_key, &label)
+}
+
+/// The effective policy, for the local editor to show.
+///
+/// Read-only here as everywhere: widening happens by editing the file through the
+/// local UI, never through an IPC call a compromised webview could make.
+#[tauri::command]
+pub async fn remote_policy(_state: State<'_, AppState>) -> Result<PolicyView, String> {
+    use crate::remote::policy::{Effective, Inert, StoredPolicy};
+
+    let path = identity_path()?
+        .parent()
+        .ok_or_else(|| "no config directory".to_string())?
+        .join("remote-policy.json");
+
+    let stored = StoredPolicy::load(&path)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let effective = stored.effective(now);
+    Ok(PolicyView {
+        path: path.to_string_lossy().to_string(),
+        active: effective.is_active(),
+        inert_because: match &effective {
+            Effective::Active(_) => None,
+            Effective::Nothing(Inert::Disabled) => Some("remote access is switched off".into()),
+            Effective::Nothing(Inert::Expired) => Some("the grant has expired".into()),
+        },
+        effective: effective.wire(),
+        workspaces: stored.workspaces.clone(),
+        bash_denylist: stored.remote_bash_denylist(),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyView {
+    /// Shown so the user knows which file to edit — §6.4 is edited locally, by
+    /// hand or through the panel, and never over IPC.
+    pub path: String,
+    pub active: bool,
+    /// Why nothing is granted, when nothing is granted. Better than an empty
+    /// panel that looks broken.
+    pub inert_because: Option<String>,
+    pub effective: claudinio_protocol::inner::Policy,
+    pub workspaces: Vec<String>,
+    pub bash_denylist: Vec<String>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnableArgs {
@@ -170,6 +283,14 @@ pub struct EnableArgs {
     pub session_id: String,
     /// How this peer appears in the transcript: "Safari on iPhone".
     pub peer_label: String,
+    /// Set when this connection is meant to pair a new peer rather than serve an
+    /// already-paired one. Opening the window is an explicit local action.
+    #[serde(default)]
+    pub pair_new_peer: bool,
+    /// Unix millis after which the *pairing* lapses. `None` means it does not,
+    /// which the local UI has to choose deliberately.
+    #[serde(default)]
+    pub pairing_expires_at: Option<u64>,
 }
 
 /// Start serving a paired peer for one session.
@@ -198,21 +319,78 @@ pub async fn remote_enable(args: EnableArgs, state: State<'_, AppState>) -> Resu
         }
     };
 
+    // Two refusals before anything is opened.
+    //
+    // An inert policy refuses outright rather than opening a channel that will deny
+    // everything: a peer that connects and then finds it can do nothing cannot tell
+    // that from a bug. And a workspace the policy does not list is refused here,
+    // which is what makes the `workspaces` field a boundary rather than a note —
+    // without this check a peer could be served any session the app had open.
+    let effective_policy = {
+        use crate::remote::policy::StoredPolicy;
+        let policy_path = identity_path()?
+            .parent()
+            .ok_or_else(|| "no config directory".to_string())?
+            .join("remote-policy.json");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let stored = StoredPolicy::load(&policy_path)?;
+        let effective = stored.effective(now_ms);
+        if !effective.is_active() {
+            return Err("remote access is not enabled locally; edit the policy first".into());
+        }
+        if !stored.allows_workspace(std::path::Path::new(&args.workspace)) {
+            return Err(format!(
+                "{} is not on the policy's workspace allowlist",
+                args.workspace
+            ));
+        }
+        // The policy the file actually grants, not the all-denying default. It was
+        // proved active just above, so serving less than it says would be a second,
+        // quieter policy nobody wrote.
+        effective.wire()
+    };
+
     let command_log = identity_path()?
         .parent()
         .ok_or_else(|| "no config directory".to_string())?
         .join("remote")
         .join(format!("{}.commands.jsonl", args.channel));
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
     let connection = crate::remote::transport::Connection {
         relay_url: args.relay_url,
         channel,
         identity,
         session_id: args.session_id,
-        peer_label: args.peer_label,
-        policy: claudinio_protocol::inner::Policy::default(),
+        // The policy the file actually grants, not the all-denying default. It was
+        // already proved active above, so serving less than it says would be a
+        // second, quieter policy nobody wrote.
+        policy: effective_policy,
+        pairing_offer: args.pair_new_peer.then(|| {
+            crate::remote::transport::PairingOffer {
+                label: args.peer_label.clone(),
+                // §6.3: a pairing code is good for 120 s. Long enough to read
+                // across a desk, short enough that a screen left unlocked is not
+                // an open door.
+                expires_at: now + crate::remote::pairing::TOKEN_TTL_MS,
+                pairing_expires_at: args.pairing_expires_at,
+            }
+        }),
         command_log,
         store_path,
+        pairings_path: identity_path()?
+            .parent()
+            .ok_or_else(|| "no config directory".to_string())?
+            .join("remote")
+            .join("pairings.json"),
         bus,
         actions: AppActions::new(&state),
     };
