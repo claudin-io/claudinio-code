@@ -222,6 +222,48 @@ pub async fn remote_rename_pairing(
     pairings.rename(&peer_key, &label)
 }
 
+/// Where the policy file lives.
+fn policy_path() -> Result<std::path::PathBuf, String> {
+    Ok(identity_path()?
+        .parent()
+        .ok_or_else(|| "no config directory".to_string())?
+        .join("remote-policy.json"))
+}
+
+/// Write the policy, from the local UI.
+///
+/// # Why the writer is here and not in `remote/policy.rs`
+///
+/// I4 says a peer can never widen its own policy, and §6.4 says the policy is
+/// edited only through the local UI. Both are true at once because of where this
+/// function lives, not because of a check inside it.
+///
+/// `remote/` is what the bridge can reach, and it has no writer at all — a peer's
+/// command cannot call something that does not exist in its dependency graph. This
+/// module is the local IPC adapter: reachable from the webview on the machine,
+/// never from a frame off the wire. The boundary is the module graph, which is why
+/// there is an architecture test about it rather than a comment.
+#[tauri::command]
+pub async fn remote_set_policy(
+    policy: crate::remote::policy::StoredPolicy,
+    _state: State<'_, AppState>,
+) -> Result<(), String> {
+    let path = policy_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create config dir: {e}"))?;
+    }
+    let body =
+        serde_json::to_string_pretty(&policy).map_err(|e| format!("serialize policy: {e}"))?;
+
+    // Through a temporary and renamed, so a crash mid-write cannot leave a file
+    // that fails to parse — which would lock the user out of their own remote
+    // access until they found and fixed it by hand.
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, &body).map_err(|e| format!("write policy: {e}"))?;
+    std::fs::rename(&temp, &path).map_err(|e| format!("replace policy: {e}"))?;
+    Ok(())
+}
+
 /// The effective policy, for the local editor to show.
 ///
 /// Read-only here as everywhere: widening happens by editing the file through the
@@ -230,11 +272,7 @@ pub async fn remote_rename_pairing(
 pub async fn remote_policy(_state: State<'_, AppState>) -> Result<PolicyView, String> {
     use crate::remote::policy::{Effective, Inert, StoredPolicy};
 
-    let path = identity_path()?
-        .parent()
-        .ok_or_else(|| "no config directory".to_string())?
-        .join("remote-policy.json");
-
+    let path = policy_path()?;
     let stored = StoredPolicy::load(&path)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -328,10 +366,7 @@ pub async fn remote_enable(args: EnableArgs, state: State<'_, AppState>) -> Resu
     // without this check a peer could be served any session the app had open.
     let effective_policy = {
         use crate::remote::policy::StoredPolicy;
-        let policy_path = identity_path()?
-            .parent()
-            .ok_or_else(|| "no config directory".to_string())?
-            .join("remote-policy.json");
+        let policy_path = policy_path()?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

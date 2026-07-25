@@ -1000,3 +1000,79 @@ export interface AskpassRequest {
 export function answerAskpass(id: number, secret: string | null): Promise<void> {
   return invoke("answer_askpass", { id, secret });
 }
+
+// --- remote access ---------------------------------------------------------
+//
+// Every one of these is local-only IPC. There is deliberately no `setPolicy` on
+// the wire the peer speaks: a policy a peer could widen is a policy a compromised
+// peer grants itself. See remote/policy.rs.
+
+export type BashApproval = "never" | "allowlist" | "always";
+
+export interface RemotePolicy {
+  send_message: boolean;
+  steer: boolean;
+  interrupt: boolean;
+  set_mode: boolean;
+  approve_edit: boolean;
+  approve_bash: BashApproval;
+  read_attachment: boolean;
+  export_file: boolean;
+  expires_at?: number | null;
+}
+
+export interface RemotePolicyView {
+  /// Shown so the user knows which file to edit.
+  path: string;
+  active: boolean;
+  /// Why nothing is granted, when nothing is granted.
+  inertBecause: string | null;
+  effective: RemotePolicy;
+  workspaces: string[];
+  bashDenylist: string[];
+}
+
+export interface Pairing {
+  peer_key: string;
+  label: string;
+  paired_at: number;
+  expires_at: number | null;
+}
+
+export interface RemoteStatus {
+  enabled: boolean;
+  deviceKey: string | null;
+  error: string | null;
+}
+
+export async function remoteStatus(): Promise<RemoteStatus> {
+  return invoke<RemoteStatus>("remote_status");
+}
+
+export async function remoteCreateIdentity(): Promise<string> {
+  return invoke<string>("remote_create_identity");
+}
+
+export async function remotePolicy(): Promise<RemotePolicyView> {
+  return invoke<RemotePolicyView>("remote_policy");
+}
+
+export async function remotePairings(): Promise<Pairing[]> {
+  return invoke<Pairing[]>("remote_pairings");
+}
+
+export async function remoteRevoked(): Promise<string[]> {
+  return invoke<string[]>("remote_revoked");
+}
+
+export async function remoteRevoke(peerKey: string): Promise<void> {
+  return invoke<void>("remote_revoke", { peerKey });
+}
+
+export async function remoteUnrevoke(peerKey: string): Promise<void> {
+  return invoke<void>("remote_unrevoke", { peerKey });
+}
+
+export async function remoteRenamePairing(peerKey: string, label: string): Promise<void> {
+  return invoke<void>("remote_rename_pairing", { peerKey, label });
+}

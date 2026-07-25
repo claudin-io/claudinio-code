@@ -15,9 +15,13 @@
 //!
 //! **A peer can never widen its own policy.** That is invariant I4, and it is
 //! enforced by absence: this module can load and evaluate, and there is no
-//! function that writes. Widening happens through the local UI, on the machine, or
-//! not at all — because the first thing a compromised peer would do is grant
-//! itself everything.
+//! function that writes.
+//!
+//! The writer lives in `commands/remote.rs`, the local IPC adapter, and the
+//! separation is the whole mechanism. `remote/` is what the bridge can reach, so a
+//! command arriving off the wire cannot call something that is not in its
+//! dependency graph. The local webview can, because it is on the machine. The
+//! boundary is the module graph rather than a flag someone could get wrong.
 
 use std::path::Path;
 
@@ -473,8 +477,9 @@ mod tests {
     }
 
     /// I4, stated as a test so it is not only a comment: this module has no way to
-    /// widen a policy. If a `save` ever appears here, the reviewer should have to
-    /// delete this test to add it.
+    /// widen a policy. The writer is in `commands/remote.rs`, which the bridge
+    /// cannot reach. If a `save` ever appears *here*, the reviewer has to delete
+    /// this test to add it, and that is the point of it existing.
     #[test]
     fn this_module_cannot_write_a_policy() {
         // Deliberately not a runtime assertion — there is nothing to call. The
