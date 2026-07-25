@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Mobile first, and `viewport-fit=cover` because a phone in one hand is the
+         target: the safe-area insets in style.css depend on it. `user-scalable` is
+         left alone on purpose — pinching a diff is exactly what someone will do. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0b0b0c" />
+
+    <!--
+      Content Security Policy.
+
+      §10 of the plan names XSS on this origin as a high risk, and it is right to: this
+      page renders model output, and it holds the key that drives someone's machine.
+
+      `connect-src` allows any `wss:` rather than one host. The relay URL arrives in
+      the pairing code and §1.1 requires that claudin.io never be a hard dependency —
+      a policy naming one relay would make self-hosting impossible. Plain `ws:` is
+      still refused, which is the part that matters: the pairing module refuses it too,
+      and this is the belt to that brace.
+
+      No `'unsafe-inline'` anywhere, which is why there is no inline script and no
+      inline style in this file.
+
+      `frame-ancestors` is absent because it is ignored in a meta tag. It belongs in
+      the response header, along with the rest — see the deployment notes in
+      README.md. It matters: this page must not be embeddable, or the origin boundary
+      that keeps it away from the dashboard's session becomes decorative.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+
+    <!-- The pairing code is in the fragment, which is never sent to a server — but a
+         referrer would leak the page URL to anything this links to. Nothing needs it. -->
+    <meta name="referrer" content="no-referrer" />
+
+    <title>Claudinio Code — remote</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,140 @@
+/* Mobile first, and only that for now: this is the bare page that proves the
+   transport works. The real timeline arrives with @claudinio/timeline-ui.
+
+   No CSS framework, because the CSP forbids inline styles and a utility framework
+   here would be a build dependency for four screens of text. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #16161a;
+  --muted: #5c5c66;
+  --faint: #8a8a94;
+  --line: #e4e4e8;
+  --surface: #f6f6f8;
+  --accent: #b4530a;
+  --danger: #b42318;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0b0c;
+    --fg: #ececf0;
+    --muted: #a0a0aa;
+    --faint: #70707a;
+    --line: #26262c;
+    --surface: #15151a;
+    --accent: #e8934a;
+    --danger: #f97066;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  /* Prevents the whole page bouncing on iOS while an inner list scrolls. */
+  overscroll-behavior-y: none;
+}
+
+.page {
+  /* The insets keep the words and the buttons out from under a notch and a home
+     indicator, which is where a phone in one hand puts them. */
+  padding: max(1rem, env(safe-area-inset-top)) 1rem max(1rem, env(safe-area-inset-bottom));
+  max-width: 44rem;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  margin: 0 0 0.25rem;
+}
+
+p {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.faint {
+  color: var(--faint);
+  font-size: 0.8125rem;
+}
+
+.danger {
+  color: var(--danger);
+}
+
+/* The three words. Deliberately the largest thing on the screen: this is the one
+   moment the user is being asked to do security work, and it has to be readable
+   across a desk without leaning in. */
+.sas {
+  font: 600 1.75rem/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.01em;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+button {
+  /* 44px, which is the smallest thing a thumb hits reliably. */
+  min-height: 2.75rem;
+  flex: 1 1 10rem;
+  padding: 0.625rem 1rem;
+  font: inherit;
+  font-size: 0.9375rem;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.625rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.refuse {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+/* Neither confirmation button is styled as the obvious one. The dangerous mistake
+   here is agreeing without looking, so nothing invites a habitual tap. */
+
+.records {
+  margin-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.record {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--line);
+  font: 0.8125rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.count {
+  color: var(--faint);
+  font-size: 0.75rem;
+  padding: 0.5rem 0;
+}
