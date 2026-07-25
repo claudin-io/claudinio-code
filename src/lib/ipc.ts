@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
@@ -911,4 +912,59 @@ export async function remoteUnrevoke(peerKey: string): Promise<void> {
 
 export async function remoteRenamePairing(peerKey: string, label: string): Promise<void> {
   return invoke<void>("remote_rename_pairing", { peerKey, label });
+}
+
+/// A pairing window, and the code that fills it.
+export interface PairingCodeView {
+  /// What the QR encodes. Shown as text too: a camera is not always the way in.
+  url: string;
+  channel: string;
+  deviceKey: string;
+  /// Unix millis. The *code* lapses here — the pairing it creates does not.
+  expiresAt: number;
+  /// An SVG document, rendered on the device. Put in an `<img src="data:...">`
+  /// rather than through innerHTML: nothing user-supplied reaches the markup, but
+  /// an `<img>` cannot execute script even if that stopped being true.
+  qrSvg: string;
+}
+
+/// Where the relay lives. Overridable per call for a self-hosted one.
+export const DEFAULT_RELAY_URL = "wss://relay.claudin.io/ws";
+
+export interface StartPairingArgs {
+  relayUrl: string;
+  /// The session is not named: the device resolves the workspace's active one,
+  /// which is the only one it would agree to serve anyway.
+  workspace: string;
+  peerLabel: string;
+  /// `null` means the pairing never lapses, which the UI has to choose on purpose.
+  pairingExpiresAt?: number | null;
+  webOrigin?: string | null;
+}
+
+export async function remoteStartPairing(args: StartPairingArgs): Promise<PairingCodeView> {
+  return invoke<PairingCodeView>("remote_start_pairing", { args });
+}
+
+/// Answer "do these three words match?".
+///
+/// `false` revokes the key. The pairing is written before the words reach a
+/// screen, so refusing has to be stronger than not-pairing — otherwise the key
+/// that failed the check pairs again on the next attempt.
+export async function remoteConfirmPairing(peerKey: string, matched: boolean): Promise<void> {
+  return invoke<void>("remote_confirm_pairing", { peerKey, matched });
+}
+
+/// Something the local user needs to see about a remote peer. Never anything the
+/// peer said — these come from the transport, not across the wire.
+export type RemoteNotice =
+  /// Two screens are showing three words each. Nothing is served until an answer.
+  | { kind: "confirmPairing"; peerKey: string; label: string; sas: string }
+  | { kind: "paired"; peerKey: string; label: string }
+  /// The words did not match, or nobody answered. The key is already revoked.
+  | { kind: "pairingRefused"; peerKey: string }
+  | { kind: "connected"; peerKey: string; label: string; sas: string };
+
+export async function onRemoteNotice(handler: (notice: RemoteNotice) => void): Promise<() => void> {
+  return listen<RemoteNotice>("remote://notice", (event) => handler(event.payload));
 }

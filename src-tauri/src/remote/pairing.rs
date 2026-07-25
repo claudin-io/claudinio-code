@@ -210,9 +210,7 @@ pub const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// were decoration.
 #[derive(Default)]
 pub struct Confirmations {
-    inner: std::sync::Mutex<
-        std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>,
-    >,
+    inner: std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
 impl Confirmations {
@@ -264,7 +262,10 @@ impl Confirmations {
     /// safe answer is the default rather than something a caller has to remember
     /// to handle.
     pub async fn wait(rx: tokio::sync::oneshot::Receiver<bool>) -> bool {
-        matches!(tokio::time::timeout(CONFIRM_TIMEOUT, rx).await, Ok(Ok(true)))
+        matches!(
+            tokio::time::timeout(CONFIRM_TIMEOUT, rx).await,
+            Ok(Ok(true))
+        )
     }
 }
 

@@ -1,4 +1,4 @@
-import { Component, For, Show, createSignal, type Accessor } from "solid-js";
+import { Component, For, Show, createSignal, type Accessor, type JSX } from "solid-js";
 import type { Pairing, RemotePolicyView } from "../../lib/ipc";
 
 interface SettingsRemoteProps {
@@ -12,6 +12,12 @@ interface SettingsRemoteProps {
   onRevoke: (peerKey: string) => void;
   onUnrevoke: (peerKey: string) => void;
   onRename: (peerKey: string, label: string) => void;
+  /// The pairing flow, slotted in high on the page rather than appended.
+  ///
+  /// A slot because the word check has to be the first thing visible when it
+  /// appears: on a phone, a confirmation prompt below the policy list and the
+  /// paired-browser list is a confirmation prompt off the bottom of the screen.
+  pairing?: JSX.Element;
 }
 
 /// A key is 64 hex characters, which is unreadable and also the thing the user has
@@ -106,6 +112,8 @@ export const SettingsRemote: Component<SettingsRemoteProps> = (props) => {
           )}
         </Show>
       </div>
+
+      {props.pairing}
 
       {/* Policy. Read-only here: it is edited by hand, and the panel says where. */}
       <Show when={props.policy()}>

@@ -21,6 +21,7 @@
 //! ```
 
 pub mod bridge;
+pub mod code;
 pub mod dedup;
 pub mod noise;
 pub mod pairing;

@@ -347,6 +347,20 @@ pub async fn remote_enable(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    open_connection(args, app, state).await
+}
+
+/// The body both `remote_enable` and `remote_start_pairing` run.
+///
+/// Shared rather than duplicated because every refusal in here — inert policy,
+/// workspace off the allowlist, a session that is not the workspace's active one —
+/// has to apply to pairing too. A second copy is a second place for one of them to
+/// go missing, and the one that went missing would be the one that mattered.
+async fn open_connection(
+    args: EnableArgs,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     use claudinio_protocol::wire::ChannelId;
 
     let channel = ChannelId::from_hex(&args.channel).map_err(|e| e.to_string())?;
@@ -443,6 +457,107 @@ pub async fn remote_enable(
     // being down, which is a retry loop rather than an error (I8).
     tokio::spawn(crate::remote::transport::run(connection));
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartPairingArgs {
+    pub relay_url: String,
+    pub workspace: String,
+    /// How the new peer will appear in the transcript. Chosen before pairing
+    /// rather than after, so the name is the user's rather than a browser's
+    /// user-agent string.
+    pub peer_label: String,
+    /// When the pairing itself lapses. `None` means never, which the UI has to
+    /// choose deliberately — §6.3 wants every grant to expire by default.
+    #[serde(default)]
+    pub pairing_expires_at: Option<u64>,
+    /// Overridable for a self-hosted web app. Defaults to app.claudin.io.
+    #[serde(default)]
+    pub web_origin: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingCodeView {
+    /// What the QR encodes, shown as text too — a camera is not always the way in.
+    pub url: String,
+    pub channel: String,
+    pub device_key: String,
+    /// Unix millis. The *code* expires here; the pairing it creates does not.
+    pub expires_at: u64,
+    pub qr_svg: String,
+}
+
+/// Open a pairing window and return the code that fills it.
+///
+/// One command rather than "mint a code" and "start serving", because a code
+/// nobody is listening for is a QR that silently does nothing, and a listener with
+/// no code is a channel waiting for a stranger.
+///
+/// The window closes on its own after `TOKEN_TTL_MS`. Pairing does not complete
+/// here: the connection stops after the handshake and waits for the user to
+/// compare the words.
+#[tauri::command]
+pub async fn remote_start_pairing(
+    args: StartPairingArgs,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<PairingCodeView, String> {
+    use crate::remote::code::{DEFAULT_WEB_ORIGIN, PairingCode};
+
+    // Resolved here rather than passed in. The webview does not track which
+    // session is active — that lives inside the chat panel — and `open_connection`
+    // would refuse anything but this one anyway, so asking a caller for it is a
+    // question with exactly one right answer.
+    let session_id = {
+        let ws = state.workspace(&args.workspace).await?;
+        let active = ws.active_session.lock().await;
+        match active.as_ref() {
+            Some(handle) => handle.id.clone(),
+            None => return Err("that workspace has no open session to share".into()),
+        }
+    };
+
+    let identity = DeviceIdentity::load_or_create(&identity_path()?)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let code = PairingCode::mint(
+        identity.public_hex(),
+        args.relay_url.clone(),
+        now + crate::remote::pairing::TOKEN_TTL_MS,
+    )?;
+
+    let origin = args.web_origin.as_deref().unwrap_or(DEFAULT_WEB_ORIGIN);
+    let view = PairingCodeView {
+        url: code.url(origin),
+        channel: code.channel.to_hex(),
+        device_key: code.device_key.clone(),
+        expires_at: code.expires_at,
+        qr_svg: code.qr_svg(origin)?,
+    };
+
+    // Listening starts only after the code rendered. A QR shown for a channel
+    // that failed to open would be a code the user reads out for nothing.
+    open_connection(
+        EnableArgs {
+            relay_url: args.relay_url,
+            workspace: args.workspace,
+            channel: view.channel.clone(),
+            session_id,
+            peer_label: args.peer_label,
+            pair_new_peer: true,
+            pairing_expires_at: args.pairing_expires_at,
+        },
+        app,
+        state,
+    )
+    .await?;
+
+    Ok(view)
 }
 
 /// The event a notice arrives on in the webview.

@@ -155,9 +155,7 @@ pub async fn run<A: DeviceActions + Sync>(connection: Connection<A>) {
 }
 
 /// One connection, from dial to disconnect.
-async fn serve_once<A: DeviceActions + Sync>(
-    connection: &Connection<A>,
-) -> Result<Served, String> {
+async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Result<Served, String> {
     let url = format!(
         "{}?channel={}&role=device",
         connection.relay_url, connection.channel

@@ -1,9 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createRoot } from "solid-js";
+import { createRoot, type Accessor } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { createRemoteSettings, type RemoteSettings } from "./createRemoteSettings";
+import type { RemoteNotice } from "./ipc";
 
 const mocked = vi.mocked(invoke);
+
+/// Captures the notice handler the hook registers, so a test can play the device's
+/// part and emit one.
+function captureNotices(): { emit: (notice: RemoteNotice) => void } {
+  let handler: ((event: { payload: RemoteNotice }) => void) | undefined;
+  vi.mocked(listen).mockImplementation(async (_event, cb) => {
+    handler = cb as (event: { payload: RemoteNotice }) => void;
+    return () => {};
+  });
+  return {
+    emit: (notice) => {
+      if (!handler) throw new Error("the hook did not subscribe to notices");
+      handler({ payload: notice });
+    },
+  };
+}
 
 /// Answers keyed by command name. A command with no answer here rejects, which is
 /// how the "not compiled in" case is expressed.
@@ -49,12 +67,18 @@ const pairing = (over: Record<string, unknown> = {}) => ({
 });
 
 /// Runs `body` inside a root so signals have an owner, and disposes it after.
-async function withSettings(body: (s: RemoteSettings) => Promise<void>) {
+async function withSettings(
+  body: (s: RemoteSettings) => Promise<void>,
+  workspace: Accessor<string | null> = () => "/Users/v/work",
+) {
   let dispose = () => {};
   const settings = createRoot((d) => {
     dispose = d;
-    return createRemoteSettings();
+    return createRemoteSettings(workspace);
   });
+  // The notice subscription is a promise the hook does not expose, so give it a
+  // turn to land before a test plays the device's part.
+  await settle();
   try {
     await body(settings);
   } finally {
@@ -68,6 +92,7 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
   mocked.mockReset();
+  vi.mocked(listen).mockReset().mockResolvedValue(() => {});
 });
 
 describe("createRemoteSettings", () => {
@@ -285,6 +310,246 @@ describe("createRemoteSettings", () => {
       await settle();
 
       expect(revokes).toBe(1);
+    });
+  });
+
+  // --- pairing -------------------------------------------------------------
+
+  const pairingAnswers = () => ({
+    remote_status: status(),
+    remote_policy: policy(),
+    remote_pairings: [],
+    remote_revoked: [],
+  });
+
+  const code = () => ({
+    url: "https://app.claudin.io/#c=abab&k=cdcd&r=wss%3A%2F%2Fr&e=1",
+    channel: "ab".repeat(16),
+    deviceKey: "cd".repeat(32),
+    expiresAt: 1_800_000_120_000,
+    qrSvg: "<svg/>",
+  });
+
+  /// Generating a key is a separate deliberate act, so the panel has to say that
+  /// is what is missing rather than offering a button that cannot work.
+  it("will not pair without a device key", async () => {
+    respond({ ...pairingAnswers(), remote_status: status({ deviceKey: null }) });
+    await withSettings(async (s) => {
+      await s.probe();
+      expect(s.blocked()).toContain("device key");
+    });
+  });
+
+  /// A browser drives a session, and there is no session without a workspace.
+  it("will not pair with no workspace open", async () => {
+    respond(pairingAnswers());
+    await withSettings(
+      async (s) => {
+        await s.probe();
+        expect(s.blocked()).toContain("Open a workspace");
+      },
+      () => null,
+    );
+  });
+
+  it("is ready to pair once there is a key and a workspace", async () => {
+    respond(pairingAnswers());
+    await withSettings(async (s) => {
+      await s.probe();
+      expect(s.blocked()).toBeNull();
+    });
+  });
+
+  it("asks the device for a code and shows it", async () => {
+    respond({ ...pairingAnswers(), remote_start_pairing: code() });
+    await withSettings(async (s) => {
+      await s.probe();
+
+      s.startPairing("Safari on iPhone");
+      await settle();
+
+      expect(s.code()?.channel).toBe("ab".repeat(16));
+      const call = mocked.mock.calls.find((c) => c[0] === "remote_start_pairing");
+      expect(call?.[1]).toMatchObject({
+        args: { workspace: "/Users/v/work", peerLabel: "Safari on iPhone" },
+      });
+    });
+  });
+
+  /// §6.3 wants every grant to expire. A pairing that outlives the reason it was
+  /// made is the one nobody remembers to revoke.
+  it("gives the pairing an expiry rather than leaving it open-ended", async () => {
+    respond({ ...pairingAnswers(), remote_start_pairing: code() });
+    await withSettings(async (s) => {
+      await s.probe();
+      s.startPairing("iPhone");
+      await settle();
+
+      const call = mocked.mock.calls.find((c) => c[0] === "remote_start_pairing");
+      const expires = (call?.[1] as { args: { pairingExpiresAt: number } }).args
+        .pairingExpiresAt;
+      expect(expires).toBeGreaterThan(Date.now());
+    });
+  });
+
+  /// The words replace the code. Leaving the QR on screen gives someone something
+  /// else to look at while the only thing that matters goes unanswered.
+  it("swaps the code for the words when the device asks for a check", async () => {
+    const notices = captureNotices();
+    respond({ ...pairingAnswers(), remote_start_pairing: code() });
+    await withSettings(async (s) => {
+      await s.probe();
+      s.startPairing("iPhone");
+      await settle();
+      expect(s.code()).not.toBeNull();
+
+      notices.emit({
+        kind: "confirmPairing",
+        peerKey: "11".repeat(32),
+        label: "iPhone",
+        sas: "basalt · dahlia · fathom",
+      });
+      await settle();
+
+      expect(s.code()).toBeNull();
+      expect(s.pending()?.sas).toBe("basalt · dahlia · fathom");
+    });
+  });
+
+  it("sends the answer for the key that is waiting", async () => {
+    const notices = captureNotices();
+    respond({ ...pairingAnswers(), remote_confirm_pairing: null });
+    await withSettings(async (s) => {
+      await s.probe();
+      notices.emit({
+        kind: "confirmPairing",
+        peerKey: "11".repeat(32),
+        label: "iPhone",
+        sas: "a · b · c",
+      });
+      await settle();
+
+      s.confirmPairing(true);
+      await settle();
+
+      expect(mocked).toHaveBeenCalledWith("remote_confirm_pairing", {
+        peerKey: "11".repeat(32),
+        matched: true,
+      });
+    });
+  });
+
+  /// The answer is one-shot on the device. A second click would come back with
+  /// "nothing is waiting for confirmation", which reads as a bug.
+  it("cannot be answered twice", async () => {
+    const notices = captureNotices();
+    respond({ ...pairingAnswers(), remote_confirm_pairing: null });
+    await withSettings(async (s) => {
+      await s.probe();
+      notices.emit({
+        kind: "confirmPairing",
+        peerKey: "11".repeat(32),
+        label: "iPhone",
+        sas: "a · b · c",
+      });
+      await settle();
+
+      s.confirmPairing(true);
+      s.confirmPairing(true);
+      await settle();
+
+      const answers = mocked.mock.calls.filter((c) => c[0] === "remote_confirm_pairing");
+      expect(answers).toHaveLength(1);
+      expect(s.pending()).toBeNull();
+    });
+  });
+
+  it("reports a pairing that completed, and reloads the list", async () => {
+    const notices = captureNotices();
+    respond({
+      ...pairingAnswers(),
+      remote_pairings: [pairing({ label: "iPhone" })],
+    });
+    await withSettings(async (s) => {
+      await s.probe();
+
+      notices.emit({ kind: "paired", peerKey: "11".repeat(32), label: "iPhone" });
+      await settle();
+
+      expect(s.outcome()).toEqual({ kind: "paired", label: "iPhone" });
+      expect(s.pending()).toBeNull();
+      expect(s.pairings()).toHaveLength(1);
+    });
+  });
+
+  /// A refusal revokes on the device, so the revoked list has to be reloaded or the
+  /// panel will not show why the browser cannot simply scan again.
+  it("reports a refusal and reloads the revoked list", async () => {
+    const notices = captureNotices();
+    respond({ ...pairingAnswers(), remote_revoked: ["11".repeat(32)] });
+    await withSettings(async (s) => {
+      await s.probe();
+
+      notices.emit({ kind: "pairingRefused", peerKey: "11".repeat(32) });
+      await settle();
+
+      expect(s.outcome()).toEqual({ kind: "refused" });
+      expect(s.revoked()).toEqual(["11".repeat(32)]);
+    });
+  });
+
+  /// An already-paired browser reconnecting is not a pairing. Prompting for the
+  /// words every time would teach the user to click through them.
+  it("does not ask for a word check when a paired browser reconnects", async () => {
+    const notices = captureNotices();
+    respond(pairingAnswers());
+    await withSettings(async (s) => {
+      await s.probe();
+
+      notices.emit({
+        kind: "connected",
+        peerKey: "11".repeat(32),
+        label: "iPhone",
+        sas: "a · b · c",
+      });
+      await settle();
+
+      expect(s.pending()).toBeNull();
+      expect(s.outcome()).toBeNull();
+    });
+  });
+
+  it("clears a stale outcome when a new pairing starts", async () => {
+    const notices = captureNotices();
+    respond({ ...pairingAnswers(), remote_start_pairing: code() });
+    await withSettings(async (s) => {
+      await s.probe();
+      notices.emit({ kind: "pairingRefused", peerKey: "11".repeat(32) });
+      await settle();
+      expect(s.outcome()).not.toBeNull();
+
+      s.startPairing("second try");
+      await settle();
+
+      expect(s.outcome()).toBeNull();
+    });
+  });
+
+  it("surfaces a device that refuses to start pairing", async () => {
+    respond({
+      ...pairingAnswers(),
+      remote_start_pairing: () => {
+        throw new Error("that workspace has no open session to share");
+      },
+    });
+    await withSettings(async (s) => {
+      await s.probe();
+
+      s.startPairing("iPhone");
+      await settle();
+
+      expect(s.error()).toContain("no open session");
+      expect(s.code()).toBeNull();
     });
   });
 });

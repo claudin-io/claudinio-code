@@ -76,9 +76,41 @@ right, it is recorded here rather than left buried in a commit message.
 | §8 Phase 1 | four items | Five. Event buses had to be keyed by session in a registry, or a second watcher could never find a running one — which is also the first thing the bridge needs. |
 | §5.3 | a shared `Actor` | Deliberately **duplicated**. The agent owns the concept of who answered a gate; the protocol crate owns its wire form. Making `agent/` depend on the remote protocol to express a *local* approval would be the agent knowing remote access exists, which §4.1 forbids. The conversion lives in `remote/`, which may know both, and is tested there. |
 
-Two temporary `#[allow(dead_code)]` suppressions exist while their consumers are
-still being written — `persist::SeqRecord::seq` and the `remote/` module. Both
-carry their reason in the code, and both come off with `remote/bridge.rs`.
+| §6.3 | "confirm the SAS on both screens" | The SAS had to become a **gate**, not a display. As first built it went to `eprintln!` and the channel was served regardless, which made the words decoration. The connection now stops after `HelloAck` and serves nothing until a human answers, and **silence refuses** — a timeout, a dropped waiter and a superseded one all resolve to "no". |
+| §6.3 | — | Refusing **revokes** rather than un-pairs. `admit` writes the pairing before the words can reach a screen, so removing it would leave the key free to pair again on the next attempt — and that key is exactly the one that must not. Consequence: `run()` needed a second ending, because redialling a revoked key loops against `admit` forever. |
+| §6.3 | a 6-word typed code alongside the QR | The QR shipped; **the word code cannot**. `sas::WORDS` has 32 entries, so six words carry 30 bits — nowhere near a 128-bit channel plus a 256-bit key. A typed code has to be a *lookup* token, which needs `/v1/pairings/claim` in the dashboard. Blocked there, not here. |
+| §8 Phase 3 | `TimelineRows.tsx` moves to the package | It is not a leaf: five sibling components plus `openExternalUrl` from `lib/ipc`. Moving it means inverting that into a host-supplied prop, which belongs with the web UI that will be its second consumer. `markdown.ts`, `records.ts` and `chatRecords.ts` moved. |
+| §6.4 | the UI edits the policy | The **writer lives in `commands/remote.rs`, not `remote/`**. `remote/policy.rs` has no writer at all, so a command arriving over the wire cannot reach one — the module graph is the enforcement rather than a check inside a function. |
+
+One temporary `#[allow(dead_code)]` remains, on `persist::SeqRecord::seq`, scoped
+to builds without the `remote` feature. An earlier note here claimed the
+module-wide suppression on `remote/` would come off with `remote/bridge.rs`; it did
+not, because nothing consumed the bridge until the transport landed. It is gone
+now. Chasing that lint paid for itself twice: it surfaced an `ApprovalResolved`
+that was never emitted and an hourly rekey that was never called.
+
+### 0.3 The pairing code is a cross-repo contract
+
+`app.claudin.io` does not exist yet, and this is the format it will have to read.
+Defined in `src-tauri/src/remote/code.rs` and pinned by tests there.
+
+```
+https://app.claudin.io/#c=<channel-hex-32>&k=<device-key-hex-64>&r=<relay-url>&e=<expiry-ms>
+```
+
+**Everything sits in the fragment, and that is not cosmetic.** A fragment is never
+sent to the server. In a query string the channel token and the device key would
+appear in the request line of every page load — handing the web origin, its logs
+and whatever sits in front of it the two things it must not have: the ability to
+attach to the channel, and the key a substitution attack needs. The web app reads
+`location.hash`, and may not quietly change that.
+
+`r` is percent-escaped for `%`, `&`, `=`, `#` and space, so a relay URL carrying
+its own query string cannot truncate the parameters after it.
+
+The device renders the QR itself (`qrcode` crate → SVG) because the code is already
+in that process, and because the device has to be able to show it with the relay
+unreachable — the relay may well be the thing being set up.
 
 ---
 

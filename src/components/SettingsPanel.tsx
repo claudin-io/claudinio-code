@@ -7,6 +7,7 @@ import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsMcp } from "./settings/SettingsMcp";
 import { SettingsRemote } from "./settings/SettingsRemote";
+import { RemotePairing } from "./settings/RemotePairing";
 import { createRemoteSettings } from "../lib/createRemoteSettings";
 
 interface SettingsPanelProps {
@@ -77,6 +78,9 @@ interface SettingsPanelProps {
   addMcpServerTemplate: () => void;
   testAllMcpServers: () => Promise<void>;
   openSupportUrl: () => void;
+  /// The workspace a paired browser would drive. `null` when none is open, which
+  /// the remote panel reports as a reason rather than a failure.
+  activeWorkspace: Accessor<string | null>;
 }
 
 type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'mcp' | 'remote';
@@ -115,7 +119,7 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
   const [phase, setPhase] = createSignal<'hidden' | 'entering' | 'visible' | 'exiting'>('hidden');
   let exitTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const remote = createRemoteSettings();
+  const remote = createRemoteSettings(props.activeWorkspace);
 
   /// Remote access is a compile-time feature, so a build can genuinely not have
   /// it. Until the device says otherwise the category is absent rather than
@@ -359,6 +363,18 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   onRevoke={remote.revoke}
                   onUnrevoke={remote.unrevoke}
                   onRename={remote.rename}
+                  pairing={
+                    <RemotePairing
+                      code={remote.code}
+                      pending={remote.pending}
+                      outcome={remote.outcome}
+                      busy={remote.busy}
+                      blocked={remote.blocked}
+                      onStart={remote.startPairing}
+                      onCancel={remote.cancelPairing}
+                      onConfirm={remote.confirmPairing}
+                    />
+                  }
                 />
               </Show>
             </div>

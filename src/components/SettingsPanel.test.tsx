@@ -162,6 +162,7 @@ function baseProps(showConfig: () => boolean) {
     addMcpServerTemplate: vi.fn(),
     testAllMcpServers: vi.fn().mockResolvedValue(undefined),
     openSupportUrl: vi.fn(),
+    activeWorkspace: () => "/Users/v/work",
   };
 }
 
@@ -254,6 +255,25 @@ describe("SettingsPanel", () => {
     await flush();
 
     expect(mocked).toHaveBeenCalledWith("remote_status");
+  });
+
+  /// The tab still opens with no workspace: the policy and the paired list are
+  /// worth reading regardless. Only pairing needs a session, and it says so.
+  it("says what is missing rather than hiding pairing when nothing is open", async () => {
+    remoteIsAvailable();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const [showConfig] = createSignal(true);
+    const props = { ...baseProps(showConfig), activeWorkspace: () => null };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    dispose = render(() => <SettingsPanel {...(props as any)} />, host);
+    await flush();
+
+    tab("Remote")!.click();
+    await flush();
+
+    expect(document.body.textContent).toContain("Open a workspace");
+    expect(document.body.textContent).toContain("Paired browsers");
   });
 
   it("finds the remote panel by searching for what is in it", async () => {
