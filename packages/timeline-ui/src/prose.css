@@ -1,0 +1,126 @@
+/* Styles for Prose.
+ *
+ * A stylesheet rather than inline styles, for the same reason as diff.css: the web
+ * peer's CSP has no 'unsafe-inline'. Colours come from custom properties with
+ * fallbacks, so a host theme wins where it defines them.
+ *
+ * Sized for a phone read at arm's length. The desktop app has its own prose styles and
+ * does not import this — it passes its own class. */
+
+.cprose {
+  --cprose-fg: var(--fg, #16161a);
+  --cprose-muted: var(--muted, #5c5c66);
+  --cprose-line: var(--line, #e4e4e8);
+  --cprose-surface: var(--surface, #f6f6f8);
+  --cprose-link: var(--accent, #b4530a);
+
+  color: var(--cprose-fg);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  /* A model writes long identifiers and URLs, and a phone is 390 px wide. Breaking
+   * anywhere is uglier than not breaking, and not breaking pushes the page sideways —
+   * which takes the approve button off screen. */
+  overflow-wrap: anywhere;
+}
+
+.cprose > :first-child {
+  margin-top: 0;
+}
+
+.cprose > :last-child {
+  margin-bottom: 0;
+}
+
+.cprose p,
+.cprose ul,
+.cprose ol,
+.cprose blockquote {
+  margin: 0 0 0.625rem;
+}
+
+.cprose ul,
+.cprose ol {
+  padding-left: 1.25rem;
+}
+
+.cprose li {
+  margin: 0.125rem 0;
+}
+
+.cprose h1,
+.cprose h2,
+.cprose h3,
+.cprose h4 {
+  /* Flattened deliberately. A model heading is a paragraph label, not a document
+   * outline, and rendering it at document scale on a phone wastes a third of the
+   * screen on one word. */
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.875rem 0 0.375rem;
+  line-height: 1.35;
+}
+
+.cprose a {
+  color: var(--cprose-link);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.cprose code {
+  font: 0.8125rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--cprose-surface);
+  border: 1px solid var(--cprose-line);
+  border-radius: 0.25rem;
+  padding: 0.0625rem 0.25rem;
+}
+
+.cprose pre {
+  margin: 0.5rem 0;
+  padding: 0.625rem;
+  background: var(--cprose-surface);
+  border: 1px solid var(--cprose-line);
+  border-radius: 0.5rem;
+  /* The one place horizontal scrolling is right: wrapping code changes what it says,
+   * and a fenced block is the only element here where the line breaks carry meaning.
+   * Contained, so the page itself never scrolls sideways. */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.cprose pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  white-space: pre;
+}
+
+.cprose blockquote {
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--cprose-line);
+  color: var(--cprose-muted);
+}
+
+.cprose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.cprose th,
+.cprose td {
+  border: 1px solid var(--cprose-line);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+}
+
+.cprose img {
+  max-width: 100%;
+  height: auto;
+}
+
+.cprose hr {
+  border: 0;
+  border-top: 1px solid var(--cprose-line);
+  margin: 0.875rem 0;
+}

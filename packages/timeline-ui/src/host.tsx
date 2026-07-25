@@ -20,6 +20,14 @@ export interface TimelineHost {
   /// navigate away from the app. A browser opens a tab.
   openExternalUrl: (url: string) => void;
 
+  /// Open a file reference from the transcript, when the host can.
+  ///
+  /// The desktop opens it in the editor. A browser driving a remote session cannot —
+  /// the file is on the developer's machine and §2's invariants say it stays there — so
+  /// this is optional and the web peer leaves it unset, which renders the reference as
+  /// text rather than as a link that does nothing.
+  openFile?: (path: string, line?: number) => void;
+
   /// Live network activity, when the host has any to show.
   ///
   /// A slot rather than a component, because it is genuinely host-specific: it

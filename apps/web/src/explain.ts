@@ -125,24 +125,3 @@ export function explainClose(reason: CloseReason): Explanation {
       };
   }
 }
-
-/// A one-line summary of a transcript record, for the bare view.
-///
-/// Not the timeline — that lands with `@claudinio/timeline-ui`. This exists so the
-/// first real connection can be judged by eye: if the records are arriving and read
-/// like the session, the transport works.
-export function summariseRecord(record: Record<string, unknown>): string {
-  const kind = typeof record.kind === "string" ? record.kind : "?";
-  for (const field of ["content", "text", "summary", "title", "toolName", "stopReason"]) {
-    const value = record[field];
-    if (typeof value === "string" && value.trim()) {
-      return `${kind}: ${ellipsis(value.trim(), 160)}`;
-    }
-  }
-  return kind;
-}
-
-function ellipsis(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ");
-  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
-}

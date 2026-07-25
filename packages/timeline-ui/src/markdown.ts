@@ -13,7 +13,49 @@
 
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import hljs from "highlight.js";
+import hljs from "highlight.js/lib/core";
+import langBash from "highlight.js/lib/languages/bash";
+import langCss from "highlight.js/lib/languages/css";
+import langDiff from "highlight.js/lib/languages/diff";
+import langJavascript from "highlight.js/lib/languages/javascript";
+import langJson from "highlight.js/lib/languages/json";
+import langMarkdown from "highlight.js/lib/languages/markdown";
+import langPython from "highlight.js/lib/languages/python";
+import langRust from "highlight.js/lib/languages/rust";
+import langSql from "highlight.js/lib/languages/sql";
+import langTypescript from "highlight.js/lib/languages/typescript";
+import langXml from "highlight.js/lib/languages/xml";
+import langYaml from "highlight.js/lib/languages/yaml";
+
+// The core plus a chosen set, rather than `highlight.js` whole.
+//
+// The full package bundles about a hundred and ninety grammars. That put the web peer's
+// bundle at 1.1 MB — 356 kB over the wire, on a phone, for syntax colours — and the
+// desktop had been shipping all of them too.
+//
+// It also makes `highlightAuto` faster and *more accurate*: it tries every registered
+// grammar, so a shell snippet had a hundred and eighty chances to be mistaken for
+// something else. The comment above `parsingLiveMessage` already complains about that
+// cost; this is the cause of it.
+//
+// A block in a language not listed here still renders, unhighlighted, which is a far
+// better trade than a third of a megabyte.
+for (const [name, language] of [
+  ["bash", langBash],
+  ["css", langCss],
+  ["diff", langDiff],
+  ["javascript", langJavascript],
+  ["json", langJson],
+  ["markdown", langMarkdown],
+  ["python", langPython],
+  ["rust", langRust],
+  ["sql", langSql],
+  ["typescript", langTypescript],
+  ["xml", langXml],
+  ["yaml", langYaml],
+] as const) {
+  hljs.registerLanguage(name, language);
+}
 
 // The live streaming block re-parses the whole message every smooth-text tick
 // (~30/s), which used to re-highlight every code block each time. Completed

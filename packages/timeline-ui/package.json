@@ -7,6 +7,9 @@
   "exports": {
     "./markdown": "./src/markdown.ts",
     "./diff": "./src/diff.ts",
+    "./host": "./src/host.tsx",
+    "./Prose": "./src/Prose.tsx",
+    "./prose.css": "./src/prose.css",
     "./DiffView": "./src/DiffView.tsx",
     "./diff.css": "./src/diff.css",
     "./records": "./src/records.ts",

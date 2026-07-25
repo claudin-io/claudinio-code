@@ -11,14 +11,18 @@
 import { For, Show, createSignal, onCleanup, onMount, type Component } from "solid-js";
 import { render } from "solid-js/web";
 import { DiffView } from "@claudinio/timeline-ui/DiffView";
+import { Prose } from "@claudinio/timeline-ui/Prose";
 import { diffLines } from "@claudinio/timeline-ui/diff";
+import { recordsToMessages, type ChatMessage } from "@claudinio/timeline-ui/chatRecords";
+import { renderMarkdown } from "@claudinio/timeline-ui/markdown";
+import type { SessionRecord } from "@claudinio/timeline-ui/records";
 import "@claudinio/timeline-ui/diff.css";
-import { findEdits } from "./edits";
+import "@claudinio/timeline-ui/prose.css";
+import { editsInMessage } from "./edits";
 import {
   explainCodeError,
   explainStaleCode,
   explainState,
-  summariseRecord,
   type Explanation,
 } from "./explain";
 import { forgetPairingCode, isStale, parsePairingCode, type PairingCodeResult } from "./pairing";
@@ -63,6 +67,14 @@ const App: Component = () => {
     return explainState(state());
   };
 
+  /// The transcript as the timeline model sees it.
+  ///
+  /// Through the same `recordsToMessages` the desktop uses, rather than a second reading
+  /// of the JSONL. Compaction, archived blocks, substantial-text promotion and the tool
+  /// steps are decisions that were already made once; making them again here is how two
+  /// surfaces start disagreeing about what a session contained.
+  const messages = () => recordsToMessages(records() as unknown as SessionRecord[]);
+
   const live = () => state().kind === "live";
   const confirming = () => state().kind === "confirming";
   const sas = () => {
@@ -95,11 +107,11 @@ const App: Component = () => {
       <Show when={live()}>
         <p class="faint">{`Following this session, read-only. ${sas()}`}</p>
         <div class="records">
-          <For each={records()}>{(record) => <RecordRow record={record} />}</For>
+          <For each={messages()}>{(message) => <MessageRow message={message} />}</For>
           <div class="count">
             {records().length === 0
               ? "Waiting for the transcript…"
-              : `${records().length} record${records().length === 1 ? "" : "s"}`}
+              : `${messages().length} message${messages().length === 1 ? "" : "s"} · ${records().length} record${records().length === 1 ? "" : "s"}`}
           </div>
         </div>
       </Show>
@@ -107,18 +119,34 @@ const App: Component = () => {
   );
 };
 
-/// One transcript record: its summary, and any diff it is about to apply.
+/// One message: who said it, what they said, and any change it is about to make.
 ///
-/// The diff is the reason this is not just a line of text. §7 of the threat model rests
-/// on a human reading a change before approving it, and the transcript carries the
-/// before and after rather than a diff — so it is computed here, from what the tool call
-/// actually said it would do.
-const RecordRow: Component<{ record: Record<string, unknown> }> = (props) => {
-  const edits = () => findEdits(props.record);
+/// The diff is the reason this is not a line of text. §7 of the threat model rests on a
+/// human reading a change before approving it, and the transcript carries the before and
+/// after rather than a diff — so it is computed here, from what the tool call said it
+/// would do.
+const MessageRow: Component<{ message: ChatMessage }> = (props) => {
+  const edits = () => editsInMessage(props.message);
+  /// The tools that ran, named. Not their output: this is read-only and a phone, and a
+  /// wall of command output between the change and the approve button is how the change
+  /// stops being read.
+  const tools = () =>
+    (props.message.steps ?? [])
+      .map((step) => step.tool?.call.toolName)
+      .filter((name): name is string => !!name);
 
   return (
-    <div class="record">
-      <div>{summariseRecord(props.record)}</div>
+    <div class="record" classList={{ mine: props.message.role === "user" }}>
+      <div class="who">{props.message.role}</div>
+      <Show when={props.message.text.trim()}>
+        {/* Through the package's renderer, which is where DOMPurify runs. Model output
+            reaching an origin that holds the key to someone's machine is what §10 names,
+            and a second sanitizer is a second thing to get wrong. */}
+        <Prose html={renderMarkdown(props.message.text)} />
+      </Show>
+      <Show when={tools().length > 0}>
+        <div class="tools">{tools().join(" · ")}</div>
+      </Show>
       <For each={edits()}>
         {(edit) => <DiffView path={edit.path} diff={diffLines(edit.oldText, edit.newText)} />}
       </For>

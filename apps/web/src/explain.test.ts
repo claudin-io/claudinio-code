@@ -1,11 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  explainClose,
-  explainCodeError,
-  explainStaleCode,
-  explainState,
-  summariseRecord,
-} from "./explain";
+import { explainClose, explainCodeError, explainStaleCode, explainState } from "./explain";
 import type { CloseReason } from "./session";
 
 describe("explaining a missing or broken code", () => {
@@ -129,44 +123,5 @@ describe("explaining a close", () => {
     expect(explainState({ kind: "closed", reason: "grant_expired" })).toEqual(
       explainClose("grant_expired"),
     );
-  });
-});
-
-describe("summarising a record", () => {
-  it("uses the kind when there is nothing to quote", () => {
-    expect(summariseRecord({ kind: "meta", sessionId: "abc" })).toBe("meta");
-  });
-
-  it("quotes the content when there is some", () => {
-    expect(summariseRecord({ kind: "user", content: "hello there" })).toBe("user: hello there");
-  });
-
-  it("prefers content over the other fields", () => {
-    expect(summariseRecord({ kind: "turn", content: "first", text: "second" })).toBe(
-      "turn: first",
-    );
-  });
-
-  it("falls back through the fields a record might carry", () => {
-    expect(summariseRecord({ kind: "tool", toolName: "Bash" })).toBe("tool: Bash");
-    expect(summariseRecord({ kind: "done", stopReason: "end_turn" })).toBe("done: end_turn");
-  });
-
-  /// One record must not take the whole screen, and a transcript is full of newlines.
-  it("flattens whitespace and truncates", () => {
-    const long = "a\n\nb" + "x".repeat(400);
-    const summary = summariseRecord({ kind: "turn", text: long });
-
-    expect(summary).not.toContain("\n");
-    expect(summary.length).toBeLessThanOrEqual(160 + "turn: ".length);
-    expect(summary.endsWith("…")).toBe(true);
-  });
-
-  it("survives a record with no kind", () => {
-    expect(summariseRecord({ something: 1 })).toBe("?");
-  });
-
-  it("ignores an empty string and falls through", () => {
-    expect(summariseRecord({ kind: "turn", content: "   ", text: "real" })).toBe("turn: real");
   });
 });
