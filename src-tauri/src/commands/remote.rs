@@ -9,7 +9,7 @@
 //! second gate here would be a second place to get it wrong.
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::agent::approval::{Actor, ResolveError};
 use crate::remote::bridge::{ApprovalOutcome, DeviceActions};
@@ -333,13 +333,20 @@ pub struct EnableArgs {
 
 /// Start serving a paired peer for one session.
 ///
-/// The policy handed to the bridge is `Policy::default()`, which grants nothing.
-/// Editing it is phase 3 work, and until that exists this command opens a channel
-/// a peer can watch and cannot act through. That ordering is deliberate: the
-/// enforcement point ships before the capability, so no intermediate state grants
-/// more than the finished one would.
+/// Refuses before it opens anything: an inert policy and a workspace off the
+/// allowlist are both errors here rather than a channel that denies everything,
+/// because a peer that connects and finds it can do nothing cannot tell that from
+/// a bug.
+///
+/// Pairing a new peer does not finish here. The connection stops after the
+/// handshake and waits for the user to compare the words on both screens; see the
+/// human check in `remote/transport.rs`.
 #[tauri::command]
-pub async fn remote_enable(args: EnableArgs, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn remote_enable(
+    args: EnableArgs,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     use claudinio_protocol::wire::ChannelId;
 
     let channel = ChannelId::from_hex(&args.channel).map_err(|e| e.to_string())?;
@@ -428,10 +435,94 @@ pub async fn remote_enable(args: EnableArgs, state: State<'_, AppState>) -> Resu
             .join("pairings.json"),
         bus,
         actions: AppActions::new(&state),
+        notices: notice_sink(app),
+        confirmations: crate::remote::pairing::shared().clone(),
     };
 
     // Detached: the connection outlives this call and must survive the relay
     // being down, which is a retry loop rather than an error (I8).
     tokio::spawn(crate::remote::transport::run(connection));
     Ok(())
+}
+
+/// The event a notice arrives on in the webview.
+pub const NOTICE_EVENT: &str = "remote://notice";
+
+/// A notice as the frontend sees it: a tag and the fields, flattened, because a
+/// Rust enum's default serialization is awkward to narrow on in TypeScript.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct NoticePayload {
+    kind: &'static str,
+    peer_key: String,
+    label: Option<String>,
+    /// Only on the two notices that carry words to compare.
+    sas: Option<String>,
+}
+
+/// Bridge `remote/`'s notices onto Tauri events.
+///
+/// This closure is why `Notice` is not a Tauri type: the transport emits into a
+/// `Fn`, and the only code that knows about `AppHandle` is here, in the adapter
+/// layer. `remote/` stays buildable — and testable — without Tauri.
+fn notice_sink(app: tauri::AppHandle) -> crate::remote::transport::NoticeSink {
+    use crate::remote::transport::Notice;
+    std::sync::Arc::new(move |notice: Notice| {
+        let payload = match notice {
+            Notice::ConfirmPairing {
+                peer_key,
+                label,
+                sas,
+            } => NoticePayload {
+                kind: "confirmPairing",
+                peer_key,
+                label: Some(label),
+                sas: Some(sas),
+            },
+            Notice::Paired { peer_key, label } => NoticePayload {
+                kind: "paired",
+                peer_key,
+                label: Some(label),
+                sas: None,
+            },
+            Notice::PairingRefused { peer_key } => NoticePayload {
+                kind: "pairingRefused",
+                peer_key,
+                label: None,
+                sas: None,
+            },
+            Notice::Connected {
+                peer_key,
+                label,
+                sas,
+            } => NoticePayload {
+                kind: "connected",
+                peer_key,
+                label: Some(label),
+                sas: Some(sas),
+            },
+        };
+        // A dropped event means the window went away. Nothing to recover: the
+        // pairing then times out and refuses, which is the safe direction.
+        let _ = app.emit(NOTICE_EVENT, payload);
+    })
+}
+
+/// The user's answer to "do these three words match?".
+///
+/// `matched: false` revokes the key, which is stronger than not pairing: `admit`
+/// has already written the pairing by the time the words are on screen, so
+/// removing it would leave a key free to pair again on the next attempt — and the
+/// key that failed the word check is exactly the one that must not.
+///
+/// Local IPC only. There is deliberately no wire command for this: a peer able to
+/// confirm its own pairing is a peer that has replaced the human the check exists
+/// for.
+#[tauri::command]
+pub async fn remote_confirm_pairing(
+    peer_key: String,
+    matched: bool,
+    _state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::remote::pairing::shared().resolve(&peer_key, matched)
 }

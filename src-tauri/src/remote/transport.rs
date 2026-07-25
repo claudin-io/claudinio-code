@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::bridge::{Bridge, DeviceActions};
 use super::dedup::CommandLog;
 use super::noise::{self, DeviceIdentity};
-use super::pairing::{Pairings, Refusal};
+use super::pairing::{Confirmations, Pairings, Refusal};
 use crate::agent::eventbus::EventBus;
 
 /// How often session keys are rolled. §6.1.
@@ -57,6 +57,57 @@ pub struct Connection<A: DeviceActions + Sync> {
     pub pairing_offer: Option<PairingOffer>,
     pub bus: EventBus,
     pub actions: A,
+    /// Where the words go so a human can compare them. Never the peer.
+    pub notices: NoticeSink,
+    /// The registry that human's answer comes back through.
+    pub confirmations: Arc<Confirmations>,
+}
+
+/// Something the local user needs to see. Deliberately not on the wire: a peer
+/// that learned it had failed the word check could retry until the user clicked
+/// through, and a peer told it was "revoked" rather than "unknown" learns whether
+/// it was ever paired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    /// Two screens are showing three words each and nothing is served until the
+    /// user says they agree.
+    ConfirmPairing {
+        peer_key: String,
+        label: String,
+        sas: String,
+    },
+    Paired {
+        peer_key: String,
+        label: String,
+    },
+    /// The words did not match, or nobody answered. The key is revoked by the
+    /// time this arrives.
+    PairingRefused {
+        peer_key: String,
+    },
+    /// An already-paired peer connected. The SAS travels with it so the user can
+    /// check it if they want to; there is nothing to confirm, because the key was
+    /// vouched for when it was paired.
+    Connected {
+        peer_key: String,
+        label: String,
+        sas: String,
+    },
+}
+
+/// How notices reach the UI. A closure rather than a Tauri handle, so this module
+/// stays free of Tauri: the command layer, which has the handle, supplies one.
+pub type NoticeSink = Arc<dyn Fn(Notice) + Send + Sync>;
+
+/// How one turn at serving ended, and whether to try again.
+#[derive(Debug, PartialEq, Eq)]
+enum Served {
+    /// The peer went away. It may come back, so the channel is redialled.
+    PeerLeft,
+    /// Do not retry. The pairing was refused, which revoked the key — every
+    /// further attempt would be turned away by `admit`, so retrying would be an
+    /// endless loop whose only effect is noise in the log.
+    Abandoned,
 }
 
 /// An open invitation for one new peer.
@@ -86,11 +137,12 @@ pub async fn run<A: DeviceActions + Sync>(connection: Connection<A>) {
 
     loop {
         match serve_once(&connection).await {
-            Ok(()) => {
+            Ok(Served::PeerLeft) => {
                 // A clean close means the peer went away, not that anything is
                 // wrong, so the next attempt starts from the bottom of the curve.
                 backoff.reset();
             }
+            Ok(Served::Abandoned) => return,
             Err(e) => {
                 eprintln!("[remote] connection ended: {e}");
             }
@@ -103,7 +155,9 @@ pub async fn run<A: DeviceActions + Sync>(connection: Connection<A>) {
 }
 
 /// One connection, from dial to disconnect.
-async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Result<(), String> {
+async fn serve_once<A: DeviceActions + Sync>(
+    connection: &Connection<A>,
+) -> Result<Served, String> {
     let url = format!(
         "{}?channel={}&role=device",
         connection.relay_url, connection.channel
@@ -142,7 +196,52 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
     )
     .await?;
 
-    eprintln!("[remote] paired, SAS: {}", session.sas());
+    // --- the human check --------------------------------------------------
+    //
+    // IK already makes a relay that substitutes its own static key fail the
+    // handshake, because the browser dialled with a key it held beforehand. What
+    // IK cannot see is that key having been wrong from the start — a doctored QR,
+    // a code read off someone else's screen. The SAS closes that: three words off
+    // the handshake hash, identical on both ends only if the handshake was
+    // genuinely end to end.
+    //
+    // So the comparison has to gate serving, and until now it did not: the words
+    // went to stderr and the channel opened regardless, which made them
+    // decoration. A peer waits here, attached and served nothing.
+    let peer_key = peer_key_hex(&session)?;
+    if connection.pairing_offer.is_some() {
+        let answer = connection.confirmations.expect(&peer_key);
+        (connection.notices)(Notice::ConfirmPairing {
+            peer_key: peer_key.clone(),
+            label: peer_label.clone(),
+            sas: session.sas(),
+        });
+
+        if !Confirmations::wait(answer).await {
+            connection.confirmations.forget(&peer_key);
+            // Revoked rather than merely forgotten. `admit` has already written the
+            // pairing, so removing it would leave a key that pairs again on the
+            // next attempt — and a key that failed the word check is precisely the
+            // one that must not.
+            Pairings::load(&connection.pairings_path)?.revoke(&peer_key)?;
+            (connection.notices)(Notice::PairingRefused {
+                peer_key: peer_key.clone(),
+            });
+            eprintln!("[remote] pairing refused at the word check; key revoked");
+            return Ok(Served::Abandoned);
+        }
+
+        (connection.notices)(Notice::Paired {
+            peer_key: peer_key.clone(),
+            label: peer_label.clone(),
+        });
+    } else {
+        (connection.notices)(Notice::Connected {
+            peer_key: peer_key.clone(),
+            label: peer_label.clone(),
+            sas: session.sas(),
+        });
+    }
 
     let mut bridge = Bridge::new(
         connection.session_id.clone(),
@@ -173,7 +272,7 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
                 let Some(message) = bridge.translate(delivery) else {
                     // The bus closed: the session ended. Leave cleanly so the
                     // peer sees a close rather than a stall.
-                    return Ok(());
+                    return Ok(Served::PeerLeft);
                 };
                 out_seq += 1;
                 send_message(&mut sink, connection.channel, &mut session, out_seq, &message).await?;
@@ -181,7 +280,7 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
 
             // Commands from the peer, inbound.
             frame = next_frame(&mut stream, connection.channel) => {
-                let Some((kind, payload)) = frame? else { return Ok(()) };
+                let Some((kind, payload)) = frame? else { return Ok(Served::PeerLeft) };
 
                 // A `Hello` on an established session means the peer gave up
                 // mid-handshake and came back. Treating it as transport data —
@@ -200,7 +299,11 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
                     admit(&connection.pairings_path, &fresh, None)?;
                     send_frame(&mut sink, connection.channel, OuterKind::HelloAck, 0, 0, msg2)
                         .await?;
-                    eprintln!("[remote] re-paired, SAS: {}", fresh.sas());
+                    (connection.notices)(Notice::Connected {
+                        peer_key: peer_key_hex(&fresh)?,
+                        label: peer_label.clone(),
+                        sas: fresh.sas(),
+                    });
                     session = fresh;
                     out_seq = 0;
                     continue;
@@ -236,6 +339,16 @@ async fn serve_once<A: DeviceActions + Sync>(connection: &Connection<A>) -> Resu
     }
 }
 
+/// The peer's static public key, hex — the form the pairing book and the UI both
+/// use. A peer that completed IK always sent one; the `None` case is a handshake
+/// that is not what it claims to be.
+fn peer_key_hex(session: &noise::Session) -> Result<String, String> {
+    let key = session
+        .peer_static()
+        .ok_or_else(|| "the peer sent no static key".to_string())?;
+    Ok(key.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// Is this peer still allowed in, and under what name?
 ///
 /// Consulted after the handshake, because the peer's static key only becomes known
@@ -247,10 +360,7 @@ fn admit(
     session: &noise::Session,
     offer: Option<&PairingOffer>,
 ) -> Result<String, String> {
-    let key = session
-        .peer_static()
-        .ok_or_else(|| "the peer sent no static key".to_string())?;
-    let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    let key_hex = peer_key_hex(session)?;
 
     let mut pairings = Pairings::load(pairings_path)?;
     let now = std::time::SystemTime::now()

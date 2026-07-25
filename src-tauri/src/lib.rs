@@ -79,6 +79,8 @@ pub fn run() {
             commands::remote::remote_policy,
             #[cfg(feature = "remote")]
             commands::remote::remote_set_policy,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_confirm_pairing,
             commands::clipboard::write_clipboard_blob,
             commands::git::git_status,
             commands::git::git_file_diff,

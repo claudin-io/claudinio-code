@@ -185,6 +185,101 @@ impl Pairings {
 /// enough that a screen left unlocked is not an open door.
 pub const TOKEN_TTL_MS: u64 = 120_000;
 
+/// How long the user has to compare the words before the pairing is abandoned.
+///
+/// Longer than `TOKEN_TTL_MS`, because this clock starts when two screens are
+/// already showing three words each and the only remaining work is a person
+/// looking at both.
+pub const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Pairings waiting for a human to say the words match.
+///
+/// # Why this gate exists
+///
+/// Noise IK authenticates the device to the browser using a key the browser
+/// already had, so a relay that substitutes its own key fails the handshake. What
+/// IK cannot catch on its own is the browser having been handed the wrong device
+/// key in the first place — a doctored QR, a code read off the wrong screen. The
+/// short authentication string closes that: both ends derive three words from the
+/// handshake hash, and only a genuine end-to-end handshake produces the same
+/// three.
+///
+/// Which makes the comparison the security boundary, and therefore something that
+/// has to happen *before* the device serves anything. It previously did not: the
+/// SAS went to `eprintln!` and the channel was served regardless, so the words
+/// were decoration.
+#[derive(Default)]
+pub struct Confirmations {
+    inner: std::sync::Mutex<
+        std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>,
+    >,
+}
+
+impl Confirmations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a wait for `peer_key` and hand back the receiver.
+    ///
+    /// A second handshake for the same key replaces the first waiter, whose
+    /// receiver then sees the channel closed — which `wait` reads as "not
+    /// confirmed". Refusing is the right default for a key whose confirmation was
+    /// superseded.
+    pub fn expect(&self, peer_key: &str) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut pending) = self.inner.lock() {
+            pending.insert(peer_key.to_string(), tx);
+        }
+        rx
+    }
+
+    /// The user's answer. `Err` when nothing was waiting, which the command layer
+    /// surfaces rather than swallowing: a confirm with no pairing in flight means
+    /// the window lapsed, and telling the user that is better than appearing to
+    /// succeed.
+    pub fn resolve(&self, peer_key: &str, matched: bool) -> Result<(), String> {
+        let sender = self
+            .inner
+            .lock()
+            .map_err(|_| "the pairing registry is poisoned".to_string())?
+            .remove(peer_key)
+            .ok_or_else(|| "no pairing is waiting for confirmation".to_string())?;
+        sender
+            .send(matched)
+            .map_err(|_| "the pairing was abandoned before you answered".to_string())
+    }
+
+    /// Stop waiting, without an answer. Called when the handshake goes away.
+    pub fn forget(&self, peer_key: &str) {
+        if let Ok(mut pending) = self.inner.lock() {
+            pending.remove(peer_key);
+        }
+    }
+
+    /// Await an answer, treating silence as refusal.
+    ///
+    /// Every failure mode collapses to `false`: a timeout, a dropped sender, a
+    /// closed channel. A pairing nobody vouched for must not be served, so the
+    /// safe answer is the default rather than something a caller has to remember
+    /// to handle.
+    pub async fn wait(rx: tokio::sync::oneshot::Receiver<bool>) -> bool {
+        matches!(tokio::time::timeout(CONFIRM_TIMEOUT, rx).await, Ok(Ok(true)))
+    }
+}
+
+/// The process-wide registry.
+///
+/// A global because it is genuinely process-wide state — one machine, one user,
+/// one screen showing the words — and because threading a registry through
+/// `AppState` would put a `#[cfg(feature = "remote")]` field in `state.rs` and so
+/// leak remote access into a module that has no other reason to know it exists.
+/// Tests construct their own `Confirmations` instead.
+pub fn shared() -> &'static std::sync::Arc<Confirmations> {
+    static SHARED: std::sync::OnceLock<std::sync::Arc<Confirmations>> = std::sync::OnceLock::new();
+    SHARED.get_or_init(|| std::sync::Arc::new(Confirmations::new()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +495,93 @@ mod tests {
             "the old iPad"
         );
         assert!(pairings.rename(&key("bb"), "nope").is_err());
+    }
+
+    // --- the confirmation gate ---------------------------------------------
+
+    #[tokio::test]
+    async fn a_confirmed_pairing_is_allowed_through() {
+        let confirmations = Confirmations::new();
+        let rx = confirmations.expect(&key("aa"));
+        confirmations.resolve(&key("aa"), true).unwrap();
+        assert!(Confirmations::wait(rx).await);
+    }
+
+    #[tokio::test]
+    async fn words_that_do_not_match_refuse() {
+        let confirmations = Confirmations::new();
+        let rx = confirmations.expect(&key("aa"));
+        confirmations.resolve(&key("aa"), false).unwrap();
+        assert!(!Confirmations::wait(rx).await);
+    }
+
+    /// Confirming a key nobody is waiting on has to be an error rather than a
+    /// no-op. It means the window lapsed, and a UI told "fine" would show a
+    /// pairing that is not going to be served.
+    #[test]
+    fn confirming_nothing_is_an_error() {
+        let confirmations = Confirmations::new();
+        assert!(confirmations.resolve(&key("aa"), true).is_err());
+    }
+
+    /// The one that matters. Nobody answers, so nothing is served — silence must
+    /// not read as consent.
+    #[tokio::test(start_paused = true)]
+    async fn silence_refuses() {
+        let confirmations = Confirmations::new();
+        let rx = confirmations.expect(&key("aa"));
+        let waiting = tokio::spawn(Confirmations::wait(rx));
+
+        tokio::time::advance(CONFIRM_TIMEOUT + std::time::Duration::from_secs(1)).await;
+
+        assert!(!waiting.await.unwrap());
+    }
+
+    /// An abandoned handshake drops its waiter. The user's answer then has
+    /// nowhere to go, and saying so beats appearing to pair.
+    #[tokio::test]
+    async fn a_forgotten_pairing_cannot_be_confirmed() {
+        let confirmations = Confirmations::new();
+        let _rx = confirmations.expect(&key("aa"));
+        confirmations.forget(&key("aa"));
+        assert!(confirmations.resolve(&key("aa"), true).is_err());
+    }
+
+    /// A dropped receiver — the serve task went away mid-wait — is refusal, not a
+    /// panic and not a success.
+    #[tokio::test]
+    async fn a_vanished_waiter_is_reported() {
+        let confirmations = Confirmations::new();
+        drop(confirmations.expect(&key("aa")));
+        assert!(confirmations.resolve(&key("aa"), true).is_err());
+    }
+
+    /// Two handshakes for one key: the second supersedes the first, and the first
+    /// waiter refuses rather than being left to time out. Otherwise a peer could
+    /// re-handshake to keep an unanswered pairing alive.
+    #[tokio::test]
+    async fn a_second_handshake_refuses_the_first() {
+        let confirmations = Confirmations::new();
+        let first = confirmations.expect(&key("aa"));
+        let second = confirmations.expect(&key("aa"));
+
+        assert!(!Confirmations::wait(first).await);
+
+        confirmations.resolve(&key("aa"), true).unwrap();
+        assert!(Confirmations::wait(second).await);
+    }
+
+    /// Each key waits on its own answer: confirming one must not let another in.
+    #[tokio::test]
+    async fn keys_do_not_share_an_answer() {
+        let confirmations = Confirmations::new();
+        let a = confirmations.expect(&key("aa"));
+        let b = confirmations.expect(&key("bb"));
+
+        confirmations.resolve(&key("aa"), true).unwrap();
+
+        assert!(Confirmations::wait(a).await);
+        assert!(confirmations.resolve(&key("bb"), false).is_ok());
+        assert!(!Confirmations::wait(b).await);
     }
 }
