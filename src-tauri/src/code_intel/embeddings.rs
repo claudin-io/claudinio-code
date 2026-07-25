@@ -1,5 +1,7 @@
+#[cfg(feature = "embeddings")]
 use ort::{session::Session, value::Tensor};
 use std::path::Path;
+#[cfg(any(feature = "embeddings", feature = "embeddings-candle"))]
 use tokenizers::Tokenizer;
 
 /// Config for a single-vector bi-encoder embedding model. Swapping candidates
@@ -109,6 +111,7 @@ pub fn model_filename() -> &'static str {
 // larger window only inflates padding and peak memory without adding signal.
 const MAX_LENGTH: usize = 512;
 
+#[cfg(feature = "embeddings")]
 pub struct CodeEmbedder {
     session: Session,
     tokenizer: Tokenizer,
@@ -118,6 +121,206 @@ pub struct CodeEmbedder {
     wants_token_type_ids: bool,
 }
 
+/// Pure-Rust embedding backend (candle). Selected with
+/// `--no-default-features --features embeddings-candle`.
+///
+/// Exists because `ort`'s prebuilt ONNX Runtime contains x86-64-v3
+/// instructions (BMI2 `SHLX`) that fault on pre-Haswell CPUs. candle is
+/// compiled from source with baseline codegen, so it runs anywhere.
+/// Produces the same 384-dim mean-pooled + L2-normalized vectors as the ORT
+/// path, from the same all-MiniLM-L6-v2 weights (safetensors instead of ONNX).
+#[cfg(all(feature = "embeddings-candle", not(feature = "embeddings")))]
+pub struct CodeEmbedder {
+    model: candle_transformers::models::bert::BertModel,
+    tokenizer: Tokenizer,
+    device: candle_core::Device,
+}
+
+#[cfg(all(feature = "embeddings-candle", not(feature = "embeddings")))]
+impl CodeEmbedder {
+    pub fn load(model_dir: &Path) -> Result<Self, String> {
+        use candle_core::{DType, Device};
+        use candle_nn::VarBuilder;
+        use candle_transformers::models::bert::{BertModel, Config};
+
+        let config_path = model_dir.join("config.json");
+        let tokenizer_path = model_dir.join(ACTIVE_MODEL.tokenizer_filename);
+        let weights_path = model_dir.join("model.safetensors");
+
+        for (p, what) in [
+            (&config_path, "config.json"),
+            (&tokenizer_path, "tokenizer"),
+            (&weights_path, "model.safetensors"),
+        ] {
+            if !p.exists() {
+                return Err(format!("{what} not found at {}", p.display()));
+            }
+        }
+
+        let config_json = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("read config.json: {e}"))?;
+        let config: Config =
+            serde_json::from_str(&config_json).map_err(|e| format!("parse bert config: {e}"))?;
+
+        let device = Device::Cpu;
+        // SAFETY: mmap of a file we just verified exists; candle requires unsafe
+        // here because the mapping is invalidated if the file changes underneath.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
+                .map_err(|e| format!("load safetensors: {e}"))?
+        };
+        let model = BertModel::load(vb, &config).map_err(|e| format!("build bert: {e}"))?;
+
+        let tokenizer =
+            Tokenizer::from_file(&tokenizer_path).map_err(|e| format!("tokenizer load: {e}"))?;
+
+        Ok(CodeEmbedder {
+            model,
+            tokenizer,
+            device,
+        })
+    }
+
+    pub fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        use candle_core::Tensor as CTensor;
+
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Tokenization/padding is identical to the ORT path so both backends
+        // see the same inputs.
+        let encoding = self
+            .tokenizer
+            .encode_batch(
+                texts
+                    .iter()
+                    .map(|t| tokenizers::EncodeInput::Single(t.to_string().into()))
+                    .collect(),
+                true,
+            )
+            .map_err(|e| format!("tokenize: {e}"))?;
+
+        let batch_size = encoding.len();
+        let mut padded_len = 0;
+        for enc in &encoding {
+            padded_len = padded_len.max(enc.len().min(MAX_LENGTH));
+        }
+        if padded_len == 0 {
+            padded_len = 1;
+        }
+
+        let mut input_ids = vec![0u32; batch_size * padded_len];
+        let mut attention_mask = vec![0i64; batch_size * padded_len];
+        for (b, enc) in encoding.iter().enumerate() {
+            let ids = enc.get_ids();
+            let mask = enc.get_attention_mask();
+            let len = ids.len().min(MAX_LENGTH);
+            for i in 0..len {
+                input_ids[b * padded_len + i] = ids[i];
+                attention_mask[b * padded_len + i] = mask[i] as i64;
+            }
+        }
+
+        let ids_t = CTensor::from_vec(input_ids, (batch_size, padded_len), &self.device)
+            .map_err(|e| format!("input_ids tensor: {e}"))?;
+        let type_ids_t = ids_t
+            .zeros_like()
+            .map_err(|e| format!("token_type_ids tensor: {e}"))?;
+        let mask_u8: Vec<u32> = attention_mask.iter().map(|v| *v as u32).collect();
+        let mask_t = CTensor::from_vec(mask_u8, (batch_size, padded_len), &self.device)
+            .map_err(|e| format!("attention_mask tensor: {e}"))?;
+
+        // [batch, seq, hidden]
+        let out = self
+            .model
+            .forward(&ids_t, &type_ids_t, Some(&mask_t))
+            .map_err(|e| format!("bert forward: {e}"))?;
+        let hidden = out
+            .dim(2)
+            .map_err(|e| format!("output dim: {e}"))?;
+        let flat: Vec<f32> = out
+            .flatten_all()
+            .and_then(|t| t.to_vec1::<f32>())
+            .map_err(|e| format!("extract output: {e}"))?;
+
+        if hidden == 0 || flat.len() < batch_size * padded_len * hidden {
+            return Err(format!(
+                "unexpected output tensor: hidden {hidden}, len {}",
+                flat.len()
+            ));
+        }
+
+        // Same masked mean-pool + L2 normalize as the ORT path.
+        let mut results = Vec::with_capacity(batch_size);
+        for b in 0..batch_size {
+            let mut sum = vec![0f32; hidden];
+            let mut count: f32 = 0.0;
+            for s in 0..padded_len {
+                if attention_mask[b * padded_len + s] > 0 {
+                    let offset = (b * padded_len + s) * hidden;
+                    for d in 0..hidden {
+                        sum[d] += flat[offset + d];
+                    }
+                    count += 1.0;
+                }
+            }
+            if count > 0.0 {
+                for v in sum.iter_mut() {
+                    *v /= count;
+                }
+            }
+            let norm: f32 = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+            for v in sum.iter_mut() {
+                *v /= norm;
+            }
+            results.push(sum);
+        }
+
+        Ok(results)
+    }
+
+    pub fn encode_query(&mut self, text: &str) -> Result<Vec<f32>, String> {
+        let prefixed;
+        let query = if ACTIVE_MODEL.query_prefix.is_empty() {
+            text
+        } else {
+            prefixed = format!("{}{}", ACTIVE_MODEL.query_prefix, text);
+            &prefixed
+        };
+        let mut vecs = self.encode(&[query])?;
+        vecs.pop().ok_or("empty encode result".into())
+    }
+}
+
+/// Stub used when the crate is built with no embedding backend at all.
+/// Construction always fails, so callers fall back to their existing
+/// "embedding model unavailable" path and the app runs without semantic search.
+#[cfg(not(any(feature = "embeddings", feature = "embeddings-candle")))]
+pub struct CodeEmbedder {
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(any(feature = "embeddings", feature = "embeddings-candle")))]
+impl CodeEmbedder {
+    const DISABLED: &'static str =
+        "semantic search disabled: built without the `embeddings` feature (no ONNX Runtime)";
+
+    pub fn load(_model_dir: &Path) -> Result<Self, String> {
+        Err(Self::DISABLED.to_string())
+    }
+
+    pub fn encode(&mut self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        // Unreachable: `load` never yields a value, so no instance can exist.
+        match self._never {}
+    }
+
+    pub fn encode_query(&mut self, _text: &str) -> Result<Vec<f32>, String> {
+        match self._never {}
+    }
+}
+
+#[cfg(feature = "embeddings")]
 impl CodeEmbedder {
     pub fn load(model_dir: &Path) -> Result<Self, String> {
         let model_path = model_dir.join(ACTIVE_MODEL.model_filename);
@@ -729,7 +932,51 @@ pub fn load_shared(cache_dir: &Path) -> Result<SharedEmbedder, String> {
 mod tests {
     use super::*;
 
+    /// Proves the candle backend produces *semantically useful* vectors, not
+    /// just correctly-shaped ones: related code must score higher against a
+    /// query than unrelated code, and vectors must be unit-length 384-dim.
     #[test]
+    #[cfg(all(feature = "embeddings-candle", not(feature = "embeddings")))]
+    fn candle_embeddings_are_normalized_and_semantically_ordered() {
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("models/{}", model_cache_dirname()));
+        if !dir.join("model.safetensors").exists() {
+            eprintln!("safetensors weights not present, skipping");
+            return;
+        }
+        let mut e = CodeEmbedder::load(&dir).expect("load candle model");
+
+        let docs = [
+            "fn refresh_token_if_stale(session: &mut Session) { /* renew expired auth */ }",
+            "fn quicksort<T: Ord>(v: &mut [T]) { /* sort slice in place */ }",
+        ];
+        let vecs = e.encode(&docs).expect("encode docs");
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0].len(), 384, "MiniLM hidden size");
+
+        for v in &vecs {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-3, "not L2-normalized: {norm}");
+        }
+
+        // Query about auth/session expiry must rank the auth snippet above the
+        // sorting one. This is the property that makes semantic search work at
+        // all -- it fails loudly if the weights or pooling are wrong.
+        let q = e
+            .encode_query("where do we handle expired login sessions")
+            .expect("encode query");
+        let cos = |a: &Vec<f32>| -> f32 { a.iter().zip(q.iter()).map(|(x, y)| x * y).sum() };
+        let auth_score = cos(&vecs[0]);
+        let sort_score = cos(&vecs[1]);
+        eprintln!("auth={auth_score:.4} sort={sort_score:.4}");
+        assert!(
+            auth_score > sort_score,
+            "semantic ordering wrong: auth {auth_score} should beat sort {sort_score}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
     fn encode_produces_normalized_model_dim_vectors() {
         let dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("models/{}", model_cache_dirname()));

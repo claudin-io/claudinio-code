@@ -14,6 +14,27 @@ edition = "2024"
 name = "claudinio_code_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# "embeddings" gates the ONNX Runtime-backed semantic search (the `ort` crate).
+# It is ON by default so upstream/CI builds are unchanged.
+#
+# Build with --no-default-features to produce a binary that runs on pre-Haswell
+# CPUs (Sandy/Ivy Bridge, pre-2013). ort's prebuilt ONNX Runtime contains
+# x86-64-v3 instructions (BMI2 `SHLX` confirmed at the faulting address), which
+# raise STATUS_ILLEGAL_INSTRUCTION (0xc000001d) on CPUs without BMI2/AVX2.
+# Disabling this trades semantic code search for the app starting at all.
+default = ["embeddings"]
+embeddings = ["dep:ort"]
+
+# "embeddings-candle" is an alternative, pure-Rust embedding backend using
+# candle instead of ONNX Runtime. Because candle is compiled from source with
+# the target's default (baseline x86-64) codegen, it emits no BMI2/AVX2 and
+# therefore runs on pre-Haswell CPUs, unlike ort's prebuilt binaries.
+# Same model (all-MiniLM-L6-v2), same 384-dim mean-pooled + L2-normalized
+# output, so semantic search behaves identically -- just slower.
+# Build with:  --no-default-features --features embeddings-candle
+embeddings-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -121,7 +142,11 @@ notify-debouncer-mini = "0.5"
 dirs = "6"
 keepawake = "0.6"
 sys-locale = "0.3"
-ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"], optional = true }
+# Pure-Rust embedding backend (see the "embeddings-candle" feature above).
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
 # default drops "esaxx_fast": it pulls esaxx-rs, a C++ lib that force-builds
 # with the static CRT (/MT), which clashes on Windows with ort's prebuilt
 # onnxruntime (dynamic CRT, /MD) — no CRT flag can satisfy both. esaxx_fast only
