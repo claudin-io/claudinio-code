@@ -1,5 +1,8 @@
 {
   "compilerOptions": {
+    "paths": {
+      "@claudinio/protocol/*": ["./src-tauri/crates/claudinio-protocol/bindings/*"]
+    },
     "target": "ES2020",
     "useDefineForClassFields": true,
     "module": "ESNext",

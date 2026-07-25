@@ -414,3 +414,87 @@ mod tests {
         assert_eq!(session.decrypt(&after).unwrap(), b"after");
     }
 }
+
+#[cfg(test)]
+mod golden {
+    use super::*;
+    use snow::Builder;
+
+    /// A recorded IK handshake, printed as hex.
+    ///
+    /// Both ephemerals are fixed and both static keypairs are printed, so the whole
+    /// transcript is reproducible from the values below — which is what makes it a
+    /// golden vector for the browser initiator in `apps/web/src/noise.test.ts`.
+    ///
+    /// This is the only thing that can show the two implementations agree. A browser
+    /// initiator tested against a browser responder proves they agree with each other
+    /// and nothing about whether either agrees with `snow`.
+    ///
+    /// `cargo test --features remote golden -- --ignored --nocapture` to regenerate.
+    /// Regenerating changes the static keys, so the TypeScript constants have to be
+    /// replaced as a set.
+    #[test]
+    #[ignore = "prints a golden Noise transcript for apps/web/src/noise.test.ts"]
+    fn print_golden_handshake() {
+        let init_ephemeral = [0x02u8; 32];
+        let resp_ephemeral = [0x04u8; 32];
+
+        let params: snow::params::NoiseParams = NOISE_PARAMS.parse().unwrap();
+        let init_keys = Builder::new(params.clone()).generate_keypair().unwrap();
+        let resp_keys = Builder::new(params.clone()).generate_keypair().unwrap();
+
+        let mut initiator = Builder::new(params.clone())
+            .local_private_key(&init_keys.private)
+            .unwrap()
+            .remote_public_key(&resp_keys.public)
+            .unwrap()
+            .fixed_ephemeral_key_for_testing_only(&init_ephemeral)
+            .build_initiator()
+            .unwrap();
+        let mut responder = Builder::new(params)
+            .local_private_key(&resp_keys.private)
+            .unwrap()
+            .fixed_ephemeral_key_for_testing_only(&resp_ephemeral)
+            .build_responder()
+            .unwrap();
+
+        let mut msg1 = [0u8; 1024];
+        let n1 = initiator.write_message(&[], &mut msg1).unwrap();
+        let mut scratch = [0u8; 1024];
+        responder.read_message(&msg1[..n1], &mut scratch).unwrap();
+
+        let mut msg2 = [0u8; 1024];
+        let n2 = responder.write_message(&[], &mut msg2).unwrap();
+        initiator.read_message(&msg2[..n2], &mut scratch).unwrap();
+
+        let hash = initiator.get_handshake_hash().to_vec();
+
+        let hex = |b: &[u8]| -> String { b.iter().map(|x| format!("{x:02x}")).collect() };
+        println!("GOLDEN_INIT_STATIC_PRIVATE={}", hex(&init_keys.private));
+        println!("GOLDEN_INIT_STATIC_PUBLIC={}", hex(&init_keys.public));
+        println!("GOLDEN_INIT_EPHEMERAL_PRIVATE={}", hex(&init_ephemeral));
+        println!("GOLDEN_RESP_STATIC_PUBLIC={}", hex(&resp_keys.public));
+        println!("GOLDEN_MSG1={}", hex(&msg1[..n1]));
+        println!("GOLDEN_MSG2={}", hex(&msg2[..n2]));
+        println!("GOLDEN_HANDSHAKE_HASH={}", hex(&hash));
+        println!("GOLDEN_SAS={}", claudinio_protocol::sas::format(&hash));
+
+        // One transport message too, so the browser's split() and nonce handling are
+        // exercised rather than only the handshake. The device sends first, which is
+        // the direction the browser has to be able to read.
+        let mut device = responder.into_transport_mode().unwrap();
+        let mut ct = [0u8; 1024];
+        let n = device
+            .write_message(b"hello from the device", &mut ct)
+            .unwrap();
+        println!("GOLDEN_DEVICE_CIPHERTEXT={}", hex(&ct[..n]));
+
+        // And the reverse: what the browser sends must decrypt here.
+        let mut peer = initiator.into_transport_mode().unwrap();
+        let mut ct2 = [0u8; 1024];
+        let n2 = peer
+            .write_message(b"hello from the browser", &mut ct2)
+            .unwrap();
+        println!("GOLDEN_PEER_CIPHERTEXT={}", hex(&ct2[..n2]));
+    }
+}

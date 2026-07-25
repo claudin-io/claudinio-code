@@ -1,4 +1,5 @@
 /// <reference types="vitest" />
+import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
@@ -17,6 +18,22 @@ export default defineConfig(async () => ({
   // not a valid file URL (no drive letter) and throws, so every JSX test suite
   // fails to load. HMR is meaningless in tests anyway.
   plugins: [solid(isTest ? { hot: false } : {}), tailwindcss()],
+
+  resolve: {
+    alias: {
+      // The generated protocol bindings, shared rather than copied.
+      //
+      // `sas.ts` in particular: the device and the browser must derive the same
+      // three words, or pairing asks people to compare strings that can never
+      // agree. A second copy of that word list is a pairing flow that breaks the
+      // day one of them is edited. CI already fails if the generated files are
+      // stale, so pointing at them keeps one definition and one check.
+      "@claudinio/protocol": resolve(
+        __dirname,
+        "src-tauri/crates/claudinio-protocol/bindings",
+      ),
+    },
+  },
 
   optimizeDeps: {
     // Monaco editor loads workers via `new Worker(new URL(...))` at runtime.
