@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { formatSas } from "@claudinio/protocol/sas";
 import { bytesFromHex, hexFromBytes } from "./wire";
+import { GOLDEN } from "./golden";
 import {
   MSG1_LENGTH,
   NoiseError,
@@ -8,30 +9,6 @@ import {
   generateKeyPair,
   importPrivateKeyForTesting,
 } from "./noise";
-
-/// A recorded handshake from `snow`, with both ephemerals fixed.
-///
-/// Regenerate with, in `src-tauri/`:
-///   cargo test --features remote golden -- --ignored --nocapture
-/// The static keys change on every run, so these are replaced as a set.
-///
-/// This is the only thing here that can show the two implementations agree. An
-/// initiator tested against a responder written in the same language proves they
-/// agree with each other and nothing about whether either agrees with the device.
-const GOLDEN = {
-  initStaticPrivate: "85bdf2a5f60f1ab0ea933480e437ee04d628491d06f1153cd70d1e1fc0a10634",
-  initStaticPublic: "eb53c549ef61da2784d51f7d3a58476b74932922a3bfa5f227b510cef11eba1d",
-  initEphemeralPrivate: "0202020202020202020202020202020202020202020202020202020202020202",
-  respStaticPublic: "1f4ff8f62422c38587c0d7b30b5485cbd2b05b48f75b8b1ec80d766bb5b3453a",
-  msg1: "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d594b62ca9e27c6ef8b5b28b8762d4c0e96f8991e0bbd870902aff2716795de38e4681ac6f05239ccb61011847448bf006d36e5eb528ad122894bf236606f571d45",
-  msg2: "ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10ba33a87d1017a524080da269a4e168359",
-  handshakeHash: "f4f92fd16e4182c365e71483fbcc809eb2a17facf878c58f15ecbe19d7a6edc4",
-  sas: "zephyr · rivet · basalt",
-  deviceCiphertext: "68c38ada9d1f1bad0b3f97507d88b69c0b0c6f0ddbd5860b5a92f6dfba8e828feb4e6d77f8",
-  devicePlaintext: "hello from the device",
-  peerCiphertext: "c34cab1aa28b9eefbc77d762288a2faa8d1ed3a8bcd13eeb00c772ef432332fbaecc11ea01b0",
-  peerPlaintext: "hello from the browser",
-};
 
 async function goldenInitiator() {
   const staticKeys = {

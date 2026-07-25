@@ -420,81 +420,139 @@ mod golden {
     use super::*;
     use snow::Builder;
 
-    /// A recorded IK handshake, printed as hex.
+    /// A recorded IK handshake and exchange, printed as hex.
     ///
     /// Both ephemerals are fixed and both static keypairs are printed, so the whole
     /// transcript is reproducible from the values below — which is what makes it a
-    /// golden vector for the browser initiator in `apps/web/src/noise.test.ts`.
+    /// golden vector for the browser in `apps/web/src/golden.ts`.
     ///
     /// This is the only thing that can show the two implementations agree. A browser
     /// initiator tested against a browser responder proves they agree with each other
-    /// and nothing about whether either agrees with `snow`.
+    /// and nothing about whether either agrees with the device. The first time this
+    /// existed it caught a real one within the hour: the device attached to the relay
+    /// with no channel token, so nothing could ever have connected.
     ///
     /// `cargo test --features remote golden -- --ignored --nocapture` to regenerate.
-    /// Regenerating changes the static keys, so the TypeScript constants have to be
-    /// replaced as a set.
+    /// The static keys change on every run, so the TypeScript constants are replaced
+    /// as a set.
+    ///
+    /// # Two handshakes, on purpose
+    ///
+    /// A Noise cipher advances its nonce per message, so a vector's position in the
+    /// stream is part of it. The bare-ciphertext vectors and the whole-frame vectors
+    /// are therefore taken from *separate* handshakes, both starting at counter zero,
+    /// so a test can use either without having to consume the other first. With the
+    /// ephemerals fixed the two handshakes are identical, which is what makes that
+    /// sound rather than a fudge.
     #[test]
-    #[ignore = "prints a golden Noise transcript for apps/web/src/noise.test.ts"]
+    #[ignore = "prints a golden Noise transcript for apps/web/src/golden.ts"]
     fn print_golden_handshake() {
         let init_ephemeral = [0x02u8; 32];
         let resp_ephemeral = [0x04u8; 32];
-
         let params: snow::params::NoiseParams = NOISE_PARAMS.parse().unwrap();
         let init_keys = Builder::new(params.clone()).generate_keypair().unwrap();
         let resp_keys = Builder::new(params.clone()).generate_keypair().unwrap();
-
-        let mut initiator = Builder::new(params.clone())
-            .local_private_key(&init_keys.private)
-            .unwrap()
-            .remote_public_key(&resp_keys.public)
-            .unwrap()
-            .fixed_ephemeral_key_for_testing_only(&init_ephemeral)
-            .build_initiator()
-            .unwrap();
-        let mut responder = Builder::new(params)
-            .local_private_key(&resp_keys.private)
-            .unwrap()
-            .fixed_ephemeral_key_for_testing_only(&resp_ephemeral)
-            .build_responder()
-            .unwrap();
-
-        let mut msg1 = [0u8; 1024];
-        let n1 = initiator.write_message(&[], &mut msg1).unwrap();
-        let mut scratch = [0u8; 1024];
-        responder.read_message(&msg1[..n1], &mut scratch).unwrap();
-
-        let mut msg2 = [0u8; 1024];
-        let n2 = responder.write_message(&[], &mut msg2).unwrap();
-        initiator.read_message(&msg2[..n2], &mut scratch).unwrap();
-
-        let hash = initiator.get_handshake_hash().to_vec();
-
         let hex = |b: &[u8]| -> String { b.iter().map(|x| format!("{x:02x}")).collect() };
+
+        // One complete handshake, returning both transport states and what it took.
+        let run = || {
+            let params: snow::params::NoiseParams = NOISE_PARAMS.parse().unwrap();
+            let mut initiator = Builder::new(params.clone())
+                .local_private_key(&init_keys.private)
+                .unwrap()
+                .remote_public_key(&resp_keys.public)
+                .unwrap()
+                .fixed_ephemeral_key_for_testing_only(&init_ephemeral)
+                .build_initiator()
+                .unwrap();
+            let mut responder = Builder::new(params)
+                .local_private_key(&resp_keys.private)
+                .unwrap()
+                .fixed_ephemeral_key_for_testing_only(&resp_ephemeral)
+                .build_responder()
+                .unwrap();
+
+            let mut msg1 = [0u8; 1024];
+            let n1 = initiator.write_message(&[], &mut msg1).unwrap();
+            let mut scratch = [0u8; 1024];
+            responder.read_message(&msg1[..n1], &mut scratch).unwrap();
+            let mut msg2 = [0u8; 1024];
+            let n2 = responder.write_message(&[], &mut msg2).unwrap();
+            initiator.read_message(&msg2[..n2], &mut scratch).unwrap();
+
+            let hash = initiator.get_handshake_hash().to_vec();
+            (
+                msg1[..n1].to_vec(),
+                msg2[..n2].to_vec(),
+                hash,
+                initiator.into_transport_mode().unwrap(),
+                responder.into_transport_mode().unwrap(),
+            )
+        };
+
+        let (msg1, msg2, hash, mut peer, mut device) = run();
+
         println!("GOLDEN_INIT_STATIC_PRIVATE={}", hex(&init_keys.private));
         println!("GOLDEN_INIT_STATIC_PUBLIC={}", hex(&init_keys.public));
         println!("GOLDEN_INIT_EPHEMERAL_PRIVATE={}", hex(&init_ephemeral));
         println!("GOLDEN_RESP_STATIC_PUBLIC={}", hex(&resp_keys.public));
-        println!("GOLDEN_MSG1={}", hex(&msg1[..n1]));
-        println!("GOLDEN_MSG2={}", hex(&msg2[..n2]));
+        println!("GOLDEN_MSG1={}", hex(&msg1));
+        println!("GOLDEN_MSG2={}", hex(&msg2));
         println!("GOLDEN_HANDSHAKE_HASH={}", hex(&hash));
         println!("GOLDEN_SAS={}", claudinio_protocol::sas::format(&hash));
 
-        // One transport message too, so the browser's split() and nonce handling are
-        // exercised rather than only the handshake. The device sends first, which is
-        // the direction the browser has to be able to read.
-        let mut device = responder.into_transport_mode().unwrap();
-        let mut ct = [0u8; 1024];
+        // First handshake: bare ciphertext, one message each way, both at counter 0.
+        let mut buf = [0u8; 1024];
         let n = device
-            .write_message(b"hello from the device", &mut ct)
+            .write_message(b"hello from the device", &mut buf)
             .unwrap();
-        println!("GOLDEN_DEVICE_CIPHERTEXT={}", hex(&ct[..n]));
+        println!("GOLDEN_DEVICE_CIPHERTEXT={}", hex(&buf[..n]));
+        let n = peer
+            .write_message(b"hello from the browser", &mut buf)
+            .unwrap();
+        println!("GOLDEN_PEER_CIPHERTEXT={}", hex(&buf[..n]));
 
-        // And the reverse: what the browser sends must decrypt here.
-        let mut peer = initiator.into_transport_mode().unwrap();
-        let mut ct2 = [0u8; 1024];
-        let n2 = peer
-            .write_message(b"hello from the browser", &mut ct2)
-            .unwrap();
-        println!("GOLDEN_PEER_CIPHERTEXT={}", hex(&ct2[..n2]));
+        // Second handshake: whole frames, as they go on the wire. Starting fresh so
+        // the browser's session layer can consume these without having consumed the
+        // bare vectors above.
+        let (_, _, _, mut peer, mut device) = run();
+        let channel = claudinio_protocol::wire::ChannelId::from_bytes([0xab; 16]);
+        let frame = |transport: &mut snow::TransportState, seq: u64, plaintext: &[u8]| -> String {
+            let mut buf = vec![0u8; plaintext.len() + 1024];
+            let n = transport.write_message(plaintext, &mut buf).unwrap();
+            let encoded =
+                claudinio_protocol::wire::OuterFrame::data(channel, seq, 0, buf[..n].to_vec());
+            hex(&claudinio_protocol::wire::encode(&encoded).unwrap())
+        };
+
+        let snapshot = claudinio_protocol::inner::DeviceToPeer::Snapshot {
+            session_id: "golden".into(),
+            records: vec![
+                serde_json::json!({ "kind": "meta", "sessionId": "golden" }),
+                serde_json::json!({ "kind": "user", "content": "hello" }),
+            ],
+            seq: 2,
+        };
+        println!(
+            "GOLDEN_SNAPSHOT_FRAME={}",
+            frame(&mut device, 2, &rmp_serde::to_vec_named(&snapshot).unwrap())
+        );
+
+        let closed = claudinio_protocol::inner::DeviceToPeer::Closed {
+            reason: claudinio_protocol::inner::CloseReason::TurnedOffLocally,
+        };
+        println!(
+            "GOLDEN_CLOSED_FRAME={}",
+            frame(&mut device, 3, &rmp_serde::to_vec_named(&closed).unwrap())
+        );
+
+        let subscribe = claudinio_protocol::inner::PeerToDevice::Subscribe {
+            session_id: "golden".into(),
+            from_seq: 0,
+        };
+        println!(
+            "GOLDEN_SUBSCRIBE_FRAME={}",
+            frame(&mut peer, 1, &rmp_serde::to_vec_named(&subscribe).unwrap())
+        );
     }
 }
