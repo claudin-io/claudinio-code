@@ -858,8 +858,33 @@ export interface RemotePolicy {
   expires_at?: number | null;
 }
 
+/// What a browser may do, as stored on disk.
+///
+/// Distinct from `RemotePolicy` — the effective grant a peer is told about — because
+/// an editor that saved the effective one would rewrite a switched-off policy as a
+/// policy that grants nothing, throwing away everything the user had configured.
+export interface RemoteStoredPolicy {
+  enabled: boolean;
+  /// Unix millis, or `null` for a grant that does not expire.
+  expires_at: number | null;
+  workspaces: string[];
+  idle_disconnect_minutes: number;
+  allow: {
+    send_message: boolean;
+    steer: boolean;
+    interrupt: boolean;
+    set_mode: boolean;
+    approve_edit: boolean;
+    approve_bash: BashApproval;
+    read_attachment: boolean;
+    export_file: boolean;
+  };
+  bash_remote_denylist_extra: string[];
+  max_unattended_minutes: number;
+}
+
 export interface RemotePolicyView {
-  /// Shown so the user knows which file to edit.
+  /// Shown so the user knows which file it lands in.
   path: string;
   active: boolean;
   /// Why nothing is granted, when nothing is granted.
@@ -867,6 +892,40 @@ export interface RemotePolicyView {
   effective: RemotePolicy;
   workspaces: string[];
   bashDenylist: string[];
+  stored: RemoteStoredPolicy;
+}
+
+/// The grant lengths the panel offers. `null` never expires.
+///
+/// Offered as a list rather than a free-form date because the useful answers are
+/// coarse, and because "how long" is a question people answer in units of trip
+/// rather than in timestamps.
+export const GRANT_DURATIONS: { label: string; ms: number | null }[] = [
+  { label: "1 hour", ms: 60 * 60 * 1000 },
+  { label: "8 hours", ms: 8 * 60 * 60 * 1000 },
+  { label: "1 day", ms: 24 * 60 * 60 * 1000 },
+  { label: "7 days", ms: 7 * 24 * 60 * 60 * 1000 },
+  { label: "30 days", ms: 30 * 24 * 60 * 60 * 1000 },
+  { label: "Never expires", ms: null },
+];
+
+export async function remoteSetPolicy(policy: RemoteStoredPolicy): Promise<void> {
+  return invoke<void>("remote_set_policy", { policy });
+}
+
+/// Turn remote access off now. Returns how many connections were stopped.
+///
+/// Local, and works with the relay unreachable — the same property §6.5 gives
+/// revocation, for the same reason.
+export async function remoteDisable(): Promise<number> {
+  return invoke<number>("remote_disable");
+}
+
+/// The channels being served. Read from the live registry rather than from a flag,
+/// so a connection that stopped by itself does not leave the panel claiming
+/// remote access is on.
+export async function remoteRunning(): Promise<string[]> {
+  return invoke<string[]>("remote_running");
 }
 
 export interface Pairing {
@@ -963,7 +1022,15 @@ export type RemoteNotice =
   | { kind: "paired"; peerKey: string; label: string }
   /// The words did not match, or nobody answered. The key is already revoked.
   | { kind: "pairingRefused"; peerKey: string }
-  | { kind: "connected"; peerKey: string; label: string; sas: string };
+  | { kind: "connected"; peerKey: string; label: string; sas: string }
+  /// Remote access stopped and will not redial, with why.
+  | { kind: "stopped"; peerKey: string; reason: RemoteCloseReason };
+
+export type RemoteCloseReason =
+  | "peerAsked"
+  | "turnedOffLocally"
+  | "grantExpired"
+  | "revoked";
 
 export async function onRemoteNotice(handler: (notice: RemoteNotice) => void): Promise<() => void> {
   return listen<RemoteNotice>("remote://notice", (event) => handler(event.payload));

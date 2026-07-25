@@ -299,6 +299,7 @@ pub async fn remote_policy(_state: State<'_, AppState>) -> Result<PolicyView, St
         effective: effective.wire(),
         workspaces: stored.workspaces.clone(),
         bash_denylist: stored.remote_bash_denylist(),
+        stored,
     })
 }
 
@@ -315,6 +316,13 @@ pub struct PolicyView {
     pub effective: claudinio_protocol::inner::Policy,
     pub workspaces: Vec<String>,
     pub bash_denylist: Vec<String>,
+    /// What is actually on disk, so the editor can round-trip it.
+    ///
+    /// `effective` is what a peer gets after the switch and the expiry are applied,
+    /// which is what the panel *displays* — but an editor that saved `effective`
+    /// would silently rewrite a switched-off policy as a policy that grants nothing,
+    /// losing everything the user had configured.
+    pub stored: crate::remote::policy::StoredPolicy,
 }
 
 #[derive(serde::Deserialize)]

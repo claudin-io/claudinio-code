@@ -132,6 +132,7 @@ describe("createRemoteSettings", () => {
       remote_policy: policy(),
       remote_pairings: [pairing()],
       remote_revoked: ["22".repeat(32)],
+      remote_running: [],
     });
     await withSettings(async (s) => {
       await s.probe();
@@ -153,11 +154,48 @@ describe("createRemoteSettings", () => {
       remote_policy: policy(),
       remote_pairings: [],
       remote_revoked: [],
+      remote_running: [],
     });
     await withSettings(async (s) => {
       await s.probe();
       expect(s.available()).toBe(true);
       expect(s.error()).toContain("not a device identity");
+    });
+  });
+
+  /// A broken identity is the problem the user has to fix. A failure to read the
+  /// live connection list used to overwrite it, leaving the panel reporting the
+  /// lesser problem and none of the real one.
+  it("an unreadable identity outranks a failure to load the rest", async () => {
+    respond({
+      remote_status: status({ deviceKey: null, error: "device.key is not a device identity" }),
+      remote_policy: policy(),
+      remote_pairings: [],
+      remote_revoked: [],
+      remote_running: () => {
+        throw new Error("remote_running blew up");
+      },
+    });
+    await withSettings(async (s) => {
+      await s.probe();
+      expect(s.error()).toContain("not a device identity");
+    });
+  });
+
+  /// And with a readable identity, the loader's error is still the one shown.
+  it("reports a load failure when the identity is fine", async () => {
+    respond({
+      remote_status: status(),
+      remote_policy: policy(),
+      remote_pairings: [],
+      remote_revoked: [],
+      remote_running: () => {
+        throw new Error("remote_running blew up");
+      },
+    });
+    await withSettings(async (s) => {
+      await s.probe();
+      expect(s.error()).toContain("remote_running blew up");
     });
   });
 
@@ -168,6 +206,7 @@ describe("createRemoteSettings", () => {
       remote_status: status(),
       remote_policy: policy(),
       remote_revoked: [],
+      remote_running: [],
       remote_pairings: () => {
         throw new Error("pairings.json is not valid JSON");
       },
@@ -185,6 +224,7 @@ describe("createRemoteSettings", () => {
       remote_policy: policy(),
       remote_pairings: [],
       remote_revoked: [],
+      remote_running: [],
       remote_create_identity: "bb".repeat(32),
     });
     await withSettings(async (s) => {
@@ -207,6 +247,7 @@ describe("createRemoteSettings", () => {
       remote_status: status(),
       remote_policy: policy(),
       remote_revoked: [],
+      remote_running: [],
       remote_pairings: () => paired,
       remote_revoke: () => {
         paired = paired.slice(1);
@@ -232,6 +273,7 @@ describe("createRemoteSettings", () => {
       remote_status: status(),
       remote_policy: policy(),
       remote_revoked: [],
+      remote_running: [],
       remote_pairings: [pairing()],
       remote_revoke: () => {
         throw new Error("read-only file system");
@@ -254,6 +296,7 @@ describe("createRemoteSettings", () => {
       remote_status: status(),
       remote_policy: policy(),
       remote_revoked: [],
+      remote_running: [],
       remote_pairings: [pairing()],
       remote_rename_pairing: null,
     });
@@ -275,6 +318,7 @@ describe("createRemoteSettings", () => {
       remote_status: status(),
       remote_policy: policy(),
       remote_revoked: [],
+      remote_running: [],
       remote_pairings: [],
       remote_unrevoke: null,
     });
@@ -296,6 +340,7 @@ describe("createRemoteSettings", () => {
       remote_status: status(),
       remote_policy: policy(),
       remote_revoked: [],
+      remote_running: [],
       remote_pairings: [],
       remote_revoke: () => {
         revokes += 1;
@@ -320,6 +365,7 @@ describe("createRemoteSettings", () => {
     remote_policy: policy(),
     remote_pairings: [],
     remote_revoked: [],
+    remote_running: [],
   });
 
   const code = () => ({

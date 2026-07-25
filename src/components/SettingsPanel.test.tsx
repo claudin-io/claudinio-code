@@ -52,6 +52,8 @@ function remoteIsAvailable() {
         return [];
       case "remote_revoked":
         return [];
+      case "remote_running":
+        return [];
       default:
         throw new Error(`Command ${cmd} not found`);
     }

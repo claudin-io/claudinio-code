@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { SettingsRemote } from "./SettingsRemote";
-import type { Pairing, RemotePolicyView } from "../../lib/ipc";
+import type { Pairing, RemotePolicyView, RemoteStoredPolicy } from "../../lib/ipc";
 
 /// SolidJS needs a macrotask to settle in jsdom.
 const flush = () => new Promise((r) => setTimeout(r, 10));
@@ -17,23 +17,34 @@ afterEach(() => {
   host = undefined;
 });
 
+const allow: RemoteStoredPolicy["allow"] = {
+  send_message: true,
+  steer: false,
+  interrupt: true,
+  set_mode: false,
+  approve_edit: true,
+  approve_bash: "allowlist",
+  read_attachment: false,
+  export_file: false,
+};
+
 function policyView(over: Partial<RemotePolicyView> = {}): RemotePolicyView {
   return {
     path: "/Users/v/.config/claudinio-code/remote-policy.json",
     active: true,
     inertBecause: null,
-    effective: {
-      send_message: true,
-      steer: false,
-      interrupt: true,
-      set_mode: false,
-      approve_edit: true,
-      approve_bash: "allowlist",
-      read_attachment: false,
-      export_file: false,
-    },
+    effective: { ...allow, expires_at: null },
     workspaces: ["/Users/v/work"],
     bashDenylist: ["rm -rf"],
+    stored: {
+      enabled: true,
+      expires_at: null,
+      workspaces: ["/Users/v/work"],
+      idle_disconnect_minutes: 30,
+      allow,
+      bash_remote_denylist_extra: [],
+      max_unattended_minutes: 60,
+    },
     ...over,
   };
 }
@@ -128,39 +139,56 @@ describe("SettingsRemote", () => {
     expect(root.textContent).not.toContain("cd".repeat(32));
   });
 
-  /// An empty panel with nothing granted looks broken. Saying why does not.
-  it("says why nothing is granted when the policy is inert", async () => {
+  /// The badge is all this component says about the policy now — the reason lives
+  /// in RemotePolicyEditor, which is the thing that can act on it.
+  it("badges the policy as off when nothing is granted", async () => {
     const root = await mount({
       policy: policyView({ active: false, inertBecause: "the grant has expired" }),
     });
 
-    expect(root.textContent).toContain("the grant has expired");
     expect(root.textContent).toContain("Off");
   });
 
-  /// `export_file` has no safe remote form. The panel must not merely show it
-  /// denied — it has to explain, or the next person adds a switch for it.
-  it("explains that exporting files is never granted remotely", async () => {
+  it("badges the policy as active when it is", async () => {
     const root = await mount();
-
-    expect(root.textContent).toContain("never granted remotely");
-    expect(root.textContent).toContain("native dialog");
+    expect(root.textContent).toContain("Active");
   });
 
-  it("shows each permission as allowed or denied", async () => {
-    const root = await mount();
+  /// The slots are why this file did not have to learn to write a policy or run a
+  /// pairing. Worth a test, because a silently unrendered slot is a blank panel.
+  it("renders what the host slots into it", async () => {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const [policy] = createSignal<RemotePolicyView | null>(policyView());
+    const [none] = createSignal<Pairing[]>([]);
+    const [empty] = createSignal<string[]>([]);
+    const [nothing] = createSignal<string | null>(null);
+    const [busy] = createSignal(false);
+    const [key] = createSignal<string | null>("bb".repeat(32));
 
-    expect(root.textContent).toContain("Send messages");
-    expect(root.textContent).toContain("Approve shell commands");
-    expect(root.textContent).toContain("allowlist");
-  });
+    dispose = render(
+      () => (
+        <SettingsRemote
+          deviceKey={key}
+          policy={policy}
+          pairings={none}
+          revoked={empty}
+          error={nothing}
+          busy={busy}
+          onCreateIdentity={() => {}}
+          onRevoke={() => {}}
+          onUnrevoke={() => {}}
+          onRename={() => {}}
+          policyEditor={<span>{"THE EDITOR"}</span>}
+          pairing={<span>{"THE PAIRING FLOW"}</span>}
+        />
+      ),
+      host,
+    );
+    await flush();
 
-  /// The user has to know where to edit, because the panel deliberately cannot.
-  it("names the file the policy is edited in, and that a peer cannot widen it", async () => {
-    const root = await mount();
-
-    expect(root.textContent).toContain("remote-policy.json");
-    expect(root.textContent).toContain("can never widen it");
+    expect(host.textContent).toContain("THE EDITOR");
+    expect(host.textContent).toContain("THE PAIRING FLOW");
   });
 
   it("lists a paired browser by the name it was given", async () => {

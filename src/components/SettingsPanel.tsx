@@ -8,6 +8,7 @@ import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsMcp } from "./settings/SettingsMcp";
 import { SettingsRemote } from "./settings/SettingsRemote";
 import { RemotePairing } from "./settings/RemotePairing";
+import { RemotePolicyEditor } from "./settings/RemotePolicyEditor";
 import { createRemoteSettings } from "../lib/createRemoteSettings";
 
 interface SettingsPanelProps {
@@ -363,6 +364,16 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   onRevoke={remote.revoke}
                   onUnrevoke={remote.unrevoke}
                   onRename={remote.rename}
+                  policyEditor={
+                    <RemotePolicyEditor
+                      policy={remote.policy}
+                      running={remote.running}
+                      busy={remote.busy}
+                      activeWorkspace={props.activeWorkspace}
+                      onSave={remote.setPolicy}
+                      onDisable={remote.disable}
+                    />
+                  }
                   pairing={
                     <RemotePairing
                       code={remote.code}

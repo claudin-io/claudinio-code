@@ -12,6 +12,11 @@ interface SettingsRemoteProps {
   onRevoke: (peerKey: string) => void;
   onUnrevoke: (peerKey: string) => void;
   onRename: (peerKey: string, label: string) => void;
+  /// The permissions editor. A slot for the same reason as `pairing`: this
+  /// component is the frame, and what goes in it is chosen by the host — which is
+  /// what let the read-only policy block become an editor without this file
+  /// learning how to write one.
+  policyEditor?: JSX.Element;
   /// The pairing flow, slotted in high on the page rather than appended.
   ///
   /// A slot because the word check has to be the first thing visible when it
@@ -115,83 +120,7 @@ export const SettingsRemote: Component<SettingsRemoteProps> = (props) => {
 
       {props.pairing}
 
-      {/* Policy. Read-only here: it is edited by hand, and the panel says where. */}
-      <Show when={props.policy()}>
-        {(policy) => (
-          <div class="mb-4">
-            <span class="mb-1 block text-[11px] uppercase tracking-wider text-ink-muted">
-              {"What a paired browser may do"}
-            </span>
-
-            <Show when={policy().inertBecause}>
-              <p class="mb-2 rounded-md border border-border-subtle bg-surface-1 px-2 py-1.5 text-[11px] text-ink-muted">
-                {`Nothing is granted: ${policy().inertBecause}.`}
-              </p>
-            </Show>
-
-            <div class="mb-2 space-y-1">
-              <For
-                each={[
-                  ["Send messages", policy().effective.send_message],
-                  ["Steer a run", policy().effective.steer],
-                  ["Interrupt", policy().effective.interrupt],
-                  ["Change mode", policy().effective.set_mode],
-                  ["Approve edits", policy().effective.approve_edit],
-                  ["Read attachments", policy().effective.read_attachment],
-                  ["Export files", policy().effective.export_file],
-                ]}
-              >
-                {([label, granted]) => (
-                  <div class="flex items-center justify-between rounded-md border border-border-subtle bg-surface-1 px-2 py-1 text-xs">
-                    <span class="text-ink">{label}</span>
-                    <span
-                      classList={{
-                        "text-ink-faint": !granted,
-                        "text-accent": !!granted,
-                      }}
-                    >
-                      {granted ? "allowed" : "denied"}
-                    </span>
-                  </div>
-                )}
-              </For>
-              <div class="flex items-center justify-between rounded-md border border-border-subtle bg-surface-1 px-2 py-1 text-xs">
-                <span class="text-ink">{"Approve shell commands"}</span>
-                <span class="text-ink-muted">{policy().effective.approve_bash}</span>
-              </div>
-            </div>
-
-            {/* Exporting has no safe remote form, and saying so is better than
-                letting someone wonder why the switch does nothing. */}
-            <p class="mb-2 text-[11px] text-ink-faint">
-              {
-                "Exporting files is never granted remotely: it is safe locally only because you pick the destination in a native dialog, and there is no remote equivalent of standing at the machine."
-              }
-            </p>
-
-            <Show when={policy().workspaces.length > 0}>
-              <span class="mb-1 block text-[11px] uppercase tracking-wider text-ink-muted">
-                {"Workspaces a browser can see"}
-              </span>
-              <div class="mb-2 space-y-1">
-                <For each={policy().workspaces}>
-                  {(path) => (
-                    <code class="block truncate rounded-md border border-border-subtle bg-surface-1 px-2 py-1 font-mono text-[11px] text-ink">
-                      {path}
-                    </code>
-                  )}
-                </For>
-              </div>
-            </Show>
-
-            <p class="text-[11px] text-ink-faint">
-              {"Edited on this machine only, in "}
-              <code class="font-mono text-ink-muted">{policy().path}</code>
-              {". A paired browser can read this policy and can never widen it."}
-            </p>
-          </div>
-        )}
-      </Show>
+      {props.policyEditor}
 
       {/* Pairings. */}
       <div class="mb-4">

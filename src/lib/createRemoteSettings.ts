@@ -11,10 +11,15 @@ import {
   remoteRenamePairing,
   remoteStartPairing,
   remoteConfirmPairing,
+  remoteSetPolicy,
+  remoteDisable,
+  remoteRunning,
   onRemoteNotice,
   type Pairing,
   type PairingCodeView,
   type RemotePolicyView,
+  type RemoteStoredPolicy,
+  type RemoteCloseReason,
 } from "./ipc";
 import type { PairingOutcome, PendingPairing } from "../components/settings/RemotePairing";
 
@@ -33,6 +38,10 @@ export interface RemoteSettings {
   /// A pairing stopped at the word check. Nothing is being served while this is set.
   pending: Accessor<PendingPairing | null>;
   outcome: Accessor<PairingOutcome | null>;
+  /// The channels being served. Non-empty means a browser is connected now.
+  running: Accessor<string[]>;
+  /// Why remote access last stopped, when it stopped on its own.
+  stoppedBecause: Accessor<RemoteCloseReason | null>;
   /// Why pairing cannot start — no device key, no workspace open.
   blocked: Accessor<string | null>;
   probe: () => Promise<void>;
@@ -40,6 +49,8 @@ export interface RemoteSettings {
   revoke: (peerKey: string) => void;
   unrevoke: (peerKey: string) => void;
   rename: (peerKey: string, label: string) => void;
+  setPolicy: (policy: RemoteStoredPolicy) => void;
+  disable: () => void;
   startPairing: (label: string) => void;
   cancelPairing: () => void;
   confirmPairing: (matched: boolean) => void;
@@ -66,6 +77,8 @@ export function createRemoteSettings(
   const [revoked, setRevoked] = createSignal<string[]>([]);
   const [error, setError] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
+  const [running, setRunning] = createSignal<string[]>([]);
+  const [stoppedBecause, setStoppedBecause] = createSignal<RemoteCloseReason | null>(null);
 
   /// Ask the device what it knows, and find out whether it can be asked at all.
   ///
@@ -77,26 +90,38 @@ export function createRemoteSettings(
   /// and not off matching an error string, which would break the day Tauri
   /// rewords it.
   const probe = async () => {
+    let identityError: string | null = null;
     try {
       const status = await remoteStatus();
       setAvailable(true);
       setDeviceKey(status.deviceKey);
-      setError(status.error);
+      identityError = status.error;
     } catch {
       setAvailable(false);
       return;
     }
     await load();
+    // Applied after `load`, not before: an unreadable device identity is the more
+    // fundamental problem, and setting it first let a failure to read the live
+    // connection list overwrite it — leaving the panel reporting the lesser
+    // problem and none of the one the user has to fix.
+    if (identityError) setError(identityError);
   };
 
   /// Each of the three is loaded independently: a damaged pairing book should not
   /// also hide the policy the user came here to read.
   const load = async () => {
-    const results = await Promise.allSettled([remotePolicy(), remotePairings(), remoteRevoked()]);
-    const [p, pr, rv] = results;
+    const results = await Promise.allSettled([
+      remotePolicy(),
+      remotePairings(),
+      remoteRevoked(),
+      remoteRunning(),
+    ]);
+    const [p, pr, rv, run] = results;
     if (p.status === "fulfilled") setPolicy(p.value);
     if (pr.status === "fulfilled") setPairings(pr.value);
     if (rv.status === "fulfilled") setRevoked(rv.value);
+    if (run.status === "fulfilled") setRunning(run.value);
 
     const failed = results.find((r) => r.status === "rejected");
     if (failed?.status === "rejected") setError(message(failed.reason));
@@ -149,6 +174,13 @@ export function createRemoteSettings(
         void load();
         break;
       case "connected":
+        // Not a pairing, so no word check — prompting on every reconnect would
+        // teach the user to click through it. Only the live list changes.
+        void load();
+        break;
+      case "stopped":
+        setStoppedBecause(notice.reason);
+        void load();
         break;
     }
   }).then((stop) => onCleanup(stop));
@@ -164,8 +196,17 @@ export function createRemoteSettings(
     code,
     pending,
     outcome,
+    running,
+    stoppedBecause,
     blocked,
     probe,
+    setPolicy: (policy) => {
+      setStoppedBecause(null);
+      mutate(() => remoteSetPolicy(policy));
+    },
+    disable: () => mutate(async () => {
+      await remoteDisable();
+    }),
     startPairing: (label) => {
       const ws = workspace();
       if (!ws) return;
