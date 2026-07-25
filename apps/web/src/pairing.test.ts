@@ -2,12 +2,14 @@ import { describe, it, expect, vi } from "vitest";
 import { parsePairingCode, isStale, forgetPairingCode } from "./pairing";
 
 const CHANNEL = "ab".repeat(16);
+const TOKEN = "ef".repeat(16);
 const KEY = "cd".repeat(32);
 const RELAY = "wss://relay.claudin.io/ws";
 
 const fragment = (over: Record<string, string | null> = {}) => {
   const base: Record<string, string | null> = {
     c: CHANNEL,
+    t: TOKEN,
     k: KEY,
     r: RELAY,
     e: String(Date.now() + 120_000),
@@ -31,6 +33,7 @@ describe("parsePairingCode", () => {
     if (!result.ok) return;
 
     expect(result.code.channel).toBe(CHANNEL);
+    expect(result.code.token).toBe(TOKEN);
     expect(result.code.deviceKey).toBe(KEY);
     expect(result.code.relayUrl).toBe(RELAY);
     expect(result.code.expiresAt).toBeGreaterThan(Date.now());
@@ -58,6 +61,7 @@ describe("parsePairingCode", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.code.channel).toBe(CHANNEL);
+    expect(result.code.token).toBe(TOKEN);
     expect(result.code.deviceKey).toBe(KEY);
   });
 
@@ -67,6 +71,18 @@ describe("parsePairingCode", () => {
       expect(result.ok, bad).toBe(false);
       if (result.ok) return;
       expect(result.error).toMatchObject({ kind: "malformed", field: "channel" });
+    }
+  });
+
+  /// The relay refuses a token under 16 characters with an opaque 403 — deliberately
+  /// opaque, so it is not an oracle for guessing channels. Caught here instead, where
+  /// the message can say what is wrong.
+  it("refuses a channel token too short to be one", () => {
+    for (const bad of [null, "", "short"]) {
+      const result = parse(fragment({ t: bad }));
+      expect(result.ok, String(bad)).toBe(false);
+      if (result.ok) return;
+      expect(result.error).toMatchObject({ kind: "malformed", field: "token" });
     }
   });
 

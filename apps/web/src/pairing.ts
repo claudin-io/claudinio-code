@@ -23,9 +23,15 @@
 /// Mirrors `src-tauri/src/remote/code.rs`, which writes it.
 
 export interface PairingCode {
-  /// 32 hex characters. The relay's routing token, and the only reason a stranger
-  /// cannot attach to someone else's channel.
+  /// 32 hex characters. Which channel on the relay.
   channel: string;
+  /// The relay's routing capability for that channel.
+  ///
+  /// Distinct from the channel id: the id says *which* channel, this says the holder
+  /// is allowed on it. The relay checks it before spending bandwidth on a stranger,
+  /// and refuses anything under 16 characters — so a short one is refused here too,
+  /// where the message can say why.
+  token: string;
   /// 64 hex characters. The device's static public key — public by design.
   deviceKey: string;
   /// Where to dial. `wss:` only; see `parseRelayUrl`.
@@ -44,6 +50,11 @@ export type PairingCodeResult =
 
 const HEX = /^[0-9a-f]+$/;
 
+/// Matches `MIN_TOKEN_LEN` in the relay's `auth.rs`. Refused here as well as there,
+/// so a short token fails with an explanation instead of as an opaque 403 from a
+/// server the user has no view of.
+export const MIN_TOKEN_LENGTH = 16;
+
 /// Parse a fragment into a pairing code.
 ///
 /// Takes the fragment rather than reading `location` itself, so this is testable
@@ -54,10 +65,14 @@ export function parsePairingCode(fragment: string): PairingCodeResult {
 
   const params = new URLSearchParams(raw);
   const channel = normaliseHex(params.get("c"));
+  const token = (params.get("t") ?? "").trim();
   const deviceKey = normaliseHex(params.get("k"));
 
   if (channel.length !== 32 || !HEX.test(channel)) {
     return bad("channel", "a channel id is 32 hex characters");
+  }
+  if (token.length < MIN_TOKEN_LENGTH) {
+    return bad("token", `a channel token is at least ${MIN_TOKEN_LENGTH} characters`);
   }
   if (deviceKey.length !== 64 || !HEX.test(deviceKey)) {
     return bad("deviceKey", "a device key is 64 hex characters");
@@ -72,7 +87,7 @@ export function parsePairingCode(fragment: string): PairingCodeResult {
   // user fetch a fresh one.
   const expiresAt = parseExpiry(params.get("e"));
 
-  return { ok: true, code: { channel, deviceKey, relayUrl: relay.url, expiresAt } };
+  return { ok: true, code: { channel, token, deviceKey, relayUrl: relay.url, expiresAt } };
 }
 
 /// Has this code gone stale?

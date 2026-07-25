@@ -28,6 +28,14 @@ pub const DEFAULT_WEB_ORIGIN: &str = "https://app.claudin.io";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingCode {
     pub channel: ChannelId,
+    /// The relay's routing capability for this channel.
+    ///
+    /// A second capability alongside the channel id, and the relay's own design
+    /// says why: it is "a bearer capability for routing, not for confidentiality".
+    /// The confidentiality guarantee is the handshake. What this adds is that a
+    /// token can be rotated without changing the channel, and that the relay has
+    /// something to check before it burns bandwidth on a stranger.
+    pub token: String,
     /// The device's static public key, hex. Public by design: this is exactly
     /// what a pairing code is for.
     pub device_key: String,
@@ -45,8 +53,11 @@ impl PairingCode {
     pub fn mint(device_key: String, relay_url: String, expires_at: u64) -> Result<Self, String> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).map_err(|e| format!("no entropy for a channel id: {e}"))?;
+        let mut token_bytes = [0u8; 16];
+        getrandom::fill(&mut token_bytes).map_err(|e| format!("no entropy for a token: {e}"))?;
         Ok(Self {
             channel: ChannelId::from_bytes(bytes),
+            token: token_bytes.iter().map(|b| format!("{b:02x}")).collect(),
             device_key,
             relay_url,
             expires_at,
@@ -59,9 +70,10 @@ impl PairingCode {
     /// requires: a PWA is wanted for push, never as a precondition for pairing.
     pub fn url(&self, web_origin: &str) -> String {
         format!(
-            "{}/#c={}&k={}&r={}&e={}",
+            "{}/#c={}&t={}&k={}&r={}&e={}",
             web_origin.trim_end_matches('/'),
             self.channel.to_hex(),
+            self.token,
             self.device_key,
             escape(&self.relay_url),
             self.expires_at,
@@ -113,6 +125,7 @@ mod tests {
     fn code() -> PairingCode {
         PairingCode {
             channel: ChannelId::from_bytes([0xab; 16]),
+            token: "ef".repeat(16),
             device_key: "cd".repeat(32),
             relay_url: "wss://relay.claudin.io/ws".to_string(),
             expires_at: 1_800_000_120_000,
@@ -128,6 +141,7 @@ mod tests {
         let (before, after) = url.split_once('#').expect("there is a fragment");
 
         assert!(!before.contains("abab"), "the channel is in {before}");
+        assert!(!before.contains("efef"), "the channel token is in {before}");
         assert!(!before.contains("cdcd"), "the device key is in {before}");
         assert!(after.contains(&"ab".repeat(16)));
         assert!(after.contains(&"cd".repeat(32)));
@@ -138,6 +152,7 @@ mod tests {
         let url = code().url(DEFAULT_WEB_ORIGIN);
         assert!(url.starts_with("https://app.claudin.io/#"));
         assert!(url.contains("c=abababababababababababababababab"));
+        assert!(url.contains(&format!("t={}", "ef".repeat(16))));
         assert!(url.contains(&format!("k={}", "cd".repeat(32))));
         assert!(url.contains("r=wss://relay.claudin.io/ws"));
         assert!(url.contains("e=1800000120000"));
@@ -178,6 +193,22 @@ mod tests {
         let a = PairingCode::mint("cd".repeat(32), "wss://r".into(), 0).unwrap();
         let b = PairingCode::mint("cd".repeat(32), "wss://r".into(), 0).unwrap();
         assert_ne!(a.channel, b.channel);
+    }
+
+    /// The relay refuses a token shorter than 16 characters, so a minted one that
+    /// fell under would make every attach fail — the shape of the bug this whole
+    /// change came out of.
+    #[test]
+    fn a_minted_token_is_long_enough_for_the_relay() {
+        let code = PairingCode::mint("cd".repeat(32), "wss://r".into(), 0).unwrap();
+        assert!(code.token.len() >= 16, "token was {}", code.token);
+    }
+
+    #[test]
+    fn every_minted_code_gets_its_own_token() {
+        let a = PairingCode::mint("cd".repeat(32), "wss://r".into(), 0).unwrap();
+        let b = PairingCode::mint("cd".repeat(32), "wss://r".into(), 0).unwrap();
+        assert_ne!(a.token, b.token);
     }
 
     /// Not a strong randomness test — that is the OS's job — but it catches the

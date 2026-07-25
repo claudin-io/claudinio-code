@@ -334,6 +334,8 @@ pub struct EnableArgs {
     pub workspace: String,
     /// Hex, 32 characters. Comes from the pairing exchange.
     pub channel: String,
+    /// The relay's routing capability for that channel, from the same exchange.
+    pub channel_token: String,
     pub session_id: String,
     /// How this peer appears in the transcript: "Safari on iPhone".
     pub peer_label: String,
@@ -440,6 +442,7 @@ async fn open_connection(
     let connection = crate::remote::transport::Connection {
         relay_url: args.relay_url,
         channel,
+        channel_token: args.channel_token,
         identity,
         session_id: args.session_id,
         // The policy the file actually grants, not the all-denying default. It was
@@ -506,6 +509,10 @@ pub struct PairingCodeView {
     pub qr_svg: String,
 }
 
+// The channel token is deliberately absent from `PairingCodeView`. It is inside the
+// URL the QR encodes, which is where the browser reads it from — and a field the
+// webview could pick out separately is a field something will eventually log.
+
 /// Open a pairing window and return the code that fills it.
 ///
 /// One command rather than "mint a code" and "start serving", because a code
@@ -564,6 +571,7 @@ pub async fn remote_start_pairing(
             relay_url: args.relay_url,
             workspace: args.workspace,
             channel: view.channel.clone(),
+            channel_token: code.token.clone(),
             session_id,
             peer_label: args.peer_label,
             pair_new_peer: true,

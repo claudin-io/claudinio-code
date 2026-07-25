@@ -40,6 +40,13 @@ pub const REKEY_INTERVAL: Duration = Duration::from_secs(3600);
 pub struct Connection<A: DeviceActions + Sync> {
     pub relay_url: String,
     pub channel: ChannelId,
+    /// The relay's routing capability for this channel.
+    ///
+    /// Not optional, and it used to be missing entirely: the device attached with no
+    /// token, the relay refused every attach, and remote access could never have
+    /// worked against a real relay. It passed every test because the relay's own
+    /// prova real used a stand-in device that did pass one.
+    pub channel_token: String,
     pub identity: Arc<DeviceIdentity>,
     pub session_id: String,
     pub policy: Policy,
@@ -201,8 +208,8 @@ async fn serve_once<A: DeviceActions + Sync>(
     stop: &mut tokio::sync::watch::Receiver<Option<CloseReason>>,
 ) -> Result<Served, String> {
     let url = format!(
-        "{}?channel={}&role=device",
-        connection.relay_url, connection.channel
+        "{}?channel={}&role=device&token={}",
+        connection.relay_url, connection.channel, connection.channel_token
     );
     // The dial is interruptible: a relay that is refusing connections must not make
     // the off switch wait for it.
