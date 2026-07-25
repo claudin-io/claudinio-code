@@ -1,14 +1,14 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { GOLDEN } from "./golden";
 import { NoiseInitiator, importPrivateKeyForTesting } from "./noise";
 import type { PairingCode } from "./pairing";
 import {
-  HANDSHAKE_TIMEOUT_MS,
   Session,
   type DeviceMessage,
   type SessionState,
   type Socket,
 } from "./session";
+import type { Timings } from "./session";
 import { OuterKind, bytesFromHex, decodeFrame, encodeFrame, hexFromBytes } from "./wire";
 
 /// A socket the test drives. Records what the session sent and lets the test push
@@ -87,6 +87,7 @@ async function harness(over: Partial<PairingCode> = {}): Promise<Harness> {
       return socket;
     },
     await goldenInitiator(),
+    FAST,
   );
 
   return { session, sockets, states, messages, socket: () => sockets[sockets.length - 1] };
@@ -100,7 +101,11 @@ async function harness(over: Partial<PairingCode> = {}): Promise<Harness> {
 /// connection redialled, the reply went to a socket the test was no longer holding, and
 /// the handshake "never completed". `setImmediate` stays real, so waiting costs no fake
 /// time at all.
-const settle = () => new Promise((r) => setImmediate(r));
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+/// Wait a real interval. Only for the assertions that something did *not* happen, where
+/// there is no condition to wait for.
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /// Wait until a state arrives, rather than for a fixed tick.
 ///
@@ -171,15 +176,20 @@ async function upToConfirming(over: Partial<PairingCode> = {}) {
   return h;
 }
 
-beforeEach(() => {
-  // Only the timers the tests drive. Faking everything would take `setImmediate` with
-  // it, and then nothing could yield to the event loop for the crypto to resolve.
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-});
-
-afterEach(() => {
-  vi.useRealTimers();
-});
+/// Real time, with the session's clocks turned down to milliseconds.
+///
+/// Faking the clock was the wrong tool. A wait for the handshake — several WebCrypto
+/// awaits — could cross the faked five-second deadline while it waited, so the connection
+/// redialled and the reply went to a socket the test no longer held. That failed about
+/// one run in three locally and reliably on CI, where the runner is slower.
+///
+/// So nothing here fakes time. The deadlines are settings now, and these are small
+/// enough to wait for honestly.
+const FAST: Timings = {
+  handshakeTimeoutMs: 40,
+  backoffBaseMs: 2,
+  backoffCeilingMs: 8,
+};
 
 describe("dialling", () => {
   /// The missing token is the bug that made remote access impossible. The URL is
@@ -290,8 +300,9 @@ describe("the handshake", () => {
 
     expect(last(h2.states)).toMatchObject({ kind: "failed" });
     expect(h2.socket().closed).toBe(true);
-    // And it does not come back.
-    vi.advanceTimersByTime(60_000);
+    // And it does not come back. Long enough for several turns of the backoff at these
+    // timings, so a redial would have happened by now if one were going to.
+    await pause(60);
     expect(h2.sockets).toHaveLength(1);
     expect(h.states.length).toBeGreaterThan(0);
   });
@@ -306,7 +317,6 @@ describe("the handshake", () => {
     await waitForSent(h.socket, 1);
     expect(h.sockets).toHaveLength(1);
 
-    vi.advanceTimersByTime(HANDSHAKE_TIMEOUT_MS + 1);
     await waitForSockets(h.sockets, 2);
 
     expect(h.sockets).toHaveLength(2);
@@ -361,7 +371,7 @@ describe("receiving", () => {
     // Not delivered as a message: nothing in the timeline should render it.
     expect(h.messages).toHaveLength(1);
 
-    vi.advanceTimersByTime(60_000);
+    await pause(60);
     expect(h.sockets).toHaveLength(1);
   });
 
@@ -425,7 +435,6 @@ describe("reconnecting", () => {
     await settle();
 
     h.socket().onclose?.();
-    vi.advanceTimersByTime(60_000);
     await waitForSockets(h.sockets, 2);
 
     expect(h.sockets.length).toBeGreaterThan(1);
@@ -442,7 +451,6 @@ describe("reconnecting", () => {
     await waitForSent(h.socket, 2);
 
     h.socket().onclose?.();
-    vi.advanceTimersByTime(60_000);
     await waitForSockets(h.sockets, 2);
     h.socket().open();
     await waitForSent(h.socket, 1);
@@ -464,7 +472,6 @@ describe("reconnecting", () => {
     await settle();
 
     h.socket().onclose?.();
-    vi.advanceTimersByTime(60_000);
     await waitForSockets(h.sockets, 2);
     h.socket().open();
     await waitForSent(h.socket, 1);
@@ -483,9 +490,7 @@ describe("reconnecting", () => {
     h.session.start();
     h.session.stop();
 
-    vi.advanceTimersByTime(60_000);
-    await settle();
-    await settle();
+    await pause(60);
 
     expect(h.sockets).toHaveLength(1);
     expect(h.socket().closed).toBe(true);

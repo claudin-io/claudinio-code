@@ -40,6 +40,26 @@ export const HANDSHAKE_TIMEOUT_MS = 5_000;
 export const BACKOFF_BASE_MS = 500;
 export const BACKOFF_CEILING_MS = 30_000;
 
+/// The clocks a session runs on.
+///
+/// Settings rather than constants for two reasons. §0.1 point 3 says a backgrounded
+/// phone drops its socket constantly and the plan expects these tuned for cellular, so
+/// they were always going to need to differ by surface. And the tests need them small:
+/// faking the clock instead meant a wait for the handshake — several WebCrypto awaits —
+/// could cross the faked five-second deadline, which is how three flakes got in and one
+/// of them only ever failed on CI.
+export interface Timings {
+  handshakeTimeoutMs: number;
+  backoffBaseMs: number;
+  backoffCeilingMs: number;
+}
+
+export const DEFAULT_TIMINGS: Timings = {
+  handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
+  backoffBaseMs: BACKOFF_BASE_MS,
+  backoffCeilingMs: BACKOFF_CEILING_MS,
+};
+
 export type SessionState =
   | { kind: "connecting" }
   /// Handshake done, waiting for the user to compare the words. Nothing is requested
@@ -133,6 +153,7 @@ export class Session {
     private readonly events: SessionEvents,
     private readonly makeSocket: SocketFactory = browserSocket,
     private readonly makeInitiator: InitiatorFactory = freshInitiator,
+    private readonly timings: Timings = DEFAULT_TIMINGS,
   ) {
     this.channel = channelFromHex(code.channel);
   }
@@ -225,7 +246,7 @@ export class Session {
       // sleeping and never meet.
       this.handshakeTimer = setTimeout(() => {
         if (!this.noise?.complete) this.redial();
-      }, HANDSHAKE_TIMEOUT_MS);
+      }, this.timings.handshakeTimeoutMs);
     } catch (e) {
       this.emitState({ kind: "failed", why: message(e) });
       this.scheduleRetry();
@@ -350,7 +371,10 @@ export class Session {
     this.attempt += 1;
     // Full jitter. Several peers reconnecting after a relay restart must not arrive
     // together, which is what an unjittered curve guarantees.
-    const ceiling = Math.min(BACKOFF_CEILING_MS, BACKOFF_BASE_MS * 2 ** (this.attempt - 1));
+    const ceiling = Math.min(
+      this.timings.backoffCeilingMs,
+      this.timings.backoffBaseMs * 2 ** (this.attempt - 1),
+    );
     const delay = Math.random() * ceiling;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
