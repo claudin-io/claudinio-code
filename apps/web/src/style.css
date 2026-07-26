@@ -154,6 +154,39 @@ button.refuse {
   color: var(--accent);
 }
 
+/* The install offer. Quiet on purpose: it is an offer, and the peer works without it,
+ * so it is bordered rather than coloured and its button does not look like the two that
+ * matter on this origin. */
+.offer {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.625rem;
+  background: var(--surface);
+}
+
+.offer-headline {
+  color: var(--fg);
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.offer > :last-child {
+  margin-bottom: 0;
+}
+
+button.quiet {
+  /* Not full width, unlike the confirmation buttons: a thumb should be able to find it,
+   * and should not find it by accident while scrolling a transcript. */
+  flex: 0 0 auto;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  background: none;
+}
+
 /* The tools that ran, named but not expanded. Their output between the change and the
  * approve button is how the change stops being read. */
 .tools {

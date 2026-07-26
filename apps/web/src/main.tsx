@@ -25,6 +25,12 @@ import {
   explainState,
   type Explanation,
 } from "./explain";
+import {
+  dismissInstallOffer,
+  installOffer,
+  registerServiceWorker,
+  type InstallOffer,
+} from "./install";
 import { forgetPairingCode, isStale, parsePairingCode, type PairingCodeResult } from "./pairing";
 import { Session, type DeviceMessage, type SessionState } from "./session";
 
@@ -39,9 +45,10 @@ const App: Component = () => {
   const [code] = createSignal<PairingCodeResult>(parsePairingCode(window.location.hash));
   const [state, setState] = createSignal<SessionState>({ kind: "connecting" });
   const [records, setRecords] = createSignal<Record<string, unknown>[]>([]);
+  const [offer, setOffer] = createSignal<InstallOffer | null>(null);
   let session: Session | undefined;
 
-  onMount(() => {
+  const connect = () => {
     const parsed = code();
     if (!parsed.ok) return;
 
@@ -56,6 +63,16 @@ const App: Component = () => {
     });
     session.start();
     session.subscribe(SESSION_ID, 0);
+  };
+
+  onMount(() => {
+    setOffer(installOffer(window));
+    connect();
+    // Last, and on every arrival including one with no code — which is how someone who
+    // has installed it arrives. After `connect` rather than before, because the worker is
+    // an optimisation and a prerequisite for phase 4's notifications, and pairing is
+    // neither: it has two minutes and must not queue behind a registration.
+    registerServiceWorker();
   });
 
   onCleanup(() => session?.stop());
@@ -106,6 +123,29 @@ const App: Component = () => {
 
       <Show when={live()}>
         <p class="faint">{`Following this session, read-only. ${sas()}`}</p>
+
+        {/* Only here, and only on iOS — see `installOffer`. Not while the words are
+            being checked: that is the one moment the user is doing security work, and
+            anything else on the screen is competing with it. */}
+        <Show when={offer()}>
+          {(hint) => (
+            <aside class="offer">
+              <p class="offer-headline">{hint().headline}</p>
+              <p class="faint">{hint().detail}</p>
+              <button
+                class="quiet"
+                onClick={() => {
+                  dismissInstallOffer(window);
+                  setOffer(null);
+                }}
+              >
+                {/* Not "Not now": it does not come back. */}
+                {"Hide this"}
+              </button>
+            </aside>
+          )}
+        </Show>
+
         <div class="records">
           <For each={messages()}>{(message) => <MessageRow message={message} />}</For>
           <div class="count">

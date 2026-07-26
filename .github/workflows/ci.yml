@@ -40,6 +40,14 @@ jobs:
       - name: Test
         run: pnpm exec vitest run
 
+      # The one prova real that needs nothing but node, and the one whose failures are
+      # invisible to the tests above: the worker's precache list is injected from a
+      # manifest written by a different Vite build, so the two can disagree and leave the
+      # installed page blank while reporting success. It builds the web peer as a side
+      # effect, which is worth having checked here too.
+      - name: Prova real — the installable page
+        run: scripts/prova-real-pwa.sh
+
   rust:
     name: Rust (fmt + clippy + tests)
     runs-on: ubuntu-24.04

@@ -24,6 +24,12 @@
       No `'unsafe-inline'` anywhere, which is why there is no inline script and no
       inline style in this file.
 
+      `worker-src` and `manifest-src` are stated rather than left to fall back to
+      `default-src`, which they would. Spelling them out means a future tightening of
+      `default-src` cannot silently stop the service worker from registering — and
+      because registration failure is swallowed on purpose (§0.1: offered, never
+      required), silently is exactly how it would happen.
+
       `frame-ancestors` is absent because it is ignored in a meta tag. It belongs in
       the response header, along with the rest — see the deployment notes in
       README.md. It matters: this page must not be embeddable, or the origin boundary
@@ -31,7 +37,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss:; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
 
     <!-- The pairing code is in the fragment, which is never sent to a server — but a
@@ -39,6 +45,29 @@
     <meta name="referrer" content="no-referrer" />
 
     <title>Claudinio Code — remote</title>
+
+    <!--
+      Installable, because Web Push on iOS is available only to a page launched from the
+      home screen and phase 4's approval requests are worth little if they cannot reach a
+      phone in a pocket. Offered, never required (§0.1) — nothing below is on the path to
+      pairing, and the uninstalled tab is a fully working peer.
+
+      `start_url` is `/` and carries no pairing code. It cannot: the code lives in the
+      fragment, which is not part of a start URL. A launch from the home screen therefore
+      lands on "Scan a pairing code to begin", which is the honest state rather than an
+      error — and it means the installed icon is never a stored key.
+
+      The manifest also declines everything that would let another app aim at this one: no
+      `share_target`, no `file_handlers`, no `protocol_handlers`. This page's authority
+      comes from a code someone read off a screen, and an entry point that hands it one
+      from elsewhere is a way to skip that.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- iOS reads none of the manifest's icons. Without this it screenshots the page and
+         uses that as the home-screen icon. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/icon-192.png" type="image/png" />
+
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>

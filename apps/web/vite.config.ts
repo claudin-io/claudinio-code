@@ -25,6 +25,10 @@ export default defineConfig({
     // inline as a data: URI in a <style> or <script> would be blocked at runtime —
     // and the failure would be a blank page rather than a build error.
     assetsInlineLimit: 0,
+    // For the service worker's precache list, which is read out of it by
+    // `vite.sw.config.ts` after this build finishes. A worker that globbed `dist/assets`
+    // instead would precache whatever an interrupted build left behind.
+    manifest: true,
     // A source map for a page that holds a session key is a source map that describes
     // how to use it. The bundle is small and the tests are where debugging happens.
     sourcemap: false,
