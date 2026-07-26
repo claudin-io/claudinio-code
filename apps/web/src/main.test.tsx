@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { render } from "solid-js/web";
 import { absorb } from "./main";
 import type { DeviceMessage } from "./session";
 
@@ -103,5 +104,66 @@ describe("absorb", () => {
     absorb(message({ kind: "snapshot", records: [] }), records.set);
 
     expect(records.get()).toEqual([]);
+  });
+});
+
+// ── the page itself ────────────────────────────────────────────────────────
+//
+// Which blocks are on screen at once is the part the unit tests above cannot see, and
+// it is a decision about attention rather than about markup: a second way to start,
+// placed next to three words someone is meant to be comparing, is how the comparison
+// stops happening.
+
+describe("the page", () => {
+  let host: HTMLDivElement | undefined;
+  let dispose: (() => void) | undefined;
+
+  afterEach(() => {
+    dispose?.();
+    host?.remove();
+    dispose = undefined;
+    host = undefined;
+  });
+
+  async function mount(hash: string) {
+    window.location.hash = hash;
+    const { App } = await import("./main");
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    dispose = render(() => <App />, host);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return host;
+  }
+
+  const buttons = (root: HTMLElement) => [...root.querySelectorAll("button")].map((b) => b.textContent);
+
+  /// Arriving with nothing is the ordinary way in — someone who installed it to the
+  /// home screen arrives this way every time.
+  it("invites a pairing code when it has none, and offers the other way in", async () => {
+    const root = await mount("");
+
+    expect(root.querySelector("h1")?.textContent).toBe("Scan a pairing code to begin");
+    expect(buttons(root)).toContain("Type a code instead");
+  });
+
+  /// An expired code is precisely when someone wants the route that does not need a
+  /// camera, so the offer has to survive it.
+  it("still offers the typed path when the code has expired", async () => {
+    const root = await mount(
+      `#c=${"ab".repeat(16)}&t=Zm9vYmFyLXRva2VuLTEyMw&k=${"cd".repeat(32)}` +
+        `&r=${encodeURIComponent("wss://relay.claudin.io/attach")}&e=1`,
+    );
+
+    expect(root.querySelector("h1")?.textContent).toBe("This pairing code has expired");
+    expect(buttons(root)).toContain("Type a code instead");
+  });
+
+  /// Nothing that belongs to a live session may be on screen before there is one.
+  it("shows no words to compare and no transcript before anything is dialled", async () => {
+    const root = await mount("");
+
+    expect(root.querySelector(".sas")).toBeNull();
+    expect(root.querySelector(".records")).toBeNull();
+    expect(buttons(root)).not.toContain("The words match");
   });
 });

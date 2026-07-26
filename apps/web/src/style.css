@@ -154,6 +154,27 @@ button.refuse {
   color: var(--accent);
 }
 
+/* The typed code. Monospace and wide-tracked because it is read off one screen and
+ * typed into another, and the whole reason the alphabet excludes I, L, O and U is that
+ * this is where transcription goes wrong. */
+.typed-code {
+  flex: 1 1 12rem;
+  min-height: 2.75rem;
+  padding: 0.625rem 0.75rem;
+  font: 600 1.0625rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0.625rem;
+}
+
+.typed-code::placeholder {
+  color: var(--faint);
+  letter-spacing: 0.08em;
+}
+
 /* The install offer. Quiet on purpose: it is an offer, and the peer works without it,
  * so it is bordered rather than coloured and its button does not look like the two that
  * matter on this origin. */

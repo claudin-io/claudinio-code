@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { explainClose, explainCodeError, explainStaleCode, explainState } from "./explain";
+import {
+  explainAuthFailure,
+  explainAuthorizing,
+  explainClaiming,
+  explainClose,
+  explainCodeError,
+  explainStaleCode,
+  explainState,
+  explainTypedReady,
+} from "./explain";
 import type { CloseReason } from "./session";
 
 describe("explaining a missing or broken code", () => {
@@ -123,5 +132,61 @@ describe("explaining a close", () => {
     expect(explainState({ kind: "closed", reason: "grant_expired" })).toEqual(
       explainClose("grant_expired"),
     );
+  });
+});
+
+describe("explaining the typed-code path", () => {
+  /// The sign-in is about the code, not about remote access. Someone who reads it as
+  /// "this needs an account" will not go back and try the QR, which needs none.
+  it("says the sign-in is only for the lookup", () => {
+    const explanation = explainAuthorizing();
+
+    expect(explanation.detail).toMatch(/sign-in/i);
+    expect(explanation.detail).toMatch(/not involved/i);
+    expect(explanation.actionable).toBe(false);
+  });
+
+  /// The account is named, because someone with two accounts will otherwise type a
+  /// code that cannot possibly resolve and be told the code is wrong.
+  it("names the account it signed in as", () => {
+    expect(explainTypedReady("alice").headline).toContain("alice");
+  });
+
+  it("still says something useful with no name to show", () => {
+    const explanation = explainTypedReady("");
+
+    expect(explanation.headline).toBeTruthy();
+    expect(explanation.detail).toMatch(/type the code/i);
+  });
+
+  /// A failed sign-in must not read as a dead end: scanning is right there and needs
+  /// no account at all.
+  it("points at the path that needs no account when the sign-in fails", () => {
+    const explanation = explainAuthFailure("that authorisation has expired");
+
+    expect(explanation.detail).toContain("that authorisation has expired");
+    expect(explanation.detail).toMatch(/scanning|scan/i);
+    expect(explanation.detail).toMatch(/no account/i);
+    expect(explanation.actionable).toBe(true);
+  });
+
+  /// Waiting is the answer while a code is being looked up, so there must be nothing
+  /// to act on — a button here invites a second attempt against a single-use code.
+  it("offers nothing to do while a code is being looked up", () => {
+    const explanation = explainClaiming();
+
+    expect(explanation.actionable).toBe(false);
+    expect(explanation.detail).toBeUndefined();
+  });
+
+  /// The rule the whole module follows, applied to the four newest messages.
+  it("never calls an ordinary state an error", () => {
+    for (const explanation of [
+      explainAuthorizing(),
+      explainClaiming(),
+      explainTypedReady("alice"),
+    ]) {
+      expect(explanation.headline).not.toMatch(/error|invalid|failed/i);
+    }
   });
 });

@@ -53,8 +53,10 @@ app.claudin.io {
 		#
 		# connect-src allows any wss: rather than one host, because the relay URL
 		# arrives in the pairing code and self-hosting has to keep working. Plain
-		# ws: is still refused, which is the part that matters.
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		# ws: is still refused, which is the part that matters. The one https
+		# origin is the account server, for the typed-code path only — exactly
+		# one host, so an XSS here cannot exfiltrate to one of its choosing.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss: https://claudin.io; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 		Referrer-Policy "no-referrer"
 		X-Content-Type-Options "nosniff"
@@ -128,11 +130,55 @@ disagree and leave the offline page blank while the worker reports success. Cutt
 list down by one file is enough to make it fail, which is the property that makes it
 worth running.
 
+## Two ways in, and only one of them needs an account
+
+**Scanning needs nothing.** The device shows a URL carrying the channel, its relay
+token and its public key in the fragment; this page reads it and runs Noise IK
+straight through the relay. No account, no lookup, nothing of `claudin.io` involved —
+which §1.1 requires, because that origin must never be a hard dependency of remote
+access.
+
+**Typing a code needs a sign-in**, and that is not a compromise. A typed code cannot
+carry 128 bits of channel plus 256 bits of key plus a relay token, so it has to be a
+short handle that something resolves — and the account server refuses to resolve a
+code for anyone but the account that minted it. Without that check a ten-character
+code is a bearer token for a developer's machine. The sign-in exists for that one
+check and nothing else.
+
+```
+this page                     claudin.io
+  │  verifier kept, hash sent      │
+  ├── GET /remote/authorize ──────▶│  (cookie-authenticated, here only)
+  │◀── 302 …/#auth=<code> ─────────┤  fragment: never sent, never logged
+  ├── POST /api/remote/token ─────▶│  code + verifier → a 15-minute token
+  ├── POST …/pairings/claim ──────▶│  code → channel, token, device key
+  └── DELETE /api/remote/token ───▶│  released the moment the claim lands
+```
+
+- The verifier is in `sessionStorage`: it must survive one navigation and must not
+  survive the tab.
+- The token is in a variable and nowhere else. §10 names XSS on this origin as the
+  high risk, and a credential in storage is readable by any script here afterwards.
+  A reload re-authorises, which for a signed-in user is a silent redirect.
+- The claim's response goes through the **same** `validatePairing` as a URL somebody
+  else may have written. Treating a body from our own server as already-checked is
+  how that server would end up able to point this browser at a `ws://` relay — where
+  the frames are still ciphertext, but an observer learns the channel token.
+- None of it can pair anything. The token resolves a code; the device still stops at
+  three words a human has to compare.
+
+Self-hosting: `VITE_ACCOUNT_ORIGIN` at build time, and the CSP's `connect-src` in
+`index.html` **and** in the deployed header have to name the same origin. A policy
+still naming claudin.io refuses the fetch, and the failure looks like the account
+server being down.
+
 ## Layout
 
 - `pairing.ts` — reads the code out of `location.hash`. The untrusted edge: refuses a
   channel or key of the wrong shape, refuses a relay URL that is not `wss:`, strips
-  credentials, and treats an unreadable expiry as already stale.
+  credentials, and treats an unreadable expiry as already stale. `validatePairing` is
+  the part both ways in share.
+- `auth.ts` — the typed-code path: the handoff above, the device list, the claim.
 - `wire.ts` — the outer frame, mirroring `claudinio-protocol`'s `wire.rs`.
 - `noise.ts` — `Noise_IK_25519_AESGCM_SHA256`, initiator side, on plain WebCrypto.
   No cryptography of ours beyond the state machine.

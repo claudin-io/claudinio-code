@@ -64,9 +64,41 @@ export function parsePairingCode(fragment: string): PairingCodeResult {
   if (!raw.trim()) return { ok: false, error: { kind: "absent" } };
 
   const params = new URLSearchParams(raw);
-  const channel = normaliseHex(params.get("c"));
-  const token = (params.get("t") ?? "").trim();
-  const deviceKey = normaliseHex(params.get("k"));
+  return validatePairing({
+    channel: params.get("c"),
+    token: params.get("t"),
+    deviceKey: params.get("k"),
+    relayUrl: params.get("r"),
+    expiresAt: params.get("e"),
+  });
+}
+
+/// The parts of a pairing, before they have been checked.
+///
+/// Strings and nulls, because that is what both sources hand over: a URL fragment
+/// somebody else may have written, and a JSON body from the account server. Neither
+/// is trusted, and both go through `validatePairing` — see there for why that
+/// matters more than it looks.
+export interface PairingParts {
+  channel: string | null;
+  token: string | null;
+  deviceKey: string | null;
+  relayUrl: string | null;
+  expiresAt: string | number | null;
+}
+
+/// Check a pairing's parts, whatever they arrived in.
+///
+/// Shared by the QR path and the typed-code path deliberately. The typed code is
+/// resolved by `claudin.io`, and it would be easy to treat a JSON body from our own
+/// server as already-checked — which would mean the account server could point the
+/// browser at a `ws://` relay, or one with credentials in the URL, and the check that
+/// exists for the fragment would simply not apply. There is one validator, and the
+/// only thing that varies is where the strings came from.
+export function validatePairing(parts: PairingParts): PairingCodeResult {
+  const channel = normaliseHex(parts.channel);
+  const token = (parts.token ?? "").trim();
+  const deviceKey = normaliseHex(parts.deviceKey);
 
   if (channel.length !== 32 || !HEX.test(channel)) {
     return bad("channel", "a channel id is 32 hex characters");
@@ -78,14 +110,14 @@ export function parsePairingCode(fragment: string): PairingCodeResult {
     return bad("deviceKey", "a device key is 64 hex characters");
   }
 
-  const relay = parseRelayUrl(params.get("r"));
+  const relay = parseRelayUrl(parts.relayUrl);
   if (!relay.ok) return bad("relayUrl", relay.why);
 
   // A missing or unreadable expiry is treated as "already stale" rather than
   // "never expires": a code with no deadline is not something the device emits, so
   // it is either corrupted or crafted, and the safe reading of both is to make the
   // user fetch a fresh one.
-  const expiresAt = parseExpiry(params.get("e"));
+  const expiresAt = parseExpiry(parts.expiresAt);
 
   return { ok: true, code: { channel, token, deviceKey, relayUrl: relay.url, expiresAt } };
 }
@@ -106,7 +138,9 @@ export function isStale(code: PairingCode, now = Date.now()): boolean {
 /// but an observer on the path learns the channel token and can then attach to the
 /// channel itself. `http(s):` is refused too: it would silently become a relative
 /// fetch rather than a socket.
-function parseRelayUrl(value: string | null): { ok: true; url: string } | { ok: false; why: string } {
+function parseRelayUrl(
+  value: string | null,
+): { ok: true; url: string } | { ok: false; why: string } {
   if (!value) return { ok: false, why: "no relay URL in the code" };
 
   let parsed: URL;
@@ -133,7 +167,7 @@ function parseRelayUrl(value: string | null): { ok: true; url: string } | { ok: 
   return { ok: true, url: parsed.toString() };
 }
 
-function parseExpiry(value: string | null): number | null {
+function parseExpiry(value: string | number | null): number | null {
   if (!value) return null;
   const millis = Number(value);
   if (!Number.isFinite(millis) || millis <= 0) return null;

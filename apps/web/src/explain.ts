@@ -41,6 +41,56 @@ export function explainCodeError(error: PairingCodeError): Explanation {
   };
 }
 
+// ── the typed-code path ────────────────────────────────────────────────────
+//
+// A second way in, for when the camera is not an option: a desktop browser, a phone
+// that will not focus, a code read out over a call. It costs a sign-in, because a ten
+// character code is only acceptable if the account that minted it is the only account
+// that can resolve it — so every message here has to make clear that the sign-in is
+// about *this* code and not about remote access needing an account. It does not: the
+// QR path never touches any of this.
+
+/// Waiting on the round trip to the account server.
+export function explainAuthorizing(): Explanation {
+  return {
+    headline: "Checking your account",
+    // Named, because the user is coming back from somewhere else and a page that
+    // simply says "loading" leaves them wondering whether the trip worked.
+    detail: "Just the sign-in — your session and your files are not involved.",
+    actionable: false,
+  };
+}
+
+/// The sign-in did not complete.
+export function explainAuthFailure(why: string): Explanation {
+  return {
+    headline: "That sign-in did not complete",
+    // The server's own sentence when it had one: "expired" and "belongs to another
+    // account" have different fixes, and the second one the user cannot fix at all.
+    detail: `${why}. You can try again, or pair by scanning a code instead — that needs no account.`,
+    actionable: true,
+  };
+}
+
+/// Signed in, waiting for the code to be typed.
+export function explainTypedReady(login: string): Explanation {
+  return {
+    // The account is named, because someone with two accounts will otherwise type a
+    // code that cannot possibly resolve and be told the code is wrong.
+    headline: login ? `Signed in as ${login}` : "Signed in",
+    detail: "Type the code shown in Claudinio Code on your machine.",
+    actionable: true,
+  };
+}
+
+/// Resolving the code.
+export function explainClaiming(): Explanation {
+  return {
+    headline: "Looking up that code",
+    actionable: false,
+  };
+}
+
 /// The code parsed but has gone stale.
 ///
 /// Deliberately its own message. "Corrupted" and "expired" have different fixes, and

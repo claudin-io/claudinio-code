@@ -21,6 +21,12 @@
       still refused, which is the part that matters: the pairing module refuses it too,
       and this is the belt to that brace.
 
+      `https://claudin.io` is named, and named *exactly*, because the typed-code path
+      resolves a code through the account server. It is one origin rather than `https:`
+      so that an XSS on this page cannot exfiltrate to a host of its choosing. Anyone
+      self-hosting sets `VITE_ACCOUNT_ORIGIN` at build time and has to change this line
+      and the deployed header with it — see README.md. The QR path uses none of it.
+
       No `'unsafe-inline'` anywhere, which is why there is no inline script and no
       inline style in this file.
 
@@ -37,7 +43,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss: https://claudin.io; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
 
     <!-- The pairing code is in the fragment, which is never sent to a server — but a
