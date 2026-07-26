@@ -985,6 +985,17 @@ export interface PairingCodeView {
   /// rather than through innerHTML: nothing user-supplied reaches the markup, but
   /// an `<img>` cannot execute script even if that stopped being true.
   qrSvg: string;
+  /// The short code to type, when the account server minted one.
+  ///
+  /// Absent is the ordinary case rather than a failure: this machine may not be signed
+  /// in, may be offline, or may be pointed at a self-hosted setup with no account
+  /// server at all. The QR is complete without it — §1.1 forbids claudin.io being a
+  /// hard dependency of remote access, and this field is where that is honoured.
+  typedCode: string | null;
+  /// Why there is no typed code, when the reason is worth showing. Absent when the
+  /// reason is "not signed in": a message about an account nobody mentioned is noise
+  /// beside a QR that already works.
+  typedCodeError: string | null;
 }
 
 /// Where the relay lives. Overridable per call for a self-hosted one.

@@ -23,6 +23,10 @@ const code = (over: Partial<PairingCodeView> = {}): PairingCodeView => ({
   deviceKey: "cd".repeat(32),
   expiresAt: Date.now() + 120_000,
   qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>',
+  // Absent by default, because absent is the ordinary case: a machine that is not
+  // signed in pairs by QR exactly as well.
+  typedCode: null,
+  typedCodeError: null,
   ...over,
 });
 
@@ -227,5 +231,49 @@ describe("RemotePairing", () => {
 
     expect(button(root, "The words match")!.disabled).toBe(true);
     expect(button(root, "They do not match")!.disabled).toBe(true);
+  });
+});
+
+// ── the typed code ─────────────────────────────────────────────────────────
+
+describe("the typed code", () => {
+  /// The QR needs no account and is the shorter path, so it stays what the eye lands
+  /// on. The typed code is the fallback for a camera that is not an option.
+  it("shows the code to type, under the QR", async () => {
+    const root = await mount({ code: code({ typedCode: "A1B2C-D3E4F" }) });
+
+    const codes = [...root.querySelectorAll("code")].map((el) => el.textContent);
+    expect(codes).toContain("A1B2C-D3E4F");
+    expect(codes.indexOf("A1B2C-D3E4F")).toBeGreaterThan(0);
+    expect(root.textContent).toContain("app.claudin.io");
+  });
+
+  /// The sign-in is the reason the code is safe to be ten characters, so the panel
+  /// says so where the code is rather than leaving the browser to explain it.
+  it("says why typing needs a sign-in", async () => {
+    const root = await mount({ code: code({ typedCode: "A1B2C-D3E4F" }) });
+
+    expect(root.textContent).toMatch(/only your account can look the code up/i);
+  });
+
+  /// A machine that is not signed in — or is pointed at a self-hosted setup with no
+  /// account server — pairs by QR exactly as well. §1.1: claudin.io is never a hard
+  /// dependency, and the panel must not report an absence as a problem.
+  it("says nothing at all when there is no code and no reason", async () => {
+    const root = await mount({ code: code() });
+
+    expect(root.textContent).not.toMatch(/type this|no code to type/i);
+    expect(root.querySelector("img")).toBeTruthy();
+  });
+
+  /// When there *is* a reason, it comes with the reassurance that the QR is unaffected
+  /// — otherwise a failed round trip to an account server reads as pairing being
+  /// broken.
+  it("keeps the QR when the account server refused", async () => {
+    const root = await mount({ code: code({ typedCodeError: "rate limit exceeded" }) });
+
+    expect(root.textContent).toContain("rate limit exceeded");
+    expect(root.textContent).toMatch(/scanning still works/i);
+    expect(root.querySelector("img")).toBeTruthy();
   });
 });

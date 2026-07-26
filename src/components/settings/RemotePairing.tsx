@@ -118,6 +118,41 @@ export const RemotePairing: Component<RemotePairingProps> = (props) => {
             <code class="mb-2 block break-all rounded bg-surface-2 px-2 py-1 font-mono text-[10px] text-ink-muted">
               {code().url}
             </code>
+
+            {/* The typed code, for when the camera is not the way in: a desktop
+                browser, a phone that will not focus, a code read out over a call.
+                Below the QR rather than beside it — scanning is the shorter path and
+                the one that needs no account, so it stays what the eye lands on.
+
+                Larger than the URL above it and tracked wide, because this is the one
+                that gets transcribed by hand. It is also why its alphabet has no I,
+                L, O or U. */}
+            <Show when={code().typedCode}>
+              {(typed) => (
+                <div class="mb-2 border-t border-border-subtle pt-2">
+                  <p class="mb-1 text-[11px] text-ink-faint">
+                    {
+                      "Or type this at app.claudin.io. It will ask you to sign in, so that only your account can look the code up."
+                    }
+                  </p>
+                  <code class="block rounded bg-surface-2 px-2 py-1 font-mono text-sm tracking-[0.12em] text-ink">
+                    {typed()}
+                  </code>
+                </div>
+              )}
+            </Show>
+
+            {/* Only when there is something worth saying. Not being signed in arrives
+                as no reason at all and prints nothing: the QR works, and a message
+                about an account nobody mentioned is noise. */}
+            <Show when={code().typedCodeError}>
+              {(why) => (
+                <p class="mb-2 text-[11px] text-ink-faint">
+                  {`No code to type this time — ${why()}. Scanning still works.`}
+                </p>
+              )}
+            </Show>
+
             <div class="flex items-center justify-between gap-2">
               <span class="text-[11px] text-ink-faint">
                 <Show when={secondsLeft() > 0} fallback={"This code has lapsed."}>

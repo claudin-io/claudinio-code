@@ -507,6 +507,18 @@ pub struct PairingCodeView {
     /// Unix millis. The *code* expires here; the pairing it creates does not.
     pub expires_at: u64,
     pub qr_svg: String,
+    /// The short code to type, when the account server minted one.
+    ///
+    /// `None` is the ordinary case rather than a failure: this machine may not be
+    /// signed in, may be offline, or may be pointed at a self-hosted setup with no
+    /// account server at all. §1.1 forbids `claudin.io` being a hard dependency, and
+    /// this field is where that is honoured — the QR above is complete without it.
+    pub typed_code: Option<String>,
+    /// Why there is no typed code, when the reason is worth showing.
+    ///
+    /// Absent when the reason is "not signed in": the panel then offers the QR without
+    /// comment rather than reporting something nobody asked about.
+    pub typed_code_error: Option<String>,
 }
 
 // The channel token is deliberately absent from `PairingCodeView`. It is inside the
@@ -556,12 +568,23 @@ pub async fn remote_start_pairing(
     )?;
 
     let origin = args.web_origin.as_deref().unwrap_or(DEFAULT_WEB_ORIGIN);
+    let channel_hex = code.channel.to_hex();
+
+    // The typed code, if the account server will mint one. Deliberately before
+    // `open_connection` and deliberately unable to stop it: a machine that is not
+    // signed in, or offline, pairs by QR exactly as well, and a network round trip
+    // that failed must not cost the user the code that needs no network.
+    let (typed_code, typed_code_error) =
+        typed_code_for(&code, &channel_hex, &args.relay_url, &args.peer_label).await;
+
     let view = PairingCodeView {
         url: code.url(origin),
-        channel: code.channel.to_hex(),
+        channel: channel_hex,
         device_key: code.device_key.clone(),
         expires_at: code.expires_at,
         qr_svg: code.qr_svg(origin)?,
+        typed_code,
+        typed_code_error,
     };
 
     // Listening starts only after the code rendered. A QR shown for a channel
@@ -583,6 +606,71 @@ pub async fn remote_start_pairing(
     .await?;
 
     Ok(view)
+}
+
+/// Ask the account server for a typed code, and shrug if it will not.
+///
+/// Registration first, because minting a code for an unregistered device is refused —
+/// and it is refused on purpose: without that check a valid key could mint a code
+/// naming any device key at all, and the resulting code would look exactly as
+/// legitimate as a real one to whoever claimed it. Registering here rather than at
+/// startup means a machine that never uses remote access never appears in an account's
+/// device list.
+///
+/// Returns `(code, error_worth_showing)`. Not signed in is neither: the QR is complete
+/// on its own and a message about an account nobody mentioned is noise.
+async fn typed_code_for(
+    code: &crate::remote::code::PairingCode,
+    channel_hex: &str,
+    relay_url: &str,
+    label: &str,
+) -> (Option<String>, Option<String>) {
+    use crate::remote::account::Account;
+
+    let Some(account) = Account::from_config() else {
+        return (None, None);
+    };
+
+    let device_label = if label.trim().is_empty() {
+        machine_label()
+    } else {
+        label.trim().to_string()
+    };
+    if let Err(error) = account
+        .register_device(&code.device_key, &device_label)
+        .await
+    {
+        return (None, showable(error));
+    }
+
+    match account
+        .mint_typed_code(&code.device_key, channel_hex, &code.token, relay_url)
+        .await
+    {
+        Ok(typed) => (Some(typed.code), None),
+        Err(error) => (None, showable(error)),
+    }
+}
+
+fn showable(error: crate::remote::account::AccountError) -> Option<String> {
+    match error {
+        crate::remote::account::AccountError::NotSignedIn => None,
+        other => Some(other.message()),
+    }
+}
+
+/// A name for this machine, for the account's device list.
+///
+/// The hostname, because it is what the user already calls this computer. Nothing is
+/// invented from hardware: a device label is shown next to "pair a browser with that
+/// machine", and a serial number helps nobody choose.
+fn machine_label() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Claudinio Code".into())
 }
 
 /// The event a notice arrives on in the webview.

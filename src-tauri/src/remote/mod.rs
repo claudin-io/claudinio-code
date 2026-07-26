@@ -20,6 +20,9 @@
 //!                        agent/ NEVER imports remote/ ◄─────────────┘
 //! ```
 
+/// The account server, and only for the typed-code path. Everything in it fails soft:
+/// §1.1 forbids `claudin.io` being a hard dependency, and the QR path never touches it.
+pub mod account;
 pub mod bridge;
 pub mod code;
 pub mod control;
