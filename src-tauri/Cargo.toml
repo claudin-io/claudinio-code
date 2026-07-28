@@ -9,6 +9,7 @@ edition = "2024"
 # Declaring the (empty) workspace here stops cargo from walking further up and
 # being absorbed by an unrelated manifest above the checkout.
 [workspace]
+members = ["crates/claudinio-protocol"]
 
 [lib]
 name = "claudinio_code_lib"
@@ -35,10 +36,36 @@ embeddings = ["dep:ort"]
 # Build with:  --no-default-features --features embeddings-candle
 embeddings-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
 
+# Remote access. Off by default: a build without it carries none of the
+# transport, none of the protocol, and no way to reach the network.
+remote = [
+  "dep:claudinio-protocol",
+  "dep:snow",
+  "dep:tokio-tungstenite",
+  "dep:futures-util",
+  "dep:rmp-serde",
+  "dep:serde_bytes",
+  "dep:getrandom",
+  "dep:qrcode",
+]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+claudinio-protocol = { path = "crates/claudinio-protocol", optional = true }
+snow = { version = "0.10", optional = true }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", optional = true }
+rmp-serde = { version = "1.3", optional = true }
+serde_bytes = { version = "0.11", optional = true }
+# The channel id has to be unguessable: it is the only thing stopping a third
+# party from attaching to someone else's channel on the relay.
+getrandom = { version = "0.3", optional = true }
+# The pairing code is 100-odd characters of URL. Typing it on a phone is not a
+# realistic ask, so the device renders it as a QR — no default features, which
+# drops the image/bitmap renderers this does not use.
+qrcode = { version = "0.14", default-features = false, features = ["svg"], optional = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
@@ -170,7 +197,16 @@ rmcp = { version = "2", default-features = false, features = [
     "transport-streamable-http-client-reqwest",
     "base64",
 ] }
+# Agent Client Protocol (ACP) — modo ACP: servir nosso harness a editores
+# externos (Agent) e conectar/observar agentes externos (Client). Builder API.
+agent-client-protocol = "2"
 
+
+[dev-dependencies]
+# `test-util` gives the paused clock. Approval expiry is a time-dependent rule,
+# and the alternative — sleeping for real — makes the suite slow and flaky
+# rather than making it prove anything.
+tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }

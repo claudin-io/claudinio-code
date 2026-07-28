@@ -338,16 +338,51 @@ impl SessionStore {
 
 /// Read every record from a session file, skipping malformed / unknown lines.
 pub fn load_records(path: &Path) -> Result<Vec<SessionRecord>, String> {
+    Ok(replay(path, 0)?.into_iter().map(|r| r.record).collect())
+}
+
+/// A record together with its position in the session file.
+#[derive(Debug, Clone)]
+pub struct SeqRecord {
+    /// The record's position in the file. Read by the remote bridge to answer
+    /// `Subscribe`; `load_records` discards it.
+    ///
+    // Its only reader is behind the `remote` feature, so in a build without it the
+    // lint is right. Scoped to that configuration rather than blanket-allowed, so
+    // it starts failing again if the reader ever goes away.
+    #[cfg_attr(not(feature = "remote"), allow(dead_code))]
+    pub seq: u64,
+    pub record: SessionRecord,
+}
+
+/// Read a session from `from_seq` onward, numbering each record.
+///
+/// `from_seq: 0` (or 1) replays everything. This is what makes remote resume a
+/// file read rather than a server-side buffer: a peer that reconnects asks for
+/// `last_seen + 1` and the device re-reads the transcript it was already
+/// appending to.
+///
+/// **`seq` is the 1-based physical line number, not the index among records
+/// that parse.** The distinction only shows on a damaged or forward-versioned
+/// file, and it is deliberate: a line this build cannot parse still consumes its
+/// number, so numbering does not shift underneath a peer when the set of
+/// understood record kinds changes. A skipped line therefore shows up as a gap,
+/// which is the honest signal — something was there and could not be delivered.
+pub fn replay(path: &Path, from_seq: u64) -> Result<Vec<SeqRecord>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open session file: {e}"))?;
     let reader = std::io::BufReader::new(file);
     let mut out = Vec::new();
-    for line in reader.lines() {
+    for (idx, line) in reader.lines().enumerate() {
+        let seq = idx as u64 + 1;
+        if seq < from_seq {
+            continue;
+        }
         let line = line.map_err(|e| format!("read session file: {e}"))?;
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(rec) = serde_json::from_str::<SessionRecord>(&line) {
-            out.push(rec);
+        if let Ok(record) = serde_json::from_str::<SessionRecord>(&line) {
+            out.push(SeqRecord { seq, record });
         }
     }
     Ok(out)
@@ -821,6 +856,107 @@ pub fn invalidate_cache(
 mod tests {
     use super::*;
     use crate::agent::provider::ContentBlock;
+
+    /// A session file with `n` user turns, written the way the app writes them.
+    fn session_with(lines: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        (dir, path)
+    }
+
+    fn user(text: &str) -> String {
+        serde_json::to_string(&SessionRecord::User {
+            text: text.into(),
+            ts: 1,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn replay_from_zero_numbers_every_record_from_one() {
+        let (_d, path) = session_with(&[&user("a"), &user("b"), &user("c")]);
+
+        let all = replay(&path, 0).unwrap();
+
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "seq must be 1-based and contiguous"
+        );
+        assert!(matches!(&all[0].record, SessionRecord::User { text, .. } if text == "a"));
+    }
+
+    /// The resume path: a peer that saw everything up to N asks for N+1.
+    #[test]
+    fn replay_from_a_seq_returns_only_what_follows() {
+        let (_d, path) = session_with(&[&user("a"), &user("b"), &user("c")]);
+
+        let tail = replay(&path, 3).unwrap();
+
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].seq, 3);
+        assert!(matches!(&tail[0].record, SessionRecord::User { text, .. } if text == "c"));
+    }
+
+    #[test]
+    fn a_peer_that_is_up_to_date_resumes_into_nothing() {
+        let (_d, path) = session_with(&[&user("a"), &user("b")]);
+
+        let latest = replay(&path, 0).unwrap().last().unwrap().seq;
+
+        assert_eq!(latest, 2);
+        assert!(replay(&path, latest + 1).unwrap().is_empty());
+    }
+
+    /// Appending and resuming is the whole reliability story: the run is never
+    /// coupled to the socket, so a reconnecting peer just re-reads.
+    #[test]
+    fn records_appended_after_a_disconnect_are_what_the_peer_resumes_into() {
+        let (_d, path) = session_with(&[&user("before")]);
+        let seen = replay(&path, 0).unwrap().last().unwrap().seq;
+
+        let store = SessionStore { path: path.clone() };
+        store
+            .append(&SessionRecord::User {
+                text: "after".into(),
+                ts: 2,
+            })
+            .unwrap();
+
+        let missed = replay(&path, seen + 1).unwrap();
+        assert_eq!(missed.len(), 1);
+        assert_eq!(missed[0].seq, 2);
+        assert!(matches!(&missed[0].record, SessionRecord::User { text, .. } if text == "after"));
+    }
+
+    /// A line this build cannot parse still consumes its number. Otherwise a
+    /// peer's numbering would shift the moment the set of understood record
+    /// kinds changed, and a resume would silently deliver the wrong records.
+    #[test]
+    fn an_unparseable_line_still_consumes_its_seq() {
+        let (_d, path) = session_with(&[
+            &user("a"),
+            r#"{"kind":"from_a_newer_build","what":"?"}"#,
+            &user("c"),
+        ]);
+
+        let all = replay(&path, 0).unwrap();
+
+        assert_eq!(all.len(), 2, "the unknown record is not delivered");
+        assert_eq!(
+            all.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1, 3],
+            "the gap at 2 is the honest signal that something was there"
+        );
+    }
+
+    #[test]
+    fn replaying_a_missing_session_is_an_error_not_an_empty_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(replay(&dir.path().join("nope.jsonl"), 0).is_err());
+    }
 
     #[test]
     fn golden_cycle_roundtrip_and_count() {

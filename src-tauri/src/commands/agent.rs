@@ -203,6 +203,55 @@ pub fn process_attachments(atts: &[AttachmentInput]) -> Vec<(ContentBlock, Attac
     results
 }
 
+/// Attach this window to a session's event bus, and hand the run a sink that
+/// publishes into it.
+///
+/// This function is the only place left that knows agent events travel over
+/// Tauri IPC — everything in `agent/` writes to an `EventSink` and cannot name
+/// a webview. Because the bus is keyed by session rather than owned by the
+/// caller, a second watcher is another call to this function, not a change to
+/// the agent.
+///
+/// A watcher that cannot keep up is dropped into a `Gap` and the run carries
+/// on. That direction matters: a slow reader must never be able to stall the
+/// agent loop, which is exactly the failure a remote peer on a bad connection
+/// would otherwise cause on the developer's own machine.
+async fn window_sink(
+    state: &AppState,
+    session_id: &str,
+    channel: Channel<AgentEvent>,
+) -> crate::agent::eventbus::EventTx {
+    use crate::agent::eventbus::Delivery;
+
+    let bus = state.bus_for(session_id).await;
+    let mut watcher = bus.subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            match watcher.recv().await {
+                Delivery::Event(event) => {
+                    // A send failure means the webview is gone. Stop pumping
+                    // rather than looping forever against a dead channel.
+                    if channel.send(*event).is_err() {
+                        break;
+                    }
+                }
+                Delivery::Gap { missed } => {
+                    // Visible rather than silent. Recovering the missed span is
+                    // a transcript replay — `persist::replay` exists for it —
+                    // and wiring that into the UI belongs with the remote work.
+                    eprintln!("[eventbus] a window fell behind and missed {missed} events");
+                }
+                // The session ended and its bus was dropped. Buffered events
+                // are delivered before this, so the tail of a run is not lost.
+                Delivery::Closed => break,
+            }
+        }
+    });
+
+    Arc::new(bus)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStarted {
@@ -386,7 +435,7 @@ pub async fn send_message(
         maps: transition_maps(&state),
         approvals: state.approvals.clone(),
         answers: state.answers.clone(),
-        chan: event_channel,
+        chan: window_sink(&state, &session_id, event_channel).await,
         handle,
         store,
         ctx,
@@ -416,7 +465,7 @@ struct RunLoopArgs {
     maps: transition::TransitionMaps,
     approvals: session::ApprovalMap,
     answers: session::AnswerMap,
-    chan: Channel<AgentEvent>,
+    chan: crate::agent::eventbus::EventTx,
     handle: SessionHandle,
     store: SessionStore,
     ctx: ToolContext,
@@ -511,7 +560,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
                                 message: e.clone(),
                                 ts: now_ms(),
                             });
-                            let _ = chan.send(AgentEvent::Error(e));
+                            chan.send(AgentEvent::Error(e));
                             break;
                         }
                     }
@@ -521,7 +570,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
                         message: e.clone(),
                         ts: now_ms(),
                     });
-                    let _ = chan.send(AgentEvent::Error(e));
+                    chan.send(AgentEvent::Error(e));
                     break;
                 }
             }
@@ -544,6 +593,12 @@ pub async fn new_session(workspace: String, state: State<'_, AppState>) -> Resul
     if let Some(h) = guard.as_ref() {
         state.remove_steering(&h.id).await;
         state.modes.lock().await.remove(&h.id);
+        // Gates belonging to the old session are dead the moment it is: an
+        // unanswered one used to sit in the map forever, because the only thing
+        // that removed an entry was answering it.
+        state.approvals.abandon_session(&h.id).await;
+        // Closing the bus is what tells attached windows the stream ended.
+        state.close_bus(&h.id).await;
         // A session abandoned before any real content (only meta/mode records,
         // e.g. created lazily by a mode toggle) is noise on disk — delete it
         // instead of leaving an "(empty session)" orphan in the list.
@@ -660,27 +715,45 @@ pub struct ApproveArgs {
 
 #[tauri::command]
 pub async fn approve_tool(args: ApproveArgs, state: State<'_, AppState>) -> Result<(), String> {
-    let key = format!("{}:{}", args.session_id, args.tool_id);
-    let mut map = state.approvals.lock().await;
-    if let Some(sender) = map.remove(&key) {
-        sender
-            .send(true)
-            .map_err(|_| "session already closed".into())
-    } else {
-        Err("approval request not found or already handled".into())
-    }
+    resolve_approval(&args, true, &state).await
 }
 
 #[tauri::command]
 pub async fn reject_tool(args: ApproveArgs, state: State<'_, AppState>) -> Result<(), String> {
+    resolve_approval(&args, false, &state).await
+}
+
+/// Answer a gate on behalf of the local user.
+///
+/// Losing a race is not an error the UI should show as a failure: it means
+/// someone else — another window today, a paired phone later — answered first,
+/// and the right response is to close this gate showing *their* decision. The
+/// error string therefore names the winner instead of claiming the request does
+/// not exist.
+async fn resolve_approval(
+    args: &ApproveArgs,
+    approved: bool,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::agent::approval::{Actor, ResolveError};
+
     let key = format!("{}:{}", args.session_id, args.tool_id);
-    let mut map = state.approvals.lock().await;
-    if let Some(sender) = map.remove(&key) {
-        sender
-            .send(false)
-            .map_err(|_| "session already closed".into())
-    } else {
-        Err("approval request not found or already handled".into())
+    match state.approvals.resolve(&key, approved, Actor::Local).await {
+        Ok(_) => Ok(()),
+        Err(ResolveError::AlreadyResolved(decision)) => Err(format!(
+            "already {} by {}",
+            if decision.approved {
+                "approved"
+            } else {
+                "rejected"
+            },
+            match decision.actor {
+                Actor::Local => "this device".to_string(),
+                Actor::Peer(label) => label,
+                Actor::Expired => "expiry".to_string(),
+            }
+        )),
+        Err(ResolveError::NotFound) => Err("approval request not found".into()),
     }
 }
 
@@ -1029,7 +1102,7 @@ pub async fn compact_session(
         &config,
         &store,
         &ctx,
-        &event_channel,
+        &window_sink(&state, &handle.id, event_channel.clone()).await,
         &state.approvals,
         &state.answers,
         &handle.id,
@@ -1150,8 +1223,14 @@ pub async fn continue_with_builder(
     );
 
     let maps = transition_maps(&state);
-    let new_handle =
-        transition::link_session(&maps, &ws, &old_handle, &spec, &event_channel).await?;
+    let new_handle = transition::link_session(
+        &maps,
+        &ws,
+        &old_handle,
+        &spec,
+        &window_sink(&state, &old_handle.id, event_channel.clone()).await,
+    )
+    .await?;
 
     // Fresh run on the new session: build its ToolContext from scratch (no old
     // running context exists — this command fires from an idle Brain session).
@@ -1194,7 +1273,7 @@ pub async fn continue_with_builder(
         maps,
         approvals: state.approvals.clone(),
         answers: state.answers.clone(),
-        chan: event_channel,
+        chan: window_sink(&state, &new_handle.id, event_channel).await,
         handle: new_handle,
         store,
         ctx,
@@ -1437,7 +1516,7 @@ pub async fn commit_and_push(
     let mode_ctl = state.mode_for(&id, &store.path).await;
 
     let sid = id.clone();
-    let chan = event_channel;
+    let chan = window_sink(&state, &id, event_channel).await;
     let appr = state.approvals.clone();
     let answ = state.answers.clone();
     let steering_map = state.steering_map();
@@ -1464,7 +1543,7 @@ pub async fn commit_and_push(
                 message: e.clone(),
                 ts: now_ms(),
             });
-            let _ = chan.send(AgentEvent::Error(e));
+            chan.send(AgentEvent::Error(e));
         }
         // Clean up steering entry on completion
         let mut map = steering_map.lock().await;

@@ -40,6 +40,14 @@ jobs:
       - name: Test
         run: pnpm exec vitest run
 
+      # The one prova real that needs nothing but node, and the one whose failures are
+      # invisible to the tests above: the worker's precache list is injected from a
+      # manifest written by a different Vite build, so the two can disagree and leave the
+      # installed page blank while reporting success. It builds the web peer as a side
+      # effect, which is worth having checked here too.
+      - name: Prova real — the installable page
+        run: scripts/prova-real-pwa.sh
+
   rust:
     name: Rust (fmt + clippy + tests)
     runs-on: ubuntu-24.04
@@ -107,3 +115,41 @@ jobs:
       - name: Test
         working-directory: src-tauri
         run: cargo test
+
+      # `remote` is off by default, so nothing above compiles a line of it. An
+      # off-by-default feature that CI never builds rots silently and is then
+      # discovered by whoever turns it on.
+      - name: Remote feature
+        working-directory: src-tauri
+        run: |
+          cargo clippy --lib --all-targets --features remote -- -D warnings
+          cargo test --lib --features remote
+
+      # src-tauri is the workspace root *and* a package, so the commands above
+      # only cover it. Workspace members need naming.
+      - name: Protocol crate
+        working-directory: src-tauri
+        run: |
+          cargo fmt -p claudinio-protocol --check
+          cargo clippy -p claudinio-protocol --all-targets --all-features -- -D warnings
+          cargo test -p claudinio-protocol --all-features
+
+      # The relay depends on claudinio-protocol with default-features off, so
+      # the end-to-end message types are not merely unused there — they are
+      # absent, and reaching for one fails to compile. That guarantee is only
+      # real if the crate genuinely builds that way, so it is built that way.
+      - name: Protocol builds without the inner messages
+        working-directory: src-tauri
+        run: cargo build -p claudinio-protocol --no-default-features
+
+      # One definition, three consumers. A hand-maintained TypeScript mirror
+      # would diverge, and the divergence would be found in production.
+      - name: TypeScript bindings are not stale
+        run: |
+          cd src-tauri && cargo test -p claudinio-protocol --features ts && cd ..
+          if ! git diff --exit-code -- src-tauri/crates/claudinio-protocol/bindings; then
+            echo "::error::Generated TypeScript bindings are stale. Run"
+            echo "  cargo test -p claudinio-protocol --features ts"
+            echo "in src-tauri and commit the bindings/ directory."
+            exit 1
+          fi

@@ -1,0 +1,23 @@
+{
+  "name": "@claudinio/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "app.claudin.io — the browser peer. Drives a session running on the developer's own machine, through a relay that cannot read the traffic.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && vite build --config vite.sw.config.ts",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@claudinio/timeline-ui": "workspace:*",
+    "@msgpack/msgpack": "^3.1.3",
+    "solid-js": "^1.9.3"
+  },
+  "devDependencies": {
+    "vite": "^7.3.2",
+    "vite-plugin-solid": "^2.11.9",
+    "vitest": "^4.1.9"
+  }
+}

@@ -31,6 +31,26 @@ vi.stubGlobal(
   }),
 );
 
+// jsdom does not implement matchMedia either. theme.ts reads
+// `(prefers-color-scheme: light)` to decide the system theme, so any test that
+// renders ThemePicker — or anything containing it, such as the settings panel —
+// throws without this. Reported as not-light, matching the app's own default.
+if (!window.matchMedia) {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
+
 // ── @tauri-apps/api/core ───────────────────────────────────────────
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockRejectedValue(new Error("invoke not mocked")),

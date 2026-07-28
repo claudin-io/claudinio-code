@@ -1,3 +1,4 @@
+use crate::agent::eventbus::EventTx;
 use crate::agent::session::AgentEvent;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -5,7 +6,6 @@ use serde_json::Value;
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::ipc::Channel;
 
 pub mod catalog;
 pub mod openai;
@@ -919,7 +919,7 @@ const TEXT_DELTA_THROTTLE: std::time::Duration = std::time::Duration::from_milli
 /// the text grew since the last send, and the throttle interval has elapsed.
 fn maybe_emit_text_delta(
     emit: bool,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     assistant_text: &str,
     last_sent_len: &mut usize,
     last_flush: &mut std::time::Instant,
@@ -928,7 +928,7 @@ fn maybe_emit_text_delta(
     {
         return;
     }
-    let _ = event_tx.send(AgentEvent::TextDelta {
+    event_tx.send(AgentEvent::TextDelta {
         text: assistant_text.to_string(),
     });
     *last_sent_len = assistant_text.len();
@@ -942,7 +942,7 @@ pub async fn stream_message(
     messages: &[Message],
     tools: &[ToolDescription],
     system: Option<&str>,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     session_id: &str,
     assistant_text: &mut String,
     interrupt: &AtomicBool,
@@ -1162,7 +1162,7 @@ pub async fn stream_message(
     // carry the authoritative text, so this just lets the live preview close
     // the gap before it's replaced, ignoring the throttle interval.
     if emit_text_deltas && assistant_text.len() != last_sent_len {
-        let _ = event_tx.send(AgentEvent::TextDelta {
+        event_tx.send(AgentEvent::TextDelta {
             text: assistant_text.clone(),
         });
     }
@@ -1251,7 +1251,7 @@ pub async fn stream_message(
 fn process_line(
     event_type: &str,
     data: &str,
-    event_tx: &Channel<AgentEvent>,
+    event_tx: &EventTx,
     _session_id: &str,
     assistant_text: &mut String,
     thinking_text: &mut String,
@@ -1300,7 +1300,7 @@ fn process_line(
                             && !thinking.is_empty()
                         {
                             thinking_text.push_str(thinking);
-                            let _ = event_tx.send(AgentEvent::Thinking(thinking_text.clone()));
+                            event_tx.send(AgentEvent::Thinking(thinking_text.clone()));
                         }
                     }
                     Some("input_json_delta") => {
@@ -1398,8 +1398,8 @@ impl fmt::Display for StreamOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::eventbus::NullSink;
     use serde_json::json;
-    use tauri::ipc::InvokeResponseBody;
 
     #[test]
     fn test_merge_workspace_config_mcp_servers_appends_and_overrides_by_name() {
@@ -1655,7 +1655,7 @@ mod tests {
 
     #[test]
     fn test_process_line_populates_usage_from_message_start() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(NullSink);
         let mut text_deltas = Vec::new();
         let mut tool_uses = Vec::new();
         let mut tool_inputs = std::collections::HashMap::new();
@@ -1687,7 +1687,7 @@ mod tests {
 
     #[test]
     fn test_input_json_delta_accumulates_tool_args() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(NullSink);
 
         let mut text_deltas = Vec::new();
         let mut tool_uses = Vec::new();
@@ -1758,7 +1758,7 @@ mod tests {
 
     #[test]
     fn test_truncated_tool_input_drops_block() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(NullSink);
 
         let mut text_deltas = Vec::new();
         let mut tool_uses = Vec::new();
@@ -1806,7 +1806,7 @@ mod tests {
 
     #[test]
     fn test_tool_use_with_complete_input_in_start_keeps_it() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(NullSink);
 
         let mut text_deltas = Vec::new();
         let mut tool_uses = Vec::new();
@@ -1847,7 +1847,7 @@ mod tests {
 
     #[test]
     fn test_tool_use_args_deserialize_successfully() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(NullSink);
 
         let mut text_deltas = Vec::new();
         let mut tool_uses = Vec::new();
@@ -1913,7 +1913,7 @@ mod tests {
 
     #[test]
     fn test_mixed_text_and_tool_stream() {
-        let chan = Channel::new(|_: InvokeResponseBody| Ok(()));
+        let chan: EventTx = std::sync::Arc::new(NullSink);
 
         let mut text_deltas = Vec::new();
         let mut tool_uses = Vec::new();

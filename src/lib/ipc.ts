@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
@@ -154,175 +155,25 @@ export interface ApproveArgs {
   toolId: string;
 }
 
-// Replay-only: old sessions may still have "plan" | "execute" | "summary"
-// phase records on disk. No new session emits these.
-export type Phase = "plan" | "execute" | "summary";
-
-export interface SubagentStartedData {
-  subagentId: string;
-  parentToolId: string;
-  name: string;
-  goal: string;
-  mode: string;
-}
-
-export interface SubagentDoneData {
-  subagentId: string;
-  status: string;
-  rounds: number;
-  inputTokens: number;
-  outputTokens: number;
-  cost: number;
-  report?: string;
-}
-
-export type SessionMode = "brain" | "builder";
-
-export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
-
-/// Slider order, lowest to highest — index in this array is the range value.
-export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
-
-export function normalizeThinkingEffort(s: unknown): ThinkingEffort {
-  return THINKING_EFFORTS.includes(s as ThinkingEffort) ? (s as ThinkingEffort) : "medium";
-}
-
-/// Map a persisted mode string to the current ids. Old session JSONLs carry
-/// the original names "pensador"/"constructor".
-export function normalizeSessionMode(s: unknown): SessionMode {
-  return s === "brain" || s === "pensador" ? "brain" : "builder";
-}
-export type ModeOrigin = "human" | "agent";
-
-export interface ModeChangedData {
-  mode: SessionMode;
-  origin: ModeOrigin;
-  reason?: string | null;
-}
-
-export interface GoldenLoopData {
-  cycle: number;
-  maxCycles: number;
-  pending: string[];
-  mode: SessionMode;
-}
-
-/// Why a session handed off to a linked successor.
-export type HandoffReason =
-  | "plan_execution"
-  | "golden_flip"
-  | "context_handoff"
-  | "manual_builder";
-
-export interface SessionLinkedData {
-  prevSessionId: string;
-  sessionId: string;
-  reason: HandoffReason;
-  mode: SessionMode;
-  firstMessage: string;
-}
-
-export type AgentEvent =
-  | { event: "TextStep"; data: { text: string } }
-  | { event: "TextDelta"; data: { text: string } }
-  | { event: "ModeChanged"; data: ModeChangedData }
-  | { event: "GoldenLoop"; data: GoldenLoopData }
-  | { event: "SessionLinked"; data: SessionLinkedData }
-  | { event: "Thinking"; data: string }
-  | { event: "ToolCall"; data: ToolCallData }
-  | { event: "ToolResult"; data: ToolResultData }
-  | { event: "AskUser"; data: AskUserData }
-  | { event: "Done"; data: DoneData }
-  | { event: "SteeringInjected"; data: { text: string; attachments?: Array<{ name: string; mediaType: string; size: number }> } }
-  | { event: "Error"; data: string }
-  | { event: "Retrying"; data: RetryingData }
-  | { event: "SubagentStarted"; data: SubagentStartedData }
-  | { event: "SubagentDone"; data: SubagentDoneData }
-  | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } }
-  | {
-      event: "SessionStats";
-      data: {
-        inputTokens: number;
-        outputTokens: number;
-        cumulativeCost?: number;
-        costInput?: number;
-        costOutput?: number;
-        costCacheRead?: number;
-        contextTokens: number;
-        maxContextTokens: number;
-        compactThreshold: number;
-      };
-    };
-
-/** Transient provider failure being retried with backoff (claudin.io
- * failover can take ~2min) — the UI shows a reconnecting banner instead of
- * dropping the run. */
-export interface RetryingData {
-  attempt: number;
-  maxAttempts: number;
-  delayMs: number;
-  error: string;
-}
-
-export interface AskUserOption {
-  /** Concise choice shown on the button. */
-  label: string;
-  /** Optional one-line explanation rendered under the label. */
-  description?: string;
-}
-
-export interface AskUserQuestion {
-  question: string;
-  options: AskUserOption[];
-  multi_select?: boolean;
-}
-
-export interface AskUserData {
-  sessionId: string;
-  toolId: string;
-  questions: AskUserQuestion[];
-}
-
-export interface UserAnswer {
-  question: string;
-  answer: string;
-}
-
-export interface ToolCallData {
-  sessionId: string;
-  toolId: string;
-  toolName: string;
-  args: Record<string, unknown>;
-  permission: string;
-  editProposal?: EditProposalData | null;
-}
-
-export type ChatStep =
-  | { type: "thinking"; text: string }
-  | { type: "tool_call"; data: ToolCallData }
-  | { type: "tool_result"; data: ToolResultData }
-  | { type: "steering"; text: string };
-
-export interface EditProposalData {
-  path: string;
-  oldString: string;
-  newString: string;
-  unifiedDiff: string;
-}
-
-export interface ToolResultData {
-  toolId: string;
-  toolName: string;
-  output: string;
-  error?: string | null;
-}
-
-export interface DoneData {
-  stopReason: string;
-  textOutput: string;
-  inputTokens: number;
-  outputTokens: number;
-}
+// --- Session records and streamed events ------------------------------------
+//
+// Defined in @claudinio/timeline-ui/records, because the web peer needs them and
+// has no Tauri. Re-exported here so the forty-odd existing call sites keep
+// importing from one place: the boundary that matters is that the package cannot
+// reach IPC, not which module a caller names. `source-hygiene.test.ts` checks
+// that direction is still true.
+export * from "@claudinio/timeline-ui/records";
+// `export *` re-exports without binding anything locally, and the command
+// signatures below are typed in terms of these.
+import type {
+  AgentEvent,
+  ModeOrigin,
+  SessionMode,
+  SessionRecord,
+  SessionSummary,
+  ThinkingEffort,
+  UserAnswer,
+} from "@claudinio/timeline-ui/records";
 
 // --- Git ---
 
@@ -424,20 +275,6 @@ export function writeClipboardBlob(data: string, name: string, mediaType: string
   return invoke<WriteClipboardBlobResult>("write_clipboard_blob", { data, name, mediaType });
 }
 
-export interface SessionSummary {
-  sessionId: string;
-  createdAt: number;
-  updatedAt: number;
-  title: string;
-  turnCount: number;
-}
-
-// One line of a session JSONL file. `kind` discriminates the variant; extra
-// fields depend on the kind (see the Rust SessionRecord enum).
-export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff";
-  [key: string]: unknown;
-};
 
 export function newSession(workspace: string): Promise<void> {
   return invoke<void>("new_session", { workspace });
@@ -999,4 +836,213 @@ export interface AskpassRequest {
 /** Reply to a pending askpass prompt. `secret: null` cancels it. */
 export function answerAskpass(id: number, secret: string | null): Promise<void> {
   return invoke("answer_askpass", { id, secret });
+}
+
+// --- remote access ---------------------------------------------------------
+//
+// Every one of these is local-only IPC. There is deliberately no `setPolicy` on
+// the wire the peer speaks: a policy a peer could widen is a policy a compromised
+// peer grants itself. See remote/policy.rs.
+
+export type BashApproval = "never" | "allowlist" | "always";
+
+export interface RemotePolicy {
+  send_message: boolean;
+  steer: boolean;
+  interrupt: boolean;
+  set_mode: boolean;
+  approve_edit: boolean;
+  approve_bash: BashApproval;
+  read_attachment: boolean;
+  export_file: boolean;
+  expires_at?: number | null;
+}
+
+/// What a browser may do, as stored on disk.
+///
+/// Distinct from `RemotePolicy` — the effective grant a peer is told about — because
+/// an editor that saved the effective one would rewrite a switched-off policy as a
+/// policy that grants nothing, throwing away everything the user had configured.
+export interface RemoteStoredPolicy {
+  enabled: boolean;
+  /// Unix millis, or `null` for a grant that does not expire.
+  expires_at: number | null;
+  workspaces: string[];
+  idle_disconnect_minutes: number;
+  allow: {
+    send_message: boolean;
+    steer: boolean;
+    interrupt: boolean;
+    set_mode: boolean;
+    approve_edit: boolean;
+    approve_bash: BashApproval;
+    read_attachment: boolean;
+    export_file: boolean;
+  };
+  bash_remote_denylist_extra: string[];
+  max_unattended_minutes: number;
+}
+
+export interface RemotePolicyView {
+  /// Shown so the user knows which file it lands in.
+  path: string;
+  active: boolean;
+  /// Why nothing is granted, when nothing is granted.
+  inertBecause: string | null;
+  effective: RemotePolicy;
+  workspaces: string[];
+  bashDenylist: string[];
+  stored: RemoteStoredPolicy;
+}
+
+/// The grant lengths the panel offers. `null` never expires.
+///
+/// Offered as a list rather than a free-form date because the useful answers are
+/// coarse, and because "how long" is a question people answer in units of trip
+/// rather than in timestamps.
+export const GRANT_DURATIONS: { label: string; ms: number | null }[] = [
+  { label: "1 hour", ms: 60 * 60 * 1000 },
+  { label: "8 hours", ms: 8 * 60 * 60 * 1000 },
+  { label: "1 day", ms: 24 * 60 * 60 * 1000 },
+  { label: "7 days", ms: 7 * 24 * 60 * 60 * 1000 },
+  { label: "30 days", ms: 30 * 24 * 60 * 60 * 1000 },
+  { label: "Never expires", ms: null },
+];
+
+export async function remoteSetPolicy(policy: RemoteStoredPolicy): Promise<void> {
+  return invoke<void>("remote_set_policy", { policy });
+}
+
+/// Turn remote access off now. Returns how many connections were stopped.
+///
+/// Local, and works with the relay unreachable — the same property §6.5 gives
+/// revocation, for the same reason.
+export async function remoteDisable(): Promise<number> {
+  return invoke<number>("remote_disable");
+}
+
+/// The channels being served. Read from the live registry rather than from a flag,
+/// so a connection that stopped by itself does not leave the panel claiming
+/// remote access is on.
+export async function remoteRunning(): Promise<string[]> {
+  return invoke<string[]>("remote_running");
+}
+
+export interface Pairing {
+  peer_key: string;
+  label: string;
+  paired_at: number;
+  expires_at: number | null;
+}
+
+export interface RemoteStatus {
+  enabled: boolean;
+  deviceKey: string | null;
+  error: string | null;
+}
+
+export async function remoteStatus(): Promise<RemoteStatus> {
+  return invoke<RemoteStatus>("remote_status");
+}
+
+export async function remoteCreateIdentity(): Promise<string> {
+  return invoke<string>("remote_create_identity");
+}
+
+export async function remotePolicy(): Promise<RemotePolicyView> {
+  return invoke<RemotePolicyView>("remote_policy");
+}
+
+export async function remotePairings(): Promise<Pairing[]> {
+  return invoke<Pairing[]>("remote_pairings");
+}
+
+export async function remoteRevoked(): Promise<string[]> {
+  return invoke<string[]>("remote_revoked");
+}
+
+export async function remoteRevoke(peerKey: string): Promise<void> {
+  return invoke<void>("remote_revoke", { peerKey });
+}
+
+export async function remoteUnrevoke(peerKey: string): Promise<void> {
+  return invoke<void>("remote_unrevoke", { peerKey });
+}
+
+export async function remoteRenamePairing(peerKey: string, label: string): Promise<void> {
+  return invoke<void>("remote_rename_pairing", { peerKey, label });
+}
+
+/// A pairing window, and the code that fills it.
+export interface PairingCodeView {
+  /// What the QR encodes. Shown as text too: a camera is not always the way in.
+  url: string;
+  channel: string;
+  deviceKey: string;
+  /// Unix millis. The *code* lapses here — the pairing it creates does not.
+  expiresAt: number;
+  /// An SVG document, rendered on the device. Put in an `<img src="data:...">`
+  /// rather than through innerHTML: nothing user-supplied reaches the markup, but
+  /// an `<img>` cannot execute script even if that stopped being true.
+  qrSvg: string;
+  /// The short code to type, when the account server minted one.
+  ///
+  /// Absent is the ordinary case rather than a failure: this machine may not be signed
+  /// in, may be offline, or may be pointed at a self-hosted setup with no account
+  /// server at all. The QR is complete without it — §1.1 forbids claudin.io being a
+  /// hard dependency of remote access, and this field is where that is honoured.
+  typedCode: string | null;
+  /// Why there is no typed code, when the reason is worth showing. Absent when the
+  /// reason is "not signed in": a message about an account nobody mentioned is noise
+  /// beside a QR that already works.
+  typedCodeError: string | null;
+}
+
+/// Where the relay lives. Overridable per call for a self-hosted one.
+export const DEFAULT_RELAY_URL = "wss://relay.claudin.io/ws";
+
+export interface StartPairingArgs {
+  relayUrl: string;
+  /// The session is not named: the device resolves the workspace's active one,
+  /// which is the only one it would agree to serve anyway.
+  workspace: string;
+  peerLabel: string;
+  /// `null` means the pairing never lapses, which the UI has to choose on purpose.
+  pairingExpiresAt?: number | null;
+  webOrigin?: string | null;
+}
+
+export async function remoteStartPairing(args: StartPairingArgs): Promise<PairingCodeView> {
+  return invoke<PairingCodeView>("remote_start_pairing", { args });
+}
+
+/// Answer "do these three words match?".
+///
+/// `false` revokes the key. The pairing is written before the words reach a
+/// screen, so refusing has to be stronger than not-pairing — otherwise the key
+/// that failed the check pairs again on the next attempt.
+export async function remoteConfirmPairing(peerKey: string, matched: boolean): Promise<void> {
+  return invoke<void>("remote_confirm_pairing", { peerKey, matched });
+}
+
+/// Something the local user needs to see about a remote peer. Never anything the
+/// peer said — these come from the transport, not across the wire.
+export type RemoteNotice =
+  /// Two screens are showing three words each. Nothing is served until an answer.
+  | { kind: "confirmPairing"; peerKey: string; label: string; sas: string }
+  | { kind: "paired"; peerKey: string; label: string }
+  /// The words did not match, or nobody answered. The key is already revoked.
+  | { kind: "pairingRefused"; peerKey: string }
+  | { kind: "connected"; peerKey: string; label: string; sas: string }
+  /// Remote access stopped and will not redial, with why.
+  | { kind: "stopped"; peerKey: string; reason: RemoteCloseReason };
+
+export type RemoteCloseReason =
+  | "peerAsked"
+  | "turnedOffLocally"
+  | "grantExpired"
+  | "revoked";
+
+export async function onRemoteNotice(handler: (notice: RemoteNotice) => void): Promise<() => void> {
+  return listen<RemoteNotice>("remote://notice", (event) => handler(event.payload));
 }

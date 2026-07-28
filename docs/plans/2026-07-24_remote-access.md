@@ -62,6 +62,76 @@ pnpm workspace does **not** exist yet.
 
 Open questions §11.2 through §11.5 remain open.
 
+### 0.2 Deviations found while building (kept current)
+
+This plan was written before the code. Where the code disagreed and the code was
+right, it is recorded here rather than left buried in a commit message.
+
+| § | Plan said | What was built, and why |
+|---|---|---|
+| §9 | `crates/claudinio-protocol` at the repo root | `src-tauri/crates/claudinio-protocol`, a member of the existing workspace. The repo root has no manifest **on purpose** — see the comment in `src-tauri/Cargo.toml` — and adding one to satisfy a path in a document would undo that. |
+| §9 | one protocol crate | It is **split along the security boundary**: `wire` (the outer frame) always available, `inner` (the end-to-end messages) behind a default feature the relay turns off. I2 stops being a convention any later commit could quietly break in review and becomes a compile error — the relay has no inner types at all. CI builds the crate that way so the guarantee stays real. |
+| §5.4 | `cmd_id` dedup as an LRU of seen ids | An LRU of ids cannot be correct on its own. Recording an id *after* executing lets a replay run the side effect twice; recording it *before* lets a crash swallow a legitimate retry. The log records **both edges**, and a command that started and never finished returns `Indeterminate` — the caller refuses and says why. Re-running an `rm` is worse than making someone tap approve again. |
+| §5.2 | eight frame kinds | Plus `Other(u8)`, so a kind this build has never seen still decodes and can still be routed. The component in the middle is the one that must never need deploying in lockstep with the peers. |
+| §8 Phase 1 | four items | Five. Event buses had to be keyed by session in a registry, or a second watcher could never find a running one — which is also the first thing the bridge needs. |
+| §5.3 | a shared `Actor` | Deliberately **duplicated**. The agent owns the concept of who answered a gate; the protocol crate owns its wire form. Making `agent/` depend on the remote protocol to express a *local* approval would be the agent knowing remote access exists, which §4.1 forbids. The conversion lives in `remote/`, which may know both, and is tested there. |
+
+| §6.3 | "confirm the SAS on both screens" | The SAS had to become a **gate**, not a display. As first built it went to `eprintln!` and the channel was served regardless, which made the words decoration. The connection now stops after `HelloAck` and serves nothing until a human answers, and **silence refuses** — a timeout, a dropped waiter and a superseded one all resolve to "no". |
+| §6.3 | — | Refusing **revokes** rather than un-pairs. `admit` writes the pairing before the words can reach a screen, so removing it would leave the key free to pair again on the next attempt — and that key is exactly the one that must not. Consequence: `run()` needed a second ending, because redialling a revoked key loops against `admit` forever. |
+| §6.3 | a 6-word typed code alongside the QR | The QR shipped; **the word code cannot**. `sas::WORDS` has 32 entries, so six words carry 30 bits — nowhere near a 128-bit channel plus a 256-bit key. A typed code has to be a *lookup* token, which needs `/v1/pairings/claim` in the dashboard. Blocked there, not here. |
+| §8 Phase 3 | the whole timeline moves to the package | **The portable primitives move; each surface composes its own rows.** `TimelineRows` carries Monaco, mermaid, `highlight.js` and a 44-importer icon set — none of which a read-only mobile view needs, and Monaco alone would take the peer's bundle past two megabytes. So the package holds `markdown`, `records`, `chatRecords`, `diff`, `Prose` and `DiffView`, and the peer builds a mobile timeline from them. The model is shared where it matters: both surfaces read a session through the same `recordsToMessages`, so they cannot disagree about what one contained. |
+| — | — | **`markdown.ts` was importing all of `highlight.js`.** About a hundred and ninety grammars, which put the peer's bundle at 1.1 MB (356 kB gzipped) and which the *desktop* had been shipping too. Switched to the core with twelve registered languages: 202 kB, 66 kB gzipped. It also makes `highlightAuto` more accurate — it tries every registered grammar, so a shell snippet had a hundred and eighty chances to be mistaken for something else. |
+| §8 Phase 3 | `TimelineRows.tsx` moves to the package | It is not a leaf: five sibling components plus `openExternalUrl` from `lib/ipc`. Moving it means inverting that into a host-supplied prop, which belongs with the web UI that will be its second consumer. `markdown.ts`, `records.ts` and `chatRecords.ts` moved. |
+| §8 Phase 1 | its prova real ran | **It never did.** Phase 1 shipped and the check was never performed — the oldest item on the list and the only one that claimed to have passed with nothing verifying it, which is the same shape as the gap that later let the device attach to the relay with no channel token. It runs now, in CI (it needs no relay), in `agent/prova_real_phase1.rs`. |
+| §8 Phase 1 | "the JSONL records which one approved" | **Cannot pass, and it is a contradiction in this plan.** `SessionRecord` has no approval variant and `persist.rs` never mentions an actor, so there is today no way to answer "who approved that?" after the fact. §8 phase 4 schedules exactly this — "Audit log: every remote command, with actor and decision, written to JSONL" — one phase later. The right place for it is `ApprovalRegistry::resolve`, the single funnel every resolution passes through, local or remote; that is a change to the agent's core and belongs with the phase that plans for it rather than smuggled in under a test. Attribution itself *does* exist and is asserted: a peer's answer is distinguishable from the local user's, which is what phase 4 will have to record. |
+| §8 Phase 2 | the prova real used the app's device code | It used a **stand-in**, and that hid the bug that mattered: the device attached to the relay with **no channel token** and no reservation, so every attach was refused and remote access could never have worked. Both suites stayed green. Fixed at the relay (a device attaching to an unreserved channel reserves it) and at the device (the token is minted with the channel and travels in the code as `t=`). Phase 3's prova real drives the real device stack, so this class of gap has somewhere to surface now. |
+| §8 Phase 3 | "seq contiguity with zero gaps" | The phase-3 check asserts **agreement on the SAS** rather than contiguity: the device and the browser derive the same three words, which is the only property that makes the human check worth anything. Coverage of the transcript is asserted separately. Contiguity per record is not verifiable from a `Snapshot`, which carries only the highest `seq` in the chunk — the same deviation already recorded for phase 2. |
+| — | — | **`replay` drops a transcript line it cannot parse, silently.** Found by writing a harness transcript in the wrong shape: every line was skipped, the peer received an empty snapshot, and nothing errored — so a transport bug is exactly what it looked like. Left as it is, because the local app reads through the same function and changing it belongs with a decision about what a corrupted transcript should do. Worth knowing: a peer can be served a *short* transcript with no indication. |
+| §6.4 | the UI edits the policy | The **writer lives in `commands/remote.rs`, not `remote/`**. `remote/policy.rs` has no writer at all, so a command arriving over the wire cannot reach one — the module graph is the enforcement rather than a check inside a function. |
+| §0.1 | "the PWA manifest plus service worker land here" | Both landed, **hand-written rather than generated**. `vite-plugin-pwa` would have done it in four lines of config, and what it also does is generate the worker — the one file on this origin that can intercept every request forever. Forty lines that can be read in full beat a generated one that cannot. Two properties the plan does not name and that fell out of asking what a worker on *this* origin must not do: it **never populates the cache at runtime** (what is in the cache is exactly what the build put there, so there is no way for a response someone else provoked to be stored and later served as this origin's own code), and the shell is served **network-first** (cache-first would launch a few hundred milliseconds sooner and would also mean a browser running an unpatchable bundle until it happened to revalidate — on a page that holds a session key and renders model output, the milliseconds lose). |
+| §0.1 | "offered, never required" | The offer is **iOS-only**, which reads like a narrowing and is the opposite. Chrome and Edge put an install control in their own UI and can show a notification from an ordinary tab, so a line of text there is an advertisement for something the browser already says better. Safari on iOS does neither: there is no prompt to trigger and Web Push is available *only* to a page launched from the home screen — so an uninstalled iOS page will silently never be able to reach someone whose phone is in their pocket, and being told is the only way they find out. It is also dismissed permanently, because an offer that comes back is an advertisement, and this one lives on the origin that drives someone's machine. |
+| §8 Phase 3 | — | **The PWA needed a prova real of its own**, for the same reason phase 2's stand-in hid the channel-token bug: every interesting failure here is invisible to the unit tests. The precache list is injected from a manifest written by a *different* Vite build, so the two can disagree and leave the offline page blank while the worker reports success; a worker emitted as an ES module does not register in some browsers, and registration failure is swallowed *on purpose*. `scripts/prova-real-pwa.sh` loads `dist/sw.js` the way a browser would — a classic script in a bare worker scope — and drives it against the real `dist/`. Removing one file from the list is enough to make it fail, which is the property that makes it worth running. |
+| §6.3 | a 6-word typed code, blocked on the dashboard | **Unblocked, and it is characters rather than words** — see the row above for why. What it needed was an authorisation handoff, because `app.claudin.io` is a different origin with no cookie of its own and the claim has to name an account. Built as the desktop's shape (a code in a fragment, redeemed with a verifier) and deliberately not the desktop's grant: `/app/authorize` hands a native binary a key that can spend money, while this hands over a token in `claudinio:remote:webtoken:` that one function reads. **The scope is the namespace**, not a claim inside a token a later route might forget to check. The plan's own note suggested extending `/app/authorize` with a destination allowlist; a separate route is better, because then neither route ever learns a destination from a caller at all. |
+| — | — | **The dashboard's ticket had the same missing field the QR code once did.** It carried the channel and the relay URL and not the channel *token*, so every typed code would have resolved to a pairing that could never attach — and the browser would have reported a transport failure with nothing wrong with the transport. Found before anything called the endpoint, by writing down what the peer needs in order to dial and noticing one of the four was absent. Consequence worth stating: the account server now holds, for 120 seconds, a credential that can attach to a relay channel. Proportionate because the token is not the boundary — whoever attaches still has to complete Noise IK and match three words on the user's own screen — and the QR path puts the same token on a screen for the same reason. |
+| §1.1 | — | **The device asks for the typed code and shrugs if it cannot have one.** `remote/account.rs` registers the machine and mints the code, and every failure in it is soft: not signed in returns no error at all, and the panel simply shows the QR. That is §1.1 made mechanical rather than promised — a build pointed at a self-hosted relay with no account server anywhere still pairs. Registration happens at the moment there is a reason to pair rather than at startup, so a machine that never uses remote access never appears in an account's device list. |
+| §6.3 | — | The claim's response goes through **the same validator as the URL fragment**. It would have been easy to treat JSON from our own account server as already-checked, and that is exactly how that server would end up able to point the browser at a `ws://` relay: the frames are still ciphertext, but an observer on the path learns the channel token and can then attach itself. One validator, two sources of strings. |
+| — | — | The manifest declares **no maskable icon**: the app icon has transparent rounded corners and no safe-zone padding, so declaring it maskable would let Android crop into the glyph. It also declares no `share_target`, `file_handlers` or `protocol_handlers` — this page's authority comes from a code someone read off a screen, and an entry point that hands it one from elsewhere is a way to skip that. |
+
+One temporary `#[allow(dead_code)]` remains, on `persist::SeqRecord::seq`, scoped
+to builds without the `remote` feature. An earlier note here claimed the
+module-wide suppression on `remote/` would come off with `remote/bridge.rs`; it did
+not, because nothing consumed the bridge until the transport landed. It is gone
+now. Chasing that lint paid for itself twice: it surfaced an `ApprovalResolved`
+that was never emitted and an hourly rekey that was never called.
+
+### 0.3 The pairing code is a cross-repo contract
+
+`app.claudin.io` does not exist yet, and this is the format it will have to read.
+Defined in `src-tauri/src/remote/code.rs` and pinned by tests there.
+
+```
+https://app.claudin.io/#c=<channel-hex-32>&t=<channel-token>&k=<device-key-hex-64>&r=<relay-url>&e=<expiry-ms>
+```
+
+`t` was not in the first draft of this section, and its absence was the bug: the relay
+refuses an attach to a channel without a token, so a code without one describes a
+pairing that can never connect. The same omission then happened a second time in the
+dashboard's typed-code ticket — see §0.2.
+
+**Everything sits in the fragment, and that is not cosmetic.** A fragment is never
+sent to the server. In a query string the channel token and the device key would
+appear in the request line of every page load — handing the web origin, its logs
+and whatever sits in front of it the two things it must not have: the ability to
+attach to the channel, and the key a substitution attack needs. The web app reads
+`location.hash`, and may not quietly change that.
+
+`r` is percent-escaped for `%`, `&`, `=`, `#` and space, so a relay URL carrying
+its own query string cannot truncate the parameters after it.
+
+The device renders the QR itself (`qrcode` crate → SVG) because the code is already
+in that process, and because the device has to be able to show it with the relay
+unreachable — the relay may well be the thing being set up.
+
 ---
 
 ## 1. Objective

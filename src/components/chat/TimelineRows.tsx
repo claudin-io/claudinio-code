@@ -18,7 +18,7 @@ import {
   toolHeader,
   toolSummary,
 } from "../tool-renderers/toolPresentation";
-import { renderMarkdown } from "../../lib/markdown";
+import { renderMarkdown } from "@claudinio/timeline-ui/markdown";
 import {
   ellipsize,
   formatDuration,
@@ -29,7 +29,7 @@ import {
   type ChatMessage,
   type SubagentTimelineState,
   type TimelineItem,
-} from "../../lib/chatRecords";
+} from "@claudinio/timeline-ui/chatRecords";
 import { openExternalUrl } from "../../lib/ipc";
 import type {
   EditProposalData,

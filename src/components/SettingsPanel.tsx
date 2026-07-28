@@ -6,6 +6,10 @@ import { SettingsModels } from "./settings/SettingsModels";
 import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsMcp } from "./settings/SettingsMcp";
+import { SettingsRemote } from "./settings/SettingsRemote";
+import { RemotePairing } from "./settings/RemotePairing";
+import { RemotePolicyEditor } from "./settings/RemotePolicyEditor";
+import { createRemoteSettings } from "../lib/createRemoteSettings";
 
 interface SettingsPanelProps {
   showConfig: Accessor<boolean>;
@@ -75,9 +79,12 @@ interface SettingsPanelProps {
   addMcpServerTemplate: () => void;
   testAllMcpServers: () => Promise<void>;
   openSupportUrl: () => void;
+  /// The workspace a paired browser would drive. `null` when none is open, which
+  /// the remote panel reports as a reason rather than a failure.
+  activeWorkspace: Accessor<string | null>;
 }
 
-type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'mcp';
+type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'mcp' | 'remote';
 
 interface Category {
   id: CategoryId;
@@ -91,6 +98,7 @@ const CATEGORIES: Category[] = [
   { id: 'account', icon: 'key', searchTerms: ["Account","Sign in with claudin.io","Sign out","API Key","Support","Providers","More providers\u2026","Connect","Access hundreds of models through one account, via OAuth."] },
   { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
+  { id: 'remote', icon: 'globe', searchTerms: ["Remote access","Paired browsers","Create device key","Revoke","Revoked","What a paired browser may do"] },
 ];
 
 function getCategoryLabel(id: CategoryId): string {
@@ -100,6 +108,7 @@ function getCategoryLabel(id: CategoryId): string {
     account: 'Account',
     agent: 'Agent',
     mcp: 'MCP',
+    remote: 'Remote',
   };
   return labels[id];
 }
@@ -111,10 +120,20 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
   const [phase, setPhase] = createSignal<'hidden' | 'entering' | 'visible' | 'exiting'>('hidden');
   let exitTimer: ReturnType<typeof setTimeout> | undefined;
 
+  const remote = createRemoteSettings(props.activeWorkspace);
+
+  /// Remote access is a compile-time feature, so a build can genuinely not have
+  /// it. Until the device says otherwise the category is absent rather than
+  /// disabled: a greyed-out tab invites someone to look for the switch that
+  /// enables it, and there isn't one — it is decided by how the binary was built.
+  const offeredCategories = createMemo(() =>
+    CATEGORIES.filter((cat) => cat.id !== 'remote' || remote.available() === true),
+  );
+
   const visibleCategories = createMemo(() => {
     const q = searchQuery().toLowerCase().trim();
-    if (!q) return CATEGORIES;
-    return CATEGORIES.filter((cat) => {
+    if (!q) return offeredCategories();
+    return offeredCategories().filter((cat) => {
       if (getCategoryLabel(cat.id).toLowerCase().includes(q)) return true;
       return cat.searchTerms.some((term) => term.toLowerCase().includes(q));
     });
@@ -168,6 +187,9 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
         exitTimer = undefined;
       }
       if (phase() === 'hidden') {
+        // Asked on open, not at startup: it is a file read the user has no reason
+        // to pay for until they look at settings.
+        void remote.probe();
         setPhase('entering');
         requestAnimationFrame(() => {
           setPhase('visible');
@@ -324,21 +346,80 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   onTestAll={props.testAllMcpServers}
                 />
               </Show>
+
+              <Show
+                when={
+                  remote.available() === true &&
+                  (searchQuery() ? true : activeCategory() === 'remote')
+                }
+              >
+                <SettingsRemote
+                  deviceKey={remote.deviceKey}
+                  policy={remote.policy}
+                  pairings={remote.pairings}
+                  revoked={remote.revoked}
+                  error={remote.error}
+                  busy={remote.busy}
+                  onCreateIdentity={remote.createIdentity}
+                  onRevoke={remote.revoke}
+                  onUnrevoke={remote.unrevoke}
+                  onRename={remote.rename}
+                  policyEditor={
+                    <RemotePolicyEditor
+                      policy={remote.policy}
+                      running={remote.running}
+                      busy={remote.busy}
+                      activeWorkspace={props.activeWorkspace}
+                      onSave={remote.setPolicy}
+                      onDisable={remote.disable}
+                    />
+                  }
+                  pairing={
+                    <RemotePairing
+                      code={remote.code}
+                      pending={remote.pending}
+                      outcome={remote.outcome}
+                      busy={remote.busy}
+                      blocked={remote.blocked}
+                      onStart={remote.startPairing}
+                      onCancel={remote.cancelPairing}
+                      onConfirm={remote.confirmPairing}
+                    />
+                  }
+                />
+              </Show>
             </div>
 
+            {/* Nothing on the Remote tab is staged: revoking a pairing has
+                already happened by the time the footer is looked at, so offering
+                Cancel there would promise an undo that does not exist. */}
             <div class="settings-panel-footer">
-              <button
-                onClick={() => props.setShowConfig(false)}
-                class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
+              <Show
+                when={!searchQuery() && activeCategory() === 'remote'}
+                fallback={
+                  <>
+                    <button
+                      onClick={() => props.setShowConfig(false)}
+                      class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
+                    >
+                      {"Cancel"}
+                    </button>
+                    <button
+                      onClick={() => props.saveConfig()}
+                      class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
+                    >
+                      {"Save"}
+                    </button>
+                  </>
+                }
               >
-                {"Cancel"}
-              </button>
-              <button
-                onClick={() => props.saveConfig()}
-                class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink hover:bg-accent-hover"
-              >
-                {"Save"}
-              </button>
+                <button
+                  onClick={() => props.setShowConfig(false)}
+                  class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
+                >
+                  {"Close"}
+                </button>
+              </Show>
             </div>
           </div>
         </div>

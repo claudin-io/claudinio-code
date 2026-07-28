@@ -25,4 +25,28 @@ describe("source hygiene", () => {
     }
     expect(offenders, `NUL byte(s) found in: ${offenders.join(", ")}`).toEqual([]);
   });
+
+  /// `packages/` is shared with the web peer, and `apps/web` *is* the web peer.
+  /// Neither has Tauri, and neither has `src/`.
+  ///
+  /// This is checked rather than left to the build for a specific reason: every
+  /// `@tauri-apps/*` module is mocked in `test-setup.ts`, so an import that would
+  /// fail in production passes silently in tests. Without this the failure surfaces
+  /// at deploy, and the cheapest-looking fix at that point is to copy a file — which
+  /// is how a sanitizer ends up existing twice and diverging.
+  it("nothing in packages/ or apps/ imports Tauri", () => {
+    const offenders: string[] = [];
+    const roots = ["packages", "apps"].map((dir) => join(process.cwd(), dir));
+    for (const file of roots.flatMap((root) => walk(root))) {
+      const body = readFileSync(file, "utf8");
+      // Covers `from "…"` and `import("…")`, which is every way a module
+      // specifier names something outside the file.
+      for (const [, spec] of body.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+        if (spec.startsWith("@tauri-apps") || spec.includes("../src/")) {
+          offenders.push(`${file} imports ${spec}`);
+        }
+      }
+    }
+    expect(offenders, offenders.join("\n")).toEqual([]);
+  });
 });

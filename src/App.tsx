@@ -806,6 +806,7 @@ function App() {
       </header>
 
       <SettingsPanel
+        activeWorkspace={activeWorkspace}
         showConfig={showConfig}
         setShowConfig={setShowConfig}
         configBrainModel={configBrainModel}

@@ -6,6 +6,8 @@ pub(crate) mod http;
 mod lsp;
 pub(crate) mod net_activity;
 pub(crate) mod procutil;
+#[cfg(feature = "remote")]
+mod remote;
 mod state;
 pub(crate) mod workspace_path;
 
@@ -57,6 +59,34 @@ pub fn run() {
             commands::providers::disconnect_provider,
             commands::providers::list_provider_models,
             commands::providers::list_all_models,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_status,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_create_identity,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_enable,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_pairings,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_revoke,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_rename_pairing,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_revoked,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_unrevoke,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_policy,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_set_policy,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_confirm_pairing,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_start_pairing,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_disable,
+            #[cfg(feature = "remote")]
+            commands::remote::remote_running,
             commands::clipboard::write_clipboard_blob,
             commands::git::git_status,
             commands::git::git_file_diff,
@@ -128,6 +158,33 @@ mod architecture_tests {
         assert!(
             offenders.is_empty(),
             "these core files import crate::commands, inverting the layering: {offenders:?}"
+        );
+    }
+
+    /// The same rule, one layer out, for remote access.
+    ///
+    /// `remote/` subscribes to the agent's event bus and implements its approval
+    /// resolver; the agent must never learn that a remote peer exists. Keeping
+    /// the arrow pointing one way is what lets remote be feature-gated off
+    /// entirely, and what stops "just check if a peer is connected" from
+    /// appearing inside the agent loop — which is where the capability rules
+    /// would then quietly stop being enforced in one place.
+    ///
+    /// The directory does not exist yet. The test is written first on purpose:
+    /// it costs nothing now and it is the guard for every phase after this one.
+    #[test]
+    fn the_agent_does_not_depend_on_the_remote_bridge() {
+        let mut offenders = Vec::new();
+        for dir in ["src/agent", "src/code_intel", "src/lsp"] {
+            visit(Path::new(dir), &mut |path, body| {
+                if body.contains("crate::remote") {
+                    offenders.push(path.display().to_string());
+                }
+            });
+        }
+        assert!(
+            offenders.is_empty(),
+            "these core files import crate::remote; the agent must not know remote access exists: {offenders:?}"
         );
     }
 

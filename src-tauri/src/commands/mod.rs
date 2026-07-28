@@ -12,6 +12,8 @@ pub mod mcp;
 pub mod network_log;
 pub mod power;
 pub mod providers;
+#[cfg(feature = "remote")]
+pub mod remote;
 pub mod shell;
 pub mod skills;
 pub mod system_stats;

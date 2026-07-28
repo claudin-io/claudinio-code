@@ -1,3 +1,4 @@
+use crate::agent::eventbus::BusRegistry;
 use crate::agent::provider::AgentConfig;
 use crate::agent::session::{
     AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, SteeringCtl,
@@ -105,13 +106,21 @@ pub struct AppState {
     pub oauth_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
     pub records_cache: crate::agent::persist::RecordsCache,
+    /// Live event buses keyed by session id.
+    ///
+    /// The bus is the session's stream, not a window's: whoever attaches gets
+    /// the same events. That is what lets a second window — and, once the
+    /// remote bridge lands, a paired peer — watch a run that is already going,
+    /// without the agent knowing either exists.
+    pub buses: Arc<BusRegistry>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             config: Mutex::new(crate::agent::provider::load_config()),
-            approvals: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            approvals: ApprovalMap::new(),
+            buses: Arc::new(BusRegistry::default()),
             answers: Arc::new(Mutex::new(std::collections::HashMap::new())),
             workspaces: Mutex::new(HashMap::new()),
             steering: Arc::new(Mutex::new(HashMap::new())),
@@ -141,6 +150,21 @@ impl AppState {
     pub async fn remove_steering(&self, session_id: &str) {
         let mut map = self.steering.lock().await;
         map.remove(session_id);
+    }
+
+    /// The event bus for a session, created on first attach.
+    ///
+    /// Keyed by session rather than by window, so attaching twice yields the
+    /// same stream. Everything that starts or resumes a run goes through here,
+    /// which means a watcher that arrives later joins what is already running
+    /// instead of being handed a private channel that nobody else can see.
+    pub async fn bus_for(&self, session_id: &str) -> crate::agent::eventbus::EventBus {
+        self.buses.bus_for(session_id).await
+    }
+
+    /// Drop a session's bus. Attached watchers see the stream close.
+    pub async fn close_bus(&self, session_id: &str) {
+        self.buses.close(session_id).await;
     }
 
     pub fn steering_map(&self) -> Arc<Mutex<HashMap<String, Arc<SteeringCtl>>>> {
