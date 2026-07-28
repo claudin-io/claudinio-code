@@ -319,9 +319,9 @@ jobs:
           asset() {
             # $1 = include glob, $2 = optional exclude glob
             if [ -n "${2:-}" ]; then
-              find release-files -type f -name "$1" ! -name "$2" ! -name '*.sig' | head -n1
+              find release-files -type f -name "$1" ! -name "$2" ! -name '*baseline*' ! -name '*.sig' | head -n1
             else
-              find release-files -type f -name "$1" ! -name '*.sig' | head -n1
+              find release-files -type f -name "$1" ! -name '*baseline*' ! -name '*.sig' | head -n1
             fi
           }
 

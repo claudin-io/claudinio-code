@@ -129,7 +129,7 @@ def main() -> int:
         return rc
     # --with-candle: also fetch safetensors weights for the candle backend
     # (baseline / pre-Haswell build). Skipped by default.
-    if "--with-candle" in sys.argv[1:]:
+    if any(arg == "--with-candle" for arg in sys.argv[1:]):
         rc = fetch_group(CANDLE_REPO, CANDLE_REVISION, CANDLE_FILES)
         if rc != 0:
             return rc
