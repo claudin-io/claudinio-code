@@ -1,2 +1,14 @@
 allowBuilds:
   esbuild: true
+
+# monaco-editor bundles its own DOMPurify (3.2.7 at 0.55.1, 3.4.8 at 0.56.0) and
+# renders markdown of its own through it — LSP hover cards, suggestion details.
+# That copy is not the one src/lib/markdown.ts imports, so it sits outside the
+# sanitizer SECURITY.md names as the only markdown->HTML path, while still being
+# in the webview's rendering path. Everything below 3.4.12 carries known bypasses
+# (17 advisories), and upgrading monaco does not reach 3.4.12 — so pin the whole
+# tree to the one audited copy. Same major version, so the API is unchanged.
+#
+# Drop this once monaco-editor ships a release depending on >=3.4.12.
+overrides:
+  dompurify: ^3.4.12
