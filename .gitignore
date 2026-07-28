@@ -1,6 +1,9 @@
 node_modules
 dist
 src-tauri/target
+# Cargo run from the repo root drops a second target/ here; only the one under
+# src-tauri/ was ever covered.
+/target
 .DS_Store
 .claudinio/
 .serena/
