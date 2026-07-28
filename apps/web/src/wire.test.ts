@@ -12,6 +12,7 @@ import {
   helloFrame,
   hexFromBytes,
 } from "./wire";
+import type { Bytes } from "./wire";
 
 /// Produced by the Rust encoder, not by this one.
 ///
@@ -216,7 +217,7 @@ describe("hex helpers", () => {
 
 /// A frame whose `seq` is encoded as a MessagePack uint64, built by hand because no
 /// well-behaved encoder would emit one for a small value.
-function withUint64Seq(seq: bigint): Uint8Array {
+function withUint64Seq(seq: bigint): Bytes {
   const head = bytesFromHex(
     "86" +
       "a17601" + // v: 1

@@ -26,6 +26,7 @@ import {
   encodeFrame,
   helloFrame,
 } from "./wire";
+import type { Bytes } from "./wire";
 import { decode as msgpackDecode, encode as msgpackEncode } from "@msgpack/msgpack";
 
 /// How long to wait for the device's reply before dialling again.
@@ -87,10 +88,10 @@ export interface SessionEvents {
 /// A socket, narrowed to what this uses. Injectable so the session can be tested
 /// without a network — and so the test drives it with bytes the real device produced.
 export interface Socket {
-  send(data: Uint8Array): void;
+  send(data: Bytes): void;
   close(): void;
   onopen: (() => void) | null;
-  onmessage: ((data: Uint8Array) => void) | null;
+  onmessage: ((data: Bytes) => void) | null;
   onclose: (() => void) | null;
   onerror: (() => void) | null;
 }
@@ -106,8 +107,8 @@ export type SocketFactory = (url: string) => Socket;
 /// it sees against its pairing book, and a browser that kept a key across reloads
 /// would be storing one, which is what the non-extractable default avoids.
 export type InitiatorFactory = (
-  deviceKey: Uint8Array,
-) => Promise<{ initiator: NoiseInitiator; message1: Uint8Array }>;
+  deviceKey: Bytes,
+) => Promise<{ initiator: NoiseInitiator; message1: Bytes }>;
 
 export const freshInitiator: InitiatorFactory = async (deviceKey) => {
   const staticKeys = await generateKeyPair();
@@ -136,7 +137,7 @@ export const browserSocket: SocketFactory = (url) => {
 export class Session {
   private socket: Socket | null = null;
   private noise: NoiseInitiator | null = null;
-  private channel: Uint8Array;
+  private channel: Bytes;
   private outSeq = 0;
   private highestSeq = 0;
   private attempt = 0;
@@ -253,7 +254,7 @@ export class Session {
     }
   }
 
-  private async receive(bytes: Uint8Array): Promise<void> {
+  private async receive(bytes: Bytes): Promise<void> {
     if (bytes.length > MAX_FRAME) return; // refused without decoding
 
     let frame;
@@ -278,7 +279,7 @@ export class Session {
 
     if (!this.noise?.complete) return;
 
-    let plaintext: Uint8Array;
+    let plaintext: Bytes;
     try {
       plaintext = await this.noise.decrypt(frame.payload);
     } catch {
@@ -316,7 +317,7 @@ export class Session {
     this.events.onMessage(record);
   }
 
-  private async completeHandshake(payload: Uint8Array): Promise<void> {
+  private async completeHandshake(payload: Bytes): Promise<void> {
     if (!this.noise || this.noise.complete) return;
     try {
       await this.noise.readMessage2(payload);
@@ -402,7 +403,7 @@ export class Session {
   }
 }
 
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+function sameBytes(a: Bytes, b: Bytes): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;

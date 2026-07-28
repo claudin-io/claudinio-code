@@ -16,6 +16,17 @@
 
 import { encode as msgpackEncode, decode as msgpackDecode } from "@msgpack/msgpack";
 
+/// A `Uint8Array` that is definitely backed by an `ArrayBuffer`, never a
+/// `SharedArrayBuffer`.
+///
+/// WebCrypto's `BufferSource` excludes the shared case — another thread can mutate a
+/// `SharedArrayBuffer` while the operation reads it — so a bare `Uint8Array`, whose
+/// buffer is `ArrayBufferLike`, is not assignable to it. Every array on this path
+/// comes from `new Uint8Array(...)`, `TextEncoder.encode` or a `slice`, all unshared,
+/// so naming that once here keeps the crypto calls in `noise.ts` typed without a cast
+/// at every call site.
+export type Bytes = Uint8Array<ArrayBuffer>;
+
 /// Matches `PROTOCOL_VERSION`.
 export const PROTOCOL_VERSION = 1;
 
@@ -42,15 +53,15 @@ export interface OuterFrame {
   /// that threw on an unfamiliar kind would be stricter than the relay for no gain.
   kind: number;
   /// 16 bytes.
-  channel: Uint8Array;
+  channel: Bytes;
   seq: number;
   ack: number;
-  payload: Uint8Array;
+  payload: Bytes;
 }
 
 export class WireError extends Error {}
 
-export function encodeFrame(frame: OuterFrame): Uint8Array {
+export function encodeFrame(frame: OuterFrame): Bytes {
   if (frame.channel.length !== 16) {
     throw new WireError(`channel id must be 16 bytes, got ${frame.channel.length}`);
   }
@@ -72,7 +83,7 @@ export function encodeFrame(frame: OuterFrame): Uint8Array {
   return bytes;
 }
 
-export function decodeFrame(bytes: Uint8Array): OuterFrame {
+export function decodeFrame(bytes: Bytes): OuterFrame {
   // Checked before decoding, not after. A frame over the limit is refused without
   // allocating whatever it claims to contain.
   if (bytes.length > MAX_FRAME) {
@@ -115,26 +126,26 @@ export function decodeFrame(bytes: Uint8Array): OuterFrame {
 
 /// A data frame at the current version.
 export function dataFrame(
-  channel: Uint8Array,
+  channel: Bytes,
   seq: number,
   ack: number,
-  payload: Uint8Array,
+  payload: Bytes,
 ): OuterFrame {
   return { v: PROTOCOL_VERSION, kind: OuterKind.Data, channel, seq, ack, payload };
 }
 
-export function helloFrame(channel: Uint8Array, payload: Uint8Array): OuterFrame {
+export function helloFrame(channel: Bytes, payload: Bytes): OuterFrame {
   return { v: PROTOCOL_VERSION, kind: OuterKind.Hello, channel, seq: 0, ack: 0, payload };
 }
 
-export function channelFromHex(hex: string): Uint8Array {
+export function channelFromHex(hex: string): Bytes {
   if (hex.length !== 32) {
     throw new WireError(`channel id must be 32 hex characters, got ${hex.length}`);
   }
   return bytesFromHex(hex, "channel id");
 }
 
-export function bytesFromHex(hex: string, what = "value"): Uint8Array {
+export function bytesFromHex(hex: string, what = "value"): Bytes {
   if (hex.length % 2 !== 0) throw new WireError(`${what} has an odd number of hex digits`);
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
@@ -145,7 +156,7 @@ export function bytesFromHex(hex: string, what = "value"): Uint8Array {
   return out;
 }
 
-export function hexFromBytes(bytes: Uint8Array): string {
+export function hexFromBytes(bytes: Bytes): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -168,12 +179,15 @@ function requireNumber(value: unknown, field: string): number {
   return value;
 }
 
-function requireBytes(value: unknown, field: string, exactly?: number): Uint8Array {
+function requireBytes(value: unknown, field: string, exactly?: number): Bytes {
   if (!(value instanceof Uint8Array)) {
     throw new WireError(`malformed frame: ${field} is not binary`);
   }
   if (exactly !== undefined && value.length !== exactly) {
     throw new WireError(`malformed frame: ${field} must be ${exactly} bytes, got ${value.length}`);
   }
-  return value;
+  // `instanceof` only narrows as far as `Uint8Array<ArrayBufferLike>`; the decoder
+  // allocates its own buffers and has no way to hand back a shared one, so this is
+  // the one place the unshared claim is asserted rather than tracked.
+  return value as Bytes;
 }

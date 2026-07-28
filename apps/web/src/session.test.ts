@@ -10,20 +10,21 @@ import {
 } from "./session";
 import type { Timings } from "./session";
 import { OuterKind, bytesFromHex, decodeFrame, encodeFrame, hexFromBytes } from "./wire";
+import type { Bytes } from "./wire";
 
 /// A socket the test drives. Records what the session sent and lets the test push
 /// bytes the real device produced.
 class FakeSocket implements Socket {
-  sent: Uint8Array[] = [];
+  sent: Bytes[] = [];
   closed = false;
   onopen: (() => void) | null = null;
-  onmessage: ((data: Uint8Array) => void) | null = null;
+  onmessage: ((data: Bytes) => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
 
   constructor(readonly url: string) {}
 
-  send(data: Uint8Array): void {
+  send(data: Bytes): void {
     this.sent.push(data);
   }
 
@@ -59,7 +60,7 @@ const goldenInitiator = async () => {
     privateKey: await importPrivateKeyForTesting(bytesFromHex(GOLDEN.initEphemeralPrivate)),
     publicKey: bytesFromHex(GOLDEN.msg1).slice(0, 32),
   };
-  return (deviceKey: Uint8Array) => NoiseInitiator.start(staticKeys, deviceKey, ephemeral);
+  return (deviceKey: Bytes) => NoiseInitiator.start(staticKeys, deviceKey, ephemeral);
 };
 
 interface Harness {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { formatSas } from "@claudinio/protocol/sas";
 import { bytesFromHex, hexFromBytes } from "./wire";
+import type { Bytes } from "./wire";
 import { GOLDEN } from "./golden";
 import {
   MSG1_LENGTH,
@@ -24,7 +25,7 @@ async function goldenInitiator() {
   return NoiseInitiator.start(staticKeys, bytesFromHex(GOLDEN.respStaticPublic), ephemeral);
 }
 
-const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+const text = (bytes: Bytes) => new TextDecoder().decode(bytes);
 
 describe("golden handshake against snow", () => {
   /// If this fails, the browser cannot pair with the device at all — whatever else

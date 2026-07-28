@@ -18,6 +18,9 @@
 ///
 /// Mirrors `src-tauri/src/remote/noise.rs`, which is the responder.
 
+// Type-only: no runtime dependency, so nothing but the crypto below still ships here.
+import type { Bytes } from "./wire";
+
 const HASHLEN = 32;
 const DHLEN = 32;
 const TAGLEN = 16;
@@ -49,7 +52,7 @@ export async function detectX25519(): Promise<{ algorithm: { name: string; named
 
 export interface KeyPair {
   privateKey: CryptoKey;
-  publicKey: Uint8Array;
+  publicKey: Bytes;
 }
 
 export async function generateKeyPair(): Promise<KeyPair> {
@@ -72,7 +75,7 @@ export async function generateKeyPair(): Promise<KeyPair> {
 /// a real session generates its key with `generateKeyPair`, where it is
 /// non-extractable. A key that arrived as bytes is a key that exists as bytes
 /// somewhere, which is exactly what the other path avoids.
-export async function importPrivateKeyForTesting(raw: Uint8Array): Promise<CryptoKey> {
+export async function importPrivateKeyForTesting(raw: Bytes): Promise<CryptoKey> {
   if (raw.length !== 32) throw new NoiseError("an X25519 private key is 32 bytes");
   const { algorithm } = await detectX25519();
   const pkcs8 = new Uint8Array([
@@ -82,7 +85,7 @@ export async function importPrivateKeyForTesting(raw: Uint8Array): Promise<Crypt
   return crypto.subtle.importKey("pkcs8", pkcs8, algorithm, false, ["deriveBits"]);
 }
 
-function concat(...parts: Uint8Array[]): Uint8Array {
+function concat(...parts: Bytes[]): Bytes {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let offset = 0;
   for (const part of parts) {
@@ -92,14 +95,14 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-async function sha256(data: Uint8Array): Promise<Uint8Array> {
+async function sha256(data: Bytes): Promise<Bytes> {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
 }
 
 /// Noise's HKDF is HKDF-Extract(salt = chaining key) followed by HKDF-Expand with an
 /// empty info — which is exactly what `deriveBits` computes, so the outputs fall out
 /// as consecutive 32-byte slices with no hand-rolled HMAC anywhere.
-async function hkdf(chainingKey: Uint8Array, ikm: Uint8Array, outputs: number): Promise<Uint8Array[]> {
+async function hkdf(chainingKey: Bytes, ikm: Bytes, outputs: number): Promise<Bytes[]> {
   const key = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
     { name: "HKDF", hash: "SHA-256", salt: chainingKey, info: new Uint8Array(0) },
@@ -110,7 +113,7 @@ async function hkdf(chainingKey: Uint8Array, ikm: Uint8Array, outputs: number): 
   return Array.from({ length: outputs }, (_, i) => all.slice(i * HASHLEN, (i + 1) * HASHLEN));
 }
 
-async function dh(privateKey: CryptoKey, publicKeyBytes: Uint8Array): Promise<Uint8Array> {
+async function dh(privateKey: CryptoKey, publicKeyBytes: Bytes): Promise<Bytes> {
   const { algorithm } = await detectX25519();
   const pub = await crypto.subtle.importKey("raw", publicKeyBytes, algorithm, false, []);
   const bits = await crypto.subtle.deriveBits({ ...algorithm, public: pub }, privateKey, 256);
@@ -118,7 +121,7 @@ async function dh(privateKey: CryptoKey, publicKeyBytes: Uint8Array): Promise<Ui
 }
 
 /// Noise's AESGCM nonce: 32 zero bits, then the counter as 64 bits big-endian.
-function nonceBytes(n: number): Uint8Array {
+function nonceBytes(n: number): Bytes {
   const iv = new Uint8Array(12);
   new DataView(iv.buffer).setBigUint64(4, BigInt(n), false);
   return iv;
@@ -128,7 +131,7 @@ class CipherState {
   private key: CryptoKey | null = null;
   private n = 0;
 
-  async initializeKey(keyBytes: Uint8Array): Promise<void> {
+  async initializeKey(keyBytes: Bytes): Promise<void> {
     this.key = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, [
       "encrypt",
       "decrypt",
@@ -136,7 +139,7 @@ class CipherState {
     this.n = 0;
   }
 
-  async encryptWithAd(ad: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array> {
+  async encryptWithAd(ad: Bytes, plaintext: Bytes): Promise<Bytes> {
     if (!this.key) return plaintext;
     const ct = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: nonceBytes(this.n), additionalData: ad, tagLength: 128 },
@@ -147,7 +150,7 @@ class CipherState {
     return new Uint8Array(ct);
   }
 
-  async decryptWithAd(ad: Uint8Array, ciphertext: Uint8Array): Promise<Uint8Array> {
+  async decryptWithAd(ad: Bytes, ciphertext: Bytes): Promise<Bytes> {
     if (!this.key) return ciphertext;
     try {
       const pt = await crypto.subtle.decrypt(
@@ -169,8 +172,8 @@ class CipherState {
 
 class SymmetricState {
   cipher = new CipherState();
-  ck: Uint8Array = new Uint8Array(HASHLEN);
-  h: Uint8Array = new Uint8Array(HASHLEN);
+  ck: Bytes = new Uint8Array(HASHLEN);
+  h: Bytes = new Uint8Array(HASHLEN);
 
   async initialize(): Promise<void> {
     const name = new TextEncoder().encode(PROTOCOL_NAME);
@@ -184,23 +187,23 @@ class SymmetricState {
     this.ck = this.h.slice();
   }
 
-  async mixHash(data: Uint8Array): Promise<void> {
+  async mixHash(data: Bytes): Promise<void> {
     this.h = await sha256(concat(this.h, data));
   }
 
-  async mixKey(ikm: Uint8Array): Promise<void> {
+  async mixKey(ikm: Bytes): Promise<void> {
     const [ck, tempK] = await hkdf(this.ck, ikm, 2);
     this.ck = ck;
     await this.cipher.initializeKey(tempK);
   }
 
-  async encryptAndHash(plaintext: Uint8Array): Promise<Uint8Array> {
+  async encryptAndHash(plaintext: Bytes): Promise<Bytes> {
     const ct = await this.cipher.encryptWithAd(this.h, plaintext);
     await this.mixHash(ct);
     return ct;
   }
 
-  async decryptAndHash(ciphertext: Uint8Array): Promise<Uint8Array> {
+  async decryptAndHash(ciphertext: Bytes): Promise<Bytes> {
     const pt = await this.cipher.decryptWithAd(this.h, ciphertext);
     await this.mixHash(ciphertext);
     return pt;
@@ -223,11 +226,11 @@ export class NoiseInitiator {
   private sym = new SymmetricState();
   private ephemeral: KeyPair | null = null;
   private transport: { send: CipherState; recv: CipherState } | null = null;
-  private hash: Uint8Array | null = null;
+  private hash: Bytes | null = null;
 
   private constructor(
     private readonly staticKeys: KeyPair,
-    private readonly remoteStatic: Uint8Array,
+    private readonly remoteStatic: Bytes,
   ) {}
 
   /// Start a handshake towards a device whose static key came from a pairing code.
@@ -236,9 +239,9 @@ export class NoiseInitiator {
   /// a fresh one, and does, because leaving it out is the default.
   static async start(
     staticKeys: KeyPair,
-    remoteStatic: Uint8Array,
+    remoteStatic: Bytes,
     ephemeral?: KeyPair,
-  ): Promise<{ initiator: NoiseInitiator; message1: Uint8Array }> {
+  ): Promise<{ initiator: NoiseInitiator; message1: Bytes }> {
     if (remoteStatic.length !== DHLEN) {
       throw new NoiseError(`a device key is ${DHLEN} bytes, got ${remoteStatic.length}`);
     }
@@ -248,7 +251,7 @@ export class NoiseInitiator {
   }
 
   /// `-> e, es, s, ss`
-  private async writeMessage1(ephemeral?: KeyPair): Promise<Uint8Array> {
+  private async writeMessage1(ephemeral?: KeyPair): Promise<Bytes> {
     await this.sym.initialize();
     await this.sym.mixHash(new Uint8Array(0)); // empty prologue
     await this.sym.mixHash(this.remoteStatic); // pre-message: <- s
@@ -264,7 +267,7 @@ export class NoiseInitiator {
   }
 
   /// `<- e, ee, se`, which completes the handshake.
-  async readMessage2(message: Uint8Array): Promise<void> {
+  async readMessage2(message: Bytes): Promise<void> {
     if (!this.ephemeral) throw new NoiseError("handshake not started");
     if (this.transport) throw new NoiseError("handshake already complete");
     if (message.length < DHLEN + TAGLEN) {
@@ -288,17 +291,17 @@ export class NoiseInitiator {
 
   /// The handshake hash. Identical on both ends only if the handshake was genuinely
   /// end to end, which is what makes the SAS worth comparing.
-  get handshakeHash(): Uint8Array {
+  get handshakeHash(): Bytes {
     if (!this.hash) throw new NoiseError("handshake not complete");
     return this.hash;
   }
 
-  async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
+  async encrypt(plaintext: Bytes): Promise<Bytes> {
     if (!this.transport) throw new NoiseError("handshake not complete");
     return this.transport.send.encryptWithAd(new Uint8Array(0), plaintext);
   }
 
-  async decrypt(ciphertext: Uint8Array): Promise<Uint8Array> {
+  async decrypt(ciphertext: Bytes): Promise<Bytes> {
     if (!this.transport) throw new NoiseError("handshake not complete");
     return this.transport.recv.decryptWithAd(new Uint8Array(0), ciphertext);
   }
