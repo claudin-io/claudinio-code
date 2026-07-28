@@ -3,6 +3,7 @@ import { listDir, openInTerminal, copyPath, openInIde, type DirEntry } from "../
 import { openPath } from "@tauri-apps/plugin-opener";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { platform } from "../lib/platform";
+import { baseName } from "../lib/path";
 
 const TreeNode: Component<{
   entry: DirEntry;
@@ -80,7 +81,7 @@ export const FileTree: Component<{
   return (
     <div class="h-full overflow-y-auto py-1">
       <div class="truncate px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-ink-muted">
-        {props.root.split("/").pop()}
+        {baseName(props.root)}
       </div>
       <For each={entries()}>
         {(entry) => (

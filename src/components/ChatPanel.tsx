@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, ErrorBoundary, For, onCleanup, onMount, Show, type Component } from "solid-js";
+import { baseName } from "../lib/path";
 import {
   sendMessage,
   approveTool,
@@ -1144,7 +1145,7 @@ export const ChatPanel: Component<{
     }
 
     // Project name from workspace path
-    const projectSummary = props.workspace.split("/").pop() ?? props.workspace;
+    const projectSummary = baseName(props.workspace);
 
     return {
       messages: recent,
