@@ -16,6 +16,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import { openInTerminal, copyPath, gitBranch, checkGitAvailable } from "./lib/ipc";
 import { checkForUpdate, type UpdateInfo } from "./lib/ipc";
 import { platform } from "./lib/platform";
+import { baseName } from "./lib/path";
 import { ContextMenu } from "./components/ContextMenu";
 import { createVisibilityAwareInterval } from "./lib/visibility";
 import { startNetworkActivityListener } from "./lib/networkActivity";
@@ -986,7 +987,7 @@ function App() {
                           </span>
                           <div class="min-w-0">
                             <div class="truncate text-[13px] text-ink">
-                              {proj.split("/").pop()}
+                              {baseName(proj)}
                             </div>
 
                             <div class="truncate text-[11px] text-ink-faint">
@@ -1033,7 +1034,7 @@ function App() {
                           <Icon name="folder" class="shrink-0 text-ink-muted" />
                           <div class="min-w-0">
                             <div class="truncate text-[13px] text-ink">
-                              {proj.split("/").pop()}
+                              {baseName(proj)}
                             </div>
 
                             <div class="truncate text-[11px] text-ink-faint">
@@ -1098,7 +1099,7 @@ function App() {
                 {"Back"}
               </button>
               <span class="truncate text-xs font-semibold text-ink">
-                {activeWorkspace()?.split("/").pop()}
+                {baseName(activeWorkspace() ?? "")}
               </span>
             </div>
 

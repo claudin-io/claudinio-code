@@ -1,5 +1,6 @@
 import { For, Show, type Component } from "solid-js";
 import { Icon } from "./Icon";
+import { baseName } from "../lib/path";
 
 export const EmptyState: Component<{
   recentProjects: string[];
@@ -39,7 +40,7 @@ export const EmptyState: Component<{
                 >
                   <Icon name="folder" class="h-4 w-4 shrink-0 text-ink-faint" />
                   <div class="min-w-0">
-                    <div class="truncate text-[13px]">{proj.split("/").pop()}</div>
+                    <div class="truncate text-[13px]">{baseName(proj)}</div>
                     <div class="truncate font-mono text-[11px] text-ink-faint">{proj}</div>
                   </div>
                 </button>
