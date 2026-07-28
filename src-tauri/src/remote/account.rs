@@ -133,8 +133,9 @@ impl Account {
             "relay_url": relay_url,
         });
         let text = self.post(CODES_PATH, &body).await?;
-        serde_json::from_str(&text)
-            .map_err(|e| AccountError::Refused(format!("the account server's answer was not a code: {e}")))
+        serde_json::from_str(&text).map_err(|e| {
+            AccountError::Refused(format!("the account server's answer was not a code: {e}"))
+        })
     }
 
     async fn post(&self, path: &str, body: &serde_json::Value) -> Result<String, AccountError> {
