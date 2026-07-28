@@ -103,12 +103,15 @@ jobs:
           # for the pure-Rust candle backend, which is compiled from source
           # with baseline codegen. Semantic search still works; same model,
           # same 384-dim vectors, just slower.
-          # The extra `--` is required because pnpm consumes one before the
-          # args reach the tauri CLI, which then forwards them to cargo.
+          # One `--`, not two: pnpm 11 forwards every argument verbatim rather
+          # than consuming a separator, so the tauri CLI needs exactly the one
+          # that tells it where its own options end and cargo's begin. Two sent
+          # a stray `--` on to cargo, which is what failed the v0.1.16 release
+          # with "unexpected argument '--no-default-features' found".
           - platform: windows-x64-baseline
             target: x86_64-pc-windows-msvc
             os: windows-latest
-            bundle-args: '-- -- --no-default-features --features embeddings-candle'
+            bundle-args: '-- --no-default-features --features embeddings-candle'
             artifact-name: Claudinio-Code-Windows-x64-baseline
             bundle-path: src-tauri/target/release/bundle/
             candle: true
