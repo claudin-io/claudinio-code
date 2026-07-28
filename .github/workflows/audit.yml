@@ -69,5 +69,12 @@ jobs:
       # never reach a user's machine, so an advisory against one of them is not a
       # vulnerability in the shipped app. Audit them separately if you want, but
       # do not let them gate this job.
+      #
+      # No --audit-level, deliberately. It started at `high`, which turned out to
+      # hide the thing most worth catching: 17 DOMPurify sanitizer-bypass
+      # advisories, all rated low or moderate, against the copy monaco-editor
+      # bundles. DOMPurify is the boundary SECURITY.md names — for this app a
+      # "moderate" sanitizer bypass is not moderate. The prod tree is clean at
+      # every severity today, so hold that line and relax it only with a reason.
       - name: pnpm audit
-        run: pnpm audit --prod --audit-level high
+        run: pnpm audit --prod
