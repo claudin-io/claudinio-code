@@ -1,0 +1,73 @@
+name: Audit
+
+# Vulnerability scanning lives in its own workflow, deliberately separate from
+# ci.yml. Advisories are published out of band, with no relation to the PR under
+# review — folding this into CI would mean a CVE disclosed on a Saturday blocks
+# every unrelated PR until someone triages it. Here it runs on a schedule, on
+# changes to the dependency graph, and on demand, and it is *not* a required
+# status check.
+on:
+  schedule:
+    # Mondays at 06:00 UTC.
+    - cron: '0 6 * * 1'
+  pull_request:
+    paths:
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/Cargo.lock'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/audit.yml'
+  workflow_dispatch:
+
+# No secrets are used by this workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo:
+    name: Cargo (RustSec advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Prebuilt binary. `cargo install cargo-audit` would dominate the runtime
+      # of a job whose actual work takes a couple of seconds.
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-audit
+
+      # Reads Cargo.lock only — nothing is compiled, so this needs neither the
+      # Tauri system libraries nor the embedding model that ci.yml sets up.
+      #
+      # Deliberately no --deny warnings: that would also fail on "unmaintained"
+      # and "yanked" advisories, which are hygiene signals rather than
+      # vulnerabilities. Across 78 tree-sitter grammars plus the candle and ort
+      # trees there is almost always one of those in flight, and a job that is
+      # permanently red stops being read. Default behaviour fails on actual
+      # vulnerabilities and prints the rest.
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit
+
+  npm:
+    name: pnpm (npm advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # --prod matters: typescript, vitest, jsdom and the rest of devDependencies
+      # never reach a user's machine, so an advisory against one of them is not a
+      # vulnerability in the shipped app. Audit them separately if you want, but
+      # do not let them gate this job.
+      - name: pnpm audit
+        run: pnpm audit --prod --audit-level high
