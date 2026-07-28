@@ -82,6 +82,24 @@ jobs:
             artifact-name: Claudinio-Code-Linux-arm64
             bundle-path: src-tauri/target/release/bundle/
 
+          # Windows x64 BASELINE — for CPUs without AVX2/BMI2 (pre-Haswell,
+          # e.g. Sandy/Ivy Bridge, 2011-2012). ort's prebuilt ONNX Runtime
+          # contains x86-64-v3 instructions (BMI2 SHLX) that raise
+          # STATUS_ILLEGAL_INSTRUCTION (0xc000001d) on those CPUs, so the
+          # normal x64 build cannot start at all. This one swaps ONNX Runtime
+          # for the pure-Rust candle backend, which is compiled from source
+          # with baseline codegen. Semantic search still works; same model,
+          # same 384-dim vectors, just slower.
+          # The extra `--` is required because pnpm consumes one before the
+          # args reach the tauri CLI, which then forwards them to cargo.
+          - platform: windows-x64-baseline
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bundle-args: '-- -- --no-default-features --features embeddings-candle'
+            artifact-name: Claudinio-Code-Windows-x64-baseline
+            bundle-path: src-tauri/target/release/bundle/
+            candle: true
+
     runs-on: ${{ matrix.os }}
     environment: RELEASE
 
@@ -136,7 +154,9 @@ jobs:
       # from first launch — the runtime HF download is only a fallback.
       - name: Fetch embedding model
         shell: bash
-        run: python3 scripts/fetch_embedding_model.py
+        # The baseline build uses the candle backend, which loads safetensors
+        # instead of ONNX — --with-candle adds those pinned weights.
+        run: python3 scripts/fetch_embedding_model.py ${{ matrix.candle && '--with-candle' || '' }}
 
       - name: Determine version from tag
         id: version
@@ -299,9 +319,9 @@ jobs:
           asset() {
             # $1 = include glob, $2 = optional exclude glob
             if [ -n "${2:-}" ]; then
-              find release-files -type f -name "$1" ! -name "$2" ! -name '*.sig' | head -n1
+              find release-files -type f -name "$1" ! -name "$2" ! -name '*baseline*' ! -name '*.sig' | head -n1
             else
-              find release-files -type f -name "$1" ! -name '*.sig' | head -n1
+              find release-files -type f -name "$1" ! -name '*baseline*' ! -name '*.sig' | head -n1
             fi
           }
 
