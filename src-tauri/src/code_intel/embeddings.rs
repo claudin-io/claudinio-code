@@ -157,8 +157,8 @@ impl CodeEmbedder {
             }
         }
 
-        let config_json = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("read config.json: {e}"))?;
+        let config_json =
+            std::fs::read_to_string(&config_path).map_err(|e| format!("read config.json: {e}"))?;
         let config: Config =
             serde_json::from_str(&config_json).map_err(|e| format!("parse bert config: {e}"))?;
 
@@ -236,9 +236,7 @@ impl CodeEmbedder {
             .model
             .forward(&ids_t, &type_ids_t, Some(&mask_t))
             .map_err(|e| format!("bert forward: {e}"))?;
-        let hidden = out
-            .dim(2)
-            .map_err(|e| format!("output dim: {e}"))?;
+        let hidden = out.dim(2).map_err(|e| format!("output dim: {e}"))?;
         let flat: Vec<f32> = out
             .flatten_all()
             .and_then(|t| t.to_vec1::<f32>())
