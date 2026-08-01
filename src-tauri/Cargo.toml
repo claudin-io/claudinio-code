@@ -47,7 +47,7 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ignore = "0.4"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 tokio = { version = "1", features = ["sync", "io-util", "process", "macros", "net", "time"] }
 sysinfo = "0.39"
 hmac = "0.12"
@@ -55,7 +55,7 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 csv = "1"
 machine-uid = "0.5"
-diffy = "0.4"
+diffy = "0.5"
 tempfile = "3"
 tree-sitter = "0.25"
 tree-sitter-language = "0.1"
@@ -144,9 +144,9 @@ keepawake = "0.6"
 sys-locale = "0.3"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"], optional = true }
 # Pure-Rust embedding backend (see the "embeddings-candle" feature above).
-candle-core = { version = "0.9", optional = true }
-candle-nn = { version = "0.9", optional = true }
-candle-transformers = { version = "0.9", optional = true }
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
 # default drops "esaxx_fast": it pulls esaxx-rs, a C++ lib that force-builds
 # with the static CRT (/MT), which clashes on Windows with ort's prebuilt
 # onnxruntime (dynamic CRT, /MD) — no CRT flag can satisfy both. esaxx_fast only
