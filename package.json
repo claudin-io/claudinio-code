@@ -22,7 +22,7 @@
     "dompurify": "^3.4.12",
     "fuse.js": "^7.4.2",
     "highlight.js": "^11.11.1",
-    "marked": "^18.0.5",
+    "marked": "^18.0.7",
     "mermaid": "^11.16.0",
     "monaco-editor": "^0.55.1",
     "solid-js": "^1.9.3",
