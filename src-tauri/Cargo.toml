@@ -55,7 +55,7 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 csv = "1"
 machine-uid = "0.5"
-diffy = "0.4"
+diffy = "0.5"
 tempfile = "3"
 tree-sitter = "0.25"
 tree-sitter-language = "0.1"
