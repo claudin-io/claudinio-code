@@ -51,8 +51,8 @@ importers:
         specifier: ^1.9.3
         version: 1.9.14
       tailwindcss:
-        specifier: ^4.3.2
-        version: 4.3.2
+        specifier: ^4.3.3
+        version: 4.3.3
     devDependencies:
       '@tauri-apps/cli':
         specifier: ^2
@@ -1664,9 +1664,6 @@ packages:
 
   symbol-tree@3.2.4:
     resolution: {integrity: sha512-9QNk5KwDF+Bvz+PyObkmSYjI5ksVUYtjW7AU22r2NKcfLJcXp96hkDWU3+XndOsUb+AQ9QhfzfCT2O+CNWT5Tw==}
-
-  tailwindcss@4.3.2:
-    resolution: {integrity: sha512-WtctNNSH8A9jlMIqxzuYumOHU5uGZyRv0Q5svQl+oEPy5w84YpBxdb7MdqyiSPQge5jTJ6zFQLq0PFygdccSBA==}
 
   tailwindcss@4.3.3:
     resolution: {integrity: sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ==}
@@ -3333,8 +3330,6 @@ snapshots:
       has-flag: 4.0.0
 
   symbol-tree@3.2.4: {}
-
-  tailwindcss@4.3.2: {}
 
   tailwindcss@4.3.3: {}
 
