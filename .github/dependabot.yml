@@ -9,6 +9,13 @@ updates:
       # 77 tree-sitter grammars would otherwise flood the PR queue.
       tree-sitter:
         patterns: ["tree-sitter*"]
+      # candle-core/nn/transformers only compile at the same version:
+      # candle-transformers 0.11 pulls its own candle-core 0.11, so a second
+      # copy of the crate resolves and the VarBuilder/Device/Tensor types
+      # handed to BertModel become unrelated. Ungrouped, dependabot proposes
+      # them one at a time -- that is what #35 was.
+      candle:
+        patterns: ["candle-*"]
 
   - package-ecosystem: npm
     directory: /
