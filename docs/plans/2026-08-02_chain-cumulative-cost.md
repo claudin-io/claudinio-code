@@ -67,18 +67,32 @@ Per-session tokens (`cumul_in`, `cumul_out`) are NOT seeded from the chain — t
 
 ## Low-Level Design
 
+### Existing code references (verified)
+
+| Symbol | File:Line | Notes |
+|---|---|---|
+| `link_session()` | `transition.rs:31-139` | 10-step handoff; steps 1-6 write to old/new files |
+| `linked_from()` | `persist.rs:215-233` | `fn linked_from(&[SessionRecord]) -> Option<LinkedFromInfo>` |
+| `LinkedFromInfo` | `persist.rs:204-211` | Field: `prev_session_id: String` |
+| `cumulative_stats()` | `persist.rs:514-568` | Returns `(u64, u64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)` — last-wins loop |
+| `SessionRecord::Status` | `persist.rs:102-120` | Fields: `total_input_tokens`, `total_output_tokens`, `total_cost`, `total_cost_input`, `total_cost_output`, `total_cost_cache_read`, `context_tokens`, `ts` |
+| `load_records()` | `persist.rs` | Reads a `.jsonl` file into `Vec<SessionRecord>` |
+| `sessions_dir()` | `persist.rs` | Returns the directory for session files |
+| `now_ms()` | `persist.rs` | Timestamp helper |
+| `CostLedger::resuming()` | `run_state.rs:48-59` | Seeds `cumul_*` fields from `cumulative_stats` tuple |
+| `emit_final_stats` | `session.rs:1599-1610` | Closure that sends `SessionStats` with `cumul_*` values |
+| `workspace_root` in `link_session` | `transition.rs:41` | `let workspace_root = Some(ws.root.to_string_lossy().to_string());` |
+
 ### Change 1: New function `chain_cumulative_cost` in `persist.rs`
 
-Add a public function that walks the chain backward from a given session id, accumulating cost from all `Status` records.
-
 **File:** `src-tauri/src/agent/persist.rs`
-**Location:** After the existing `cumulative_stats` function (~line 568), before the `SessionSummary` section.
+**Location:** After `cumulative_stats` (~line 568), before the `SessionSummary` section.
 
 ```rust
-/// Walk the session chain backward (via LinkedFrom) and accumulate every
-/// session's last Status record into a single cumulative cost tuple.
+/// Walk the session chain backward (via LinkedFrom) from `start_session_id`
+/// and sum every session's last Status record cost fields.
 /// Returns (total_cost, cost_input, cost_output, cost_cache_read) — all Options.
-/// Returns all None if no session in the chain has cost data.
+/// All None when no session in the chain has cost data.
 pub fn chain_cumulative_cost(
     workspace_root: Option<&str>,
     start_session_id: &str,
@@ -122,8 +136,8 @@ pub fn chain_cumulative_cost(
             cost_cache_read = Some(cost_cache_read.unwrap_or(0.0) + c);
         }
 
-        // Walk to predecessor.
-        match linked_from_info(&records) {
+        // Walk to predecessor via LinkedFrom.
+        match linked_from(&records) {
             Some(info) => current_id = info.prev_session_id,
             None => break,
         }
@@ -133,20 +147,19 @@ pub fn chain_cumulative_cost(
 }
 ```
 
-**Dependencies:**
-- `sessions_dir` — already exists in `persist.rs` (used by `list_sessions`, `SessionStore::create`)
-- `load_records` — already exists in `persist.rs`
-- `cumulative_stats` — already exists at `persist.rs:514-568`
-- `linked_from_info` — needs to be created as a thin wrapper around the existing `linked_from` function. The existing function `linked_from` at `persist.rs:215-233` returns `Option<LinkedFromInfo>`. It reads from a `&[SessionRecord]` slice. The new function should call it.
-
-Wait — checking `persist.rs:215`, the function is named `linked_from`. Let me verify: from the investigation, "`linked_from` — persist.rs:215–233: `records.iter().find_map(...)` for the first `LinkedFrom` record, returning `LinkedFromInfo`". So the existing function is `linked_from(records: &[SessionRecord]) -> Option<LinkedFromInfo>`. Perfect — we call it directly, no wrapper needed.
+**Design decisions:**
+- Calls `linked_from()` — the existing function at `persist.rs:215` — to walk backward
+- Calls `cumulative_stats()` — the existing function at `persist.rs:514` — to get each session's cost
+- Cycle guard via `HashSet` + `MAX_HOPS = 64` (same pattern as `load_session` at `agent.rs:604`)
+- Missing/corrupt files break the loop silently — partial accumulation is used
+- `sessions_dir` returns the directory; `load_records` reads the file
 
 ### Change 2: Append initial `Status` record in `link_session`
 
 **File:** `src-tauri/src/agent/transition.rs`
-**Location:** After step 6 (Mode append at ~line 99), before step 7 (steering swap comment at ~line 103).
+**Location:** After the Mode append block (step 6, ~line 99), before the steering swap comment (step 7, ~line 101).
 
-Insert after the Mode append block:
+Insert this block:
 
 ```rust
     // 6½. Seed the successor's cost ledger with cumulative chain cost
@@ -176,80 +189,52 @@ Insert after the Mode append block:
     }
 ```
 
-**Note:** `workspace_root` is already computed at line 41: `let workspace_root = Some(ws.root.to_string_lossy().to_string());`. We use `workspace_root.as_deref()`.
+**Why `workspace_root.as_deref()`:** `workspace_root` is `Option<String>` defined at `transition.rs:41`. `chain_cumulative_cost` takes `Option<&str>`, so `as_deref()` converts `Option<String>` → `Option<&str>`.
+
+**Why tokens=0:** Token fields (`total_input_tokens`, `total_output_tokens`) are set to 0 so the new session starts fresh for token counting. Only cost fields carry the chain accumulation. This is intentional per the user's decision.
 
 ### What does NOT change
 
 | Component | File | Reason |
 |---|---|---|
-| `CostLedger` struct & `resuming()` | `run_state.rs` | Already resumes from last `Status` — reads the chain `Status` we appended |
+| `CostLedger` struct & `resuming()` | `run_state.rs:20,48` | Already resumes from last `Status` — reads our chain `Status` |
 | `emit_final_stats` closure | `session.rs:1599` | Sends `cumul_*` from ledger — now includes chain baseline |
 | `SessionStats` event | `session.rs:755` | Schema unchanged |
 | `SessionLinked` event & handler | `session.rs:746`, `ChatPanel.tsx:836` | No cost fields added; handler unchanged |
 | `load_session` | `agent.rs:587` | Chain walk already concatenates records; our `Status` is in the chain |
 | `getSessionStats` | `ipc.ts:490` | Last `Status` wins — sees chain `Status` |
 | `ContextFooter` | `TimelineRows.tsx:95` | Renders `contextStats` — unchanged |
-| `session.rs` run loop | `session.rs:1594` | `CostLedger::resuming(cumulative_stats(records))` on the new file — reads our `Status` |
+| Session run loop | `session.rs:1594` | `CostLedger::resuming(cumulative_stats(records))` on new file — reads our `Status` |
 | `HandoffSpec` / `LinkedFrom` / `HandoffTo` | `persist.rs`, `session.rs` | Schema unchanged |
 
 ### How the live `SessionStats` feed works after the change
 
-The successor session's `run_workflow` starts (`session.rs`), builds the ledger from the new file's records:
+The successor session's `run_workflow` starts, builds the ledger from the new file's records:
 
-```
-session.rs:1594: let records = load_records_cached(&store.path, ...);
-session.rs:1598: let cumul = cumulative_stats(&records);
-```
+1. `session.rs:1594`: `let records = load_records_cached(&store.path, ...);` — loads the new file
+2. `session.rs:1598`: `let cumul = cumulative_stats(&records);` — reads the last `Status` (our chain-cost record)
+3. `CostLedger::resuming(cumul)` seeds: `cumul_in=0`, `cumul_out=0`, `cumul_cost=chain_sum`
+4. Builder does work, `emit_final_stats` sends: `{ inputTokens: new_tokens, outputTokens: new_tokens, cumulativeCost: chain_sum + new_cost }`
+5. Frontend receives `SessionStats`, sets `estimatedCost = data.cumulativeCost` → footer shows chain cumulative ✅
 
-`cumulative_stats` reads the last `Status` — which is our chain-cost `Status` (input=0, output=0, cost=chain_sum). The ledger seeds `cumul_in=0`, `cumul_out=0`, `cumul_cost=chain_sum`.
-
-When the Builder does its first work and `emit_final_stats` fires:
-
-```
-session.rs:1599: emit_final_stats(ledger, context_tokens)
-  → SessionStats {
-      input_tokens: ledger.cumul_in,   // 0 + new work tokens
-      output_tokens: ledger.cumul_out, // 0 + new work tokens
-      cumulative_cost: ledger.cumul_cost, // chain_sum + new work cost
-      ...
-    }
-```
-
-Frontend receives this and sets `contextStats`:
-- `cumulativeTokens: data.inputTokens + data.outputTokens` — per-session tokens only
-- `estimatedCost: data.cumulativeCost` — chain cumulative cost ✅
+On page reload:
+1. `load_session` concatenates all chain records (including our `Status` in the successor)
+2. `getSessionStats` walks the merged list, last `Status` wins → chain cost
+3. Footer shows chain cost ✅
 
 ### Edge cases
 
 | Scenario | Behavior |
 |---|---|
-| First session in chain (no predecessors) | `chain_cumulative_cost` accumulates only the old session's cost → returns it. `Status` appended with that cost. |
+| First session in chain (no predecessors) | `chain_cumulative_cost` accumulates only `start_session_id`'s cost → returns it. `Status` appended with that cost. |
 | Chain with no cost data (no provider pricing) | All `Option<f64>` are `None` → no `Status` appended. Behavior unchanged from today. |
 | 64+ hop chain | Cycle guard at 64 hops stops. In practice chains are 2-3 deep. |
-| Corrupted predecessor file | `load_records` returns `Err` → loop breaks. Partial accumulation is used (cost from reachable sessions). |
-| Old session has cost but no tokens | `total_input_tokens: 0, total_output_tokens: 0` in the seed `Status`. Tokens start fresh. Cost carries over. ✅ |
-| Multiple handoffs (Brain→Builder→Brain→Builder) | Each `link_session` call appends a `Status` with the growing chain cost. Cost accumulates correctly at each hop. |
-
-### Verification Plan
-
-1. **Compile:** `cargo build` in `src-tauri/` — must succeed with no warnings
-2. **Unit test (optional):** Add a test for `chain_cumulative_cost` with 2-3 linked session files — verify correct summation
-3. **Manual E2E:**
-   - Start a Brain session, let it do work that generates cost (use a cheap model)
-   - Note the footer cost (e.g., $0.0123)
-   - Switch to Builder via the "Continue with Builder" button
-   - **Assert:** Footer cost does NOT reset to $0.0000 — it shows ≥$0.0123
-   - Let Builder do more work
-   - **Assert:** Footer cost increases from the baseline (e.g., $0.0123 → $0.0156)
-4. **Reload test:**
-   - After the handoff, reload the page
-   - **Assert:** Footer still shows chain cumulative cost (not zero)
-5. **Regression:**
-   - New session (no chain) — footer starts at $0.0000 as before
-   - Token count — still per-session, resets on handoff
+| Corrupted predecessor file | `load_records` returns `Err` → loop breaks. Partial accumulation is used. |
+| Old session has cost but no tokens | `total_input_tokens: 0, total_output_tokens: 0` in seed `Status`. Tokens start fresh. Cost carries over. ✅ |
+| Multiple handoffs (Brain→Builder→Brain→Builder) | Each `link_session` appends a `Status` with growing chain cost. Cost accumulates correctly. |
 
 ## Tasks Summary
 
-1. **Add `chain_cumulative_cost` function** — new function in `src-tauri/src/agent/persist.rs` that walks chain backward summing `Status` cost fields
-2. **Seed successor `Status` in `link_session`** — append initial `Status` record with chain cost in `src-tauri/src/agent/transition.rs` step 6½
-3. **Build & verify** — compile, manual E2E test confirming footer doesn't reset on handoff
+1. **Add `chain_cumulative_cost`** — new function in `src-tauri/src/agent/persist.rs` after `cumulative_stats` (~line 568); walks chain backward via `linked_from()`, sums `cumulative_stats()` cost fields
+2. **Seed successor `Status` in `link_session`** — insert block after Mode append (~line 99) in `src-tauri/src/agent/transition.rs`; call `chain_cumulative_cost`, append `SessionRecord::Status` with chain cost and zero tokens
+3. **Build & verify** — `cargo build` in `src-tauri/`, manual E2E test: Brain→Builder handoff, confirm footer cost doesn't reset
