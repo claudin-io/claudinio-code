@@ -86,6 +86,30 @@ pub async fn link_session(
         ts: now_ms(),
     });
 
+    // 6½. Seed the successor's cost ledger with cumulative chain cost
+    // so the footer never drops to zero on handoff — each session
+    // inherits the cost of its entire ancestry.
+    {
+        let chain_cost = persist::chain_cumulative_cost(workspace_root.as_deref(), &old_handle.id);
+        if chain_cost.0.is_some()
+            || chain_cost.1.is_some()
+            || chain_cost.2.is_some()
+            || chain_cost.3.is_some()
+        {
+            new_store.try_append(&SessionRecord::Status {
+                session_id: new_id.clone(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                total_cost: chain_cost.0,
+                total_cost_input: chain_cost.1,
+                total_cost_output: chain_cost.2,
+                total_cost_cache_read: chain_cost.3,
+                context_tokens: None,
+                ts: now_ms(),
+            });
+        }
+    }
+
     // 7. Move the SteeringCtl from the old session id to the new one
     // (any queued steering survives the transition). Done BEFORE swapping
     // active_session so a queue_steering racing the swap still finds a ctl.
