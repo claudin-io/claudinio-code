@@ -40,6 +40,11 @@ pub enum SessionRecord {
     },
     /// A user turn (the raw input the user typed).
     User { text: String, ts: u64 },
+    /// The user's raw input was rejected before the workflow started (e.g. the
+    /// English-only guard). Kept for audit: the user's message should never
+    /// silently vanish from the JSONL.
+    #[serde(rename = "rejected")]
+    Rejected { text: String, reason: String, ts: u64 },
     /// A workflow phase boundary: "plan" | "execute" | "summary".
     Phase { phase: String, ts: u64 },
     /// A conversation message exactly as sent to / received from the model.
@@ -707,7 +712,8 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::GoldenCycle { ts, .. }
                 | SessionRecord::ContinuationJudge { ts, .. }
                 | SessionRecord::BaseCommit { ts, .. }
-                | SessionRecord::PlanFinalized { ts, .. } => {
+                | SessionRecord::PlanFinalized { ts, .. }
+                | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
                 SessionRecord::LinkedFrom { ts, .. }
@@ -1253,6 +1259,34 @@ mod tests {
                 assert_eq!(ts, 42);
             }
             _ => panic!("expected ContinuationJudge, got {:?}", back),
+        }
+    }
+
+    #[test]
+    fn rejected_record_serialization() {
+        // A message rejected by a pre-workflow guard (e.g. the English-only
+        // check) must still land in the JSONL for audit — the user's text must
+        // never silently vanish.
+        let rec = SessionRecord::Rejected {
+            text: "Então...".into(),
+            reason: "Only English is supported. Please write your message in English. \
+                     (Detected non-English characters: ã)"
+                .into(),
+            ts: 42,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"rejected\""), "got: {json}");
+        assert!(json.contains("\"text\":\"Então...\""), "got: {json}");
+        assert!(json.contains("\"reason\":"), "got: {json}");
+
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionRecord::Rejected { text, reason, ts } => {
+                assert_eq!(text, "Então...");
+                assert!(reason.contains("Only English is supported"));
+                assert_eq!(ts, 42);
+            }
+            _ => panic!("expected Rejected, got {:?}", back),
         }
     }
 

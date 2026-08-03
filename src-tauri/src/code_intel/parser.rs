@@ -446,6 +446,7 @@ const DECLARATION_KINDS: &[&str] = &[
     // Rust / general C-like
     "function_item",
     "function_declaration",
+    "lexical_declaration",
     "method_definition",
     "struct_item",
     "struct_declaration",
@@ -762,6 +763,22 @@ fn extract_declaration_name(node: &tree_sitter::Node, kind: &str, content: &str)
         }
     }
 
+    // JS/TS: lexical_declaration (const x = ..., let y = ...)
+    if kind == "lexical_declaration" {
+        // Name = first variable_declarator's name
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "variable_declarator" {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
+                        return Some(name.trim().to_string());
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
     // For some node kinds, the name might be in a different field
     if let Some(alias) = node.child_by_field_name("alias") {
         let name = alias.utf8_text(content.as_bytes()).ok()?;
@@ -941,6 +958,17 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
     };
     let root = tree.root_node();
 
+    // --- HTML: custom extraction with embedded JS/CSS support ---
+    if lang == "html" {
+        let (html_symbols, html_calls) = parse_html_file(content, &root);
+        return ParseResult {
+            language: lang.into(),
+            symbols: html_symbols,
+            calls: html_calls,
+            error: None,
+        };
+    }
+
     let mut symbols: Vec<ParsedSymbol> = Vec::new();
     let mut calls: Vec<ParsedCall> = Vec::new();
     let mut cursor = root.walk();
@@ -1095,6 +1123,478 @@ pub fn parse_file(path: &str, content: &str) -> ParseResult {
         symbols,
         calls,
         error: None,
+    }
+}
+
+/// HTML: extract symbols from an HTML AST. Elements with id/class become
+/// "element" symbols, HTML comments become "section" symbols, and embedded
+/// <script>/<style> blocks are re-parsed with their own grammars.
+fn parse_html_file(
+    content: &str,
+    root: &tree_sitter::Node,
+) -> (Vec<ParsedSymbol>, Vec<ParsedCall>) {
+    let mut symbols: Vec<ParsedSymbol> = Vec::new();
+    let mut calls: Vec<ParsedCall> = Vec::new();
+    let mut cursor = root.walk();
+    let mut done = false;
+
+    loop {
+        if done {
+            break;
+        }
+        let node = cursor.node();
+        let kind = node.kind();
+
+        match kind {
+            "element" => extract_html_element(&node, content, &mut symbols),
+            "comment" => extract_html_comment(&node, content, &mut symbols),
+            "script_element" => {
+                extract_embedded_script(&node, content, &mut symbols, &mut calls)
+            }
+            "style_element" => extract_embedded_style(&node, content, &mut symbols),
+            _ => {}
+        }
+
+        // Embedded JS/CSS is re-parsed by the sub-parsers above — never
+        // walk into the raw text of <script>/<style> looking for HTML.
+        let skip_descend = kind == "script_element" || kind == "style_element";
+        if !skip_descend && cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                done = true;
+                break;
+            }
+        }
+    }
+
+    (symbols, calls)
+}
+
+/// Extract an HTML element node: a symbol for its `id` attribute (name =
+/// the id value) and/or its `class` attribute (name = "tag.class1 class2"),
+/// both with kind "element" and the tag text as signature.
+fn extract_html_element(node: &tree_sitter::Node, content: &str, symbols: &mut Vec<ParsedSymbol>) {
+    // The opening tag: start_tag for normal elements, self_closing_tag for
+    // <br/>, <img/>, etc. Both carry the tag_name and attribute children.
+    let mut cursor = node.walk();
+    let start_tag = node
+        .children(&mut cursor)
+        .find(|c| c.kind() == "start_tag" || c.kind() == "self_closing_tag");
+    let Some(start_tag) = start_tag else { return };
+
+    let mut tag_cursor = start_tag.walk();
+    let tag_name_node = start_tag
+        .children(&mut tag_cursor)
+        .find(|c| c.kind() == "tag_name");
+    let Some(tag_name_node) = tag_name_node else { return };
+    let tag_text = get_node_text(content, &tag_name_node, 80);
+
+    let start = node.start_position();
+    let end = node.end_position();
+    let start_line = start.row as i64 + 1;
+    let end_line = end.row as i64 + 1;
+    let signature = Some(get_node_text(content, &start_tag, 80));
+
+    let mut attr_cursor = start_tag.walk();
+    for attr in start_tag.children(&mut attr_cursor) {
+        if attr.kind() != "attribute" {
+            continue;
+        }
+        let mut a_cursor = attr.walk();
+        let mut attr_name: Option<String> = None;
+        let mut attr_value: Option<String> = None;
+        for child in attr.children(&mut a_cursor) {
+            match child.kind() {
+                "attribute_name" => {
+                    attr_name = child.utf8_text(content.as_bytes()).ok().map(|s| s.to_string());
+                }
+                // Quoted values parse as `quoted_attribute_value` in the
+                // tree-sitter-html grammar (raw text includes the surrounding
+                // quotes) — strip them to get the value.
+                "attribute_value" | "quoted_attribute_value" => {
+                    attr_value = child
+                        .utf8_text(content.as_bytes())
+                        .ok()
+                        .map(|s| s.trim_matches('\'').trim_matches('"').trim().to_string());
+                }
+                _ => {}
+            }
+        }
+        let Some(name) = attr_name else { continue };
+        let value = attr_value.unwrap_or_default();
+        if value.is_empty() {
+            continue;
+        }
+        match name.as_str() {
+            "id" => {
+                symbols.push(ParsedSymbol {
+                    name: value,
+                    kind: "element".into(),
+                    parent_context: None,
+                    signature: signature.clone(),
+                    doc_comment: None,
+                    body_text: None,
+                    start_line,
+                    start_col: start.column as i64 + 1,
+                    end_line,
+                    end_col: end.column as i64 + 1,
+                });
+            }
+            "class" => {
+                symbols.push(ParsedSymbol {
+                    name: format!("{}.{}", tag_text, value),
+                    kind: "element".into(),
+                    parent_context: None,
+                    signature: signature.clone(),
+                    doc_comment: None,
+                    body_text: None,
+                    start_line,
+                    start_col: start.column as i64 + 1,
+                    end_line,
+                    end_col: end.column as i64 + 1,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract an HTML comment node (e.g. `<!-- 3. JS: Constants -->`) as a
+/// "section" symbol: name = comment text without the `<!--` / `-->`
+/// delimiters, truncated to 80 chars. Empty comments are skipped.
+fn extract_html_comment(node: &tree_sitter::Node, content: &str, symbols: &mut Vec<ParsedSymbol>) {
+    let raw = node.utf8_text(content.as_bytes()).unwrap_or("");
+    let text = raw
+        .strip_prefix("<!--")
+        .and_then(|t| t.strip_suffix("-->").or_else(|| Some(t)))
+        .map(|t| t.trim())
+        .unwrap_or("");
+    if text.is_empty() {
+        return;
+    }
+    let name: String = text.chars().take(80).collect();
+    let start = node.start_position();
+    let end = node.end_position();
+    symbols.push(ParsedSymbol {
+        name,
+        kind: "section".into(),
+        parent_context: None,
+        signature: None,
+        doc_comment: None,
+        body_text: None,
+        start_line: start.row as i64 + 1,
+        start_col: start.column as i64 + 1,
+        end_line: end.row as i64 + 1,
+        end_col: end.column as i64 + 1,
+    });
+}
+
+/// Extract symbols from an embedded <script> block by re-parsing its raw
+/// text with tree-sitter-typescript. Symbols get absolute line numbers
+/// (offset by the script's start line in the HTML) and parent "script".
+fn extract_embedded_script(
+    node: &tree_sitter::Node,
+    content: &str,
+    symbols: &mut Vec<ParsedSymbol>,
+    calls: &mut Vec<ParsedCall>,
+) {
+    let mut cursor = node.walk();
+    let raw_text_node = node
+        .children(&mut cursor)
+        .find(|c| c.kind() == "raw_text");
+    let Some(raw_text_node) = raw_text_node else { return };
+    let js_code = raw_text_node.utf8_text(content.as_bytes()).unwrap_or("");
+    if js_code.trim().is_empty() {
+        return;
+    }
+    let line_offset = raw_text_node.start_position().row as i64;
+
+    let mut js_parser = tree_sitter::Parser::new();
+    let js_ts_language: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    if js_parser.set_language(&js_ts_language).is_err() {
+        return;
+    }
+    let Some(js_tree) = js_parser.parse(js_code, None) else { return };
+    let js_root = js_tree.root_node();
+
+    let mut js_cursor = js_root.walk();
+    let mut done = false;
+    loop {
+        if done {
+            break;
+        }
+        let js_node = js_cursor.node();
+        let kind = js_node.kind();
+
+        // Declarations: functions, const/let (lexical_declaration), classes, etc.
+        if DECLARATION_KINDS.contains(&kind)
+            && let Some(name) = extract_declaration_name(&js_node, kind, js_code)
+        {
+            let start = js_node.start_position();
+            let end = js_node.end_position();
+            let sl = start.row as i64 + 1 + line_offset;
+            let el = end.row as i64 + 1 + line_offset;
+            symbols.push(ParsedSymbol {
+                name,
+                kind: kind.into(),
+                parent_context: Some("script".into()),
+                signature: Some(get_node_text(js_code, &js_node, 80)),
+                doc_comment: extract_doc_comment(content, sl),
+                body_text: extract_body_text(content, sl, el),
+                start_line: sl,
+                start_col: start.column as i64 + 1,
+                end_line: el,
+                end_col: end.column as i64 + 1,
+            });
+        }
+
+        // Function-valued variable declarations (arrow functions etc.)
+        if kind == "variable_declarator" {
+            let value_is_function = js_node
+                .child_by_field_name("value")
+                .map(|v| {
+                    matches!(
+                        v.kind(),
+                        "arrow_function"
+                            | "function_expression"
+                            | "function"
+                            | "generator_function"
+                    )
+                })
+                .unwrap_or(false);
+            if value_is_function
+                && let Some(name_node) = js_node.child_by_field_name("name")
+                && let Ok(name) = name_node.utf8_text(js_code.as_bytes())
+            {
+                let start = js_node.start_position();
+                let end = js_node.end_position();
+                let sl = start.row as i64 + 1 + line_offset;
+                let el = end.row as i64 + 1 + line_offset;
+                symbols.push(ParsedSymbol {
+                    name: name.trim().to_string(),
+                    kind: "function_declaration".into(),
+                    parent_context: Some("script".into()),
+                    signature: Some(get_node_text(js_code, &js_node, 80)),
+                    doc_comment: extract_doc_comment(content, sl),
+                    body_text: extract_body_text(content, sl, el),
+                    start_line: sl,
+                    start_col: start.column as i64 + 1,
+                    end_line: el,
+                    end_col: end.column as i64 + 1,
+                });
+            }
+        }
+
+        // Call expressions -> relations
+        if CALL_EXPRESSION_KINDS.contains(&kind) {
+            let func_node = js_node
+                .child_by_field_name("function")
+                .or_else(|| js_node.child(0));
+            if let Some(func) = func_node
+                && let Ok(func_text) = func.utf8_text(js_code.as_bytes())
+            {
+                let called_name = func_text.trim();
+                if !called_name.starts_with('"')
+                    && !called_name.starts_with('\'')
+                    && !called_name.starts_with('`')
+                {
+                    let start = js_node.start_position();
+                    let containing =
+                        find_containing_function_name(&js_node, js_code).unwrap_or_default();
+                    if !containing.is_empty() && called_name != containing {
+                        calls.push(ParsedCall {
+                            from_name: containing,
+                            to_name: called_name.to_string(),
+                            from_line: start.row as i64 + 1 + line_offset,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Import statements
+        if IMPORT_KINDS.contains(&kind) {
+            let start = js_node.start_position();
+            let end = js_node.end_position();
+            let sl = start.row as i64 + 1 + line_offset;
+            let el = end.row as i64 + 1 + line_offset;
+            let name = extract_import_name(&js_node, kind, js_code);
+            let is_already_symbol = symbols.iter().any(|s| s.start_line == sl);
+            if !is_already_symbol {
+                symbols.push(ParsedSymbol {
+                    name,
+                    kind: "import".into(),
+                    parent_context: Some("script".into()),
+                    signature: Some(get_node_text(js_code, &js_node, 100)),
+                    doc_comment: None,
+                    body_text: extract_body_text(content, sl, el),
+                    start_line: sl,
+                    start_col: start.column as i64 + 1,
+                    end_line: el,
+                    end_col: end.column as i64 + 1,
+                });
+            }
+        }
+
+        // Walk
+        if js_cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if js_cursor.goto_next_sibling() {
+                break;
+            }
+            if !js_cursor.goto_parent() {
+                done = true;
+                break;
+            }
+        }
+    }
+
+    // JS line/block comments become "section" symbols with parent "script".
+    // NOTE: `extract_js_comments` is defined in a later task of the same plan
+    // (html-outline-7); the file will compile only after that function exists,
+    // which is expected — the full build happens at task html-outline-9.
+    extract_js_comments(&js_root, js_code, line_offset, symbols);
+}
+
+/// Extract symbols from an embedded <style> block by re-parsing its raw text
+/// with tree-sitter-css. Symbols get absolute line numbers (offset by the
+/// style's start line in the HTML) and parent "style".
+fn extract_embedded_style(node: &tree_sitter::Node, content: &str, symbols: &mut Vec<ParsedSymbol>) {
+    let mut cursor = node.walk();
+    let raw_text_node = node
+        .children(&mut cursor)
+        .find(|c| c.kind() == "raw_text");
+    let Some(raw_text_node) = raw_text_node else { return };
+    let css_code = raw_text_node.utf8_text(content.as_bytes()).unwrap_or("");
+    if css_code.trim().is_empty() {
+        return;
+    }
+    let line_offset = raw_text_node.start_position().row as i64;
+
+    let mut css_parser = tree_sitter::Parser::new();
+    let css_ts_language: tree_sitter::Language = tree_sitter_css::LANGUAGE.into();
+    if css_parser.set_language(&css_ts_language).is_err() {
+        return;
+    }
+    let Some(css_tree) = css_parser.parse(css_code, None) else { return };
+    let css_root = css_tree.root_node();
+
+    let mut css_cursor = css_root.walk();
+    let mut done = false;
+    loop {
+        if done {
+            break;
+        }
+        let css_node = css_cursor.node();
+        let kind = css_node.kind();
+
+        // DECLARATION_KINDS already contains the CSS node kinds we want
+        // (rule_set, media_statement, keyframes_statement), and a CSS AST only
+        // produces CSS node kinds — so this filter matches exactly those.
+        if DECLARATION_KINDS.contains(&kind)
+            && let Some(name) = extract_declaration_name(&css_node, kind, css_code)
+        {
+            let start = css_node.start_position();
+            let end = css_node.end_position();
+            let sl = start.row as i64 + 1 + line_offset;
+            let el = end.row as i64 + 1 + line_offset;
+            symbols.push(ParsedSymbol {
+                name,
+                kind: kind.into(),
+                parent_context: Some("style".into()),
+                signature: Some(get_node_text(css_code, &css_node, 80)),
+                doc_comment: None,
+                body_text: extract_body_text(content, sl, el),
+                start_line: sl,
+                start_col: start.column as i64 + 1,
+                end_line: el,
+                end_col: end.column as i64 + 1,
+            });
+        }
+
+        // Walk
+        if css_cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if css_cursor.goto_next_sibling() {
+                break;
+            }
+            if !css_cursor.goto_parent() {
+                done = true;
+                break;
+            }
+        }
+    }
+}
+
+/// Extract JS comments (// and /* */) from an embedded <script> as "section"
+/// symbols with parent "script". Decorative comments (only dashes/equals)
+/// are skipped. Lines are absolute: JS row + script line_offset.
+fn extract_js_comments(
+    js_root: &tree_sitter::Node,
+    js_code: &str,
+    line_offset: i64,
+    symbols: &mut Vec<ParsedSymbol>,
+) {
+    let mut cursor = js_root.walk();
+    let mut done = false;
+    loop {
+        if done {
+            break;
+        }
+        let node = cursor.node();
+        if node.kind() == "comment" {
+            let raw = node.utf8_text(js_code.as_bytes()).unwrap_or("");
+            let text = raw
+                .strip_prefix("//")
+                .or_else(|| {
+                    raw.strip_prefix("/*")
+                        .and_then(|t| t.strip_suffix("*/"))
+                })
+                .map(|t| t.trim())
+                .unwrap_or("");
+            let is_decorative = text.is_empty()
+                || text.chars().all(|c| c == '-' || c == '=' || c.is_whitespace());
+            if !is_decorative {
+                let start = node.start_position();
+                let end = node.end_position();
+                let name: String = text.chars().take(80).collect();
+                symbols.push(ParsedSymbol {
+                    name,
+                    kind: "section".into(),
+                    parent_context: Some("script".into()),
+                    signature: None,
+                    doc_comment: None,
+                    body_text: None,
+                    start_line: start.row as i64 + line_offset + 1,
+                    start_col: start.column as i64 + 1,
+                    end_line: end.row as i64 + line_offset + 1,
+                    end_col: end.column as i64 + 1,
+                });
+            }
+        }
+
+        // Walk
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                done = true;
+                break;
+            }
+        }
     }
 }
 
@@ -1400,5 +1900,82 @@ Has content.
         assert!(
             symbols[1].body_text.is_some() && !symbols[1].body_text.as_ref().unwrap().is_empty()
         );
+    }
+
+    #[test]
+    fn parse_html_embedded_js_css_symbols() {
+        let content = r#"<!DOCTYPE html>
+<!-- 1. HTML -->
+<html lang="en">
+<head>
+    <style>
+        body {
+            background: #1a1a2e;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game" width="520" height="440"></canvas>
+    <div class="container main"></div>
+    <!-- 3. JS: Constants -->
+    <script>
+    /* 3. JS: Constants */
+    const COLS = 13;
+    function generateMap() {
+        return COLS;
+    }
+    </script>
+</body>
+</html>
+"#;
+        let result = parse_file("index.html", content);
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+
+        let by_name = |n: &str| result.symbols.iter().filter(|s| s.name == n).collect::<Vec<_>>();
+
+        // HTML element with id
+        let game = by_name("game");
+        assert_eq!(game.len(), 1, "symbols: {:?}", result.symbols);
+        assert_eq!(game[0].kind, "element");
+        assert_eq!(game[0].parent_context, None);
+
+        // HTML element with class -> name "div.container main"
+        let div = by_name("div.container main");
+        assert_eq!(div.len(), 1, "symbols: {:?}", result.symbols);
+        assert_eq!(div[0].kind, "element");
+
+        // HTML comment section
+        let comment = by_name("3. JS: Constants");
+        assert!(!comment.is_empty(), "symbols: {:?}", result.symbols);
+        assert_eq!(comment[0].kind, "section");
+
+        // Embedded JS: const COLS via lexical_declaration, parent "script"
+        let cols = by_name("COLS");
+        assert_eq!(cols.len(), 1, "symbols: {:?}", result.symbols);
+        assert_eq!(cols[0].parent_context.as_deref(), Some("script"));
+        assert_eq!(cols[0].kind, "lexical_declaration");
+
+        // Embedded JS function, parent "script", absolute line numbers
+        let gen_fn = by_name("generateMap");
+        assert_eq!(gen_fn.len(), 1, "symbols: {:?}", result.symbols);
+        assert_eq!(gen_fn[0].kind, "function_declaration");
+        assert_eq!(gen_fn[0].parent_context.as_deref(), Some("script"));
+        // generateMap is inside the <script> (script raw_text starts on line 16,
+        // so the JS function lives on absolute line 18)
+        assert_eq!(gen_fn[0].start_line, 18);
+
+        // Embedded CSS rule_set, parent "style"
+        let body = by_name("body");
+        assert_eq!(body.len(), 1, "symbols: {:?}", result.symbols);
+        assert_eq!(body[0].kind, "rule_set");
+        assert_eq!(body[0].parent_context.as_deref(), Some("style"));
+
+        // JS comment (/* ... */) becomes a section with parent "script"
+        let js_comment = result
+            .symbols
+            .iter()
+            .filter(|s| s.name == "3. JS: Constants" && s.parent_context.as_deref() == Some("script"))
+            .count();
+        assert_eq!(js_comment, 1, "symbols: {:?}", result.symbols);
     }
 }

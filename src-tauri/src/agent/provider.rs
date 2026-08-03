@@ -737,13 +737,17 @@ pub struct StreamOutput {
 /// language the UI supports, but the answer is always CONTINUE / DONE).
 const COMPLETION_JUDGE_SYSTEM: &str = "You are a strict classifier inside an agentic coding harness. \
 You are given the assistant's final message of a turn that ended WITHOUT calling any tool. \
-Decide whether the turn is genuinely complete, or whether the assistant merely announced or \
-implied an immediate next step (e.g. said it would ask the user a question, spawn subagents, \
-read a file, run a command, or make an edit) but stopped before actually doing it. \
-Answer with EXACTLY ONE WORD and nothing else: \
-CONTINUE if the assistant promised or implied a next action it did not take, \
-or if the message is clearly cut off mid-thought; \
-DONE if the message is a complete, self-contained reply that needs no further action right now. \
+The assistant CAN ONLY ask the user a question through the ask_user tool, never in prose. \
+Therefore, if the final message announces, implies, or begins a question to the user (e.g. \
+'the key question is…', 'I need to ask you…', 'my question for you is…', or any trailing \
+question mark or dangling '…:' before a question) WITHOUT actually calling ask_user in the \
+same turn, the verdict MUST be CONTINUE so the harness nudges the model to call ask_user. \
+Also CONTINUE if the assistant announced or implied any other immediate next step (spawn \
+subagents, read a file, run a command, make an edit) but stopped before taking it, or if \
+the message is clearly cut off mid-thought. \
+DONE only if the message is a complete, self-contained reply that needs no further action \
+right now. \
+Answer with EXACTLY ONE WORD and nothing else: CONTINUE or DONE. \
 The message may be in any language; your one-word answer must still be CONTINUE or DONE.";
 
 /// Non-streaming, single-shot classification call used by the workflow loop to
