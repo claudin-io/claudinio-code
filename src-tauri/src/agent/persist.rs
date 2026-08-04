@@ -40,6 +40,11 @@ pub enum SessionRecord {
     },
     /// A user turn (the raw input the user typed).
     User { text: String, ts: u64 },
+    /// The user's raw input was rejected before the workflow started (e.g. the
+    /// English-only guard). Kept for audit: the user's message should never
+    /// silently vanish from the JSONL.
+    #[serde(rename = "rejected")]
+    Rejected { text: String, reason: String, ts: u64 },
     /// A workflow phase boundary: "plan" | "execute" | "summary".
     Phase { phase: String, ts: u64 },
     /// A conversation message exactly as sent to / received from the model.
@@ -577,6 +582,63 @@ pub fn cumulative_stats(
     )
 }
 
+/// Walk the session chain backward (via LinkedFrom) from `start_session_id`
+/// and sum every session's last Status record cost fields.
+/// Returns (total_cost, cost_input, cost_output, cost_cache_read) — all Options.
+/// All None when no session in the chain has cost data.
+pub fn chain_cumulative_cost(
+    workspace_root: Option<&str>,
+    start_session_id: &str,
+) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    let dir = match sessions_dir(workspace_root) {
+        Ok(d) => d,
+        Err(_) => return (None, None, None, None),
+    };
+
+    let mut total_cost: Option<f64> = None;
+    let mut cost_input: Option<f64> = None;
+    let mut cost_output: Option<f64> = None;
+    let mut cost_cache_read: Option<f64> = None;
+
+    let mut current_id = start_session_id.to_string();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    const MAX_HOPS: usize = 64;
+
+    for _ in 0..MAX_HOPS {
+        if !seen.insert(current_id.clone()) {
+            break; // cycle guard
+        }
+
+        let path = dir.join(format!("{current_id}.jsonl"));
+        let Ok(records) = load_records(&path) else {
+            break;
+        };
+
+        // Accumulate this session's cost from its last Status record.
+        let (_, _, tc, ci, co, cc) = cumulative_stats(&records);
+        if let Some(c) = tc {
+            total_cost = Some(total_cost.unwrap_or(0.0) + c);
+        }
+        if let Some(c) = ci {
+            cost_input = Some(cost_input.unwrap_or(0.0) + c);
+        }
+        if let Some(c) = co {
+            cost_output = Some(cost_output.unwrap_or(0.0) + c);
+        }
+        if let Some(c) = cc {
+            cost_cache_read = Some(cost_cache_read.unwrap_or(0.0) + c);
+        }
+
+        // Walk to predecessor via LinkedFrom.
+        match linked_from(&records) {
+            Some(info) => current_id = info.prev_session_id,
+            None => break,
+        }
+    }
+
+    (total_cost, cost_input, cost_output, cost_cache_read)
+}
+
 /// Lightweight summary shown in the session list.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -650,7 +712,8 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::GoldenCycle { ts, .. }
                 | SessionRecord::ContinuationJudge { ts, .. }
                 | SessionRecord::BaseCommit { ts, .. }
-                | SessionRecord::PlanFinalized { ts, .. } => {
+                | SessionRecord::PlanFinalized { ts, .. }
+                | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
                 SessionRecord::LinkedFrom { ts, .. }
@@ -1200,6 +1263,34 @@ mod tests {
     }
 
     #[test]
+    fn rejected_record_serialization() {
+        // A message rejected by a pre-workflow guard (e.g. the English-only
+        // check) must still land in the JSONL for audit — the user's text must
+        // never silently vanish.
+        let rec = SessionRecord::Rejected {
+            text: "Então...".into(),
+            reason: "Only English is supported. Please write your message in English. \
+                     (Detected non-English characters: ã)"
+                .into(),
+            ts: 42,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"rejected\""), "got: {json}");
+        assert!(json.contains("\"text\":\"Então...\""), "got: {json}");
+        assert!(json.contains("\"reason\":"), "got: {json}");
+
+        let back: SessionRecord = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionRecord::Rejected { text, reason, ts } => {
+                assert_eq!(text, "Então...");
+                assert!(reason.contains("Only English is supported"));
+                assert_eq!(ts, 42);
+            }
+            _ => panic!("expected Rejected, got {:?}", back),
+        }
+    }
+
+    #[test]
     fn status_record_serialization() {
         let rec = SessionRecord::Status {
             session_id: "s1".into(),
@@ -1652,6 +1743,221 @@ mod tests {
         assert_eq!(cy, 0);
         assert_eq!(st, 0);
         assert!(lp.is_empty());
+    }
+
+    #[test]
+    fn chain_cumulative_cost_sums_whole_chain() {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio-chain-cost-test-sums-{}",
+            std::process::id()
+        ));
+        let ws = dir.to_string_lossy().to_string();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // root -> mid -> tip
+        let root_store = SessionStore::create("root", Some(&ws)).unwrap();
+        root_store
+            .append(&SessionRecord::Status {
+                session_id: "root".into(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                context_tokens: None,
+                total_cost: Some(0.10),
+                total_cost_input: Some(0.05),
+                total_cost_output: Some(0.03),
+                total_cost_cache_read: Some(0.02),
+                ts: 10,
+            })
+            .unwrap();
+        root_store
+            .append(&SessionRecord::HandoffTo {
+                next_session_id: "mid".into(),
+                reason: "plan_execution".into(),
+                ts: 20,
+            })
+            .unwrap();
+
+        let mid_store = SessionStore::create("mid", Some(&ws)).unwrap();
+        mid_store
+            .append(&SessionRecord::LinkedFrom {
+                prev_session_id: "root".into(),
+                reason: "plan_execution".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 21,
+            })
+            .unwrap();
+        mid_store
+            .append(&SessionRecord::Status {
+                session_id: "mid".into(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                context_tokens: None,
+                total_cost: Some(0.20),
+                total_cost_input: Some(0.10),
+                total_cost_output: Some(0.08),
+                total_cost_cache_read: Some(0.02),
+                ts: 22,
+            })
+            .unwrap();
+        mid_store
+            .append(&SessionRecord::HandoffTo {
+                next_session_id: "tip".into(),
+                reason: "plan_execution".into(),
+                ts: 30,
+            })
+            .unwrap();
+
+        let tip_store = SessionStore::create("tip", Some(&ws)).unwrap();
+        tip_store
+            .append(&SessionRecord::LinkedFrom {
+                prev_session_id: "mid".into(),
+                reason: "plan_execution".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 31,
+            })
+            .unwrap();
+        tip_store
+            .append(&SessionRecord::Status {
+                session_id: "tip".into(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                context_tokens: None,
+                total_cost: Some(0.30),
+                total_cost_input: Some(0.15),
+                total_cost_output: Some(0.10),
+                total_cost_cache_read: Some(0.05),
+                ts: 32,
+            })
+            .unwrap();
+
+        let (total_cost, cost_input, cost_output, cost_cache_read) =
+            chain_cumulative_cost(Some(&ws), "tip");
+        std::fs::remove_dir_all(&dir).ok();
+
+        let eps = 1e-9;
+        assert!(
+            (total_cost.unwrap() - 0.60).abs() < eps,
+            "total_cost: {total_cost:?}"
+        );
+        assert!(
+            (cost_input.unwrap() - 0.30).abs() < eps,
+            "cost_input: {cost_input:?}"
+        );
+        assert!(
+            (cost_output.unwrap() - 0.21).abs() < eps,
+            "cost_output: {cost_output:?}"
+        );
+        assert!(
+            (cost_cache_read.unwrap() - 0.09).abs() < eps,
+            "cost_cache_read: {cost_cache_read:?}"
+        );
+    }
+
+    #[test]
+    fn chain_cumulative_cost_no_cost_data_returns_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio-chain-cost-test-none-{}",
+            std::process::id()
+        ));
+        let ws = dir.to_string_lossy().to_string();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = SessionStore::create("solo", Some(&ws)).unwrap();
+        store
+            .append(&SessionRecord::Status {
+                session_id: "solo".into(),
+                total_input_tokens: 10,
+                total_output_tokens: 5,
+                context_tokens: None,
+                total_cost: None,
+                total_cost_input: None,
+                total_cost_output: None,
+                total_cost_cache_read: None,
+                ts: 10,
+            })
+            .unwrap();
+
+        let (total_cost, cost_input, cost_output, cost_cache_read) =
+            chain_cumulative_cost(Some(&ws), "solo");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(total_cost, None);
+        assert_eq!(cost_input, None);
+        assert_eq!(cost_output, None);
+        assert_eq!(cost_cache_read, None);
+    }
+
+    #[test]
+    fn chain_cumulative_cost_cycle_guard_stops() {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio-chain-cost-test-cycle-{}",
+            std::process::id()
+        ));
+        let ws = dir.to_string_lossy().to_string();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // a <-> b cycle via LinkedFrom.
+        let a_store = SessionStore::create("a", Some(&ws)).unwrap();
+        a_store
+            .append(&SessionRecord::LinkedFrom {
+                prev_session_id: "b".into(),
+                reason: "plan_execution".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 1,
+            })
+            .unwrap();
+        a_store
+            .append(&SessionRecord::Status {
+                session_id: "a".into(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                context_tokens: None,
+                total_cost: Some(1.0),
+                total_cost_input: Some(1.0),
+                total_cost_output: Some(1.0),
+                total_cost_cache_read: Some(1.0),
+                ts: 2,
+            })
+            .unwrap();
+
+        let b_store = SessionStore::create("b", Some(&ws)).unwrap();
+        b_store
+            .append(&SessionRecord::LinkedFrom {
+                prev_session_id: "a".into(),
+                reason: "plan_execution".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 3,
+            })
+            .unwrap();
+        b_store
+            .append(&SessionRecord::Status {
+                session_id: "b".into(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                context_tokens: None,
+                total_cost: Some(1.0),
+                total_cost_input: Some(1.0),
+                total_cost_output: Some(1.0),
+                total_cost_cache_read: Some(1.0),
+                ts: 4,
+            })
+            .unwrap();
+
+        let (total_cost, _, _, _) = chain_cumulative_cost(Some(&ws), "a");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            (total_cost.unwrap() - 2.0).abs() < 1e-9,
+            "cycle guard must visit each session once, got {total_cost:?}"
+        );
     }
 
     #[test]

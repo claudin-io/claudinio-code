@@ -177,4 +177,79 @@ mod tests {
             (1, 2, Some(3.0), Some(4.0), Some(5.0), Some(6.0))
         );
     }
+
+    #[test]
+    fn chain_cost_seed_feeds_successor_ledger() {
+        // Temp workspace following the repo's existing test pattern.
+        let dir = std::env::temp_dir().join(format!("claudinio-seam-test-{}", std::process::id()));
+        let ws = dir.to_string_lossy().to_string();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. Brain session accumulates cost via the real persistence API.
+        let brain = SessionStore::create("brain", Some(&ws)).unwrap();
+        brain
+            .append(&SessionRecord::Status {
+                session_id: "brain".into(),
+                total_input_tokens: 5000,
+                total_output_tokens: 1200,
+                context_tokens: None,
+                total_cost: Some(0.1234),
+                total_cost_input: Some(0.06),
+                total_cost_output: Some(0.04),
+                total_cost_cache_read: Some(0.0234),
+                ts: 10,
+            })
+            .unwrap();
+
+        // 2. Handoff exactly as link_session (transition.rs step 6.5) seeds it:
+        //    chain cost flows into the successor's Status record.
+        let builder = SessionStore::create("builder", Some(&ws)).unwrap();
+        let chain_cost = crate::agent::persist::chain_cumulative_cost(Some(ws.as_str()), "brain");
+        builder
+            .append(&SessionRecord::Status {
+                session_id: "builder".into(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                total_cost: chain_cost.0,
+                total_cost_input: chain_cost.1,
+                total_cost_output: chain_cost.2,
+                total_cost_cache_read: chain_cost.3,
+                context_tokens: None,
+                ts: 20,
+            })
+            .unwrap();
+
+        // 3. Real resuming path: read the file back, cumulate, seed the ledger.
+        let cumul = crate::agent::persist::cumulative_stats(
+            &crate::agent::persist::load_records(&builder.path).unwrap(),
+        );
+        let mut ledger = CostLedger::resuming(cumul);
+
+        // 4. Baseline equals the chain sum BEFORE any new work.
+        assert_eq!(ledger.cumul_in, 0);
+        assert_eq!(ledger.cumul_out, 0);
+        assert!((ledger.cumul_cost.unwrap() - 0.1234).abs() < 1e-9);
+        assert!((ledger.cumul_cost_input.unwrap() - 0.06).abs() < 1e-9);
+        assert!((ledger.cumul_cost_output.unwrap() - 0.04).abs() < 1e-9);
+        assert!((ledger.cumul_cost_cache.unwrap() - 0.0234).abs() < 1e-9);
+
+        // 5. Builder does new work, then the terminal roll.
+        ledger.total_in = 900;
+        ledger.total_out = 250;
+        ledger.run_cost_input = Some(0.01);
+        ledger.run_cost_output = Some(0.012);
+        ledger.run_cost_cache = Some(0.0);
+        ledger.subagent_cost = 0.5;
+        ledger.roll("claudinio");
+
+        // Baseline preserved, total GREW; subagent cost (0.5) dominates new
+        // work, proving the chain baseline carried through roll.
+        assert!(ledger.cumul_cost.unwrap() > 0.1234);
+        assert!(ledger.cumul_cost.unwrap() - 0.1234 > 0.4);
+        // Tokens stayed per-session — NOT accumulated from the chain.
+        assert_eq!(ledger.cumul_in, 900);
+        assert_eq!(ledger.cumul_out, 250);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

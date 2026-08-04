@@ -1131,6 +1131,20 @@ async fn judge_terminal_turn(
     }
 }
 
+/// Cheap structural backstop for the judge: a terminal message ending in a
+/// question mark or a trailing colon (like "the core design question:") is
+/// extremely unlikely to be a genuine final reply — the harness must not
+/// silently end the run, it must nudge the model to actually call ask_user
+/// (the only channel for asking the user) or finish properly. Language-
+/// agnostic by construction (pure punctuation), so it complements the LLM
+/// judge without any hardcoded phrase list.
+fn should_nudge_terminal(text: &str) -> bool {
+    text.trim_end().ends_with(':')
+        || text.trim_end().ends_with('?')
+        || text.trim_end().ends_with('…')
+        || text.trim_end().ends_with("...")
+}
+
 /// Wraps `provider::stream_message` with a retry loop for transient network
 /// failures (stalled streams, dropped connections, 429/5xx). A full 30-minute
 /// hang like the one that killed session 1aafbfbf was silently unrecoverable
@@ -1454,7 +1468,18 @@ pub async fn run_workflow_with_profile(
     mode_ctl: &Arc<ModeCtl>,
     profile: PromptProfile,
 ) -> Result<RunOutcome, String> {
-    reject_non_english(&user_message)?;
+    // A rejected input is still a user message: persist it for audit before
+    // returning the error, so the user's text never silently vanishes from the
+    // JSONL (it used to, because the guard ran before the User append).
+    if let Err(reason) = reject_non_english(&user_message) {
+        store.try_append(&SessionRecord::Rejected {
+            text: user_message.clone(),
+            reason: reason.clone(),
+            ts: now_ms(),
+        });
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        return Err(reason);
+    }
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
         ts: now_ms(),
@@ -2048,7 +2073,10 @@ pub async fn run_workflow_with_profile(
                 // the Builder model, regardless of the session's current mode.
                 let judge_model = config.model_for_mode(SessionMode::Brain.as_str());
                 let verdict = judge_terminal_turn(config, judge_model, &last_text).await;
-                let will_nudge = verdict == TurnVerdict::Continue;
+                // Structural backstop on top of the judge's verdict: a message
+                // ending in a question mark or a trailing colon ("the core
+                // design question:") is a dangling question, not a final reply.
+                let will_nudge = verdict == TurnVerdict::Continue || should_nudge_terminal(&last_text);
                 // Transparent to the user (no event emitted, UI renders nothing)
                 // but auditable: persist the judge's decision to the JSONL.
                 store.try_append(&SessionRecord::ContinuationJudge {
@@ -4161,6 +4189,26 @@ mod tests {
             parse_turn_verdict("not DONE, you should CONTINUE"),
             TurnVerdict::Continue
         );
+    }
+
+    // --- structural backstop (language-agnostic punctuation check) ---
+    // A terminal message ending in a question mark or a trailing colon is a
+    // dangling question (the model can only ask via the ask_user tool), so the
+    // harness must nudge instead of silently ending the run.
+
+    #[test]
+    fn structural_backstop_nudges_dangling_questions() {
+        // The real stalled case: a promise to ask a design question, no tool.
+        assert!(should_nudge_terminal("Now for danger memory — the core design question:"));
+        assert!(should_nudge_terminal("Do you want me to continue?"));
+    }
+
+    #[test]
+    fn structural_backstop_spares_real_final_replies() {
+        assert!(!should_nudge_terminal("All done."));
+        assert!(!should_nudge_terminal("Everything is ready."));
+        // Empty text is not a dangling question either.
+        assert!(!should_nudge_terminal(""));
     }
 }
 
