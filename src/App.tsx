@@ -841,6 +841,7 @@ function App() {
         configPlanSavePath={configPlanSavePath}
         setConfigPlanSavePath={setConfigPlanSavePath}
         workspaceConfigFields={workspaceConfigFields}
+        activeWorkspace={activeWorkspace}
         accountLogin={accountLogin}
         hasApiKey={hasApiKey}
         loggingIn={loggingIn}

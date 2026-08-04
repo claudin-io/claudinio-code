@@ -3,6 +3,7 @@ mod edit_file;
 pub mod finalize_plan;
 mod grep;
 mod list_dir;
+pub mod quality;
 mod read_file;
 pub mod tasks;
 mod web_search;
@@ -69,6 +70,35 @@ pub struct ToolContext {
     pub records_cache: crate::agent::persist::RecordsCache,
 }
 
+/// A bare `ToolContext` for tests: no workspace, no index, no mode handle, so
+/// every gate that keys off those is inert unless the test opts in.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    pub fn ctx() -> ToolContext {
+        ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+            ))),
+        }
+    }
+}
+
 impl ToolContext {
     /// True when the session this context belongs to is currently in Brain
     /// mode. False when no mode handle is attached (tests, aux workflows).
@@ -89,6 +119,31 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
         None => return Ok(()),
     };
     crate::workspace_path::ensure_within_root(requested, std::path::Path::new(root))
+}
+
+/// Like `validate_path`, but also refuses to write the project's specs.
+///
+/// Specs are the one input to a project that did not come out of a model, which
+/// is the entire reason checking against them means anything. An agent that can
+/// edit them can resolve any disagreement between code and requirement by
+/// editing the requirement — so both write paths (the proposal tool and the
+/// subagent's direct apply) go through here.
+pub fn validate_editable_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
+    validate_path(requested, ctx)?;
+    let Some(root) = ctx.workspace_root.as_deref() else {
+        return Ok(());
+    };
+    // Re-read from disk rather than caching: the user may move their specs
+    // mid-session, and the guard must follow them immediately.
+    let features_dir = crate::quality::QualityConfig::load(std::path::Path::new(root)).features_dir;
+    if crate::quality::spec::is_spec_path(
+        std::path::Path::new(root),
+        features_dir.as_deref(),
+        std::path::Path::new(requested),
+    ) {
+        return Err(crate::quality::spec::edit_refusal(requested));
+    }
+    Ok(())
 }
 
 /// Like `validate_path`, but additionally allows READ access to user-level
@@ -285,6 +340,29 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                     "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default 30; override if the command needs more time)" }
                 },
                 "required": ["command"]
+            }),
+        },
+        ToolDef {
+            name: "run_quality".into(),
+            description: "Run this project's own verification layers and record the result as \
+                          session evidence: 'tests' runs the test suite, 'coverage' measures how \
+                          much of what YOU changed is actually executed by a test. The commands \
+                          come from the project (detected, or set in .claudinio.json) — you \
+                          cannot pass a command. \
+                          A golden task CANNOT be marked done unless the most recent run is green \
+                          AND no file changed since it ran: the harness verifies this \
+                          mechanically, so saying the tests pass does not work — run them. \
+                          Call this after finishing the work, and again after any further edit.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "layers": {
+                        "type": "array",
+                        "description": "Layers to run. Omit to run what this project enforces (tests, and coverage when configured).",
+                        "items": { "type": "string", "enum": ["tests", "coverage", "mutation", "gherkin", "metrics"] }
+                    }
+                },
+                "required": []
             }),
         },
         ToolDef {
@@ -513,7 +591,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "edit_file" => {
             let a: edit_file::EditFileArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            validate_path(&a.path, ctx)?;
+            validate_editable_path(&a.path, ctx)?;
             // Enforce read-before-edit
             {
                 let tracker = ctx.read_tracker.lock().await;
@@ -701,6 +779,12 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = bash::execute(a, ctx).await?;
             Ok(ToolOutput::Text { content })
         }
+        "run_quality" => {
+            let a: quality::RunQualityArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let content = quality::execute(a, ctx).await?;
+            Ok(ToolOutput::Text { content })
+        }
         "tasks_get" => {
             let content = tasks::execute_get(ctx)?;
             Ok(ToolOutput::Text { content })
@@ -749,7 +833,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<String, String> {
     let a: edit_file::EditFileArgs =
         serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-    validate_path(&a.path, ctx)?;
+    validate_editable_path(&a.path, ctx)?;
     // Enforce read-before-edit
     {
         let tracker = ctx.read_tracker.lock().await;
@@ -1316,6 +1400,74 @@ mod tests {
     }
 
     // Existing tests (unchanged)
+    /// A workspace with a spec directory and a source file.
+    fn spec_workspace(name: &str, config: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("cq-editguard-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("features")).unwrap();
+        std::fs::create_dir_all(root.join("docs/specs")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join(".claudinio.json"), config).unwrap();
+        std::fs::write(
+            root.join("features/a.feature"),
+            "Feature: F\n  Scenario: S\n    Then it works\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/specs/b.feature"), "Feature: G\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        root
+    }
+
+    fn ctx_at(root: &std::path::Path) -> ToolContext {
+        let mut ctx = tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+        ctx
+    }
+
+    #[test]
+    fn the_agent_cannot_edit_a_specification() {
+        // The spec is the one input that did not come from a model. An agent
+        // that can rewrite it can settle any code-vs-requirement disagreement
+        // by editing the requirement.
+        let root = spec_workspace("refuse", "{}");
+        let ctx = ctx_at(&root);
+        let err = validate_editable_path(root.join("features/a.feature").to_str().unwrap(), &ctx)
+            .unwrap_err();
+        assert!(err.contains("owned by the user"), "{err}");
+        assert!(err.contains("ask the user"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ordinary_source_files_stay_editable() {
+        let root = spec_workspace("allow", "{}");
+        let ctx = ctx_at(&root);
+        assert!(validate_editable_path(root.join("src/lib.rs").to_str().unwrap(), &ctx).is_ok());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_guard_follows_a_configured_spec_directory() {
+        let root = spec_workspace("configured", r#"{"quality":{"features_dir":"docs/specs"}}"#);
+        let ctx = ctx_at(&root);
+        assert!(
+            validate_editable_path(root.join("docs/specs/b.feature").to_str().unwrap(), &ctx)
+                .is_err()
+        );
+        // Once specs move, the old default directory is ordinary code again.
+        assert!(
+            validate_editable_path(root.join("features/a.feature").to_str().unwrap(), &ctx).is_ok()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_guard_is_inert_without_a_workspace() {
+        // Tests and one-off workflows must not be gated.
+        let ctx = tests_support::ctx();
+        assert!(validate_editable_path("/anywhere/features/a.feature", &ctx).is_ok());
+    }
+
     #[test]
     fn test_validate_path_allows_within_workspace() {
         let ctx = ToolContext {

@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, ErrorBoundary, For, onCleanup, onMount, Show, type Component } from "solid-js";
 import { baseName } from "../lib/path";
+import { pendingComposerSeed, takeComposerSeed } from "../lib/composerSeed";
 import {
   sendMessage,
   approveTool,
@@ -31,6 +32,7 @@ import {
   type ThinkingEffort,
   type ModeChangedData,
   type GoldenLoopData,
+  type QualityVerdictData,
   type SessionLinkedData,
   type AgentEvent,
   type RetryingData,
@@ -108,6 +110,18 @@ export const ChatPanel: Component<{
   onThinkingEffortChange: (v: ThinkingEffort) => void;
 }> = (props) => {
   const [input, setInput] = createSignal("");
+  // Another panel (Settings) can hand this workspace a prepared prompt. It
+  // fills the box and focuses it; the user still chooses to send.
+  createEffect(() => {
+    if (!pendingComposerSeed()) return;
+    const seeded = takeComposerSeed(props.workspace);
+    if (seeded === null) return;
+    setInput(seeded);
+    queueMicrotask(() => {
+      inputRef?.focus();
+      inputRef?.setSelectionRange(seeded.length, seeded.length);
+    });
+  });
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [status, setStatus] = createSignal<Status>("idle");
   const [pendingApprovals, setPendingApprovals] = createSignal<(ToolCallData & { subagentName?: string })[]>([]);
@@ -831,6 +845,13 @@ export const ChatPanel: Component<{
       setCurrentSteps((prev) => [
         ...prev,
         { type: "golden" as const, golden: data } as TimelineItem,
+      ]);
+      scrollToBottom();
+    } else if (event.event === "QualityVerdict") {
+      const data = event.data as QualityVerdictData;
+      setCurrentSteps((prev) => [
+        ...prev,
+        { type: "quality" as const, quality: data } as TimelineItem,
       ]);
       scrollToBottom();
     } else if (event.event === "SessionLinked") {

@@ -32,6 +32,7 @@ const TITLES: Record<string, string> = {
   ask_user: "Asked you",
   tasks_get: "Checked tasks",
   tasks_set: "Updated tasks",
+  run_quality: "Ran the checks",
   spawn_agents: "Spawned agents",
   write_plan: "Wrote plan",
   finalize_plan: "Finalized plan",

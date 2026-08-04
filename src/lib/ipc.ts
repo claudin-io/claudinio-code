@@ -207,6 +207,23 @@ export interface GoldenLoopData {
   mode: SessionMode;
 }
 
+/** One layer of the quality harness, as scored against one stack. */
+export interface QualityLayerView {
+  layer: string;
+  stack: string;
+  status: "pass" | "fail" | "unavailable";
+  summary: string;
+}
+
+/** A verification run finished. `trigger` is "tool" when the agent asked for
+ * it and "harness" when the loop enforced it before letting the run finish. */
+export interface QualityVerdictData {
+  pass: boolean;
+  summary: string;
+  layers: QualityLayerView[];
+  trigger: "tool" | "harness";
+}
+
 /// Why a session handed off to a linked successor.
 export type HandoffReason =
   | "plan_execution"
@@ -227,6 +244,7 @@ export type AgentEvent =
   | { event: "TextDelta"; data: { text: string } }
   | { event: "ModeChanged"; data: ModeChangedData }
   | { event: "GoldenLoop"; data: GoldenLoopData }
+  | { event: "QualityVerdict"; data: QualityVerdictData }
   | { event: "SessionLinked"; data: SessionLinkedData }
   | { event: "Thinking"; data: string }
   | { event: "ToolCall"; data: ToolCallData }
@@ -541,6 +559,57 @@ export function setConfig(args: SetConfigArgs): Promise<void> {
 
 export function getConfig(workspace?: string): Promise<AgentConfig> {
   return invoke<AgentConfig>("get_config", { workspace: workspace ?? null });
+}
+
+/** What triggers the harness's finish-line verification. */
+export type EnforceOn = "goals" | "code_change";
+
+/** Per-project quality settings, stored in the workspace's `.claudinio.json`. */
+export interface QualitySettings {
+  enabled: boolean;
+  enforceOn: EnforceOn;
+  /** Layers that block a finish: "tests" and/or "coverage". Empty = report only. */
+  enforcedLayers: string[];
+  diffCoverageThreshold: number;
+  mutationScoreThreshold: number;
+  /** Empty = use the detected command. */
+  testCmd: string;
+  coverageCmd: string;
+  mutationCmd: string;
+  /** Empty = the default "features" directory. */
+  featuresDir: string;
+  gherkinCmd: string;
+  /** 0 = no budget; the complexity layer reports without blocking. */
+  maxComplexity: number;
+  testTimeoutSecs: number;
+  coverageTimeoutSecs: number;
+  mutationTimeoutSecs: number;
+}
+
+/** A build root the harness found, and what it would run there. */
+export interface DetectedStack {
+  name: string;
+  root: string;
+  testCmd: string;
+  coverageCmd: string | null;
+  mutationCmd: string | null;
+  gherkinCmd: string | null;
+}
+
+export interface QualityInfo {
+  settings: QualitySettings;
+  stacks: DetectedStack[];
+}
+
+export function getQualityConfig(workspaceRoot: string): Promise<QualityInfo> {
+  return invoke<QualityInfo>("get_quality_config", { workspaceRoot });
+}
+
+export function setQualityConfig(
+  workspaceRoot: string,
+  settings: QualitySettings,
+): Promise<void> {
+  return invoke<void>("set_quality_config", { workspaceRoot, settings });
 }
 
 export function setKeepAwake(active: boolean): Promise<void> {

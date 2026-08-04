@@ -31,6 +31,7 @@ pub fn execute_set(
     let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
+    check_quality_gate(&prev, &merged, ctx)?;
     crate::agent::persist::append_tasks(Path::new(path), &merged)?;
     let mut note = String::new();
     if renamed > 0 {
@@ -93,6 +94,60 @@ fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext) -> Result<(), St
             }
         }
     }
+}
+
+/// Quality gate: an execution goal may only be closed with verified evidence.
+///
+/// This is the mechanical half of the golden-goals system. The prompt has
+/// always told the model to "run the checks" before marking a goal done, and
+/// nothing ever confirmed that it did — a goal could be closed on the model's
+/// word. Here `tasks_set` refuses the transition unless the session holds a
+/// passing quality run whose digest still matches the worktree, which also
+/// rules out run-then-edit-then-close.
+///
+/// Only the execution half of each goal is gated (`golden-<slug>-1`): the
+/// planning half is closed by Brain, which has not written any code and could
+/// not make a test suite green if it wanted to.
+fn check_quality_gate(
+    prev: &[TaskItem],
+    merged: &[TaskItem],
+    ctx: &crate::agent::tools::ToolContext,
+) -> Result<(), String> {
+    use crate::agent::tools::quality::{Evidence, current_evidence, rejection_message};
+
+    let closing = newly_done_execution_goals(prev, merged);
+    if closing.is_empty() {
+        return Ok(());
+    }
+    match current_evidence(ctx) {
+        Evidence::NotRequired => Ok(()),
+        Evidence::Current { pass: true, .. } => Ok(()),
+        other => Err(rejection_message(ctx, &other, &closing)),
+    }
+}
+
+/// Ids of execution goals moving to `done` in this call. A goal that was
+/// already done stays done without re-verification — the transition is the
+/// event worth gating, and re-gating settled goals would deadlock any later
+/// `tasks_set` after an unrelated edit.
+fn newly_done_execution_goals(prev: &[TaskItem], merged: &[TaskItem]) -> Vec<String> {
+    merged
+        .iter()
+        .filter(|t| is_golden_execution(t) && t.status == "done")
+        .filter(|t| {
+            prev.iter()
+                .find(|p| p.id == t.id)
+                .is_none_or(|p| p.status != "done")
+        })
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+/// The execute half of a goal pair. `create_golden_tasks` mints `-0` (plan)
+/// and `-1` (execute) for every `<goal>`; the UI already derives its label
+/// from that same suffix.
+pub fn is_golden_execution(task: &TaskItem) -> bool {
+    is_golden(task) && task.id.ends_with("-1")
 }
 
 /// Strip the reserved `golden-` prefix from any incoming task id that isn't
@@ -333,6 +388,213 @@ mod lld_gate_tests {
         let (ctx, root) = ctx_for("no-handle", None);
         let res = execute_set(one_task(), &ctx);
         assert!(res.is_ok(), "unexpected error: {res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod quality_gate_tests {
+    use super::*;
+    use crate::agent::persist::QualityRunInfo;
+
+    /// A workspace whose `.claudinio.json` carries `quality_json`, plus a
+    /// session JSONL seeded with `prev` tasks.
+    fn setup(
+        name: &str,
+        quality_json: &str,
+        prev: &[TaskItem],
+    ) -> (crate::agent::tools::ToolContext, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("cq-tasks-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".claudinio.json"), quality_json).unwrap();
+        std::fs::write(root.join("src.txt"), "code").unwrap();
+        // Where sessions actually live: appending records must not itself
+        // invalidate the evidence the gate is about to read.
+        std::fs::create_dir_all(root.join(".claudinio/sessions")).unwrap();
+        let store = root.join(".claudinio/sessions/s.jsonl");
+        std::fs::write(&store, "").unwrap();
+        if !prev.is_empty() {
+            crate::agent::persist::append_tasks(&store, prev).unwrap();
+        }
+        let mut ctx = crate::agent::tools::tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+        ctx.session_store_path = Some(store.to_string_lossy().to_string());
+        (ctx, root)
+    }
+
+    fn task(id: &str, status: &str) -> TaskItem {
+        TaskItem {
+            id: id.into(),
+            title: "goal".into(),
+            description: "d".into(),
+            journal: vec![],
+            status: status.into(),
+        }
+    }
+
+    fn record_run(ctx: &crate::agent::tools::ToolContext, root: &std::path::Path, pass: bool) {
+        let store = ctx.session_store_path.clone().unwrap();
+        crate::agent::persist::append_quality_run(
+            std::path::Path::new(&store),
+            &QualityRunInfo {
+                digest: crate::quality::evidence::workspace_digest(root),
+                pass,
+                summary: if pass {
+                    "3 passed, 0 failed"
+                } else {
+                    "2 passed, 1 failed"
+                }
+                .into(),
+                report: String::new(),
+                trigger: "tool".into(),
+                ts: 1,
+            },
+        )
+        .unwrap();
+    }
+
+    fn close_goal(ctx: &crate::agent::tools::ToolContext) -> Result<String, String> {
+        execute_set(
+            SetTasksArgs {
+                tasks: vec![task("golden-g-0", "done"), task("golden-g-1", "done")],
+            },
+            ctx,
+        )
+    }
+
+    #[test]
+    fn closing_an_execution_goal_without_a_run_is_rejected() {
+        let (ctx, root) = setup(
+            "noevidence",
+            "{}",
+            &[task("golden-g-0", "done"), task("golden-g-1", "doing")],
+        );
+        let err = close_goal(&ctx).unwrap_err();
+        assert!(err.contains("run_quality"), "{err}");
+        assert!(err.contains("golden-g-1"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn closing_an_execution_goal_with_fresh_green_evidence_is_allowed() {
+        let (ctx, root) = setup(
+            "green",
+            "{}",
+            &[task("golden-g-0", "done"), task("golden-g-1", "doing")],
+        );
+        record_run(&ctx, &root, true);
+        assert!(close_goal(&ctx).is_ok());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn editing_after_a_green_run_makes_the_evidence_stale_and_blocks_the_close() {
+        // The run-then-edit-then-close path. Without the digest check this is
+        // exactly how a broken change would ship with a green report attached.
+        let (ctx, root) = setup(
+            "stale",
+            "{}",
+            &[task("golden-g-0", "done"), task("golden-g-1", "doing")],
+        );
+        record_run(&ctx, &root, true);
+        std::fs::write(root.join("src.txt"), "code, changed after the run").unwrap();
+        let err = close_goal(&ctx).unwrap_err();
+        assert!(err.contains("stale"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_failing_run_blocks_the_close() {
+        let (ctx, root) = setup(
+            "red",
+            "{}",
+            &[task("golden-g-0", "done"), task("golden-g-1", "doing")],
+        );
+        record_run(&ctx, &root, false);
+        let err = close_goal(&ctx).unwrap_err();
+        assert!(err.contains("FAILED"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_planning_half_of_a_goal_is_not_gated() {
+        // Brain closes `-0` without having written a line of code; demanding a
+        // green suite from it would deadlock every planning session.
+        let (ctx, root) = setup("planhalf", "{}", &[task("golden-g-0", "doing")]);
+        let res = execute_set(
+            SetTasksArgs {
+                tasks: vec![task("golden-g-0", "done")],
+            },
+            &ctx,
+        );
+        assert!(res.is_ok(), "{res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ordinary_tasks_are_not_gated() {
+        let (ctx, root) = setup("ordinary", "{}", &[task("task-1", "doing")]);
+        let res = execute_set(
+            SetTasksArgs {
+                tasks: vec![task("task-1", "done")],
+            },
+            &ctx,
+        );
+        assert!(res.is_ok(), "{res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_workspace_that_enforces_nothing_is_not_gated() {
+        let (ctx, root) = setup(
+            "observation",
+            r#"{"quality":{"enforced_layers":[]}}"#,
+            &[task("golden-g-0", "done"), task("golden-g-1", "doing")],
+        );
+        assert!(close_goal(&ctx).is_ok());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_already_closed_goal_can_be_resubmitted_after_later_edits() {
+        // tasks_set is a full replace, so a settled goal is re-sent on every
+        // later call. Re-gating it would make the list unwritable the moment
+        // the agent touched another file.
+        let (ctx, root) = setup(
+            "settled",
+            "{}",
+            &[task("golden-g-0", "done"), task("golden-g-1", "done")],
+        );
+        std::fs::write(root.join("src.txt"), "changed since the goal closed").unwrap();
+        let res = execute_set(
+            SetTasksArgs {
+                tasks: vec![
+                    task("golden-g-0", "done"),
+                    task("golden-g-1", "done"),
+                    task("task-new", "doing"),
+                ],
+            },
+            &ctx,
+        );
+        assert!(res.is_ok(), "{res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_rejected_call_does_not_persist_the_task_list() {
+        // A rejected tasks_set must leave no trace, or a retry would see the
+        // goal already marked done and skip the gate entirely.
+        let (ctx, root) = setup(
+            "atomic",
+            "{}",
+            &[task("golden-g-0", "done"), task("golden-g-1", "doing")],
+        );
+        close_goal(&ctx).unwrap_err();
+        let store = ctx.session_store_path.clone().unwrap();
+        let saved = crate::agent::persist::load_last_tasks(std::path::Path::new(&store)).unwrap();
+        let goal = saved.iter().find(|t| t.id == "golden-g-1").unwrap();
+        assert_eq!(goal.status, "doing", "the rejected close must not stick");
         std::fs::remove_dir_all(&root).ok();
     }
 }

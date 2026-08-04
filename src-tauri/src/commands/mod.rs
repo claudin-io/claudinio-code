@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod network_log;
 pub mod power;
 pub mod providers;
+pub mod quality;
 pub mod shell;
 pub mod skills;
 pub mod system_stats;

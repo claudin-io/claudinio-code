@@ -6,6 +6,7 @@ import { SettingsModels } from "./settings/SettingsModels";
 import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsMcp } from "./settings/SettingsMcp";
+import { SettingsQuality } from "./settings/SettingsQuality";
 
 interface SettingsPanelProps {
   showConfig: Accessor<boolean>;
@@ -43,6 +44,9 @@ interface SettingsPanelProps {
   configPlanSavePath: Accessor<string>;
   setConfigPlanSavePath: Setter<string>;
   workspaceConfigFields: Accessor<Set<string>>;
+  /// The project the Quality tab configures — those settings live in the
+  /// workspace's own `.claudinio.json`, not the global config.
+  activeWorkspace: Accessor<string | null>;
   accountLogin: Accessor<string | null>;
   hasApiKey: Accessor<boolean>;
   loggingIn: Accessor<boolean>;
@@ -77,7 +81,7 @@ interface SettingsPanelProps {
   openSupportUrl: () => void;
 }
 
-type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'mcp';
+type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'quality' | 'mcp';
 
 interface Category {
   id: CategoryId;
@@ -90,6 +94,7 @@ const CATEGORIES: Category[] = [
   { id: 'models', icon: 'brain', searchTerms: ["Brain Model","Builder Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override"] },
   { id: 'account', icon: 'key', searchTerms: ["Account","Sign in with claudin.io","Sign out","API Key","Support","Providers","More providers\u2026","Connect","Access hundreds of models through one account, via OAuth."] },
   { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)"] },
+  { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
 ];
 
@@ -99,6 +104,7 @@ function getCategoryLabel(id: CategoryId): string {
     models: 'Models',
     account: 'Account',
     agent: 'Agent',
+    quality: 'Quality',
     mcp: 'MCP',
   };
   return labels[id];
@@ -310,6 +316,13 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   yoloBlacklist={props.configYoloBlacklist}
                   setYoloBlacklist={props.setConfigYoloBlacklist}
                   workspaceConfigFields={props.workspaceConfigFields}
+                />
+              </Show>
+
+              <Show when={searchQuery() ? true : activeCategory() === 'quality'}>
+                <SettingsQuality
+                  workspaceRoot={props.activeWorkspace}
+                  onClose={() => props.setShowConfig(false)}
                 />
               </Show>
 
