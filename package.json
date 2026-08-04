@@ -20,7 +20,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "dompurify": "^3.4.12",
-    "fuse.js": "^7.4.2",
+    "fuse.js": "^7.5.0",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.7",
     "mermaid": "^11.16.0",
