@@ -10,6 +10,7 @@ import {
   type HandoffReason,
   type ModeChangedData,
   type Phase,
+  type QualityVerdictData,
   type SessionMode,
   type SessionRecord,
   type ToolCallData,
@@ -48,7 +49,7 @@ export interface SubagentTimelineState {
 }
 
 export interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode" | "golden" | "linked";
+  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode" | "golden" | "quality" | "linked";
   thinking?: { text: string; startedAt: number; endedAt?: number };
   tool?: {
     call: ToolCallData;
@@ -66,6 +67,8 @@ export interface TimelineItem {
   };
   modeChange?: ModeChangedData;
   golden?: GoldenLoopData;
+  /// A quality-harness verdict: the project's own checks ran and were scored.
+  quality?: QualityVerdictData;
   /// Chain divider: this conversation continued in a new linked session.
   /// `firstMessage` (when present) is the successor's kickoff prompt / handoff
   /// document, rendered collapsed. `docOnly` marks the predecessor-side

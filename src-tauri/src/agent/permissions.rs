@@ -33,6 +33,25 @@ const BASH_ALLOWLIST: &[&str] = &[
     "cargo build",
     "cargo check",
     "cargo test",
+    // Verification commands. The quality harness runs these through its own
+    // executor, but the agent also reaches for them ad hoc while debugging a
+    // failure, and stopping to ask permission mid-investigation is friction
+    // with no safety payoff: they read and report, they do not deploy.
+    // `cargo fmt` and `cargo clippy` are deliberately absent: matching is by
+    // prefix, so allowlisting them would also allowlist `cargo clippy --fix`
+    // and let the main session rewrite files outside the subagent path.
+    "cargo nextest",
+    "cargo llvm-cov",
+    "npx vitest",
+    "pnpm exec vitest",
+    "pnpm vitest",
+    "npx jest",
+    "pnpm exec jest",
+    "npm test",
+    "pnpm test",
+    "yarn test",
+    "pytest",
+    "go test",
     "node ",
     "python ",
     "pnpm run",

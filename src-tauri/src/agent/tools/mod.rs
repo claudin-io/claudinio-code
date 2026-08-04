@@ -3,6 +3,7 @@ mod edit_file;
 pub mod finalize_plan;
 mod grep;
 mod list_dir;
+pub mod quality;
 mod read_file;
 pub mod tasks;
 mod web_search;
@@ -67,6 +68,35 @@ pub struct ToolContext {
     /// LRU cache for the session's persisted records, so load_records in the
     /// hot loop skips the filesystem when the file hasn't changed (800 ms TTL).
     pub records_cache: crate::agent::persist::RecordsCache,
+}
+
+/// A bare `ToolContext` for tests: no workspace, no index, no mode handle, so
+/// every gate that keys off those is inert unless the test opts in.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    pub fn ctx() -> ToolContext {
+        ToolContext {
+            db_path: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: Arc::new(Mutex::new(None)),
+            session_store_path: None,
+            read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(4).unwrap(),
+            ))),
+        }
+    }
 }
 
 impl ToolContext {
@@ -285,6 +315,29 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                     "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default 30; override if the command needs more time)" }
                 },
                 "required": ["command"]
+            }),
+        },
+        ToolDef {
+            name: "run_quality".into(),
+            description: "Run this project's own verification layers and record the result as \
+                          session evidence: 'tests' runs the test suite, 'coverage' measures how \
+                          much of what YOU changed is actually executed by a test. The commands \
+                          come from the project (detected, or set in .claudinio.json) — you \
+                          cannot pass a command. \
+                          A golden task CANNOT be marked done unless the most recent run is green \
+                          AND no file changed since it ran: the harness verifies this \
+                          mechanically, so saying the tests pass does not work — run them. \
+                          Call this after finishing the work, and again after any further edit.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "layers": {
+                        "type": "array",
+                        "description": "Layers to run. Omit to run what this project enforces (tests, and coverage when configured).",
+                        "items": { "type": "string", "enum": ["tests", "coverage"] }
+                    }
+                },
+                "required": []
             }),
         },
         ToolDef {
@@ -699,6 +752,12 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 a.workdir = ctx.workspace_root.clone();
             }
             let content = bash::execute(a, ctx).await?;
+            Ok(ToolOutput::Text { content })
+        }
+        "run_quality" => {
+            let a: quality::RunQualityArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let content = quality::execute(a, ctx).await?;
             Ok(ToolOutput::Text { content })
         }
         "tasks_get" => {

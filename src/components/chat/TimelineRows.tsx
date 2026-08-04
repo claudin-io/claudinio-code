@@ -358,12 +358,67 @@ export const TimelineSteps: Component<{
               </span>
             </div>
           </Show>
+          <Show when={step.type === "quality" && step.quality}>
+            <QualityRow quality={step.quality!} />
+          </Show>
           <Show when={step.type === "linked" && step.linked}>
             <LinkedRow linked={step.linked!} />
           </Show>
         </>
       )}
     </For>
+  );
+};
+
+/// A quality-harness verdict. Every layer is listed, including ones that could
+/// not run: "we did not measure this" has to look different from "this passed",
+/// or the row would quietly overstate what was actually verified.
+export const QualityRow: Component<{
+  quality: NonNullable<TimelineItem["quality"]>;
+}> = (props) => {
+  const tone = () =>
+    props.quality.pass
+      ? "border-emerald-500/40 text-emerald-500"
+      : "border-red-500/40 text-red-500";
+  const headline = () =>
+    props.quality.pass ? "Checks passed" : "Checks failed";
+  const layerTone = (status: string) =>
+    status === "pass"
+      ? "text-emerald-500"
+      : status === "fail"
+        ? "text-red-500"
+        : "text-neutral-500";
+  const layerMark = (status: string) =>
+    status === "pass" ? "✓" : status === "fail" ? "✕" : "–";
+
+  return (
+    <div class="my-1 ml-6 flex flex-col gap-1">
+      <div class="flex items-center gap-1.5">
+        <span
+          class={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${tone()}`}
+          title={props.quality.summary}
+        >
+          <Icon
+            name={props.quality.pass ? "check-circle" : "alert-triangle"}
+            class="h-3 w-3"
+          />
+          {headline()}
+          <Show when={props.quality.trigger === "harness"}>
+            <span class="opacity-60">· verified by the harness</span>
+          </Show>
+        </span>
+      </div>
+      <div class="flex flex-col gap-0.5 pl-1">
+        <For each={props.quality.layers}>
+          {(layer) => (
+            <span class="font-mono text-[10px] text-neutral-500">
+              <span class={layerTone(layer.status)}>{layerMark(layer.status)}</span>{" "}
+              {layer.layer} ({layer.stack}): {layer.summary}
+            </span>
+          )}
+        </For>
+      </div>
+    </div>
   );
 };
 

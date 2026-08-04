@@ -6,6 +6,7 @@ pub(crate) mod http;
 mod lsp;
 pub(crate) mod net_activity;
 pub(crate) mod procutil;
+pub mod quality;
 mod state;
 pub(crate) mod workspace_path;
 
@@ -118,7 +119,7 @@ mod architecture_tests {
     #[test]
     fn core_modules_do_not_depend_on_the_command_layer() {
         let mut offenders = Vec::new();
-        for dir in ["src/agent", "src/code_intel", "src/lsp"] {
+        for dir in ["src/agent", "src/code_intel", "src/lsp", "src/quality"] {
             visit(Path::new(dir), &mut |path, body| {
                 if body.contains("crate::commands") {
                     offenders.push(path.display().to_string());

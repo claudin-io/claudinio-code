@@ -132,6 +132,10 @@ pub struct GuardState {
     /// The single reminder to finalize has been sent; next time the harness
     /// appends the log itself.
     pub finalize_nudged: bool,
+    /// Times the harness sent the model back to work because the quality gate
+    /// was red at the finish line. Bounded so a suite the model cannot fix
+    /// stops the run honestly instead of looping.
+    pub quality_retries: u32,
 }
 
 #[cfg(test)]

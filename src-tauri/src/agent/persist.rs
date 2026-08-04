@@ -44,7 +44,11 @@ pub enum SessionRecord {
     /// English-only guard). Kept for audit: the user's message should never
     /// silently vanish from the JSONL.
     #[serde(rename = "rejected")]
-    Rejected { text: String, reason: String, ts: u64 },
+    Rejected {
+        text: String,
+        reason: String,
+        ts: u64,
+    },
     /// A workflow phase boundary: "plan" | "execute" | "summary".
     Phase { phase: String, ts: u64 },
     /// A conversation message exactly as sent to / received from the model.
@@ -191,6 +195,63 @@ pub enum SessionRecord {
     /// it as its first user message.
     #[serde(rename = "handoff")]
     Handoff { text: String, ts: u64 },
+    /// A quality-harness run: the project's own tests / coverage were executed
+    /// and their machine-readable output parsed. This is the evidence the
+    /// golden gate checks — `digest` fingerprints the worktree it ran against,
+    /// so an edit made afterwards invalidates it. `trigger` is "tool" (the
+    /// agent called run_quality) or "harness" (the loop ran it at the finish).
+    #[serde(rename = "quality_run")]
+    QualityRun {
+        digest: String,
+        pass: bool,
+        summary: String,
+        /// Serialized `quality::QualityReport`, for the UI and for audit.
+        report: String,
+        trigger: String,
+        ts: u64,
+    },
+}
+
+/// A `QualityRun` record, flattened for the callers that only need the verdict.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualityRunInfo {
+    pub digest: String,
+    pub pass: bool,
+    pub summary: String,
+    pub report: String,
+    pub trigger: String,
+    pub ts: u64,
+}
+
+/// The most recent quality run in this session, if any.
+///
+/// Per-session by design: a linked successor starts with no evidence, which is
+/// the correct default — a handoff happens precisely when the work was not
+/// finished, so its predecessor's green run says nothing about the new state.
+pub fn last_quality_run(records: &[SessionRecord]) -> Option<QualityRunInfo> {
+    records.iter().rev().find_map(|r| match r {
+        SessionRecord::QualityRun {
+            digest,
+            pass,
+            summary,
+            report,
+            trigger,
+            ts,
+        } => Some(QualityRunInfo {
+            digest: digest.clone(),
+            pass: *pass,
+            summary: summary.clone(),
+            report: report.clone(),
+            trigger: trigger.clone(),
+            ts: *ts,
+        }),
+        _ => None,
+    })
+}
+
+/// Read the session file and return its latest quality run.
+pub fn load_last_quality_run(path: &Path) -> Option<QualityRunInfo> {
+    last_quality_run(&load_records(path).ok()?)
 }
 
 /// Number of golden cycles already run in this session (the highest
@@ -713,6 +774,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::ContinuationJudge { ts, .. }
                 | SessionRecord::BaseCommit { ts, .. }
                 | SessionRecord::PlanFinalized { ts, .. }
+                | SessionRecord::QualityRun { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
@@ -841,6 +903,29 @@ pub fn append_tasks(path: &Path, tasks: &[TaskItem]) -> Result<(), String> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
+    };
+    let line = serde_json::to_string(&record).map_err(|e| format!("serialize record: {e}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open session file: {e}"))?;
+    use std::io::Write;
+    writeln!(file, "{line}").map_err(|e| format!("write session file: {e}"))?;
+    Ok(())
+}
+
+/// Append a quality run to the session JSONL. Mirrors `append_tasks`: the
+/// JSONL is the session's source of truth, so the gate reads its evidence from
+/// the same place the task list and the golden state already live.
+pub fn append_quality_run(path: &Path, info: &QualityRunInfo) -> Result<(), String> {
+    let record = SessionRecord::QualityRun {
+        digest: info.digest.clone(),
+        pass: info.pass,
+        summary: info.summary.clone(),
+        report: info.report.clone(),
+        trigger: info.trigger.clone(),
+        ts: info.ts,
     };
     let line = serde_json::to_string(&record).map_err(|e| format!("serialize record: {e}"))?;
     let mut file = std::fs::OpenOptions::new()

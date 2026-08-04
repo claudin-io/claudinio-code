@@ -26,6 +26,10 @@ pub const GOLDEN_TASK_PREFIX: &str = "golden-";
 /// Golden-loop safety caps used when the config leaves them unset.
 const DEFAULT_MAX_GOLDEN_CYCLES: usize = 5;
 const DEFAULT_MAX_GOLDEN_STALLS: usize = 2;
+/// How many times the harness sends the model back over a failing quality
+/// gate before stopping honestly. A suite it cannot fix in three tries is a
+/// suite it will not fix in ten, and looping burns the user's tokens.
+const MAX_QUALITY_RETRIES: u32 = 3;
 
 /// Parse <goal>...</goal> tags from user input.
 /// Returns (cleaned_text, list_of_goals).
@@ -417,7 +421,9 @@ Use relative paths from the workspace root (no leading `/`). The file icon next 
 const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS (MANDATORY GOALS)\n\
 Tasks whose id starts with 'golden-' are mandatory goals set by the user via <goal> tags:\n\
 - They are the success criteria of the session: work is only finished when every golden task has status='done'.\n\
-- Only mark a golden task 'done' after you VERIFIED the goal it describes is actually met (run the checks — build, tests, coverage, whatever the goal requires) — never on intention.\n\
+- Only mark a golden task 'done' after you VERIFIED the goal it describes is actually met — never on intention.\n\
+- Verification is MECHANICAL, not a claim: call `run_quality` (it runs this project's own tests, and coverage of the lines you changed). `tasks_set` REJECTS closing an execution goal ('golden-...-1') unless the latest run passed AND no file changed since it ran, so editing after a green run means running it again. Stating that the tests pass has no effect — only a recorded run does.\n\
+- When a check fails, fix the cause. Weakening a test, deleting an assertion or skipping a case to get green is a defect, and the changed-line coverage check is there to catch code nothing exercises.\n\
 - If you end your turn while golden tasks are pending, the system automatically switches mode (Brain to plan, Builder to execute) and sends you back to work on them, up to a cycle limit.\n\
 - Never delete golden tasks in tasks_set; keep them in the list and update their status.";
 
@@ -602,7 +608,10 @@ File tools take absolute paths inside this root."
                 "5. When a task's work is verified, call `tasks_set` to mark THAT task status='done', with journal entries for the findings and the 'why'. ",
                 "Do this task by task, as you go - NEVER batch several tasks into a single 'done' call at the end. Then move to the next task (back to step 3).\n",
                 "6. Use the available skills whenever one matches the work.\n",
-                "7. After all tasks, verify the whole (build/tests where applicable) and report.\n",
+                "7. After all tasks, verify the whole: call `run_quality` and report its result. ",
+                "It runs this project's real tests (and changed-line coverage where configured) and records the ",
+                "outcome as the session's evidence - the harness re-checks it before letting the run finish, so a ",
+                "goal cannot be closed on an unverified build. If it comes back red, fix the cause and run it again.\n",
                 "8. As your LAST step, once every task is done and verified, call `finalize_plan` with a journal of findings ",
                 "(key decisions, gotchas, what was learned). It auto-records the changed files and commit(s) into the plan file, ",
                 "so the journal should focus on the 'why' and what you learned - not a file list. This feeds the plan with data for future reference.\n",
@@ -739,6 +748,19 @@ pub enum AgentEvent {
         pending: Vec<String>,
         mode: String,
     },
+    /// A quality-harness run finished: the project's own tests / coverage ran
+    /// and were scored against the gate. Emitted whether the harness or the
+    /// agent triggered it, so the user always sees the verification, not just
+    /// the model's claim about it.
+    #[serde(rename = "QualityVerdict")]
+    QualityVerdict {
+        pass: bool,
+        summary: String,
+        /// One entry per layer/stack: "tests", "pass", "3 passed, 0 failed".
+        layers: Vec<QualityLayerView>,
+        /// "tool" when the agent asked, "harness" when the loop enforced it.
+        trigger: String,
+    },
     /// The session was linked to a new successor via handoff. The old session
     /// ends here; the UI stitches the successor's events into the same thread.
     #[serde(rename = "SessionLinked")]
@@ -773,6 +795,31 @@ pub enum AgentEvent {
         #[serde(rename = "compactThreshold")]
         compact_threshold: u64,
     },
+}
+
+/// One row of the quality panel: which layer, on which stack, and how it went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityLayerView {
+    pub layer: String,
+    pub stack: String,
+    pub status: String,
+    pub summary: String,
+}
+
+impl QualityLayerView {
+    pub fn from_report(report: &crate::quality::QualityReport) -> Vec<Self> {
+        report
+            .layers
+            .iter()
+            .map(|l| QualityLayerView {
+                layer: l.layer.as_str().to_string(),
+                stack: l.stack.clone(),
+                status: l.status.as_str().to_string(),
+                summary: l.summary.clone(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2076,7 +2123,8 @@ pub async fn run_workflow_with_profile(
                 // Structural backstop on top of the judge's verdict: a message
                 // ending in a question mark or a trailing colon ("the core
                 // design question:") is a dangling question, not a final reply.
-                let will_nudge = verdict == TurnVerdict::Continue || should_nudge_terminal(&last_text);
+                let will_nudge =
+                    verdict == TurnVerdict::Continue || should_nudge_terminal(&last_text);
                 // Transparent to the user (no event emitted, UI renders nothing)
                 // but auditable: persist the judge's decision to the JSONL.
                 store.try_append(&SessionRecord::ContinuationJudge {
@@ -2192,6 +2240,104 @@ pub async fn run_workflow_with_profile(
                     },
                     golden_pending.join(", "),
                 );
+            }
+
+            // Quality verification: the mechanical half of "the goal is met".
+            // `tasks_set` already refuses to close an execution goal without
+            // fresh green evidence, but the model can also simply stop talking
+            // — so before this run is allowed to finish, the harness checks
+            // the evidence itself and runs the checks when there are none.
+            // Same pattern as auto_finalize below: never rely on the model
+            // having done the required last step.
+            if stop_reason == "end_turn" {
+                let has_execution_goal = ctx
+                    .session_store_path
+                    .as_deref()
+                    .and_then(|p| {
+                        crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok()
+                    })
+                    .unwrap_or_default()
+                    .iter()
+                    .any(crate::agent::tools::tasks::is_golden_execution);
+
+                if has_execution_goal {
+                    use crate::agent::tools::quality as qtool;
+                    let evidence = qtool::current_evidence(ctx);
+                    // A failing run whose digest still matches describes
+                    // exactly the files on disk right now — nothing changed
+                    // since, so re-running would spend minutes to learn the
+                    // same thing. This is also the common case while the model
+                    // is being sent back over a red gate.
+                    let mut report = match &evidence {
+                        qtool::Evidence::Current { pass: false, .. } => qtool::last_report(ctx),
+                        _ => None,
+                    };
+                    // Nothing to do when no layer is enforced or the evidence
+                    // is already green against these exact files. Otherwise we
+                    // genuinely do not know, so we check for ourselves.
+                    let must_run = report.is_none()
+                        && !matches!(
+                            evidence,
+                            qtool::Evidence::NotRequired
+                                | qtool::Evidence::Current { pass: true, .. }
+                        );
+                    if must_run {
+                        let _ = event_tx.send(AgentEvent::TextStep {
+                            text: "🧪 Verifying the goal: running the project's checks…".into(),
+                        });
+                        match qtool::run_enforced(ctx, "harness").await {
+                            Ok(r) => {
+                                let _ = event_tx.send(AgentEvent::QualityVerdict {
+                                    pass: r.verdict.pass,
+                                    summary: r.summary_text(),
+                                    layers: QualityLayerView::from_report(&r),
+                                    trigger: "harness".into(),
+                                });
+                                report = Some(r);
+                            }
+                            Err(e) => {
+                                // The harness itself could not run (no
+                                // recognizable project, workspace gone). Fail
+                                // open and say so: blocking a finish on OUR
+                                // inability to check would strand the user
+                                // with no way forward.
+                                let _ = event_tx.send(AgentEvent::TextStep {
+                                    text: format!("⚠️ Quality checks could not run: {e}"),
+                                });
+                            }
+                        }
+                    }
+
+                    if let Some(report) = report.filter(|r| !r.verdict.pass) {
+                        if guards.quality_retries < MAX_QUALITY_RETRIES {
+                            guards.quality_retries += 1;
+                            push_user_blocks(
+                                history,
+                                store,
+                                ctx,
+                                vec![ContentBlock::text(format!(
+                                    "[system] You tried to finish, but the project's own checks \
+                                     FAIL against the code as it stands. The goal is not met \
+                                     until they pass.\n\n{}\n{}\nFix the cause (not the test), \
+                                     then call run_quality again. Attempt {}/{}.",
+                                    report.summary_text(),
+                                    report.failure_detail(4_000),
+                                    guards.quality_retries,
+                                    MAX_QUALITY_RETRIES,
+                                ))],
+                            );
+                            continue;
+                        }
+                        // Out of attempts: stop honestly with a reason the
+                        // user can see, exactly like the golden cycle cap.
+                        stop_reason = "quality_failed";
+                        last_text = format!(
+                            "{last_text}\n\n⚠️ Quality gate not met after {MAX_QUALITY_RETRIES} \
+                             attempts:\n{}",
+                            report.summary_text()
+                        );
+                    }
+                }
             }
 
             // Feed the plan its Implementation Log when a goal-driven build
@@ -4199,7 +4345,9 @@ mod tests {
     #[test]
     fn structural_backstop_nudges_dangling_questions() {
         // The real stalled case: a promise to ask a design question, no tool.
-        assert!(should_nudge_terminal("Now for danger memory — the core design question:"));
+        assert!(should_nudge_terminal(
+            "Now for danger memory — the core design question:"
+        ));
         assert!(should_nudge_terminal("Do you want me to continue?"));
     }
 

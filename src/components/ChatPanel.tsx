@@ -31,6 +31,7 @@ import {
   type ThinkingEffort,
   type ModeChangedData,
   type GoldenLoopData,
+  type QualityVerdictData,
   type SessionLinkedData,
   type AgentEvent,
   type RetryingData,
@@ -831,6 +832,13 @@ export const ChatPanel: Component<{
       setCurrentSteps((prev) => [
         ...prev,
         { type: "golden" as const, golden: data } as TimelineItem,
+      ]);
+      scrollToBottom();
+    } else if (event.event === "QualityVerdict") {
+      const data = event.data as QualityVerdictData;
+      setCurrentSteps((prev) => [
+        ...prev,
+        { type: "quality" as const, quality: data } as TimelineItem,
       ]);
       scrollToBottom();
     } else if (event.event === "SessionLinked") {

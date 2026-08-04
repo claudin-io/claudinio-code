@@ -207,6 +207,23 @@ export interface GoldenLoopData {
   mode: SessionMode;
 }
 
+/** One layer of the quality harness, as scored against one stack. */
+export interface QualityLayerView {
+  layer: string;
+  stack: string;
+  status: "pass" | "fail" | "unavailable";
+  summary: string;
+}
+
+/** A verification run finished. `trigger` is "tool" when the agent asked for
+ * it and "harness" when the loop enforced it before letting the run finish. */
+export interface QualityVerdictData {
+  pass: boolean;
+  summary: string;
+  layers: QualityLayerView[];
+  trigger: "tool" | "harness";
+}
+
 /// Why a session handed off to a linked successor.
 export type HandoffReason =
   | "plan_execution"
@@ -227,6 +244,7 @@ export type AgentEvent =
   | { event: "TextDelta"; data: { text: string } }
   | { event: "ModeChanged"; data: ModeChangedData }
   | { event: "GoldenLoop"; data: GoldenLoopData }
+  | { event: "QualityVerdict"; data: QualityVerdictData }
   | { event: "SessionLinked"; data: SessionLinkedData }
   | { event: "Thinking"; data: string }
   | { event: "ToolCall"; data: ToolCallData }
