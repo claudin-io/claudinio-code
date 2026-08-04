@@ -768,12 +768,11 @@ fn extract_declaration_name(node: &tree_sitter::Node, kind: &str, content: &str)
         // Name = first variable_declarator's name
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "variable_declarator" {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
-                        return Some(name.trim().to_string());
-                    }
-                }
+            if child.kind() == "variable_declarator"
+                && let Some(name_node) = child.child_by_field_name("name")
+                && let Ok(name) = name_node.utf8_text(content.as_bytes())
+            {
+                return Some(name.trim().to_string());
             }
         }
         return None;
@@ -1148,9 +1147,7 @@ fn parse_html_file(
         match kind {
             "element" => extract_html_element(&node, content, &mut symbols),
             "comment" => extract_html_comment(&node, content, &mut symbols),
-            "script_element" => {
-                extract_embedded_script(&node, content, &mut symbols, &mut calls)
-            }
+            "script_element" => extract_embedded_script(&node, content, &mut symbols, &mut calls),
             "style_element" => extract_embedded_style(&node, content, &mut symbols),
             _ => {}
         }
@@ -1191,7 +1188,9 @@ fn extract_html_element(node: &tree_sitter::Node, content: &str, symbols: &mut V
     let tag_name_node = start_tag
         .children(&mut tag_cursor)
         .find(|c| c.kind() == "tag_name");
-    let Some(tag_name_node) = tag_name_node else { return };
+    let Some(tag_name_node) = tag_name_node else {
+        return;
+    };
     let tag_text = get_node_text(content, &tag_name_node, 80);
 
     let start = node.start_position();
@@ -1211,7 +1210,10 @@ fn extract_html_element(node: &tree_sitter::Node, content: &str, symbols: &mut V
         for child in attr.children(&mut a_cursor) {
             match child.kind() {
                 "attribute_name" => {
-                    attr_name = child.utf8_text(content.as_bytes()).ok().map(|s| s.to_string());
+                    attr_name = child
+                        .utf8_text(content.as_bytes())
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 // Quoted values parse as `quoted_attribute_value` in the
                 // tree-sitter-html grammar (raw text includes the surrounding
@@ -1271,7 +1273,7 @@ fn extract_html_comment(node: &tree_sitter::Node, content: &str, symbols: &mut V
     let raw = node.utf8_text(content.as_bytes()).unwrap_or("");
     let text = raw
         .strip_prefix("<!--")
-        .and_then(|t| t.strip_suffix("-->").or_else(|| Some(t)))
+        .map(|t| t.strip_suffix("-->").unwrap_or(t))
         .map(|t| t.trim())
         .unwrap_or("");
     if text.is_empty() {
@@ -1304,10 +1306,10 @@ fn extract_embedded_script(
     calls: &mut Vec<ParsedCall>,
 ) {
     let mut cursor = node.walk();
-    let raw_text_node = node
-        .children(&mut cursor)
-        .find(|c| c.kind() == "raw_text");
-    let Some(raw_text_node) = raw_text_node else { return };
+    let raw_text_node = node.children(&mut cursor).find(|c| c.kind() == "raw_text");
+    let Some(raw_text_node) = raw_text_node else {
+        return;
+    };
     let js_code = raw_text_node.utf8_text(content.as_bytes()).unwrap_or("");
     if js_code.trim().is_empty() {
         return;
@@ -1319,7 +1321,9 @@ fn extract_embedded_script(
     if js_parser.set_language(&js_ts_language).is_err() {
         return;
     }
-    let Some(js_tree) = js_parser.parse(js_code, None) else { return };
+    let Some(js_tree) = js_parser.parse(js_code, None) else {
+        return;
+    };
     let js_root = js_tree.root_node();
 
     let mut js_cursor = js_root.walk();
@@ -1466,12 +1470,16 @@ fn extract_embedded_script(
 /// Extract symbols from an embedded <style> block by re-parsing its raw text
 /// with tree-sitter-css. Symbols get absolute line numbers (offset by the
 /// style's start line in the HTML) and parent "style".
-fn extract_embedded_style(node: &tree_sitter::Node, content: &str, symbols: &mut Vec<ParsedSymbol>) {
+fn extract_embedded_style(
+    node: &tree_sitter::Node,
+    content: &str,
+    symbols: &mut Vec<ParsedSymbol>,
+) {
     let mut cursor = node.walk();
-    let raw_text_node = node
-        .children(&mut cursor)
-        .find(|c| c.kind() == "raw_text");
-    let Some(raw_text_node) = raw_text_node else { return };
+    let raw_text_node = node.children(&mut cursor).find(|c| c.kind() == "raw_text");
+    let Some(raw_text_node) = raw_text_node else {
+        return;
+    };
     let css_code = raw_text_node.utf8_text(content.as_bytes()).unwrap_or("");
     if css_code.trim().is_empty() {
         return;
@@ -1483,7 +1491,9 @@ fn extract_embedded_style(node: &tree_sitter::Node, content: &str, symbols: &mut
     if css_parser.set_language(&css_ts_language).is_err() {
         return;
     }
-    let Some(css_tree) = css_parser.parse(css_code, None) else { return };
+    let Some(css_tree) = css_parser.parse(css_code, None) else {
+        return;
+    };
     let css_root = css_tree.root_node();
 
     let mut css_cursor = css_root.walk();
@@ -1555,14 +1565,13 @@ fn extract_js_comments(
             let raw = node.utf8_text(js_code.as_bytes()).unwrap_or("");
             let text = raw
                 .strip_prefix("//")
-                .or_else(|| {
-                    raw.strip_prefix("/*")
-                        .and_then(|t| t.strip_suffix("*/"))
-                })
+                .or_else(|| raw.strip_prefix("/*").and_then(|t| t.strip_suffix("*/")))
                 .map(|t| t.trim())
                 .unwrap_or("");
             let is_decorative = text.is_empty()
-                || text.chars().all(|c| c == '-' || c == '=' || c.is_whitespace());
+                || text
+                    .chars()
+                    .all(|c| c == '-' || c == '=' || c.is_whitespace());
             if !is_decorative {
                 let start = node.start_position();
                 let end = node.end_position();
@@ -1931,7 +1940,13 @@ Has content.
         let result = parse_file("index.html", content);
         assert!(result.error.is_none(), "error: {:?}", result.error);
 
-        let by_name = |n: &str| result.symbols.iter().filter(|s| s.name == n).collect::<Vec<_>>();
+        let by_name = |n: &str| {
+            result
+                .symbols
+                .iter()
+                .filter(|s| s.name == n)
+                .collect::<Vec<_>>()
+        };
 
         // HTML element with id
         let game = by_name("game");
@@ -1974,7 +1989,9 @@ Has content.
         let js_comment = result
             .symbols
             .iter()
-            .filter(|s| s.name == "3. JS: Constants" && s.parent_context.as_deref() == Some("script"))
+            .filter(|s| {
+                s.name == "3. JS: Constants" && s.parent_context.as_deref() == Some("script")
+            })
             .count();
         assert_eq!(js_comment, 1, "symbols: {:?}", result.symbols);
     }
