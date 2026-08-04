@@ -6,9 +6,12 @@ import {
   type EnforceOn,
   type QualitySettings,
 } from "../../lib/ipc";
+import { bootstrapTestsPrompt, seedComposer } from "../../lib/composerSeed";
 
 interface SettingsQualityProps {
   workspaceRoot: Accessor<string | null>;
+  /// Closes the Settings modal, so the prepared prompt is visible in the chat.
+  onClose: () => void;
 }
 
 /**
@@ -329,8 +332,8 @@ export const SettingsQuality: Component<SettingsQualityProps> = (props) => {
                 <Show
                   when={stacks().length > 0}
                   fallback={
-                    <p class="text-[11px] text-amber-500">
-                      {"No test-capable project detected. Set a test command above, or the harness will report that it could not verify anything."}
+                    <p class="mb-2 text-[11px] text-amber-500">
+                      {"No test-capable project detected. Nothing here can verify anything until this project has a test suite."}
                     </p>
                   }
                 >
@@ -345,6 +348,26 @@ export const SettingsQuality: Component<SettingsQualityProps> = (props) => {
                     )}
                   </For>
                 </Show>
+              </div>
+
+              <div class="mt-3 border-t border-border-subtle pt-3">
+                <button
+                  onClick={() => {
+                    const ws = props.workspaceRoot();
+                    if (!ws) return;
+                    seedComposer(ws, bootstrapTestsPrompt(stacks().map((s) => s.name)));
+                    props.onClose();
+                  }}
+                  class="rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3"
+                >
+                  {stacks().length > 0 ? "Ask the agent to add tests" : "Ask the agent to set up tests"}
+                </button>
+                <p class="mt-2 text-[11px] text-ink-faint">
+                  {"Puts a prepared prompt in the chat for you to read and send — it does not run anything on its own."}
+                </p>
+                <p class="mt-1 text-[11px] text-ink-faint">
+                  {"The agent writing its own tests is exactly the risk this harness exists for, so the prompt requires it to finish with a mutation run: the tests have to catch code that was deliberately broken, not just execute it. Your .feature specs, if you have any, remain the part it cannot write."}
+                </p>
               </div>
 
               <Show when={error()}>

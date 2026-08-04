@@ -3,12 +3,14 @@ import { render } from "solid-js/web";
 import { createSignal } from "solid-js";
 import { getQualityConfig, setQualityConfig, type QualityInfo } from "../../lib/ipc";
 import { SettingsQuality } from "./SettingsQuality";
+import { takeComposerSeed } from "../../lib/composerSeed";
 
 vi.mock("../../lib/ipc", () => ({
   getQualityConfig: vi.fn(),
   setQualityConfig: vi.fn().mockResolvedValue(undefined),
 }));
 
+const onClose = vi.fn();
 let dispose: (() => void) | undefined;
 let host: HTMLDivElement | undefined;
 
@@ -55,7 +57,7 @@ async function mount(workspace: string | null, data: QualityInfo = info()) {
   const [ws] = createSignal(workspace);
   host = document.createElement("div");
   document.body.appendChild(host);
-  dispose = render(() => <SettingsQuality workspaceRoot={ws} />, host);
+  dispose = render(() => <SettingsQuality workspaceRoot={ws} onClose={onClose} />, host);
   // Let the load effect's promise settle.
   await Promise.resolve();
   await Promise.resolve();
@@ -163,6 +165,27 @@ describe("SettingsQuality", () => {
     const el = await mount("/p", info({ enforcedLayers: ["tests", "metrics"] }));
     expect(el.textContent).toContain("report only");
     expect(el.textContent).toContain("not canonical McCabe");
+  });
+
+  it("offers to have the agent set up tests when there are none", async () => {
+    const el = await mount("/p", { ...info(), stacks: [] });
+    const button = Array.from(el.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("set up tests"),
+    );
+    expect(button).toBeDefined();
+    button!.click();
+    await Promise.resolve();
+    // It hands the prompt to the chat and gets out of the way — it must not
+    // start spending tokens from a settings click.
+    expect(takeComposerSeed("/p")).toContain("<goal>");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("says up front that the agent will not run anything on its own", async () => {
+    const el = await mount("/p");
+    expect(el.textContent).toContain("does not run anything on its own");
+    // And names the risk it is creating, plus the check that answers it.
+    expect(el.textContent).toContain("mutation run");
   });
 
   it("surfaces a write failure instead of pretending it saved", async () => {

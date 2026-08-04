@@ -320,7 +320,10 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
               </Show>
 
               <Show when={searchQuery() ? true : activeCategory() === 'quality'}>
-                <SettingsQuality workspaceRoot={props.activeWorkspace} />
+                <SettingsQuality
+                  workspaceRoot={props.activeWorkspace}
+                  onClose={() => props.setShowConfig(false)}
+                />
               </Show>
 
               <Show when={searchQuery() ? true : activeCategory() === 'mcp'}>

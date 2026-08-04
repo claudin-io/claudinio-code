@@ -355,6 +355,29 @@ we cannot tell, and treating it as "nothing to check" let a non-git project pass
 coverage and mutation forever without either layer ever running. `changed_lines`
 now returns `Option`, and an unknown scope reports as unavailable.
 
+## Bootstrapping a project that has no tests
+
+A project with no suite gets nothing from any of this — the harness can only
+report that it cannot verify anything. The Quality tab therefore offers to have
+the agent write the suite, which raises the obvious objection: if the AI writes
+the tests, what checks the tests?
+
+Three things, and they are why this button waited until phase 5 rather than
+shipping with phase 1:
+
+1. The prompt is a `<goal>`, so the golden gate refuses to let the run finish
+   until the suite actually passes.
+2. It requires the agent to end with a **mutation** run. Mutation is mechanical
+   and adversarial to the tests specifically: it breaks the code and demands the
+   tests notice. Tests that assert nothing survive it, which is exactly the
+   failure mode of AI-written tests.
+3. Specs stay human-owned. Whether the tests point at the *right* behaviour is
+   still answered by something the agent cannot write.
+
+The button seeds the composer and closes Settings; it does not send. A click in
+a settings panel should not spend tokens, and a prompt worth running is a prompt
+worth reading first.
+
 ## Still open
 
 **Phase 4 — Gherkin / BDD.** `features/**/*.feature` as human-owned ground
