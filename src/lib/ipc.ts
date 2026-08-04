@@ -561,6 +561,47 @@ export function getConfig(workspace?: string): Promise<AgentConfig> {
   return invoke<AgentConfig>("get_config", { workspace: workspace ?? null });
 }
 
+/** What triggers the harness's finish-line verification. */
+export type EnforceOn = "goals" | "code_change";
+
+/** Per-project quality settings, stored in the workspace's `.claudinio.json`. */
+export interface QualitySettings {
+  enabled: boolean;
+  enforceOn: EnforceOn;
+  /** Layers that block a finish: "tests" and/or "coverage". Empty = report only. */
+  enforcedLayers: string[];
+  diffCoverageThreshold: number;
+  /** Empty = use the detected command. */
+  testCmd: string;
+  coverageCmd: string;
+  testTimeoutSecs: number;
+  coverageTimeoutSecs: number;
+}
+
+/** A build root the harness found, and what it would run there. */
+export interface DetectedStack {
+  name: string;
+  root: string;
+  testCmd: string;
+  coverageCmd: string | null;
+}
+
+export interface QualityInfo {
+  settings: QualitySettings;
+  stacks: DetectedStack[];
+}
+
+export function getQualityConfig(workspaceRoot: string): Promise<QualityInfo> {
+  return invoke<QualityInfo>("get_quality_config", { workspaceRoot });
+}
+
+export function setQualityConfig(
+  workspaceRoot: string,
+  settings: QualitySettings,
+): Promise<void> {
+  return invoke<void>("set_quality_config", { workspaceRoot, settings });
+}
+
 export function setKeepAwake(active: boolean): Promise<void> {
   return invoke<void>("set_keep_awake", { active });
 }

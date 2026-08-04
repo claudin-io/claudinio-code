@@ -215,6 +215,18 @@ installed, and a harness that blocks on day one gets switched off. Empty
 Malformed JSON falls back to the defaults *with the gate on*. A stray comma must
 never silently disable enforcement.
 
+The **Quality tab** in Settings edits this same file — it is a view onto
+`.claudinio.json`, never a second source of truth. It saves on change rather
+than on the panel's Save button, because that button writes the *global* config:
+one button appearing to cover two different files is worse than two obvious
+behaviours. The tab also lists the stacks detection found and the commands it
+would run, so "did it understand my project?" is answerable without running
+anything.
+
+The panel cannot write a file the harness fails to read: unknown layer names are
+dropped, the threshold is clamped to 0–100, and a zero timeout (which would kill
+every run) is floored at one second.
+
 `test_cmd` replaces detection entirely rather than running alongside it — if the
 user said how to test the project, also running our guess would double the wall
 clock and could contradict them.
@@ -239,9 +251,8 @@ touched files. This is the phase that needs cross-session history, and so the
 phase that should introduce `quality.db` (a separate database with real
 migrations — never `index.db`, which is dropped and rebuilt on schema bumps).
 
-Also deferred: a manual "run checks" IPC command with a progress channel, a
-history/trend panel, and a Settings tab. Configuration works today by editing
-`.claudinio.json`.
+Also deferred: a manual "run checks" button with a live progress channel, and a
+history/trend panel.
 
 ## Verification
 
