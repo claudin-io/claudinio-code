@@ -345,7 +345,9 @@ pub fn parse_doc_file(path: &str, content: &str) -> Vec<ParsedSymbol> {
 // `tree_sitter_language::LanguageFn` that implements `Into<tree_sitter::Language>`.
 // ---------------------------------------------------------------------------
 
-fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
+/// Public so the quality harness can walk the same trees for complexity
+/// metrics instead of duplicating this 77-grammar table.
+pub fn get_language(lang: &str) -> Result<tree_sitter::Language, String> {
     match lang {
         // New API — LANGUAGE constant (LanguageFn), convertible via .into()
         "ada" => Ok(tree_sitter_ada::LANGUAGE.into()),

@@ -579,6 +579,8 @@ export interface QualitySettings {
   /** Empty = the default "features" directory. */
   featuresDir: string;
   gherkinCmd: string;
+  /** 0 = no budget; the complexity layer reports without blocking. */
+  maxComplexity: number;
   testTimeoutSecs: number;
   coverageTimeoutSecs: number;
   mutationTimeoutSecs: number;

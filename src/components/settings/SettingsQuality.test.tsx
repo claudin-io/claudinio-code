@@ -32,6 +32,7 @@ const info = (over: Partial<QualityInfo["settings"]> = {}): QualityInfo => ({
     mutationCmd: "",
     featuresDir: "",
     gherkinCmd: "",
+    maxComplexity: 0,
     testTimeoutSecs: 600,
     coverageTimeoutSecs: 900,
     mutationTimeoutSecs: 1800,
@@ -155,6 +156,13 @@ describe("SettingsQuality", () => {
     expect(el.textContent).toContain("Specs directory");
     // Without a runner, the honest outcome must be stated up front.
     expect(el.textContent).toContain("never as passing");
+  });
+
+  it("says complexity only reports until a budget is set", async () => {
+    // A heuristic that blocks by default would block for the wrong reason.
+    const el = await mount("/p", info({ enforcedLayers: ["tests", "metrics"] }));
+    expect(el.textContent).toContain("report only");
+    expect(el.textContent).toContain("not canonical McCabe");
   });
 
   it("surfaces a write failure instead of pretending it saved", async () => {

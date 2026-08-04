@@ -173,6 +173,38 @@ export const SettingsQuality: Component<SettingsQualityProps> = (props) => {
                     {"Runs your .feature files. They are the one input the agent cannot edit — it must ask you to change a scenario rather than rewrite it."}
                   </p>
                 </Show>
+                <label class="mb-1 flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={enforces("metrics")}
+                    onChange={(e) => toggleLayer("metrics", e.currentTarget.checked)}
+                    class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+                  />
+                  <span class="text-sm text-ink">{"Complexity"}</span>
+                  <span class="text-[11px] text-ink-faint">{"Catches the codebase rotting."}</span>
+                </label>
+                <Show when={enforces("metrics")}>
+                  <label class="mb-1 mt-2 block text-xs text-ink-muted">
+                    {"Complexity budget per changed function"}
+                  </label>
+                  <div class="mb-1 flex items-center gap-3">
+                    <input
+                      type="range"
+                      min="0"
+                      max="40"
+                      step="1"
+                      value={cfg().maxComplexity}
+                      onInput={(e) => patch({ maxComplexity: Number(e.currentTarget.value) })}
+                      class="flex-1 accent-accent"
+                    />
+                    <span class="w-20 text-right font-mono text-sm text-ink">
+                      {cfg().maxComplexity === 0 ? "report only" : String(cfg().maxComplexity)}
+                    </span>
+                  </div>
+                  <p class="mb-4 text-[11px] text-ink-faint">
+                    {"A consistent heuristic, not canonical McCabe — good for comparing a function against itself over time. Leave at 0 to record the trend without ever blocking."}
+                  </p>
+                </Show>
                 <Show when={cfg().enforcedLayers.length === 0}>
                   <p class="mb-4 text-[11px] text-amber-500">
                     {"Nothing is enforced: the harness will report results but never block a finish."}

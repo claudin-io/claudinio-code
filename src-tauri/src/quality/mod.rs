@@ -19,10 +19,12 @@
 pub mod config;
 pub mod diff;
 pub mod evidence;
+pub mod metrics;
 pub mod parsers;
 pub mod profile;
 pub mod runner;
 pub mod spec;
+pub mod store;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -45,6 +47,7 @@ pub enum Layer {
     Coverage,
     Mutation,
     Gherkin,
+    Metrics,
 }
 
 impl Layer {
@@ -54,6 +57,7 @@ impl Layer {
             Layer::Coverage => "coverage",
             Layer::Mutation => "mutation",
             Layer::Gherkin => "gherkin",
+            Layer::Metrics => "metrics",
         }
     }
 
@@ -63,6 +67,7 @@ impl Layer {
             "coverage" | "cov" => Some(Layer::Coverage),
             "mutation" | "mutants" => Some(Layer::Mutation),
             "gherkin" | "spec" | "specs" | "bdd" => Some(Layer::Gherkin),
+            "metrics" | "complexity" => Some(Layer::Metrics),
             _ => None,
         }
     }
@@ -226,6 +231,7 @@ pub fn evaluate_gate(layers: &[LayerResult], enforced: &[Layer]) -> GateVerdict 
                 Layer::Coverage => "diff coverage at or above threshold".into(),
                 Layer::Mutation => "mutation score at or above threshold".into(),
                 Layer::Gherkin => "every scenario in the spec passing".into(),
+                Layer::Metrics => "changed functions within the complexity budget".into(),
             },
             actual: r.summary.clone(),
         });
@@ -249,7 +255,10 @@ pub async fn run_layers(
     interrupt: Option<&Arc<AtomicBool>>,
 ) -> Result<QualityReport, String> {
     let profile = profile::detect(workspace_root, cfg);
-    if profile.stacks.is_empty() {
+    // Only the command-driven layers need a detected stack. Complexity reads
+    // files directly, so a project with no test runner can still be watched.
+    let needs_stack = requested.iter().any(|l| !matches!(l, Layer::Metrics));
+    if profile.stacks.is_empty() && needs_stack {
         return Err(
             "no test-capable project detected in this workspace (looked for Cargo.toml and \
              package.json with vitest/jest). Set \"quality\": {\"test_cmd\": \"...\"} in \
@@ -258,10 +267,12 @@ pub async fn run_layers(
         );
     }
 
-    // Coverage and mutation are both scoped to the lines this run actually
+    // Coverage, mutation and metrics are all scoped to what this run actually
     // changed, so they report on the agent's work rather than the repo's
     // history — and so mutation stays affordable at all.
-    let scoped = requested.contains(&Layer::Coverage) || requested.contains(&Layer::Mutation);
+    let scoped = requested.contains(&Layer::Coverage)
+        || requested.contains(&Layer::Mutation)
+        || requested.contains(&Layer::Metrics);
     let changed = if scoped {
         diff::changed_lines(workspace_root, base_commit)
     } else {
@@ -313,6 +324,15 @@ pub async fn run_layers(
         }
     }
 
+    if requested.contains(&Layer::Metrics) {
+        results.push(run_metrics(
+            workspace_root,
+            cfg,
+            changed.as_ref(),
+            base_commit,
+        ));
+    }
+
     let verdict = evaluate_gate(&results, &cfg.enforced_layers);
     Ok(QualityReport {
         ts: now_ms(),
@@ -321,6 +341,136 @@ pub async fn run_layers(
         layers: results,
         verdict,
     })
+}
+
+/// Complexity of the functions this run touched.
+///
+/// Unlike every other layer this one runs no command — it reads the files — so
+/// it is scored once for the workspace rather than once per stack.
+fn run_metrics(
+    workspace_root: &Path,
+    cfg: &QualityConfig,
+    changed: Option<&diff::ChangedLines>,
+    base_commit: Option<&str>,
+) -> LayerResult {
+    let stack = "workspace".to_string();
+    let Some(changed) = changed else {
+        return LayerResult {
+            layer: Layer::Metrics,
+            status: LayerStatus::Unavailable,
+            stack,
+            summary: "changed files could not be determined (no git repository), so complexity \
+                      of this run's work was not measured"
+                .into(),
+            detail: String::new(),
+            exit_code: None,
+            metrics: serde_json::Value::Null,
+            log_path: None,
+        };
+    };
+
+    let mut files: Vec<&std::path::PathBuf> = changed.keys().collect();
+    files.sort();
+    let mut measured: Vec<metrics::FunctionMetric> = Vec::new();
+    for path in files {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue; // deleted, binary, or unreadable
+        };
+        let display = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        measured.extend(metrics::analyze(&display, &content));
+    }
+
+    let summary = metrics::summarize(&measured, cfg.max_complexity);
+    // History is what turns a number into a direction, and it is the reason
+    // this phase has a database at all. Failing to record must never fail the
+    // run: a trend is nice to have, the gate is not.
+    let previous = record_metrics_history(workspace_root, base_commit, &summary);
+    let trend = previous
+        .map(|p| {
+            let delta = summary.mean_complexity() - p.mean_complexity;
+            match delta {
+                d if d > 0.05 => format!(", trending up from {:.1}", p.mean_complexity),
+                d if d < -0.05 => format!(", trending down from {:.1}", p.mean_complexity),
+                _ => format!(", flat against {:.1}", p.mean_complexity),
+            }
+        })
+        .unwrap_or_default();
+
+    let over = summary.over_budget.len();
+    let green = over == 0;
+    let mut detail = String::new();
+    if !green {
+        let budget = cfg.max_complexity.unwrap_or(0);
+        detail.push_str(&format!(
+            "{over} changed function(s) exceed the complexity budget of {budget}:\n"
+        ));
+        for f in &summary.over_budget {
+            detail.push_str(&format!(
+                "  - {}:{} {} (complexity {}, {} lines)\n",
+                f.file, f.line, f.name, f.complexity, f.loc
+            ));
+        }
+        detail.push_str(
+            "\nSplit them, or raise quality.max_complexity if this project's shape genuinely \
+             calls for it. Note this is a consistent heuristic rather than canonical McCabe.\n",
+        );
+    }
+
+    LayerResult {
+        layer: Layer::Metrics,
+        status: if green {
+            LayerStatus::Pass
+        } else {
+            LayerStatus::Fail
+        },
+        stack,
+        summary: format!("{}{trend}", summary.headline()),
+        detail,
+        exit_code: None,
+        metrics: serde_json::json!({
+            "functions": summary.functions,
+            "max_complexity": summary.max_complexity,
+            "mean_complexity": summary.mean_complexity(),
+            "over_budget": over,
+            "budget": cfg.max_complexity,
+        }),
+        log_path: None,
+    }
+}
+
+/// Append this measurement to the workspace's history and return the one
+/// before it. Best-effort throughout: history is an extra, never a gate.
+fn record_metrics_history(
+    workspace_root: &Path,
+    base_commit: Option<&str>,
+    summary: &metrics::MetricsSummary,
+) -> Option<store::MetricsPoint> {
+    if summary.functions == 0 {
+        return None;
+    }
+    let db = store::QualityStore::open(&metrics_db_path(workspace_root)).ok()?;
+    let previous = db.history(1).ok()?.into_iter().next();
+    let commit = base_commit
+        .map(|s| s.to_string())
+        .or_else(|| evidence::git_head(workspace_root));
+    let _ = db.record(now_ms(), commit.as_deref(), summary);
+    previous
+}
+
+/// Where a workspace's history lives. Outside the workspace, keyed by its path
+/// — the same reasoning that moved the code index into app data: SQLite and WAL
+/// do not survive a network share.
+pub fn metrics_db_path(workspace_root: &Path) -> std::path::PathBuf {
+    let hash = xxhash_rust::xxh3::xxh3_64(workspace_root.to_string_lossy().as_bytes());
+    dirs::data_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("claudinio-code"))
+        .join("claudinio-code")
+        .join("quality")
+        .join(format!("{hash:016x}.db"))
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -503,6 +653,115 @@ mod tests {
             mutation.detail
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The metrics layer end to end over a real repository: a deliberately
+    /// branchy function is measured, blocked by the budget, and named.
+    #[tokio::test]
+    async fn complexity_over_the_budget_blocks_and_names_the_function() {
+        let root = std::env::temp_dir().join(format!("cq-metrics-e2e-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let sh = |cmd: &str| {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(cmd).current_dir(&root);
+            crate::procutil::no_window(&mut c);
+            c.output().map(|o| o.status.success()).unwrap_or(false)
+        };
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        if !sh(
+            "git init -q && git config user.email t@t && git config user.name t \
+                && git add -A && git commit -qm base",
+        ) {
+            return; // git unavailable
+        }
+        let base = evidence::git_head(&root);
+
+        // A new file the agent might have written: one simple function, one
+        // that keeps growing branches.
+        std::fs::write(
+            root.join("rules.rs"),
+            "pub fn simple(a: i32) -> i32 {\n    a\n}\n\n\
+             pub fn tangled(a: i32, b: bool, c: bool) -> i32 {\n    \
+             if a > 0 && b {\n        1\n    } else if a < 0 || c {\n        2\n    } \
+             else if b {\n        3\n    } else {\n        4\n    }\n}\n",
+        )
+        .unwrap();
+
+        let cfg = QualityConfig {
+            enforced_layers: vec![Layer::Metrics],
+            max_complexity: Some(3),
+            ..Default::default()
+        };
+        let report = run_layers(&root, &cfg, &[Layer::Metrics], base.as_deref(), None)
+            .await
+            .unwrap();
+
+        let m = report
+            .layers
+            .iter()
+            .find(|l| l.layer == Layer::Metrics)
+            .unwrap();
+        assert_eq!(m.status, LayerStatus::Fail, "{}", m.summary);
+        assert_eq!(m.metrics["over_budget"], 1, "only the tangled one is over");
+        assert!(
+            m.detail.contains("tangled"),
+            "the offender must be named: {}",
+            m.detail
+        );
+        assert!(
+            !m.detail.contains("simple"),
+            "the simple one must not be: {}",
+            m.detail
+        );
+        assert!(!report.verdict.pass);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn without_a_budget_complexity_reports_without_blocking() {
+        // A consistent heuristic is good enough to watch and not good enough
+        // to block on unless the user asks for it.
+        let root = std::env::temp_dir().join(format!("cq-metrics-nobudget-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let sh = |cmd: &str| {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(cmd).current_dir(&root);
+            crate::procutil::no_window(&mut c);
+            c.output().map(|o| o.status.success()).unwrap_or(false)
+        };
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        if !sh(
+            "git init -q && git config user.email t@t && git config user.name t \
+                && git add -A && git commit -qm base",
+        ) {
+            return;
+        }
+        std::fs::write(
+            root.join("rules.rs"),
+            "pub fn tangled(a: i32) -> i32 {\n    if a > 0 { 1 } else if a < 0 { 2 } \
+             else if a == 0 { 3 } else { 4 }\n}\n",
+        )
+        .unwrap();
+
+        let cfg = QualityConfig {
+            enforced_layers: vec![Layer::Metrics],
+            max_complexity: None,
+            ..Default::default()
+        };
+        let report = run_layers(&root, &cfg, &[Layer::Metrics], None, None)
+            .await
+            .unwrap();
+        let m = report
+            .layers
+            .iter()
+            .find(|l| l.layer == Layer::Metrics)
+            .unwrap();
+        assert_eq!(m.status, LayerStatus::Pass);
+        assert!(m.metrics["functions"].as_u64().unwrap() >= 1);
+        assert!(report.verdict.pass);
         std::fs::remove_dir_all(&root).ok();
     }
 

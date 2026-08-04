@@ -81,6 +81,11 @@ pub struct QualityConfig {
     /// Override the detected BDD runner command.
     #[serde(default)]
     pub gherkin_cmd: Option<String>,
+    /// Cyclomatic-complexity budget for a function you touched. `None` reports
+    /// the numbers without ever blocking, which is the right default for a
+    /// consistent heuristic that is not canonical McCabe.
+    #[serde(default)]
+    pub max_complexity: Option<u32>,
     #[serde(default = "default_test_timeout")]
     pub test_timeout_secs: u64,
     #[serde(default = "default_coverage_timeout")]
@@ -133,6 +138,7 @@ impl Default for QualityConfig {
             mutation_score_threshold: DEFAULT_MUTATION_SCORE_THRESHOLD,
             features_dir: None,
             gherkin_cmd: None,
+            max_complexity: None,
             test_timeout_secs: DEFAULT_TEST_TIMEOUT_SECS,
             coverage_timeout_secs: DEFAULT_COVERAGE_TIMEOUT_SECS,
             mutation_timeout_secs: DEFAULT_MUTATION_TIMEOUT_SECS,

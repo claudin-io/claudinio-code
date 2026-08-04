@@ -25,8 +25,7 @@ defect the others miss:
 | Gherkin / spec | Does it do what the business asked? | The worst failure: building the wrong thing perfectly |
 | Metrics | Is the codebase improving or rotting? | Debt accrues silently at machine speed |
 
-Phases 1–4 (tests, diff coverage, mutation, Gherkin) are implemented. Phase 5 is
-the roadmap below.
+All five phases are implemented.
 
 ## Principle: enforcement, not trust
 
@@ -283,6 +282,7 @@ exclusion is explicit rather than left to gitignore.
     "mutation_cmd": null,
     "features_dir": "features",
     "gherkin_cmd": null,
+    "max_complexity": null,
     "test_timeout_secs": 600,
     "coverage_timeout_secs": 900,
     "mutation_timeout_secs": 1800
@@ -313,6 +313,40 @@ every run) is floored at one second.
 user said how to test the project, also running our guess would double the wall
 clock and could contradict them.
 
+### Metrics: the only layer that judges the codebase, not the change
+
+The other four ask about one run. This one asks whether the repository is
+getting better or worse — a question no single session can answer, and the
+reason this is the phase that finally earns a database.
+
+Complexity is computed by walking the same 77 tree-sitter grammars the indexer
+already carries: the indexer supplies *which* functions exist, this module adds
+the branch counting, and decision points are matched by node kind rather than by
+a rule per language. One implementation covers Rust, TypeScript, Python, Go and
+everything else the app can already parse — asserted by tests in three of them.
+
+Two honest limits, stated because a metric that overclaims is worse than none:
+
+- It is a **consistent heuristic, not canonical McCabe.** The absolute number
+  may differ from another tool's. That is fine for what it is used for —
+  comparing a function against itself over time and against a budget the user
+  picks — because the same rule is applied every time.
+- It is therefore **off by default.** `max_complexity` is `None` until the user
+  sets one; until then the layer records the trend and never blocks.
+
+`quality.db` lives beside the code index in app data, keyed by workspace path,
+and migrates rather than rebuilding — the opposite of `index.db`, which is
+dropped on every `SCHEMA_VERSION` bump. That is fine for a derivable index and
+fatal for history. Recording is best-effort: a trend is a nice-to-have, the gate
+is not, so a failed write never fails a run.
+
+## Two correctness fixes this phase surfaced
+
+Metrics need no test runner — they read files — so `run_layers` no longer
+refuses a workspace with no detected stack unless a command-driven layer was
+actually requested. A docs-heavy or polyglot repo can now watch its complexity
+without pretending to have a test command.
+
 ## A correctness fix the mutation work surfaced
 
 Scoping used to return an empty change set both when git said nothing changed
@@ -321,7 +355,7 @@ we cannot tell, and treating it as "nothing to check" let a non-git project pass
 coverage and mutation forever without either layer ever running. `changed_lines`
 now returns `Option`, and an unknown scope reports as unavailable.
 
-## Roadmap
+## Still open
 
 **Phase 4 — Gherkin / BDD.** `features/**/*.feature` as human-owned ground
 truth: `edit_file` rejects writes there, and Brain receives a scenario index in
@@ -330,14 +364,14 @@ is hybrid — a real BDD runner is a hard gate; where none exists, a `Verify`
 subagent maps scenario→test as a **soft** warning. Model judgement is never sold
 as mechanical evidence.
 
-**Phase 5 — Metrics and trend.** Cyclomatic complexity via the tree-sitter
-grammars `code_intel` already carries, duplication, and non-regression on
-touched files. This is the phase that needs cross-session history, and so the
-phase that should introduce `quality.db` (a separate database with real
-migrations — never `index.db`, which is dropped and rebuilt on schema bumps).
+Deferred: a manual "run checks" button with a live progress channel, and a
+trend panel over `quality.db` (the data is recorded; only the chart is missing).
+Duplication detection was scoped out of the metrics layer — complexity is the
+signal that pays for itself first, and a token-level duplicate finder is its own
+piece of work.
 
-Also deferred: a manual "run checks" button with a live progress channel, and a
-history/trend panel.
+Mutation is driven natively for Rust only; other stacks go through
+`quality.mutation_cmd` until Stryker's flags can be verified end to end.
 
 ## Verification
 

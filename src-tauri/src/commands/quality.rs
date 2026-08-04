@@ -31,6 +31,8 @@ pub struct QualitySettings {
     /// Empty = the default "features" directory.
     pub features_dir: String,
     pub gherkin_cmd: String,
+    /// 0 = no budget; the complexity layer reports without blocking.
+    pub max_complexity: u32,
     pub test_timeout_secs: u64,
     pub coverage_timeout_secs: u64,
     pub mutation_timeout_secs: u64,
@@ -75,6 +77,7 @@ impl From<&QualityConfig> for QualitySettings {
             mutation_cmd: cfg.mutation_cmd.clone().unwrap_or_default(),
             features_dir: cfg.features_dir.clone().unwrap_or_default(),
             gherkin_cmd: cfg.gherkin_cmd.clone().unwrap_or_default(),
+            max_complexity: cfg.max_complexity.unwrap_or(0),
             test_timeout_secs: cfg.test_timeout_secs,
             coverage_timeout_secs: cfg.coverage_timeout_secs,
             mutation_timeout_secs: cfg.mutation_timeout_secs,
@@ -104,6 +107,8 @@ impl QualitySettings {
             mutation_cmd: non_empty(&self.mutation_cmd),
             features_dir: non_empty(&self.features_dir),
             gherkin_cmd: non_empty(&self.gherkin_cmd),
+            // 0 from the UI means "no budget" — the slider's off position.
+            max_complexity: Some(self.max_complexity).filter(|c| *c > 0),
             diff_coverage_threshold: self.diff_coverage_threshold.clamp(0.0, 100.0),
             mutation_score_threshold: self.mutation_score_threshold.clamp(0.0, 100.0),
             test_timeout_secs: self.test_timeout_secs.max(1),
