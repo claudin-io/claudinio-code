@@ -334,7 +334,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                     "layers": {
                         "type": "array",
                         "description": "Layers to run. Omit to run what this project enforces (tests, and coverage when configured).",
-                        "items": { "type": "string", "enum": ["tests", "coverage"] }
+                        "items": { "type": "string", "enum": ["tests", "coverage", "mutation"] }
                     }
                 },
                 "required": []

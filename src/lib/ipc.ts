@@ -571,11 +571,14 @@ export interface QualitySettings {
   /** Layers that block a finish: "tests" and/or "coverage". Empty = report only. */
   enforcedLayers: string[];
   diffCoverageThreshold: number;
+  mutationScoreThreshold: number;
   /** Empty = use the detected command. */
   testCmd: string;
   coverageCmd: string;
+  mutationCmd: string;
   testTimeoutSecs: number;
   coverageTimeoutSecs: number;
+  mutationTimeoutSecs: number;
 }
 
 /** A build root the harness found, and what it would run there. */
@@ -584,6 +587,7 @@ export interface DetectedStack {
   root: string;
   testCmd: string;
   coverageCmd: string | null;
+  mutationCmd: string | null;
 }
 
 export interface QualityInfo {

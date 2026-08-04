@@ -143,6 +143,21 @@ export const SettingsQuality: Component<SettingsQualityProps> = (props) => {
                   <span class="text-sm text-ink">{"Changed-line coverage"}</span>
                   <span class="text-[11px] text-ink-faint">{"Catches code nothing tests."}</span>
                 </label>
+                <label class="mb-1 flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={enforces("mutation")}
+                    onChange={(e) => toggleLayer("mutation", e.currentTarget.checked)}
+                    class="h-4 w-4 rounded border-border-subtle bg-surface-0 text-accent focus:ring-accent"
+                  />
+                  <span class="text-sm text-ink">{"Mutation"}</span>
+                  <span class="text-[11px] text-ink-faint">{"Catches tests that assert nothing."}</span>
+                </label>
+                <Show when={enforces("mutation")}>
+                  <p class="mb-1 text-[11px] text-amber-500">
+                    {"Slow by design: the suite reruns once per mutant. It is scoped to your changed lines and only runs at the end of a session, never mid-task."}
+                  </p>
+                </Show>
                 <Show when={cfg().enforcedLayers.length === 0}>
                   <p class="mb-4 text-[11px] text-amber-500">
                     {"Nothing is enforced: the harness will report results but never block a finish."}
@@ -174,6 +189,31 @@ export const SettingsQuality: Component<SettingsQualityProps> = (props) => {
                   </p>
                 </Show>
 
+                <Show when={enforces("mutation")}>
+                  <label class="mb-1 mt-3 block text-xs text-ink-muted">
+                    {"Minimum mutants caught"}
+                  </label>
+                  <div class="mb-1 flex items-center gap-3">
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={cfg().mutationScoreThreshold}
+                      onInput={(e) =>
+                        patch({ mutationScoreThreshold: Number(e.currentTarget.value) })
+                      }
+                      class="flex-1 accent-accent"
+                    />
+                    <span class="w-12 text-right font-mono text-sm text-ink">
+                      {`${String(cfg().mutationScoreThreshold)}%`}
+                    </span>
+                  </div>
+                  <p class="mb-4 text-[11px] text-ink-faint">
+                    {"Requires cargo-mutants for Rust. Other stacks need a mutation command below."}
+                  </p>
+                </Show>
+
                 <label class="mb-1 mt-3 block text-xs text-ink-muted">{"Test command override"}</label>
                 <input
                   type="text"
@@ -196,6 +236,18 @@ export const SettingsQuality: Component<SettingsQualityProps> = (props) => {
                 />
                 <p class="mb-4 text-[11px] text-ink-faint">
                   {"Must write an lcov report to {artifact_dir}/lcov.info."}
+                </p>
+
+                <label class="mb-1 block text-xs text-ink-muted">{"Mutation command override"}</label>
+                <input
+                  type="text"
+                  value={cfg().mutationCmd}
+                  onChange={(e) => patch({ mutationCmd: e.currentTarget.value })}
+                  placeholder={stacks()[0]?.mutationCmd ?? "detected automatically"}
+                  class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 font-mono text-xs text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p class="mb-4 text-[11px] text-ink-faint">
+                  {"Takes {artifact_dir} and {in_diff}. Must write a mutants.out directory into {artifact_dir}."}
                 </p>
               </Show>
 

@@ -46,6 +46,11 @@ pub struct StackProfile {
     pub coverage_probe: Option<String>,
     /// lcov file the coverage command writes inside `{artifact_dir}`.
     pub coverage_lcov: String,
+    /// Mutation command. Takes `{artifact_dir}` and `{in_diff}`, the latter
+    /// expanding to the diff-scoping flag or to nothing. `None` when the
+    /// harness cannot drive this stack natively.
+    pub mutation_cmd: Option<String>,
+    pub mutation_probe: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -78,12 +83,20 @@ pub fn detect(workspace_root: &Path, cfg: &QualityConfig) -> ProjectProfile {
             coverage_cmd: None,
             coverage_probe: None,
             coverage_lcov: "lcov.info".into(),
+            mutation_cmd: None,
+            mutation_probe: None,
         }];
     }
     if let Some(cmd) = cfg.coverage_cmd.as_deref().filter(|c| !c.trim().is_empty()) {
         for stack in &mut stacks {
             stack.coverage_cmd = Some(cmd.to_string());
             stack.coverage_probe = None;
+        }
+    }
+    if let Some(cmd) = cfg.mutation_cmd.as_deref().filter(|c| !c.trim().is_empty()) {
+        for stack in &mut stacks {
+            stack.mutation_cmd = Some(cmd.to_string());
+            stack.mutation_probe = None;
         }
     }
 
@@ -133,6 +146,11 @@ fn detect_rust(workspace_root: &Path) -> Option<StackProfile> {
         coverage_cmd: Some("cargo llvm-cov --lcov --output-path {artifact_dir}/lcov.info".into()),
         coverage_probe: Some("cargo llvm-cov --version".into()),
         coverage_lcov: "lcov.info".into(),
+        // `-o` makes cargo-mutants create mutants.out INSIDE the given
+        // directory instead of the source tree, so a run never leaves
+        // artifacts in the user's repo (which would also churn the digest).
+        mutation_cmd: Some("cargo mutants -o {artifact_dir} {in_diff}".into()),
+        mutation_probe: Some("cargo mutants --version".into()),
     })
 }
 
@@ -171,6 +189,13 @@ fn detect_js(workspace_root: &Path) -> Option<StackProfile> {
         coverage_cmd: Some(coverage_cmd),
         coverage_probe: None,
         coverage_lcov: "lcov.info".into(),
+        // Deliberately absent: Stryker's flags for redirecting its report and
+        // scoping to changed files have not been verified end to end here, and
+        // shipping an unverified command means the user waits minutes to learn
+        // nothing. Set quality.mutation_cmd to opt in — the standard
+        // mutation-testing-elements JSON is already parsed.
+        mutation_cmd: None,
+        mutation_probe: None,
     })
 }
 

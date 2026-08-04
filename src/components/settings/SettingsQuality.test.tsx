@@ -26,14 +26,23 @@ const info = (over: Partial<QualityInfo["settings"]> = {}): QualityInfo => ({
     enforceOn: "goals",
     enforcedLayers: ["tests"],
     diffCoverageThreshold: 80,
+    mutationScoreThreshold: 60,
     testCmd: "",
     coverageCmd: "",
+    mutationCmd: "",
     testTimeoutSecs: 600,
     coverageTimeoutSecs: 900,
+    mutationTimeoutSecs: 1800,
     ...over,
   },
   stacks: [
-    { name: "rust", root: "/p/src-tauri", testCmd: "cargo test", coverageCmd: null },
+    {
+      name: "rust",
+      root: "/p/src-tauri",
+      testCmd: "cargo test",
+      coverageCmd: null,
+      mutationCmd: "cargo mutants -o {artifact_dir} {in_diff}",
+    },
   ],
 });
 
@@ -114,7 +123,7 @@ describe("SettingsQuality", () => {
   it("toggling a layer keeps the others", async () => {
     const el = await mount("/p", info({ enforcedLayers: ["tests"] }));
     const boxes = Array.from(el.querySelectorAll('input[type="checkbox"]'));
-    // [0] is the master switch, [1] tests, [2] coverage.
+    // [0] is the master switch, [1] tests, [2] coverage, [3] mutation.
     const coverage = boxes[2] as HTMLInputElement;
     coverage.checked = true;
     coverage.dispatchEvent(new Event("change", { bubbles: true }));
@@ -123,6 +132,18 @@ describe("SettingsQuality", () => {
       "/p",
       expect.objectContaining({ enforcedLayers: ["tests", "coverage"] }),
     );
+  });
+
+  it("warns that mutation is slow when it is enforced", async () => {
+    // The user must learn the cost before a session stalls for minutes.
+    const off = await mount("/p", info({ enforcedLayers: ["tests"] }));
+    expect(off.textContent).not.toContain("reruns once per mutant");
+
+    dispose?.();
+    host?.remove();
+    const on = await mount("/p", info({ enforcedLayers: ["tests", "mutation"] }));
+    expect(on.textContent).toContain("reruns once per mutant");
+    expect(on.textContent).toContain("60%");
   });
 
   it("surfaces a write failure instead of pretending it saved", async () => {

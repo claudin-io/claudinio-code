@@ -19,6 +19,13 @@ pub const DEFAULT_DIFF_COVERAGE_THRESHOLD: f64 = 80.0;
 /// 30s, which is exactly why the quality runner does not go through it.
 pub const DEFAULT_TEST_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_COVERAGE_TIMEOUT_SECS: u64 = 900;
+/// Mutation reruns the suite once per mutant, so it is the slow one by an
+/// order of magnitude. Half an hour is generous for a diff-scoped run and
+/// still bounded enough that a runaway does not hang a session forever.
+pub const DEFAULT_MUTATION_TIMEOUT_SECS: u64 = 1800;
+/// A deliberately reachable bar. Perfect mutation scores are not the goal;
+/// catching suites that verify nothing is.
+pub const DEFAULT_MUTATION_SCORE_THRESHOLD: f64 = 60.0;
 
 /// When a run must be verified before it is allowed to finish.
 ///
@@ -59,10 +66,20 @@ pub struct QualityConfig {
     pub coverage_cmd: Option<String>,
     #[serde(default = "default_diff_coverage_threshold")]
     pub diff_coverage_threshold: f64,
+    /// Override the detected mutation command. Required for stacks the harness
+    /// does not drive natively; it must write a `mutants.out` directory into
+    /// `{artifact_dir}`, or an lcov-style mutation report — see the design doc.
+    #[serde(default)]
+    pub mutation_cmd: Option<String>,
+    /// Share of viable mutants the tests must catch.
+    #[serde(default = "default_mutation_score_threshold")]
+    pub mutation_score_threshold: f64,
     #[serde(default = "default_test_timeout")]
     pub test_timeout_secs: u64,
     #[serde(default = "default_coverage_timeout")]
     pub coverage_timeout_secs: u64,
+    #[serde(default = "default_mutation_timeout")]
+    pub mutation_timeout_secs: u64,
 }
 
 fn default_true() -> bool {
@@ -89,6 +106,12 @@ fn default_test_timeout() -> u64 {
 fn default_coverage_timeout() -> u64 {
     DEFAULT_COVERAGE_TIMEOUT_SECS
 }
+fn default_mutation_score_threshold() -> f64 {
+    DEFAULT_MUTATION_SCORE_THRESHOLD
+}
+fn default_mutation_timeout() -> u64 {
+    DEFAULT_MUTATION_TIMEOUT_SECS
+}
 
 impl Default for QualityConfig {
     fn default() -> Self {
@@ -99,8 +122,11 @@ impl Default for QualityConfig {
             test_cmd: None,
             coverage_cmd: None,
             diff_coverage_threshold: DEFAULT_DIFF_COVERAGE_THRESHOLD,
+            mutation_cmd: None,
+            mutation_score_threshold: DEFAULT_MUTATION_SCORE_THRESHOLD,
             test_timeout_secs: DEFAULT_TEST_TIMEOUT_SECS,
             coverage_timeout_secs: DEFAULT_COVERAGE_TIMEOUT_SECS,
+            mutation_timeout_secs: DEFAULT_MUTATION_TIMEOUT_SECS,
         }
     }
 }
@@ -131,9 +157,22 @@ impl QualityConfig {
         self.enabled && !self.enforced_layers.is_empty()
     }
 
-    /// The layers worth running by default: everything enforced, plus tests,
-    /// which are cheap and are what the model most often actually wants.
-    pub fn default_layers(&self) -> Vec<Layer> {
+    /// What `run_quality` runs when the agent names no layers.
+    ///
+    /// Mutation is excluded even when enforced: it reruns the suite once per
+    /// mutant, so an agent checking its work mid-task would burn half an hour
+    /// to learn what a plain test run tells it in seconds. It still runs at
+    /// the finish line, and the agent can always ask for it by name.
+    pub fn tool_default_layers(&self) -> Vec<Layer> {
+        self.finish_line_layers()
+            .into_iter()
+            .filter(|l| *l != Layer::Mutation)
+            .collect()
+    }
+
+    /// What the harness runs before letting a run finish: everything enforced,
+    /// plus tests, which are cheap and gate the rest.
+    pub fn finish_line_layers(&self) -> Vec<Layer> {
         let mut layers = vec![Layer::Tests];
         for l in &self.enforced_layers {
             if !layers.contains(l) {
@@ -191,10 +230,10 @@ mod tests {
     }
 
     #[test]
-    fn default_layers_include_every_enforced_layer() {
+    fn finish_line_layers_include_every_enforced_layer() {
         let cfg =
             QualityConfig::from_workspace_json(r#"{"quality":{"enforced_layers":["coverage"]}}"#);
-        let layers = cfg.default_layers();
+        let layers = cfg.finish_line_layers();
         assert!(layers.contains(&Layer::Tests));
         assert!(layers.contains(&Layer::Coverage));
     }

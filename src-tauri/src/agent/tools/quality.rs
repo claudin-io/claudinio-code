@@ -158,7 +158,7 @@ pub async fn run_and_record(
 pub async fn run_enforced(ctx: &ToolContext, trigger: &str) -> Result<QualityReport, String> {
     let (_, cfg) = workspace_and_config(ctx)
         .ok_or("the quality harness needs an open workspace: none is attached")?;
-    run_and_record(ctx, &cfg.default_layers(), trigger).await
+    run_and_record(ctx, &cfg.finish_line_layers(), trigger).await
 }
 
 /// Tool entry point.
@@ -179,7 +179,7 @@ pub async fn execute(args: RunQualityArgs, ctx: &ToolContext) -> Result<String, 
             }
             parsed
         }
-        _ => cfg.default_layers(),
+        _ => cfg.tool_default_layers(),
     };
 
     let report = run_and_record(ctx, &layers, "tool").await?;
@@ -425,7 +425,7 @@ mod tests {
         let (ctx, root) = workspace("badlayer", "{}");
         let err = execute(
             RunQualityArgs {
-                layers: Some(vec!["mutation".into()]),
+                layers: Some(vec!["gherkin".into()]),
             },
             &ctx,
         )

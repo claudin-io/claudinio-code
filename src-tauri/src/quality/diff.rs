@@ -19,17 +19,16 @@ pub type ChangedLines = HashMap<PathBuf, HashSet<u32>>;
 /// Lines changed since `base_commit` (defaults to HEAD), including uncommitted
 /// work and untracked files.
 ///
-/// Returns empty when the workspace is not a git repository — the coverage
-/// layer then has nothing to require, which is the honest answer rather than a
-/// fabricated one.
-pub fn changed_lines(root: &Path, base_commit: Option<&str>) -> ChangedLines {
+/// `None` means the scope could not be determined at all — no git, or no
+/// commit to diff against. That is emphatically NOT the same as an empty map,
+/// which means "git looked and nothing changed": treating the two alike would
+/// let a non-git project pass coverage and mutation forever without either
+/// layer ever running.
+pub fn changed_lines(root: &Path, base_commit: Option<&str>) -> Option<ChangedLines> {
     let mut out: ChangedLines = HashMap::new();
     let base = base_commit
         .map(|s| s.to_string())
-        .or_else(|| git(root, &["rev-parse", "HEAD"]));
-    let Some(base) = base else {
-        return out;
-    };
+        .or_else(|| git(root, &["rev-parse", "HEAD"]))?;
 
     // `git diff <commit>` spans commits made since the base AND the current
     // working tree, so one call covers everything tracked. -U0 keeps the hunks
@@ -53,7 +52,7 @@ pub fn changed_lines(root: &Path, base_commit: Option<&str>) -> ChangedLines {
         }
     }
 
-    out
+    Some(out)
 }
 
 /// Pull `+` line numbers out of a unified diff. Only the post-image matters:
@@ -92,6 +91,28 @@ fn parse_unified_diff(patch: &str, root: &Path, out: &mut ChangedLines) {
             .or_default()
             .extend(start..start + count);
     }
+}
+
+/// Write the diff since `base_commit` to a scratch file, for tools that scope
+/// themselves from a patch rather than a line list (cargo-mutants `--in-diff`).
+///
+/// `git diff` already emits the `b/` prefix those tools expect. Returns `None`
+/// when there is no diff to write, which the caller reads as "mutate
+/// everything or nothing", never as an error.
+pub fn write_patch(root: &Path, base_commit: Option<&str>) -> Option<PathBuf> {
+    let base = base_commit
+        .map(|s| s.to_string())
+        .or_else(|| git(root, &["rev-parse", "HEAD"]))?;
+    let patch = git(root, &["diff", &base, "--"])?;
+    if patch.trim().is_empty() {
+        return None;
+    }
+    let dir = crate::quality::runner::artifact_dir(root, "diff");
+    let path = dir.join("changes.patch");
+    // The trailing newline matters: a patch without one is rejected as
+    // malformed by some parsers.
+    std::fs::write(&path, format!("{patch}\n")).ok()?;
+    Some(path)
 }
 
 /// Total number of changed lines across all files.
@@ -271,8 +292,13 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         // Deliberately passing a bogus base: the point is that the harness
         // degrades to "nothing to require" instead of erroring.
-        let changed = changed_lines(&root, Some("0000000000000000000000000000000000000000"));
-        assert!(changed.is_empty());
+        // Some() with an empty map would claim "git looked and nothing
+        // changed", which is a different and much more dangerous statement.
+        let changed = changed_lines(&root, None);
+        assert!(
+            changed.is_none(),
+            "no git means unknown scope, not empty scope"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -25,7 +25,7 @@ defect the others miss:
 | Gherkin / spec | Does it do what the business asked? | The worst failure: building the wrong thing perfectly |
 | Metrics | Is the codebase improving or rotting? | Debt accrues silently at machine speed |
 
-Phases 1 and 2 (tests and diff coverage) are implemented. Phases 3–5 are the
+Phases 1–3 (tests, diff coverage, mutation) are implemented. Phases 4–5 are the
 roadmap below.
 
 ## Principle: enforcement, not trust
@@ -97,6 +97,14 @@ since a fixture can drift from reality.
 | vitest | `vitest run --reporter=json` | `vitest run --coverage --coverage.reporter=lcovonly` |
 | jest | `jest --json` | `jest --coverage --coverageReporters=lcovonly` |
 
+Mutation is driven natively for Rust only: `cargo mutants -o {artifact_dir}
+{in_diff}`. Other stacks need `quality.mutation_cmd`. That is deliberate —
+Stryker's flags for redirecting its report and scoping to changed files were not
+verified end to end here, and shipping an unverified command means the user
+waits minutes to learn nothing. The standard mutation-testing-elements JSON that
+Stryker emits is already parsed, so wiring it up later is a command, not a
+rewrite.
+
 lcov is the common denominator every tool can emit, so the scorer stays
 stack-agnostic. The package manager comes from the lockfile (`pnpm exec`,
 `bunx`, `yarn`, else `npx`).
@@ -108,6 +116,34 @@ error, a timeout — these mean *we learned nothing*. Reporting them as failures
 would send the model off to fix tests that never ran; reporting them as passes
 would be a lie. They are reported honestly and excluded from the verdict, and
 the UI marks them `–` rather than `✓`.
+
+### Mutation: the layer that judges the tests
+
+Coverage proves a line ran. It cannot prove anything checked the result — and
+`assert!(result.is_ok())` is exactly the shape a model reaches for. Mutation
+closes that hole by breaking the code on purpose and demanding the suite notice.
+
+Verified on a fixture with a deliberately weak test: **100% line coverage, and 3
+of 5 mutants survived.** That gap is the entire argument for the layer.
+
+Two design points matter more than the plumbing:
+
+*Cost.* Mutation reruns the suite once per mutant, so it is minutes where tests
+are seconds. Three things keep it affordable: it is scoped to the diff
+(`--in-diff`), it is excluded from `run_quality`'s default layers so an agent
+cannot trigger it mid-task, and it is skipped outright when the suite is red —
+mutants on a failing baseline teach nothing, and cargo-mutants would refuse
+anyway (exit 4).
+
+*Trust.* cargo-mutants documents `outcomes.json` as "subject to change", so
+nothing parses it. The stable surface is the four outcome text files plus the
+documented exit codes, and the two are cross-checked: exit 2 means survivors
+exist, so a report listing none means the format moved under us — reported as
+unavailable, never as a pass.
+
+Exit codes carry the distinction the whole harness is built on: 0/2/3 are real
+results, while 4 (red baseline), 5/6 (bad diff) and 70 (internal error) mean we
+never found out.
 
 ### Diff coverage, not project coverage
 
@@ -203,10 +239,13 @@ exclusion is explicit rather than left to gitignore.
     "enforce_on": "code_change",
     "enforced_layers": ["tests"],
     "diff_coverage_threshold": 80.0,
+    "mutation_score_threshold": 60.0,
     "test_cmd": null,
     "coverage_cmd": null,
+    "mutation_cmd": null,
     "test_timeout_secs": 600,
-    "coverage_timeout_secs": 900
+    "coverage_timeout_secs": 900,
+    "mutation_timeout_secs": 1800
   }
 }
 ```
@@ -234,12 +273,15 @@ every run) is floored at one second.
 user said how to test the project, also running our guess would double the wall
 clock and could contradict them.
 
-## Roadmap
+## A correctness fix the mutation work surfaced
 
-**Phase 3 — Mutation testing.** `cargo mutants --in-diff --json` (native diff
-scoping) and Stryker as opt-in for JS. Expensive, so: diff scope by default and
-run only in the harness's finish-line check, never inside the work loop. Gate on
-mutation score over touched files.
+Scoping used to return an empty change set both when git said nothing changed
+*and* when there was no git at all. The two are not the same: the second means
+we cannot tell, and treating it as "nothing to check" let a non-git project pass
+coverage and mutation forever without either layer ever running. `changed_lines`
+now returns `Option`, and an unknown scope reports as unavailable.
+
+## Roadmap
 
 **Phase 4 — Gherkin / BDD.** `features/**/*.feature` as human-owned ground
 truth: `edit_file` rejects writes there, and Brain receives a scenario index in

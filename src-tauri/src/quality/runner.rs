@@ -21,7 +21,8 @@ use super::config::QualityConfig;
 use super::diff::{ChangedLines, total_lines};
 use super::parsers::coverage::diff_coverage;
 use super::parsers::{
-    TestSummary, parse_cargo_test, parse_jest_json, parse_lcov, parse_vitest_json,
+    MutationOutcome, TestSummary, interpret_exit_code, parse_cargo_test, parse_jest_json,
+    parse_lcov, parse_mutants_out, parse_vitest_json,
 };
 use super::profile::{StackProfile, TestParser};
 use super::{Layer, LayerResult, LayerStatus, truncate_chars};
@@ -273,7 +274,7 @@ fn parse_test_output(stack: &StackProfile, dir: &Path, stdout: &str) -> TestSumm
 pub async fn run_coverage(
     stack: &StackProfile,
     cfg: &QualityConfig,
-    changed: &ChangedLines,
+    changed: Option<&ChangedLines>,
     interrupt: Option<&Arc<AtomicBool>>,
 ) -> LayerResult {
     let Some(template) = stack.coverage_cmd.clone() else {
@@ -285,6 +286,16 @@ pub async fn run_coverage(
         );
     };
 
+    // Without git we cannot tell which lines are new, and scoring the whole
+    // repo would answer a different question. Say so rather than pass.
+    let Some(changed) = changed else {
+        return unavailable(
+            Layer::Coverage,
+            stack,
+            "changed lines could not be determined (no git repository or no commit to diff \
+             against), so coverage of this run's work was not measured",
+        );
+    };
     // Nothing changed means nothing to require. Skipping the run also saves
     // the user a multi-minute instrumented build for no information.
     if total_lines(changed) == 0 {
@@ -387,6 +398,168 @@ pub async fn run_coverage(
     }
 }
 
+/// Run mutation testing and score how many deliberate breakages the tests
+/// caught.
+///
+/// `tests_passed` gates the whole thing: mutation reruns the suite once per
+/// mutant, so starting from a red baseline burns half an hour to learn what the
+/// tests layer already reported. cargo-mutants refuses too (exit 4); we simply
+/// do not pay for the round trip.
+pub async fn run_mutation(
+    stack: &StackProfile,
+    cfg: &QualityConfig,
+    changed: Option<&ChangedLines>,
+    patch: Option<&Path>,
+    tests_passed: bool,
+    interrupt: Option<&Arc<AtomicBool>>,
+) -> LayerResult {
+    let Some(template) = stack.mutation_cmd.clone() else {
+        return unavailable(
+            Layer::Mutation,
+            stack,
+            "no mutation command is known for this stack; set quality.mutation_cmd in \
+             .claudinio.json (it must write a mutants.out directory into {artifact_dir})",
+        );
+    };
+    if !tests_passed {
+        return unavailable(
+            Layer::Mutation,
+            stack,
+            "skipped: the test suite must be green before mutants mean anything",
+        );
+    }
+    let Some(changed) = changed else {
+        return unavailable(
+            Layer::Mutation,
+            stack,
+            "changed lines could not be determined (no git repository or no commit to diff \
+             against); mutating the whole project is an overnight job, so nothing was run",
+        );
+    };
+    if total_lines(changed) == 0 {
+        return LayerResult {
+            layer: Layer::Mutation,
+            status: LayerStatus::Pass,
+            stack: stack.name.clone(),
+            summary: "no changed lines to mutate".into(),
+            detail: String::new(),
+            exit_code: None,
+            metrics: serde_json::json!({"score": 100.0, "caught": 0, "valid": 0}),
+            log_path: None,
+        };
+    }
+
+    if let Some(probe) = stack.mutation_probe.as_deref() {
+        let probed = run_command(probe, &stack.root, PROBE_TIMEOUT_SECS, None, interrupt).await;
+        if !probed.success() {
+            return unavailable(
+                Layer::Mutation,
+                stack,
+                "mutation tooling is not installed (try `cargo install cargo-mutants`); \
+                 test strength was not measured",
+            );
+        }
+    }
+
+    let dir = artifact_dir(&stack.root, &format!("mutation-{}", stack.name));
+    // Scoping to the diff is what makes this affordable at all: mutating a
+    // whole codebase is an overnight job, mutating a change is minutes.
+    let in_diff = match patch {
+        Some(p) => format!("--in-diff {}", p.display()),
+        None => String::new(),
+    };
+    let command = template
+        .replace("{artifact_dir}", &dir.to_string_lossy())
+        .replace("{in_diff}", &in_diff);
+    let log = dir.join("output.log");
+    let outcome = run_command(
+        &command,
+        &stack.root,
+        cfg.mutation_timeout_secs,
+        Some(&log),
+        interrupt,
+    )
+    .await;
+
+    if let Some(result) = infrastructure_failure(Layer::Mutation, stack, &outcome, &command) {
+        return result;
+    }
+    // The exit code is the documented, stable signal; it separates "the tests
+    // are weak" from "we never got to find out".
+    if let MutationOutcome::NotMeasured(why) = interpret_exit_code(outcome.exit_code) {
+        return unavailable(Layer::Mutation, stack, why);
+    }
+
+    let summary = parse_mutants_out(&dir.join("mutants.out"));
+    if !summary.parsed {
+        // Verified against cargo-mutants 27.1.0: a --in-diff run that finds
+        // nothing to mutate exits 0 and writes no directory at all.
+        return LayerResult {
+            layer: Layer::Mutation,
+            status: LayerStatus::Pass,
+            stack: stack.name.clone(),
+            summary: "no viable mutants generated for the changed code".into(),
+            detail: String::new(),
+            exit_code: outcome.exit_code,
+            metrics: serde_json::json!({"score": 100.0, "caught": 0, "valid": 0}),
+            log_path: outcome.log_path.map(|p| p.to_string_lossy().to_string()),
+        };
+    }
+    // Two signals that must agree. Exit 2 means survivors exist, so a report
+    // listing none has changed format under us — say so rather than pass.
+    if outcome.exit_code == Some(2) && summary.missed == 0 {
+        return unavailable(
+            Layer::Mutation,
+            stack,
+            "the mutation report was not understood: survivors were reported but none listed",
+        );
+    }
+
+    let score = summary.score();
+    let green = score + f64::EPSILON >= cfg.mutation_score_threshold;
+    let mut detail = String::new();
+    if !green {
+        detail.push_str(&format!(
+            "{} mutant(s) survived — the code was deliberately broken and no test noticed:\n",
+            summary.missed
+        ));
+        for survivor in &summary.survivors {
+            detail.push_str(&format!("  - {survivor}\n"));
+        }
+        detail.push_str(
+            "\nEach line is a change the tests accept. Strengthen the assertions that should \
+             have caught it — adding a test that merely runs the code again will not help.\n",
+        );
+    }
+
+    LayerResult {
+        layer: Layer::Mutation,
+        status: if green {
+            LayerStatus::Pass
+        } else {
+            LayerStatus::Fail
+        },
+        stack: stack.name.clone(),
+        summary: format!(
+            "{} (threshold {:.1}%)",
+            summary.headline(),
+            cfg.mutation_score_threshold
+        ),
+        detail,
+        exit_code: outcome.exit_code,
+        metrics: serde_json::json!({
+            "score": score,
+            "caught": summary.caught,
+            "missed": summary.missed,
+            "timeout": summary.timeout,
+            "unviable": summary.unviable,
+            "valid": summary.valid(),
+            "threshold": cfg.mutation_score_threshold,
+        }),
+        log_path: outcome.log_path.map(|p| p.to_string_lossy().to_string()),
+    }
+}
+
 /// Distinguish "the check ran and says no" from "the check never ran".
 /// Reporting a spawn failure or a timeout as `Fail` would tell the model to go
 /// fix tests that were never executed.
@@ -443,6 +616,8 @@ mod tests {
             coverage_cmd: None,
             coverage_probe: None,
             coverage_lcov: "lcov.info".into(),
+            mutation_cmd: None,
+            mutation_probe: None,
         }
     }
 
@@ -542,7 +717,13 @@ mod tests {
         let mut s = stack(&root, "true");
         // A command that would fail if it ever ran, proving we skipped it.
         s.coverage_cmd = Some("exit 9".into());
-        let r = run_coverage(&s, &QualityConfig::default(), &ChangedLines::new(), None).await;
+        let r = run_coverage(
+            &s,
+            &QualityConfig::default(),
+            Some(&ChangedLines::new()),
+            None,
+        )
+        .await;
         assert_eq!(r.status, LayerStatus::Pass);
         assert_eq!(r.exit_code, None);
         std::fs::remove_dir_all(&root).ok();
@@ -556,7 +737,7 @@ mod tests {
         let r = run_coverage(
             &stack(&root, "true"),
             &QualityConfig::default(),
-            &changed,
+            Some(&changed),
             None,
         )
         .await;
@@ -582,7 +763,7 @@ mod tests {
             diff_coverage_threshold: 80.0,
             ..Default::default()
         };
-        let r = run_coverage(&s, &cfg, &changed, None).await;
+        let r = run_coverage(&s, &cfg, Some(&changed), None).await;
         assert_eq!(
             r.status,
             LayerStatus::Fail,
@@ -601,8 +782,218 @@ mod tests {
             diff_coverage_threshold: 50.0,
             ..Default::default()
         };
-        let r2 = run_coverage(&s, &lenient, &changed, None).await;
+        let r2 = run_coverage(&s, &lenient, Some(&changed), None).await;
         assert_eq!(r2.status, LayerStatus::Pass);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stack whose "mutation run" is a shell script writing the outcome
+    /// files cargo-mutants would write, so the scoring path is exercised
+    /// without paying for real mutants.
+    fn mutating_stack(root: &Path, caught: usize, missed: usize, exit: i32) -> StackProfile {
+        let mut s = stack(root, "true");
+        let caught_lines: String = (0..caught)
+            .map(|i| format!("a.rs:{i}: caught\\n"))
+            .collect();
+        let missed_lines: String = (0..missed)
+            .map(|i| format!("a.rs:{i}: replace * with + in discount\\n"))
+            .collect();
+        s.mutation_cmd = Some(format!(
+            "mkdir -p {{artifact_dir}}/mutants.out && printf '{caught_lines}' > \
+             {{artifact_dir}}/mutants.out/caught.txt && printf '{missed_lines}' > \
+             {{artifact_dir}}/mutants.out/missed.txt && exit {exit}"
+        ));
+        s
+    }
+
+    fn one_changed_line(root: &Path) -> ChangedLines {
+        let mut changed = ChangedLines::new();
+        changed.insert(root.join("a.rs"), [1u32].into_iter().collect());
+        changed
+    }
+
+    #[tokio::test]
+    async fn a_weak_suite_fails_the_mutation_gate() {
+        // The case the layer exists for: 2 of 5 mutants caught is a suite that
+        // runs the code without checking it.
+        let root = tmp("mut-weak");
+        let s = mutating_stack(&root, 2, 3, 2);
+        let cfg = QualityConfig {
+            mutation_score_threshold: 60.0,
+            ..Default::default()
+        };
+        let r = run_mutation(&s, &cfg, Some(&one_changed_line(&root)), None, true, None).await;
+        assert_eq!(r.status, LayerStatus::Fail);
+        assert_eq!(r.metrics["caught"], 2);
+        assert_eq!(r.metrics["missed"], 3);
+        assert_eq!(r.metrics["score"], 40.0);
+        assert!(r.detail.contains("replace * with +"), "{}", r.detail);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_strong_suite_passes_the_mutation_gate() {
+        let root = tmp("mut-strong");
+        let s = mutating_stack(&root, 9, 1, 2);
+        let cfg = QualityConfig {
+            mutation_score_threshold: 60.0,
+            ..Default::default()
+        };
+        let r = run_mutation(&s, &cfg, Some(&one_changed_line(&root)), None, true, None).await;
+        assert_eq!(r.status, LayerStatus::Pass);
+        assert_eq!(r.metrics["score"], 90.0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn mutation_is_skipped_while_the_suite_is_red() {
+        // Half an hour of mutants on a failing baseline teaches nothing the
+        // tests layer has not already said.
+        let root = tmp("mut-red");
+        let mut s = mutating_stack(&root, 0, 0, 0);
+        s.mutation_cmd = Some("exit 99".into()); // would fail loudly if it ran
+        let r = run_mutation(
+            &s,
+            &QualityConfig::default(),
+            Some(&one_changed_line(&root)),
+            None,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Unavailable);
+        assert!(r.summary.contains("green before mutants"), "{}", r.summary);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_run_with_no_changed_lines_skips_mutation_entirely() {
+        let root = tmp("mut-nochange");
+        let mut s = stack(&root, "true");
+        s.mutation_cmd = Some("exit 9".into());
+        let r = run_mutation(
+            &s,
+            &QualityConfig::default(),
+            Some(&ChangedLines::new()),
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Pass);
+        assert_eq!(r.exit_code, None, "the command must not have run");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_red_baseline_reported_by_the_tool_is_unavailable_not_failed() {
+        // cargo-mutants exit 4. Reporting it as a mutation failure would
+        // punish one problem twice.
+        let root = tmp("mut-baseline");
+        let mut s = stack(&root, "true");
+        s.mutation_cmd = Some("exit 4".into());
+        let r = run_mutation(
+            &s,
+            &QualityConfig::default(),
+            Some(&one_changed_line(&root)),
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Unavailable);
+        assert!(r.summary.contains("already failing"), "{}", r.summary);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn no_mutants_generated_passes_rather_than_erroring() {
+        // Verified against cargo-mutants 27.1.0: exit 0, no mutants.out at all.
+        let root = tmp("mut-none");
+        let mut s = stack(&root, "true");
+        s.mutation_cmd = Some("exit 0".into());
+        let r = run_mutation(
+            &s,
+            &QualityConfig::default(),
+            Some(&one_changed_line(&root)),
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Pass);
+        assert!(r.summary.contains("no viable mutants"), "{}", r.summary);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn survivors_reported_but_not_listed_is_treated_as_a_broken_report() {
+        // The cross-check that protects against the outcome files being
+        // renamed, which the tool documents as possible.
+        let root = tmp("mut-mismatch");
+        let s = mutating_stack(&root, 3, 0, 2);
+        let r = run_mutation(
+            &s,
+            &QualityConfig::default(),
+            Some(&one_changed_line(&root)),
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Unavailable);
+        assert!(r.summary.contains("not understood"), "{}", r.summary);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_stack_without_a_mutation_command_is_unavailable() {
+        let root = tmp("mut-nocmd");
+        let r = run_mutation(
+            &stack(&root, "true"),
+            &QualityConfig::default(),
+            Some(&one_changed_line(&root)),
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Unavailable);
+        assert!(r.summary.contains("mutation_cmd"), "{}", r.summary);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn the_diff_scoping_flag_reaches_the_command() {
+        let root = tmp("mut-indiff");
+        let mut s = stack(&root, "true");
+        // Echo the expanded command into the report so we can assert on it.
+        s.mutation_cmd = Some(
+            "mkdir -p {artifact_dir}/mutants.out && echo '{in_diff}' > \
+             {artifact_dir}/mutants.out/caught.txt"
+                .into(),
+        );
+        let patch = root.join("changes.patch");
+        std::fs::write(&patch, "diff --git a/x b/x\n").unwrap();
+        let r = run_mutation(
+            &s,
+            &QualityConfig::default(),
+            Some(&one_changed_line(&root)),
+            Some(&patch),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Pass);
+        // NOT artifact_dir() again: it clears the directory it returns, which
+        // would delete the file being asserted on.
+        let dir = PathBuf::from(r.log_path.as_deref().unwrap())
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let log = std::fs::read_to_string(dir.join("mutants.out/caught.txt")).unwrap();
+        assert!(log.contains("--in-diff"), "{log}");
+        assert!(log.contains("changes.patch"), "{log}");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -613,7 +1004,7 @@ mod tests {
         s.coverage_cmd = Some("true".into());
         let mut changed = ChangedLines::new();
         changed.insert(root.join("a.rs"), [1u32].into_iter().collect());
-        let r = run_coverage(&s, &QualityConfig::default(), &changed, None).await;
+        let r = run_coverage(&s, &QualityConfig::default(), Some(&changed), None).await;
         assert_eq!(r.status, LayerStatus::Unavailable);
         assert!(r.summary.contains("no lcov report"), "{}", r.summary);
         std::fs::remove_dir_all(&root).ok();

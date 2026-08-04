@@ -32,13 +32,15 @@ pub use config::QualityConfig;
 pub use profile::{ProjectProfile, StackProfile};
 
 /// One verification layer. Each catches a class of defect the others miss:
-/// tests catch broken logic, coverage catches code no test ever touched.
-/// Mutation / Gherkin / metrics are the next phases (see the design doc).
+/// tests catch broken logic, coverage catches code no test ever touched, and
+/// mutation catches tests that execute code without actually checking it.
+/// Gherkin and trend metrics are the next phases (see the design doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
     Tests,
     Coverage,
+    Mutation,
 }
 
 impl Layer {
@@ -46,6 +48,7 @@ impl Layer {
         match self {
             Layer::Tests => "tests",
             Layer::Coverage => "coverage",
+            Layer::Mutation => "mutation",
         }
     }
 
@@ -53,6 +56,7 @@ impl Layer {
         match s.trim().to_ascii_lowercase().as_str() {
             "tests" | "test" => Some(Layer::Tests),
             "coverage" | "cov" => Some(Layer::Coverage),
+            "mutation" | "mutants" => Some(Layer::Mutation),
             _ => None,
         }
     }
@@ -214,6 +218,7 @@ pub fn evaluate_gate(layers: &[LayerResult], enforced: &[Layer]) -> GateVerdict 
             expected: match r.layer {
                 Layer::Tests => "all tests passing".into(),
                 Layer::Coverage => "diff coverage at or above threshold".into(),
+                Layer::Mutation => "mutation score at or above threshold".into(),
             },
             actual: r.summary.clone(),
         });
@@ -246,21 +251,47 @@ pub async fn run_layers(
         );
     }
 
-    // Coverage is measured against the lines this run actually changed, so it
-    // reports on the agent's work rather than on the repo's history.
-    let changed = if requested.contains(&Layer::Coverage) {
+    // Coverage and mutation are both scoped to the lines this run actually
+    // changed, so they report on the agent's work rather than the repo's
+    // history — and so mutation stays affordable at all.
+    let scoped = requested.contains(&Layer::Coverage) || requested.contains(&Layer::Mutation);
+    let changed = if scoped {
         diff::changed_lines(workspace_root, base_commit)
     } else {
-        Default::default()
+        None
+    };
+    // cargo-mutants scopes itself from a patch file rather than a line list.
+    let patch = if requested.contains(&Layer::Mutation) {
+        diff::write_patch(workspace_root, base_commit)
+    } else {
+        None
     };
 
     let mut results: Vec<LayerResult> = Vec::new();
     for stack in &profile.stacks {
+        // Mutation depends on this: breaking code on top of a red suite tells
+        // you nothing, and costs a rerun per mutant to find out.
+        let mut tests_passed = true;
         if requested.contains(&Layer::Tests) {
-            results.push(runner::run_tests(stack, cfg, interrupt).await);
+            let result = runner::run_tests(stack, cfg, interrupt).await;
+            tests_passed = result.status == LayerStatus::Pass;
+            results.push(result);
         }
         if requested.contains(&Layer::Coverage) {
-            results.push(runner::run_coverage(stack, cfg, &changed, interrupt).await);
+            results.push(runner::run_coverage(stack, cfg, changed.as_ref(), interrupt).await);
+        }
+        if requested.contains(&Layer::Mutation) {
+            results.push(
+                runner::run_mutation(
+                    stack,
+                    cfg,
+                    changed.as_ref(),
+                    patch.as_deref(),
+                    tests_passed,
+                    interrupt,
+                )
+                .await,
+            );
         }
     }
 
@@ -356,7 +387,8 @@ mod tests {
     fn layer_parse_round_trips() {
         assert_eq!(Layer::parse("tests"), Some(Layer::Tests));
         assert_eq!(Layer::parse("Coverage"), Some(Layer::Coverage));
-        assert_eq!(Layer::parse("mutation"), None);
+        assert_eq!(Layer::parse("mutation"), Some(Layer::Mutation));
+        assert_eq!(Layer::parse("gherkin"), None);
     }
 
     #[test]
@@ -364,6 +396,93 @@ mod tests {
         assert_eq!(truncate_chars("abc", 10), "abc");
         assert!(truncate_chars("abcdef", 3).starts_with("abc"));
         assert!(truncate_chars("abcdef", 3).contains("truncated"));
+    }
+
+    /// The claim the whole layer rests on, against the real tool: a suite with
+    /// full line coverage but no assertions lets mutants survive.
+    ///
+    /// Skipped when cargo-mutants is not installed — this must not turn CI red
+    /// on machines without it, and every scoring rule is unit-tested separately.
+    #[tokio::test]
+    async fn mutation_catches_a_test_that_covers_without_checking() {
+        let root = std::env::temp_dir().join(format!("cq-mut-e2e-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        let sh = |cmd: &str| {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(cmd).current_dir(&root);
+            crate::procutil::no_window(&mut c);
+            c.output().map(|o| o.status.success()).unwrap_or(false)
+        };
+        if !sh("cargo mutants --version") {
+            return; // tool absent; the unit tests still cover the scoring
+        }
+
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"mutdemo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
+        )
+        .unwrap();
+        // Commit the scaffold, then add the code as a NEW file: that is the
+        // real shape of an agent's work, and it gives the diff something to
+        // scope to.
+        if !sh(
+            "git init -q && git config user.email t@t && git config user.name t \
+                && git add -A && git commit -qm scaffold",
+        ) {
+            return; // git unavailable
+        }
+        std::fs::write(
+            root.join("src/lib.rs"),
+            // The test runs every line of `discount` and asserts almost
+            // nothing — 100% coverage, zero verification.
+            "pub fn discount(total: f64, is_member: bool) -> f64 {\n    \
+             if is_member { total * 0.9 } else { total }\n}\n\n\
+             #[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    \
+             fn covers_without_checking() {\n        \
+             assert!(discount(100.0, true) > 0.0);\n    }\n}\n",
+        )
+        .unwrap();
+
+        let cfg = QualityConfig {
+            enforced_layers: vec![Layer::Tests, Layer::Mutation],
+            mutation_score_threshold: 60.0,
+            mutation_timeout_secs: 600,
+            ..Default::default()
+        };
+        // No base commit: not a git repo, so mutation runs unscoped over the
+        // whole (tiny) crate.
+        let report = run_layers(&root, &cfg, &[Layer::Tests, Layer::Mutation], None, None)
+            .await
+            .unwrap();
+
+        let tests = report
+            .layers
+            .iter()
+            .find(|l| l.layer == Layer::Tests)
+            .unwrap();
+        assert_eq!(tests.status, LayerStatus::Pass, "the weak suite is green");
+
+        let mutation = report
+            .layers
+            .iter()
+            .find(|l| l.layer == Layer::Mutation)
+            .unwrap();
+        assert_eq!(
+            mutation.status,
+            LayerStatus::Fail,
+            "mutants must survive a suite that checks nothing: {}",
+            mutation.summary
+        );
+        assert!(!report.verdict.pass);
+        assert!(
+            mutation.detail.contains("survived"),
+            "the survivors must be named: {}",
+            mutation.detail
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

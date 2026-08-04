@@ -70,15 +70,21 @@ async fn main() {
     }
 
     let base = quality::evidence::git_head(&root);
-    let changed = quality::diff::changed_lines(&root, base.as_deref());
-    println!(
-        "\nchanged since {}: {} line(s) across {} file(s)",
-        base.as_deref()
-            .map(|c| &c[..7.min(c.len())])
-            .unwrap_or("(no git)"),
-        quality::diff::total_lines(&changed),
-        changed.len()
-    );
+    match quality::diff::changed_lines(&root, base.as_deref()) {
+        Some(changed) => println!(
+            "\nchanged since {}: {} line(s) across {} file(s)",
+            base.as_deref()
+                .map(|c| &c[..7.min(c.len())])
+                .unwrap_or("HEAD"),
+            quality::diff::total_lines(&changed),
+            changed.len()
+        ),
+        // Not a failure, but it does mean the diff-scoped layers cannot run.
+        None => println!(
+            "\nno git repository here, so coverage and mutation cannot be scoped to this \
+             run's changes and will report as unavailable"
+        ),
+    }
 
     if detect_only {
         println!("\n--detect-only: nothing was executed.");
@@ -91,7 +97,7 @@ async fn main() {
             .filter(|s| !s.trim().is_empty())
             .map(|name| Layer::parse(name).unwrap_or_else(|| panic!("unknown layer '{name}'")))
             .collect(),
-        None => cfg.default_layers(),
+        None => cfg.finish_line_layers(),
     };
     println!(
         "\n── running: {} ──",
