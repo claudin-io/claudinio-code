@@ -21,8 +21,8 @@ use super::config::QualityConfig;
 use super::diff::{ChangedLines, total_lines};
 use super::parsers::coverage::diff_coverage;
 use super::parsers::{
-    MutationOutcome, TestSummary, interpret_exit_code, parse_cargo_test, parse_jest_json,
-    parse_lcov, parse_mutants_out, parse_vitest_json,
+    Feature, MutationOutcome, TestSummary, interpret_exit_code, parse_cargo_test, parse_jest_json,
+    parse_lcov, parse_mutants_out, parse_vitest_json, total_scenarios,
 };
 use super::profile::{StackProfile, TestParser};
 use super::{Layer, LayerResult, LayerStatus, truncate_chars};
@@ -560,6 +560,102 @@ pub async fn run_mutation(
     }
 }
 
+/// Execute the project's `.feature` specs.
+///
+/// This is the only layer whose subject is not the code: it asks whether the
+/// implementation does what a human wrote down, which is the failure the other
+/// three cannot see — code that is correct, tested, well-covered, and solves
+/// the wrong problem.
+///
+/// When no BDD runner is wired up the layer reports `Unavailable` with the
+/// scenario count. It deliberately does NOT fall back to asking a model whether
+/// the scenarios look satisfied: that would be the one place in this harness
+/// where a model's opinion is dressed up as evidence, and a spec you cannot
+/// execute is exactly where that lie would be most expensive.
+pub async fn run_gherkin(
+    stack: &StackProfile,
+    cfg: &QualityConfig,
+    features: &[Feature],
+    interrupt: Option<&Arc<AtomicBool>>,
+) -> LayerResult {
+    let scenarios = total_scenarios(features);
+    if scenarios == 0 {
+        return LayerResult {
+            layer: Layer::Gherkin,
+            status: LayerStatus::Pass,
+            stack: stack.name.clone(),
+            summary: "no scenarios to check".into(),
+            detail: String::new(),
+            exit_code: None,
+            metrics: serde_json::json!({"scenarios": 0, "features": 0}),
+            log_path: None,
+        };
+    }
+
+    let Some(template) = stack.gherkin_cmd.clone() else {
+        return unavailable(
+            Layer::Gherkin,
+            stack,
+            &format!(
+                "{scenarios} scenario(s) in {} spec file(s), but no BDD runner is wired up to \
+                 execute them. Set quality.gherkin_cmd, or add a runner (cucumber-rs runs \
+                 under `cargo test`; cucumber-js is detected automatically)",
+                features.len()
+            ),
+        );
+    };
+
+    let dir = artifact_dir(&stack.root, &format!("gherkin-{}", stack.name));
+    let command = template.replace("{artifact_dir}", &dir.to_string_lossy());
+    let log = dir.join("output.log");
+    let outcome = run_command(
+        &command,
+        &stack.root,
+        cfg.test_timeout_secs,
+        Some(&log),
+        interrupt,
+    )
+    .await;
+
+    if let Some(result) = infrastructure_failure(Layer::Gherkin, stack, &outcome, &command) {
+        return result;
+    }
+
+    let green = outcome.success();
+    LayerResult {
+        layer: Layer::Gherkin,
+        status: if green {
+            LayerStatus::Pass
+        } else {
+            LayerStatus::Fail
+        },
+        stack: stack.name.clone(),
+        summary: if green {
+            format!("{scenarios} scenario(s) passing")
+        } else {
+            format!(
+                "the spec is not satisfied ({scenarios} scenario(s), exit {:?})",
+                outcome.exit_code
+            )
+        },
+        detail: if green {
+            String::new()
+        } else {
+            format!(
+                "The implementation does not satisfy the specification. Fix the code to match \
+                 the scenarios — the scenarios are the requirement.\n\n{}",
+                outcome.output
+            )
+        },
+        exit_code: outcome.exit_code,
+        metrics: serde_json::json!({
+            "scenarios": scenarios,
+            "features": features.len(),
+        }),
+        log_path: outcome.log_path.map(|p| p.to_string_lossy().to_string()),
+    }
+}
+
 /// Distinguish "the check ran and says no" from "the check never ran".
 /// Reporting a spawn failure or a timeout as `Fail` would tell the model to go
 /// fix tests that were never executed.
@@ -618,6 +714,7 @@ mod tests {
             coverage_lcov: "lcov.info".into(),
             mutation_cmd: None,
             mutation_probe: None,
+            gherkin_cmd: None,
         }
     }
 
@@ -994,6 +1091,74 @@ mod tests {
         let log = std::fs::read_to_string(dir.join("mutants.out/caught.txt")).unwrap();
         assert!(log.contains("--in-diff"), "{log}");
         assert!(log.contains("changes.patch"), "{log}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn feature(scenarios: usize) -> Feature {
+        crate::quality::parsers::parse_feature(
+            "features/a.feature",
+            &format!(
+                "Feature: F\n{}",
+                (0..scenarios)
+                    .map(|i| format!("  Scenario: S{i}\n    Then it works\n"))
+                    .collect::<String>()
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_project_with_no_scenarios_passes_the_spec_layer() {
+        let root = tmp("gherkin-none");
+        let r = run_gherkin(&stack(&root, "true"), &QualityConfig::default(), &[], None).await;
+        assert_eq!(r.status, LayerStatus::Pass);
+        assert_eq!(r.metrics["scenarios"], 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn scenarios_with_no_runner_are_unavailable_never_a_pass() {
+        // The honest answer. Claiming a spec is satisfied because nothing can
+        // run it is exactly the lie this harness exists to prevent — and the
+        // message has to tell the user how to make it real.
+        let root = tmp("gherkin-norunner");
+        let r = run_gherkin(
+            &stack(&root, "true"),
+            &QualityConfig::default(),
+            &[feature(3)],
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Unavailable);
+        assert!(r.summary.contains("3 scenario"), "{}", r.summary);
+        assert!(r.summary.contains("gherkin_cmd"), "{}", r.summary);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_passing_bdd_runner_satisfies_the_spec() {
+        let root = tmp("gherkin-green");
+        let mut s = stack(&root, "true");
+        s.gherkin_cmd = Some("exit 0".into());
+        let r = run_gherkin(&s, &QualityConfig::default(), &[feature(2)], None).await;
+        assert_eq!(r.status, LayerStatus::Pass);
+        assert_eq!(r.metrics["scenarios"], 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failing_scenario_fails_the_spec_layer() {
+        let root = tmp("gherkin-red");
+        let mut s = stack(&root, "true");
+        s.gherkin_cmd =
+            Some("echo 'Scenario: A member gets ten percent off ... failed'; exit 1".into());
+        let r = run_gherkin(&s, &QualityConfig::default(), &[feature(1)], None).await;
+        assert_eq!(r.status, LayerStatus::Fail);
+        assert!(
+            r.detail.contains("the scenarios are the requirement"),
+            "{}",
+            r.detail
+        );
+        assert!(r.detail.contains("ten percent"), "{}", r.detail);
         std::fs::remove_dir_all(&root).ok();
     }
 

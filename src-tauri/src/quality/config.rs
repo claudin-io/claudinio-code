@@ -74,6 +74,13 @@ pub struct QualityConfig {
     /// Share of viable mutants the tests must catch.
     #[serde(default = "default_mutation_score_threshold")]
     pub mutation_score_threshold: f64,
+    /// Where the project's `.feature` specs live, relative to the workspace.
+    /// Everything under it is human-owned: the agent cannot edit it.
+    #[serde(default)]
+    pub features_dir: Option<String>,
+    /// Override the detected BDD runner command.
+    #[serde(default)]
+    pub gherkin_cmd: Option<String>,
     #[serde(default = "default_test_timeout")]
     pub test_timeout_secs: u64,
     #[serde(default = "default_coverage_timeout")]
@@ -124,6 +131,8 @@ impl Default for QualityConfig {
             diff_coverage_threshold: DEFAULT_DIFF_COVERAGE_THRESHOLD,
             mutation_cmd: None,
             mutation_score_threshold: DEFAULT_MUTATION_SCORE_THRESHOLD,
+            features_dir: None,
+            gherkin_cmd: None,
             test_timeout_secs: DEFAULT_TEST_TIMEOUT_SECS,
             coverage_timeout_secs: DEFAULT_COVERAGE_TIMEOUT_SECS,
             mutation_timeout_secs: DEFAULT_MUTATION_TIMEOUT_SECS,

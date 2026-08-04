@@ -576,6 +576,9 @@ export interface QualitySettings {
   testCmd: string;
   coverageCmd: string;
   mutationCmd: string;
+  /** Empty = the default "features" directory. */
+  featuresDir: string;
+  gherkinCmd: string;
   testTimeoutSecs: number;
   coverageTimeoutSecs: number;
   mutationTimeoutSecs: number;
@@ -588,6 +591,7 @@ export interface DetectedStack {
   testCmd: string;
   coverageCmd: string | null;
   mutationCmd: string | null;
+  gherkinCmd: string | null;
 }
 
 export interface QualityInfo {

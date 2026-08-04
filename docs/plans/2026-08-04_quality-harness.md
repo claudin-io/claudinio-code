@@ -25,8 +25,8 @@ defect the others miss:
 | Gherkin / spec | Does it do what the business asked? | The worst failure: building the wrong thing perfectly |
 | Metrics | Is the codebase improving or rotting? | Debt accrues silently at machine speed |
 
-Phases 1–3 (tests, diff coverage, mutation) are implemented. Phases 4–5 are the
-roadmap below.
+Phases 1–4 (tests, diff coverage, mutation, Gherkin) are implemented. Phase 5 is
+the roadmap below.
 
 ## Principle: enforcement, not trust
 
@@ -145,6 +145,44 @@ Exit codes carry the distinction the whole harness is built on: 0/2/3 are real
 results, while 4 (red baseline), 5/6 (bad diff) and 70 (internal error) mean we
 never found out.
 
+### Gherkin: the only check whose subject is not the code
+
+Tests, coverage and mutation all ask "is this code sound?". They cannot ask "is
+this the thing we were asked to build?", and that is the failure the others let
+through: an implementation that is correct, tested, well-covered, and solves the
+wrong problem.
+
+Specs get two properties nothing else in the harness has.
+
+**They are human-owned.** `edit_file` refuses any path under the spec directory,
+on both write paths — the proposal tool and the code subagent's direct apply.
+A spec the implementer may rewrite is not a specification, it is a comment: any
+disagreement between code and requirement would be settled by editing the
+requirement. The refusal tells the agent to ask the user instead.
+
+**They drive planning.** The scenario index is injected into the system prompt
+beside the skills block, so the planner sees the scenarios it has to satisfy
+before it designs anything. A specification nobody reads while designing is
+decoration.
+
+The Gherkin parser is a deliberate subset written here rather than pulled in as
+a crate: the harness never *executes* scenarios — a real BDD runner does — so it
+needs names, tags and steps for indexing, not full fidelity. It never fails
+either; a malformed feature yields whatever could be read, because a typo in a
+spec must not silently remove it from the index.
+
+**No LLM judge.** The original plan had a fallback: when no BDD runner exists,
+ask a subagent to map scenarios onto tests and report a soft warning. That was
+dropped. It would have been the one place in this harness where a model's
+opinion is dressed up as evidence, and a spec you cannot execute is exactly
+where that lie is most expensive. Instead the layer reports `Unavailable` with
+the scenario count and how to make it real — the same honesty every other layer
+already applies to missing tooling.
+
+cucumber-js is detected automatically. cucumber-rs needs nothing: it runs as an
+ordinary test target, so `cargo test` already executes it and a separate command
+would run every scenario twice.
+
 ### Diff coverage, not project coverage
 
 A project-wide percentage barely moves when an agent adds forty lines, so it is
@@ -243,6 +281,8 @@ exclusion is explicit rather than left to gitignore.
     "test_cmd": null,
     "coverage_cmd": null,
     "mutation_cmd": null,
+    "features_dir": "features",
+    "gherkin_cmd": null,
     "test_timeout_secs": 600,
     "coverage_timeout_secs": 900,
     "mutation_timeout_secs": 1800

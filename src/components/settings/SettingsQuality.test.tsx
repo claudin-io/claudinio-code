@@ -30,6 +30,8 @@ const info = (over: Partial<QualityInfo["settings"]> = {}): QualityInfo => ({
     testCmd: "",
     coverageCmd: "",
     mutationCmd: "",
+    featuresDir: "",
+    gherkinCmd: "",
     testTimeoutSecs: 600,
     coverageTimeoutSecs: 900,
     mutationTimeoutSecs: 1800,
@@ -42,6 +44,7 @@ const info = (over: Partial<QualityInfo["settings"]> = {}): QualityInfo => ({
       testCmd: "cargo test",
       coverageCmd: null,
       mutationCmd: "cargo mutants -o {artifact_dir} {in_diff}",
+      gherkinCmd: null,
     },
   ],
 });
@@ -144,6 +147,14 @@ describe("SettingsQuality", () => {
     const on = await mount("/p", info({ enforcedLayers: ["tests", "mutation"] }));
     expect(on.textContent).toContain("reruns once per mutant");
     expect(on.textContent).toContain("60%");
+  });
+
+  it("explains that specs are write-protected when the layer is on", async () => {
+    const el = await mount("/p", info({ enforcedLayers: ["tests", "gherkin"] }));
+    expect(el.textContent).toContain("cannot edit");
+    expect(el.textContent).toContain("Specs directory");
+    // Without a runner, the honest outcome must be stated up front.
+    expect(el.textContent).toContain("never as passing");
   });
 
   it("surfaces a write failure instead of pretending it saved", async () => {

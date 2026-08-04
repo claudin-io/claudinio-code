@@ -28,6 +28,9 @@ pub struct QualitySettings {
     pub test_cmd: String,
     pub coverage_cmd: String,
     pub mutation_cmd: String,
+    /// Empty = the default "features" directory.
+    pub features_dir: String,
+    pub gherkin_cmd: String,
     pub test_timeout_secs: u64,
     pub coverage_timeout_secs: u64,
     pub mutation_timeout_secs: u64,
@@ -70,6 +73,8 @@ impl From<&QualityConfig> for QualitySettings {
             test_cmd: cfg.test_cmd.clone().unwrap_or_default(),
             coverage_cmd: cfg.coverage_cmd.clone().unwrap_or_default(),
             mutation_cmd: cfg.mutation_cmd.clone().unwrap_or_default(),
+            features_dir: cfg.features_dir.clone().unwrap_or_default(),
+            gherkin_cmd: cfg.gherkin_cmd.clone().unwrap_or_default(),
             test_timeout_secs: cfg.test_timeout_secs,
             coverage_timeout_secs: cfg.coverage_timeout_secs,
             mutation_timeout_secs: cfg.mutation_timeout_secs,
@@ -97,6 +102,8 @@ impl QualitySettings {
             test_cmd: non_empty(&self.test_cmd),
             coverage_cmd: non_empty(&self.coverage_cmd),
             mutation_cmd: non_empty(&self.mutation_cmd),
+            features_dir: non_empty(&self.features_dir),
+            gherkin_cmd: non_empty(&self.gherkin_cmd),
             diff_coverage_threshold: self.diff_coverage_threshold.clamp(0.0, 100.0),
             mutation_score_threshold: self.mutation_score_threshold.clamp(0.0, 100.0),
             test_timeout_secs: self.test_timeout_secs.max(1),
@@ -191,7 +198,7 @@ mod tests {
     fn an_unknown_layer_name_is_dropped_not_persisted() {
         // The panel must never be able to write a file the harness cannot read.
         let mut s = settings();
-        s.enforced_layers = vec!["tests".into(), "gherkin".into()];
+        s.enforced_layers = vec!["tests".into(), "not-a-real-layer".into()];
         assert_eq!(s.to_config().enforced_layers, vec![Layer::Tests]);
     }
 

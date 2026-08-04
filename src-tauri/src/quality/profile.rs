@@ -51,6 +51,10 @@ pub struct StackProfile {
     /// harness cannot drive this stack natively.
     pub mutation_cmd: Option<String>,
     pub mutation_probe: Option<String>,
+    /// Command that executes the project's `.feature` specs, when a real BDD
+    /// runner is wired up. `None` means the scenarios exist but nothing here
+    /// can execute them — reported honestly rather than guessed at.
+    pub gherkin_cmd: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -85,6 +89,7 @@ pub fn detect(workspace_root: &Path, cfg: &QualityConfig) -> ProjectProfile {
             coverage_lcov: "lcov.info".into(),
             mutation_cmd: None,
             mutation_probe: None,
+            gherkin_cmd: None,
         }];
     }
     if let Some(cmd) = cfg.coverage_cmd.as_deref().filter(|c| !c.trim().is_empty()) {
@@ -97,6 +102,11 @@ pub fn detect(workspace_root: &Path, cfg: &QualityConfig) -> ProjectProfile {
         for stack in &mut stacks {
             stack.mutation_cmd = Some(cmd.to_string());
             stack.mutation_probe = None;
+        }
+    }
+    if let Some(cmd) = cfg.gherkin_cmd.as_deref().filter(|c| !c.trim().is_empty()) {
+        for stack in &mut stacks {
+            stack.gherkin_cmd = Some(cmd.to_string());
         }
     }
 
@@ -151,6 +161,9 @@ fn detect_rust(workspace_root: &Path) -> Option<StackProfile> {
         // artifacts in the user's repo (which would also churn the digest).
         mutation_cmd: Some("cargo mutants -o {artifact_dir} {in_diff}".into()),
         mutation_probe: Some("cargo mutants --version".into()),
+        // cucumber-rs runs as an ordinary test target, so `cargo test` already
+        // executes it. A separate command would run the scenarios twice.
+        gherkin_cmd: None,
     })
 }
 
@@ -196,7 +209,24 @@ fn detect_js(workspace_root: &Path) -> Option<StackProfile> {
         // mutation-testing-elements JSON is already parsed.
         mutation_cmd: None,
         mutation_probe: None,
+        gherkin_cmd: bdd_runner_cmd(&pkg, exec),
     })
+}
+
+/// A JS BDD runner, if the project has one wired up. Only cucumber-js is
+/// detected: it is the one with a stable CLI that exits non-zero on a failing
+/// scenario, which is all the gate needs.
+fn bdd_runner_cmd(pkg: &serde_json::Value, exec: &str) -> Option<String> {
+    let has = |name: &str| {
+        ["devDependencies", "dependencies"]
+            .iter()
+            .any(|block| pkg.get(block).and_then(|d| d.get(name)).is_some())
+    };
+    if has("@cucumber/cucumber") {
+        Some(format!("{exec} cucumber-js"))
+    } else {
+        None
+    }
 }
 
 enum JsRunner {

@@ -22,6 +22,7 @@ pub mod evidence;
 pub mod parsers;
 pub mod profile;
 pub mod runner;
+pub mod spec;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -32,15 +33,18 @@ pub use config::QualityConfig;
 pub use profile::{ProjectProfile, StackProfile};
 
 /// One verification layer. Each catches a class of defect the others miss:
-/// tests catch broken logic, coverage catches code no test ever touched, and
-/// mutation catches tests that execute code without actually checking it.
-/// Gherkin and trend metrics are the next phases (see the design doc).
+/// tests catch broken logic, coverage catches code no test ever touched,
+/// mutation catches tests that execute code without actually checking it, and
+/// Gherkin checks the whole thing against what a human actually asked for —
+/// the one input that did not come out of a model. Trend metrics are the
+/// remaining phase (see the design doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
     Tests,
     Coverage,
     Mutation,
+    Gherkin,
 }
 
 impl Layer {
@@ -49,6 +53,7 @@ impl Layer {
             Layer::Tests => "tests",
             Layer::Coverage => "coverage",
             Layer::Mutation => "mutation",
+            Layer::Gherkin => "gherkin",
         }
     }
 
@@ -57,6 +62,7 @@ impl Layer {
             "tests" | "test" => Some(Layer::Tests),
             "coverage" | "cov" => Some(Layer::Coverage),
             "mutation" | "mutants" => Some(Layer::Mutation),
+            "gherkin" | "spec" | "specs" | "bdd" => Some(Layer::Gherkin),
             _ => None,
         }
     }
@@ -219,6 +225,7 @@ pub fn evaluate_gate(layers: &[LayerResult], enforced: &[Layer]) -> GateVerdict 
                 Layer::Tests => "all tests passing".into(),
                 Layer::Coverage => "diff coverage at or above threshold".into(),
                 Layer::Mutation => "mutation score at or above threshold".into(),
+                Layer::Gherkin => "every scenario in the spec passing".into(),
             },
             actual: r.summary.clone(),
         });
@@ -267,6 +274,14 @@ pub async fn run_layers(
         None
     };
 
+    // The specs are read once: they are the same for every stack, and reading
+    // them is also how the layer reports "you have scenarios nothing runs".
+    let features = if requested.contains(&Layer::Gherkin) {
+        spec::load_features(workspace_root, cfg.features_dir.as_deref())
+    } else {
+        Vec::new()
+    };
+
     let mut results: Vec<LayerResult> = Vec::new();
     for stack in &profile.stacks {
         // Mutation depends on this: breaking code on top of a red suite tells
@@ -279,6 +294,9 @@ pub async fn run_layers(
         }
         if requested.contains(&Layer::Coverage) {
             results.push(runner::run_coverage(stack, cfg, changed.as_ref(), interrupt).await);
+        }
+        if requested.contains(&Layer::Gherkin) {
+            results.push(runner::run_gherkin(stack, cfg, &features, interrupt).await);
         }
         if requested.contains(&Layer::Mutation) {
             results.push(
@@ -388,7 +406,10 @@ mod tests {
         assert_eq!(Layer::parse("tests"), Some(Layer::Tests));
         assert_eq!(Layer::parse("Coverage"), Some(Layer::Coverage));
         assert_eq!(Layer::parse("mutation"), Some(Layer::Mutation));
-        assert_eq!(Layer::parse("gherkin"), None);
+        assert_eq!(Layer::parse("gherkin"), Some(Layer::Gherkin));
+        // A name chosen so it can never become a real layer and quietly
+        // turn this assertion into a no-op.
+        assert_eq!(Layer::parse("not-a-real-layer"), None);
     }
 
     #[test]

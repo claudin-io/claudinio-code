@@ -425,7 +425,7 @@ mod tests {
         let (ctx, root) = workspace("badlayer", "{}");
         let err = execute(
             RunQualityArgs {
-                layers: Some(vec!["gherkin".into()]),
+                layers: Some(vec!["not-a-real-layer".into()]),
             },
             &ctx,
         )

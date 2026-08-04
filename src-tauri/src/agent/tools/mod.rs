@@ -121,6 +121,31 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     crate::workspace_path::ensure_within_root(requested, std::path::Path::new(root))
 }
 
+/// Like `validate_path`, but also refuses to write the project's specs.
+///
+/// Specs are the one input to a project that did not come out of a model, which
+/// is the entire reason checking against them means anything. An agent that can
+/// edit them can resolve any disagreement between code and requirement by
+/// editing the requirement — so both write paths (the proposal tool and the
+/// subagent's direct apply) go through here.
+pub fn validate_editable_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
+    validate_path(requested, ctx)?;
+    let Some(root) = ctx.workspace_root.as_deref() else {
+        return Ok(());
+    };
+    // Re-read from disk rather than caching: the user may move their specs
+    // mid-session, and the guard must follow them immediately.
+    let features_dir = crate::quality::QualityConfig::load(std::path::Path::new(root)).features_dir;
+    if crate::quality::spec::is_spec_path(
+        std::path::Path::new(root),
+        features_dir.as_deref(),
+        std::path::Path::new(requested),
+    ) {
+        return Err(crate::quality::spec::edit_refusal(requested));
+    }
+    Ok(())
+}
+
 /// Like `validate_path`, but additionally allows READ access to user-level
 /// skill directories (`~/{.agents,.claudinio,.claude}/skills`), which live
 /// outside the workspace yet are referenced by the skills system prompt.
@@ -334,7 +359,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                     "layers": {
                         "type": "array",
                         "description": "Layers to run. Omit to run what this project enforces (tests, and coverage when configured).",
-                        "items": { "type": "string", "enum": ["tests", "coverage", "mutation"] }
+                        "items": { "type": "string", "enum": ["tests", "coverage", "mutation", "gherkin"] }
                     }
                 },
                 "required": []
@@ -566,7 +591,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "edit_file" => {
             let a: edit_file::EditFileArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            validate_path(&a.path, ctx)?;
+            validate_editable_path(&a.path, ctx)?;
             // Enforce read-before-edit
             {
                 let tracker = ctx.read_tracker.lock().await;
@@ -808,7 +833,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<String, String> {
     let a: edit_file::EditFileArgs =
         serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-    validate_path(&a.path, ctx)?;
+    validate_editable_path(&a.path, ctx)?;
     // Enforce read-before-edit
     {
         let tracker = ctx.read_tracker.lock().await;
@@ -1375,6 +1400,74 @@ mod tests {
     }
 
     // Existing tests (unchanged)
+    /// A workspace with a spec directory and a source file.
+    fn spec_workspace(name: &str, config: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("cq-editguard-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("features")).unwrap();
+        std::fs::create_dir_all(root.join("docs/specs")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join(".claudinio.json"), config).unwrap();
+        std::fs::write(
+            root.join("features/a.feature"),
+            "Feature: F\n  Scenario: S\n    Then it works\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/specs/b.feature"), "Feature: G\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        root
+    }
+
+    fn ctx_at(root: &std::path::Path) -> ToolContext {
+        let mut ctx = tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+        ctx
+    }
+
+    #[test]
+    fn the_agent_cannot_edit_a_specification() {
+        // The spec is the one input that did not come from a model. An agent
+        // that can rewrite it can settle any code-vs-requirement disagreement
+        // by editing the requirement.
+        let root = spec_workspace("refuse", "{}");
+        let ctx = ctx_at(&root);
+        let err = validate_editable_path(root.join("features/a.feature").to_str().unwrap(), &ctx)
+            .unwrap_err();
+        assert!(err.contains("owned by the user"), "{err}");
+        assert!(err.contains("ask the user"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ordinary_source_files_stay_editable() {
+        let root = spec_workspace("allow", "{}");
+        let ctx = ctx_at(&root);
+        assert!(validate_editable_path(root.join("src/lib.rs").to_str().unwrap(), &ctx).is_ok());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_guard_follows_a_configured_spec_directory() {
+        let root = spec_workspace("configured", r#"{"quality":{"features_dir":"docs/specs"}}"#);
+        let ctx = ctx_at(&root);
+        assert!(
+            validate_editable_path(root.join("docs/specs/b.feature").to_str().unwrap(), &ctx)
+                .is_err()
+        );
+        // Once specs move, the old default directory is ordinary code again.
+        assert!(
+            validate_editable_path(root.join("features/a.feature").to_str().unwrap(), &ctx).is_ok()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_guard_is_inert_without_a_workspace() {
+        // Tests and one-off workflows must not be gated.
+        let ctx = tests_support::ctx();
+        assert!(validate_editable_path("/anywhere/features/a.feature", &ctx).is_ok());
+    }
+
     #[test]
     fn test_validate_path_allows_within_workspace() {
         let ctx = ToolContext {

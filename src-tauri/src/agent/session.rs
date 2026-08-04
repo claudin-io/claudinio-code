@@ -30,6 +30,9 @@ const DEFAULT_MAX_GOLDEN_STALLS: usize = 2;
 /// gate before stopping honestly. A suite it cannot fix in three tries is a
 /// suite it will not fix in ten, and looping burns the user's tokens.
 const MAX_QUALITY_RETRIES: u32 = 3;
+/// Prompt budget for the scenario index. Enough for a real spec suite, small
+/// enough that a thousand scenarios cannot crowd out the conversation.
+const MAX_SPEC_SECTION_CHARS: usize = 4_000;
 
 /// Parse <goal>...</goal> tags from user input.
 /// Returns (cleaned_text, list_of_goals).
@@ -448,12 +451,45 @@ const GIT_SYNC_PROMPT: &str = r#"Role: Claudinio git operator. Single goal: get 
 - Final user-facing summary: language of the user's most recent message if known, else English.
 - Reasoning and commands MUST be in English."#;
 
+/// The scenario index for the planning prompt, if the project has specs.
+///
+/// This is the point of the whole layer: a specification nobody reads while
+/// designing is decoration. Putting the scenarios in front of the planner makes
+/// them the requirement they claim to be.
+fn build_spec_prompt_section(ctx: &ToolContext) -> Option<String> {
+    let root = ctx.workspace_root.as_deref()?;
+    let cfg = crate::quality::QualityConfig::load(std::path::Path::new(root));
+    let features = crate::quality::spec::load_features(
+        std::path::Path::new(root),
+        cfg.features_dir.as_deref(),
+    );
+    if features.is_empty() {
+        return None;
+    }
+    let index = crate::quality::parsers::scenario_index(&features, MAX_SPEC_SECTION_CHARS);
+    Some(format!(
+        "\n## SPECIFICATION (Gherkin — the user's requirement)\n\
+         This project has executable specs. They are the requirement, and they are the one \
+         input here that did not come from a model:\n\
+         - Your plan and your implementation must satisfy these scenarios.\n\
+         - You CANNOT edit them: `edit_file` refuses any path under the spec directory. If a \
+         scenario looks wrong or cannot be met, say so and ask the user — never change the \
+         spec to match the code.\n\
+         - Reference the scenarios each task covers, so it is obvious what is left.\n\n\
+         {index}"
+    ))
+}
+
 /// Build the per-session system prompt. The base is byte-identical for every
 /// request in the same workspace so the provider's prefix cache stays warm;
 /// the mode block is appended last and only changes when the mode switches.
 fn system_prompt(
     workspace_root: Option<&str>,
     skills_section: Option<&str>,
+    // Index of the project's Gherkin scenarios, when it has any. Placed with
+    // the skills block: stable per workspace, so the prefix cache only moves
+    // when the specs themselves do.
+    spec_section: Option<&str>,
     plan_save_path: Option<&str>,
     mode: SessionMode,
     profile: PromptProfile,
@@ -479,6 +515,10 @@ File tools take absolute paths inside this root."
         None => SYSTEM_PROMPT.to_string(),
     };
     let base = match skills_section {
+        Some(s) if !s.is_empty() => format!("{base}\n{s}"),
+        _ => base,
+    };
+    let base = match spec_section {
         Some(s) if !s.is_empty() => format!("{base}\n{s}"),
         _ => base,
     };
@@ -1540,10 +1580,14 @@ pub async fn run_workflow_with_profile(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
+    // The specs are the requirement. Putting them in the prompt is what makes
+    // them an input to planning rather than a document nobody opens.
+    let spec_section = build_spec_prompt_section(ctx);
     let (mut cur_mode, _) = mode_ctl.get();
     let mut system = system_prompt(
         ctx.workspace_root.as_deref(),
         skills_section.as_deref(),
+        spec_section.as_deref(),
         ctx.plan_save_path.as_deref(),
         cur_mode,
         profile,
@@ -1744,6 +1788,7 @@ pub async fn run_workflow_with_profile(
             system = system_prompt(
                 ctx.workspace_root.as_deref(),
                 skills_section.as_deref(),
+                spec_section.as_deref(),
                 ctx.plan_save_path.as_deref(),
                 cur_mode,
                 profile,
@@ -1802,6 +1847,7 @@ pub async fn run_workflow_with_profile(
                         system = system_prompt(
                             ctx.workspace_root.as_deref(),
                             skills_section.as_deref(),
+                            spec_section.as_deref(),
                             ctx.plan_save_path.as_deref(),
                             cur_mode,
                             profile,
@@ -4578,6 +4624,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             Some(ROOT),
             None,
             None,
+            None,
             SessionMode::Brain,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
@@ -4602,6 +4649,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     fn brain_prompt_mandates_lld_stage() {
         let sys = system_prompt(
             Some(ROOT),
+            None,
             None,
             None,
             SessionMode::Brain,
@@ -4632,6 +4680,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             Some(ROOT),
             None,
             None,
+            None,
             SessionMode::Brain,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
@@ -4653,6 +4702,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             Some(ROOT),
             None,
             None,
+            None,
             SessionMode::Builder,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
@@ -4667,6 +4717,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     fn builder_prompt_requires_complete_subagent_spec() {
         let sys = system_prompt(
             Some(ROOT),
+            None,
             None,
             None,
             SessionMode::Builder,
@@ -4684,9 +4735,57 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     }
 
     #[test]
+    fn the_scenario_index_reaches_the_planning_prompt() {
+        // A spec nobody reads while designing is decoration. This is the wire
+        // that makes it a requirement.
+        let root = std::env::temp_dir().join(format!("cq-specprompt-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("features")).unwrap();
+        std::fs::write(
+            root.join("features/discount.feature"),
+            "Feature: Member discounts\n  Scenario: Ten percent off\n    Then the total is 90\n",
+        )
+        .unwrap();
+        let mut ctx = crate::agent::tools::tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+
+        let section = build_spec_prompt_section(&ctx).expect("specs found");
+        assert!(section.contains("Member discounts"), "{section}");
+        assert!(section.contains("Ten percent off"), "{section}");
+        assert!(section.contains("CANNOT edit"), "{section}");
+
+        let sys = system_prompt(
+            Some("/ws"),
+            None,
+            Some(&section),
+            None,
+            SessionMode::Brain,
+            PromptProfile::Standard,
+            4,
+        );
+        assert!(
+            sys.contains("Ten percent off"),
+            "the planner must see the scenarios"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_project_without_specs_adds_nothing_to_the_prompt() {
+        // No spec directory must cost zero prompt budget.
+        let root = std::env::temp_dir().join(format!("cq-nospec-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = crate::agent::tools::tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+        assert!(build_spec_prompt_section(&ctx).is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn system_prompt_warns_against_similar_to_guessing() {
         let sys = system_prompt(
             Some(ROOT),
+            None,
             None,
             None,
             SessionMode::Builder,
@@ -4707,6 +4806,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     fn git_sync_prompt_has_no_task_system_or_modes() {
         let sys = system_prompt(
             Some(ROOT),
+            None,
             None,
             None,
             SessionMode::Builder,
@@ -4769,6 +4869,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         };
         let system = system_prompt(
             Some(ROOT),
+            None,
             None,
             None,
             SessionMode::Brain,
@@ -4838,6 +4939,7 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
         };
         let system = system_prompt(
             Some(ROOT),
+            None,
             None,
             None,
             SessionMode::Builder,
