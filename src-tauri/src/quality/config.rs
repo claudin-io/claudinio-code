@@ -20,11 +20,29 @@ pub const DEFAULT_DIFF_COVERAGE_THRESHOLD: f64 = 80.0;
 pub const DEFAULT_TEST_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_COVERAGE_TIMEOUT_SECS: u64 = 900;
 
+/// When a run must be verified before it is allowed to finish.
+///
+/// `Goals` is the conservative default: only a `<goal>` the user tagged demands
+/// proof. It is also the narrow one — the harness stays invisible to anyone who
+/// does not know the tag exists, which is the opposite of earning the right not
+/// to read the code. `CodeChange` closes that gap: any session that touched
+/// source gets verified once, at the finish line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforceOn {
+    Goals,
+    CodeChange,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QualityConfig {
     /// Master switch. False disables both the tool and the gate.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// What triggers the finish-line check. Tagged goals always trigger it;
+    /// this widens the net beyond them.
+    #[serde(default = "default_enforce_on")]
+    pub enforce_on: EnforceOn,
     /// Which layers block a golden task from being marked done. Empty = the
     /// harness reports but never blocks (observation mode).
     #[serde(default = "default_enforced")]
@@ -48,6 +66,12 @@ pub struct QualityConfig {
 fn default_true() -> bool {
     true
 }
+fn default_enforce_on() -> EnforceOn {
+    // Conservative on purpose: turning a one-line experiment into a full test
+    // run without being asked is how a harness earns itself a config flag set
+    // to false. Opt in with "enforce_on": "code_change".
+    EnforceOn::Goals
+}
 fn default_enforced() -> Vec<Layer> {
     // Tests only by default: coverage needs tooling the user may not have
     // installed, and a harness that blocks on day one gets switched off.
@@ -67,6 +91,7 @@ impl Default for QualityConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            enforce_on: default_enforce_on(),
             enforced_layers: default_enforced(),
             test_cmd: None,
             coverage_cmd: None,
@@ -169,6 +194,32 @@ mod tests {
         let layers = cfg.default_layers();
         assert!(layers.contains(&Layer::Tests));
         assert!(layers.contains(&Layer::Coverage));
+    }
+
+    #[test]
+    fn enforce_on_defaults_to_goals_only() {
+        // Widening the net without being asked would turn a one-line
+        // experiment into a full test run; that is how a harness gets disabled.
+        assert_eq!(QualityConfig::default().enforce_on, EnforceOn::Goals);
+        assert_eq!(
+            QualityConfig::from_workspace_json(r#"{"quality":{}}"#).enforce_on,
+            EnforceOn::Goals
+        );
+    }
+
+    #[test]
+    fn enforce_on_code_change_is_opt_in() {
+        let cfg = QualityConfig::from_workspace_json(r#"{"quality":{"enforce_on":"code_change"}}"#);
+        assert_eq!(cfg.enforce_on, EnforceOn::CodeChange);
+    }
+
+    #[test]
+    fn an_unknown_enforce_on_value_falls_back_to_the_safe_defaults() {
+        // serde rejects the whole object, so every field reverts — including
+        // the gate staying on.
+        let cfg = QualityConfig::from_workspace_json(r#"{"quality":{"enforce_on":"always"}}"#);
+        assert_eq!(cfg.enforce_on, EnforceOn::Goals);
+        assert!(cfg.gate_active());
     }
 
     #[test]

@@ -2249,18 +2249,13 @@ pub async fn run_workflow_with_profile(
             // the evidence itself and runs the checks when there are none.
             // Same pattern as auto_finalize below: never rely on the model
             // having done the required last step.
-            if stop_reason == "end_turn" {
-                let has_execution_goal = ctx
-                    .session_store_path
-                    .as_deref()
-                    .and_then(|p| {
-                        crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok()
-                    })
-                    .unwrap_or_default()
-                    .iter()
-                    .any(crate::agent::tools::tasks::is_golden_execution);
-
-                if has_execution_goal {
+            // A tagged goal always demands proof; a workspace set to
+            // `enforce_on: "code_change"` also demands it from any run that
+            // touched source, so the harness protects people who never learned
+            // the <goal> syntax.
+            if stop_reason == "end_turn" && crate::agent::tools::quality::verification_required(ctx)
+            {
+                {
                     use crate::agent::tools::quality as qtool;
                     let evidence = qtool::current_evidence(ctx);
                     // A failing run whose digest still matches describes

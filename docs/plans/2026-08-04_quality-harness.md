@@ -135,11 +135,41 @@ replace, so re-gating settled goals would make the task list unwritable after
 any later edit.
 
 **2. The harness at the finish line (`agent/session.rs`)** — the model can also
-simply stop talking. Before a goal-driven run is allowed to finish, the loop
-checks the evidence itself and, if it is missing, stale or red, **runs the
-checks itself** — the same pattern as `auto_finalize`. Red sends the model back
-with the parsed failures, up to `MAX_QUALITY_RETRIES` (3), then stops honestly
-with `stop_reason = "quality_failed"`, mirroring `golden_stalled`.
+simply stop talking. Before a run is allowed to finish, the loop checks the
+evidence itself and, if it is missing, stale or red, **runs the checks itself** —
+the same pattern as `auto_finalize`. Red sends the model back with the parsed
+failures, up to `MAX_QUALITY_RETRIES` (3), then stops honestly with
+`stop_reason = "quality_failed"`, mirroring `golden_stalled`.
+
+A red report whose digest still matches is reused rather than re-run: nothing
+changed since it was produced, so a second run would spend minutes reaching the
+same conclusion. That is the common case while the model is being sent back
+over a failing gate.
+
+### What triggers the finish-line check
+
+Keying enforcement only off `<goal>` tags made the harness invisible to anyone
+who did not know the tag exists — which is most people, and the opposite of
+earning the right not to read the code. `enforce_on` widens it:
+
+| `enforce_on` | Verified at the finish line |
+|---|---|
+| `"goals"` (default) | Only runs with a tagged `<goal>` |
+| `"code_change"` | Any run that touched a file a test could execute |
+
+`code_change` is opt-in on purpose: turning a one-line experiment into a full
+test run without being asked is how a harness gets switched off. Either way the
+check is **once per run**, at the end — never per task, or a session with ten
+tasks would mean ten test runs.
+
+"Touched source" comes from a *denylist* of documentation and asset extensions,
+not an allowlist of source ones. An unfamiliar extension therefore counts as
+code and gets verified: over-checking an unknown file type costs minutes,
+under-checking it costs the guarantee. Lockfiles and build config are *not*
+excluded — a dependency bump can break a suite as surely as an edited function.
+
+The `tasks_set` gate is unaffected by this setting: it always and only guards
+the execution half of a tagged goal.
 
 It fails open when the harness itself cannot run (no recognizable project):
 blocking a finish on *our* inability to check would strand the user.
@@ -167,6 +197,7 @@ exclusion is explicit rather than left to gitignore.
 {
   "quality": {
     "enabled": true,
+    "enforce_on": "goals",
     "enforced_layers": ["tests"],
     "diff_coverage_threshold": 80.0,
     "test_cmd": null,

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use crate::agent::tools::ToolContext;
+use crate::quality::config::EnforceOn;
 use crate::quality::{self, Layer, QualityConfig, QualityReport};
 
 /// Longest failure detail pushed back into the conversation when the gate
@@ -64,6 +65,36 @@ pub fn current_evidence(ctx: &ToolContext) -> Evidence {
     Evidence::Current {
         pass: run.pass,
         summary: run.summary,
+    }
+}
+
+/// Whether this run has to be verified before it is allowed to finish.
+///
+/// A tagged `<goal>` always demands proof. But keying *only* off goals made
+/// the harness invisible to anyone who did not know the tag exists — the
+/// common case — so `enforce_on: "code_change"` widens it to any session that
+/// touched source. The check stays at the finish line, once per run, rather
+/// than per task: a session with ten tasks must not mean ten test runs.
+pub fn verification_required(ctx: &ToolContext) -> bool {
+    let Some((root, cfg)) = workspace_and_config(ctx) else {
+        return false;
+    };
+    if !cfg.gate_active() {
+        return false;
+    }
+    let has_goal = ctx
+        .session_store_path
+        .as_deref()
+        .and_then(|p| crate::agent::persist::load_last_tasks(Path::new(p)).ok())
+        .unwrap_or_default()
+        .iter()
+        .any(crate::agent::tools::tasks::is_golden_execution);
+    if has_goal {
+        return true;
+    }
+    match cfg.enforce_on {
+        EnforceOn::Goals => false,
+        EnforceOn::CodeChange => quality::diff::touches_source(&root, ctx.base_commit.as_deref()),
     }
 }
 
@@ -287,6 +318,101 @@ mod tests {
         // Tests and one-off workflows must not be gated.
         let ctx = crate::agent::tools::tests_support::ctx();
         assert!(matches!(current_evidence(&ctx), Evidence::NotRequired));
+    }
+
+    /// A git repository with one commit, so `touches_source` has a real base
+    /// to diff against.
+    fn git_workspace(name: &str, quality_json: &str) -> (ToolContext, std::path::PathBuf, String) {
+        let (mut ctx, root) = workspace(name, quality_json);
+        let git = |args: &[&str]| {
+            let mut c = std::process::Command::new("git");
+            c.args(args).current_dir(&root);
+            crate::procutil::no_window(&mut c);
+            c.output().map(|o| o.status.success()).unwrap_or(false)
+        };
+        assert!(git(&["init", "-q"]));
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join(".gitignore"), ".claudinio/\n").unwrap();
+        git(&["add", "-A"]);
+        assert!(git(&["commit", "-q", "-m", "base"]));
+        let head = quality::evidence::git_head(&root).expect("HEAD");
+        ctx.base_commit = Some(head.clone());
+        (ctx, root, head)
+    }
+
+    fn goal_task(status: &str) -> crate::agent::persist::TaskItem {
+        crate::agent::persist::TaskItem {
+            id: "golden-g-1".into(),
+            title: "goal".into(),
+            description: String::new(),
+            journal: vec![],
+            status: status.into(),
+        }
+    }
+
+    #[test]
+    fn a_tagged_goal_always_demands_verification() {
+        let (ctx, root, _) = git_workspace("req-goal", "{}");
+        let store = ctx.session_store_path.clone().unwrap();
+        crate::agent::persist::append_tasks(Path::new(&store), &[goal_task("doing")]).unwrap();
+        assert!(verification_required(&ctx));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn without_a_goal_the_default_mode_demands_nothing() {
+        // The narrowness this documents: someone who never learned the <goal>
+        // tag gets no gate at all under the default.
+        let (ctx, root, _) = git_workspace("req-default", "{}");
+        std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
+        assert!(!verification_required(&ctx));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn code_change_mode_demands_verification_without_any_goal() {
+        let (ctx, root, _) =
+            git_workspace("req-code", r#"{"quality":{"enforce_on":"code_change"}}"#);
+        std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
+        assert!(verification_required(&ctx));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn code_change_mode_leaves_a_docs_only_session_alone() {
+        let (ctx, root, _) =
+            git_workspace("req-docs", r#"{"quality":{"enforce_on":"code_change"}}"#);
+        std::fs::write(root.join("NOTES.md"), "notes\n").unwrap();
+        assert!(
+            !verification_required(&ctx),
+            "editing prose must not cost a test run"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn code_change_mode_leaves_a_read_only_session_alone() {
+        let (ctx, root, _) = git_workspace(
+            "req-readonly",
+            r#"{"quality":{"enforce_on":"code_change"}}"#,
+        );
+        assert!(
+            !verification_required(&ctx),
+            "a conversation that changed nothing has nothing to verify"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_workspace_enforcing_nothing_demands_nothing_in_either_mode() {
+        let (ctx, root, _) = git_workspace(
+            "req-off",
+            r#"{"quality":{"enforce_on":"code_change","enforced_layers":[]}}"#,
+        );
+        std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
+        assert!(!verification_required(&ctx));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

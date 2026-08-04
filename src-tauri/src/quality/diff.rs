@@ -99,6 +99,59 @@ pub fn total_lines(changed: &ChangedLines) -> usize {
     changed.values().map(|s| s.len()).sum()
 }
 
+/// Extensions whose contents no test can execute. Used to decide whether a
+/// session's changes are worth running the suite over.
+///
+/// A denylist rather than an allowlist of source extensions, deliberately: an
+/// unfamiliar extension then counts as code and gets verified. Over-verifying
+/// an unknown file type costs minutes; under-verifying it costs the guarantee.
+const NON_EXECUTABLE_EXTENSIONS: &[&str] = &[
+    "md", "mdx", "txt", "rst", "adoc", "png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "bmp",
+    "mp4", "webm", "mov", "mp3", "wav", "flac", "pdf", "woff", "woff2", "ttf", "otf",
+];
+
+/// Whether this session changed anything a test could execute.
+///
+/// Note that lockfiles and config are NOT excluded: a dependency bump or a
+/// changed build setting can break a suite as surely as an edited function.
+pub fn touches_source(root: &Path, base_commit: Option<&str>) -> bool {
+    changed_files(root, base_commit)
+        .iter()
+        .any(|p| is_source(p))
+}
+
+/// Could a test conceivably execute this file's contents?
+fn is_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| !NON_EXECUTABLE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        // No extension at all (Makefile, a shell script, a binary entry
+        // point) — treat as code.
+        .unwrap_or(true)
+}
+
+/// Paths changed since `base_commit`, including untracked files. Cheaper than
+/// [`changed_lines`]: it never reads or parses a diff body.
+pub fn changed_files(root: &Path, base_commit: Option<&str>) -> Vec<PathBuf> {
+    let base = base_commit
+        .map(|s| s.to_string())
+        .or_else(|| git(root, &["rev-parse", "HEAD"]));
+    let Some(base) = base else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = git(root, &["diff", "--name-only", &base, "--"])
+        .map(|s| s.lines().map(|l| root.join(l.trim())).collect())
+        .unwrap_or_default();
+    if let Some(status) = git(root, &["status", "--porcelain=v1", "--untracked-files=all"]) {
+        for rel in status.lines().filter_map(|l| l.strip_prefix("?? ")) {
+            out.push(root.join(rel.trim().trim_matches('"')));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +203,66 @@ mod tests {
         parse_unified_diff(patch, Path::new("/r"), &mut out);
         assert_eq!(out.len(), 2);
         assert_eq!(total_lines(&out), 3);
+    }
+
+    #[test]
+    fn documentation_only_changes_are_not_source() {
+        assert!(!is_source(Path::new("/r/README.md")));
+        assert!(!is_source(Path::new("/r/docs/plan.MDX")));
+        assert!(!is_source(Path::new("/r/assets/logo.svg")));
+    }
+
+    #[test]
+    fn code_and_config_changes_are_source() {
+        assert!(is_source(Path::new("/r/src/lib.rs")));
+        assert!(is_source(Path::new("/r/src/App.tsx")));
+        // A dependency bump can break a suite as surely as an edited function.
+        assert!(is_source(Path::new("/r/pnpm-lock.yaml")));
+        assert!(is_source(Path::new("/r/Cargo.toml")));
+    }
+
+    #[test]
+    fn an_unknown_or_extensionless_file_counts_as_source() {
+        // The denylist errs toward verifying: over-checking an unfamiliar file
+        // type costs minutes, under-checking it costs the guarantee.
+        assert!(is_source(Path::new("/r/Makefile")));
+        assert!(is_source(Path::new("/r/build.zig")));
+        assert!(is_source(Path::new("/r/src/thing.somelang")));
+    }
+
+    #[test]
+    fn touching_only_docs_does_not_demand_a_test_run() {
+        let root = std::env::temp_dir().join(format!("cq-touch-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let git_ok = |args: &[&str]| {
+            let mut c = std::process::Command::new("git");
+            c.args(args).current_dir(&root);
+            crate::procutil::no_window(&mut c);
+            c.output().map(|o| o.status.success()).unwrap_or(false)
+        };
+        if !git_ok(&["init", "-q"]) {
+            return;
+        }
+        git_ok(&["config", "user.email", "t@t"]);
+        git_ok(&["config", "user.name", "t"]);
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        git_ok(&["add", "-A"]);
+        assert!(git_ok(&["commit", "-q", "-m", "base"]));
+        let base = super::super::evidence::git_head(&root);
+
+        assert!(!touches_source(&root, base.as_deref()), "clean tree");
+
+        std::fs::write(root.join("NOTES.md"), "just notes\n").unwrap();
+        assert!(
+            !touches_source(&root, base.as_deref()),
+            "a markdown-only change must not cost a test run"
+        );
+
+        std::fs::write(root.join("a.rs"), "fn a() { todo!() }\n").unwrap();
+        assert!(touches_source(&root, base.as_deref()), "source changed");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
