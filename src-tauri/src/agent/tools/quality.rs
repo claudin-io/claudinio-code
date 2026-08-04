@@ -361,28 +361,27 @@ mod tests {
     }
 
     #[test]
-    fn without_a_goal_the_default_mode_demands_nothing() {
-        // The narrowness this documents: someone who never learned the <goal>
-        // tag gets no gate at all under the default.
+    fn by_default_changing_code_demands_verification_without_any_goal() {
+        // The point of the default: someone who never learned the <goal> tag
+        // is still protected.
         let (ctx, root, _) = git_workspace("req-default", "{}");
-        std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
-        assert!(!verification_required(&ctx));
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn code_change_mode_demands_verification_without_any_goal() {
-        let (ctx, root, _) =
-            git_workspace("req-code", r#"{"quality":{"enforce_on":"code_change"}}"#);
         std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
         assert!(verification_required(&ctx));
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn code_change_mode_leaves_a_docs_only_session_alone() {
-        let (ctx, root, _) =
-            git_workspace("req-docs", r#"{"quality":{"enforce_on":"code_change"}}"#);
+    fn goals_mode_narrows_it_back_to_tagged_goals() {
+        // The escape hatch for a suite too slow to sit through on every change.
+        let (ctx, root, _) = git_workspace("req-goals", r#"{"quality":{"enforce_on":"goals"}}"#);
+        std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
+        assert!(!verification_required(&ctx));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_docs_only_session_is_left_alone() {
+        let (ctx, root, _) = git_workspace("req-docs", "{}");
         std::fs::write(root.join("NOTES.md"), "notes\n").unwrap();
         assert!(
             !verification_required(&ctx),
@@ -392,11 +391,8 @@ mod tests {
     }
 
     #[test]
-    fn code_change_mode_leaves_a_read_only_session_alone() {
-        let (ctx, root, _) = git_workspace(
-            "req-readonly",
-            r#"{"quality":{"enforce_on":"code_change"}}"#,
-        );
+    fn a_read_only_session_is_left_alone() {
+        let (ctx, root, _) = git_workspace("req-readonly", "{}");
         assert!(
             !verification_required(&ctx),
             "a conversation that changed nothing has nothing to verify"
@@ -406,10 +402,7 @@ mod tests {
 
     #[test]
     fn a_workspace_enforcing_nothing_demands_nothing_in_either_mode() {
-        let (ctx, root, _) = git_workspace(
-            "req-off",
-            r#"{"quality":{"enforce_on":"code_change","enforced_layers":[]}}"#,
-        );
+        let (ctx, root, _) = git_workspace("req-off", r#"{"quality":{"enforced_layers":[]}}"#);
         std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
         assert!(!verification_required(&ctx));
         std::fs::remove_dir_all(&root).ok();

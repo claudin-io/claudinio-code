@@ -113,13 +113,13 @@ export const SettingsQuality: Component<SettingsQualityProps> = (props) => {
                   onChange={(e) => patch({ enforceOn: e.currentTarget.value as EnforceOn })}
                   class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
                 >
-                  <option value="goals">{"Runs with a tagged <goal> only"}</option>
                   <option value="code_change">{"Any run that changed code"}</option>
+                  <option value="goals">{"Runs with a tagged <goal> only"}</option>
                 </select>
                 <p class="mb-4 text-[11px] text-ink-faint">
                   {cfg().enforceOn === "goals"
-                    ? "Narrow: nothing is verified unless you tag a <goal>. Everything else finishes unchecked."
-                    : "Any session that touched a file a test could execute gets verified once, at the end. Prose and asset changes are ignored."}
+                    ? "Narrow: nothing is verified unless you tag a <goal>. Everything else finishes unchecked — use this when the suite is too slow to sit through on every change."
+                    : "Any session that touched a file a test could execute gets verified once, at the end. Read-only, prose and asset changes cost nothing."}
                 </p>
 
                 <label class="mb-1 block text-xs text-ink-muted">{"Layers that block a finish"}</label>

@@ -1,3 +1,15 @@
 {
-  "plan_save_path": "docs/plans"
+  "plan_save_path": "docs/plans",
+  "quality": {
+    "coverage_cmd": null,
+    "coverage_timeout_secs": 900,
+    "diff_coverage_threshold": 80.0,
+    "enabled": true,
+    "enforce_on": "code_change",
+    "enforced_layers": [
+      "tests"
+    ],
+    "test_cmd": null,
+    "test_timeout_secs": 600
+  }
 }

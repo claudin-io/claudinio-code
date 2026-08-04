@@ -154,13 +154,16 @@ earning the right not to read the code. `enforce_on` widens it:
 
 | `enforce_on` | Verified at the finish line |
 |---|---|
-| `"goals"` (default) | Only runs with a tagged `<goal>` |
-| `"code_change"` | Any run that touched a file a test could execute |
+| `"code_change"` (default) | Any run that touched a file a test could execute |
+| `"goals"` | Only runs with a tagged `<goal>` |
 
-`code_change` is opt-in on purpose: turning a one-line experiment into a full
-test run without being asked is how a harness gets switched off. Either way the
-check is **once per run**, at the end — never per task, or a session with ten
-tasks would mean ten test runs.
+Verifying by default is the whole point: a harness that acts only when the user
+remembers a tag protects nobody. `"goals"` is the escape hatch for a repo whose
+suite is too slow to sit through on every change.
+
+Either way the check is **once per run**, at the end — never per task, or a
+session with ten tasks would mean ten test runs. A read-only session, or one
+that only edited prose, costs nothing.
 
 "Touched source" comes from a *denylist* of documentation and asset extensions,
 not an allowlist of source ones. An unfamiliar extension therefore counts as
@@ -197,7 +200,7 @@ exclusion is explicit rather than left to gitignore.
 {
   "quality": {
     "enabled": true,
-    "enforce_on": "goals",
+    "enforce_on": "code_change",
     "enforced_layers": ["tests"],
     "diff_coverage_threshold": 80.0,
     "test_cmd": null,

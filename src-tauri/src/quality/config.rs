@@ -22,11 +22,13 @@ pub const DEFAULT_COVERAGE_TIMEOUT_SECS: u64 = 900;
 
 /// When a run must be verified before it is allowed to finish.
 ///
-/// `Goals` is the conservative default: only a `<goal>` the user tagged demands
-/// proof. It is also the narrow one — the harness stays invisible to anyone who
-/// does not know the tag exists, which is the opposite of earning the right not
-/// to read the code. `CodeChange` closes that gap: any session that touched
-/// source gets verified once, at the finish line.
+/// `CodeChange` is the default: any session that touched source gets verified
+/// once, at the finish line. A harness that only acts when the user remembers
+/// to tag a `<goal>` protects nobody by default, and the whole point is to earn
+/// the right not to read the generated code.
+///
+/// `Goals` narrows it back to tagged goals only — the escape hatch for a repo
+/// whose suite is too slow to sit through on every change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnforceOn {
@@ -67,10 +69,11 @@ fn default_true() -> bool {
     true
 }
 fn default_enforce_on() -> EnforceOn {
-    // Conservative on purpose: turning a one-line experiment into a full test
-    // run without being asked is how a harness earns itself a config flag set
-    // to false. Opt in with "enforce_on": "code_change".
-    EnforceOn::Goals
+    // Verify by default. The cost is one test run at the end of a session that
+    // changed code — not per task, and never for a read-only or prose-only
+    // session. Narrow it with "enforce_on": "goals" when a suite is too slow to
+    // sit through on every change.
+    EnforceOn::CodeChange
 }
 fn default_enforced() -> Vec<Layer> {
     // Tests only by default: coverage needs tooling the user may not have
@@ -197,28 +200,32 @@ mod tests {
     }
 
     #[test]
-    fn enforce_on_defaults_to_goals_only() {
-        // Widening the net without being asked would turn a one-line
-        // experiment into a full test run; that is how a harness gets disabled.
-        assert_eq!(QualityConfig::default().enforce_on, EnforceOn::Goals);
+    fn enforce_on_defaults_to_any_code_change() {
+        // A harness that only acts when the user remembers a <goal> tag
+        // protects nobody by default.
+        assert_eq!(QualityConfig::default().enforce_on, EnforceOn::CodeChange);
         assert_eq!(
             QualityConfig::from_workspace_json(r#"{"quality":{}}"#).enforce_on,
-            EnforceOn::Goals
+            EnforceOn::CodeChange
+        );
+        assert_eq!(
+            QualityConfig::from_workspace_json(r#"{}"#).enforce_on,
+            EnforceOn::CodeChange
         );
     }
 
     #[test]
-    fn enforce_on_code_change_is_opt_in() {
-        let cfg = QualityConfig::from_workspace_json(r#"{"quality":{"enforce_on":"code_change"}}"#);
-        assert_eq!(cfg.enforce_on, EnforceOn::CodeChange);
+    fn narrowing_to_goals_only_is_explicit() {
+        let cfg = QualityConfig::from_workspace_json(r#"{"quality":{"enforce_on":"goals"}}"#);
+        assert_eq!(cfg.enforce_on, EnforceOn::Goals);
     }
 
     #[test]
     fn an_unknown_enforce_on_value_falls_back_to_the_safe_defaults() {
         // serde rejects the whole object, so every field reverts — including
-        // the gate staying on.
+        // the gate staying on, and staying wide.
         let cfg = QualityConfig::from_workspace_json(r#"{"quality":{"enforce_on":"always"}}"#);
-        assert_eq!(cfg.enforce_on, EnforceOn::Goals);
+        assert_eq!(cfg.enforce_on, EnforceOn::CodeChange);
         assert!(cfg.gate_active());
     }
 

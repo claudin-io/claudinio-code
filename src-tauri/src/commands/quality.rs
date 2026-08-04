@@ -172,7 +172,7 @@ mod tests {
     fn defaults_round_trip_through_the_wire_shape() {
         let cfg = settings().to_config();
         assert!(cfg.enabled);
-        assert_eq!(cfg.enforce_on, EnforceOn::Goals);
+        assert_eq!(cfg.enforce_on, EnforceOn::CodeChange);
         assert_eq!(cfg.enforced_layers, vec![Layer::Tests]);
     }
 
@@ -211,7 +211,8 @@ mod tests {
         .unwrap();
 
         let mut s = settings();
-        s.enforce_on = "code_change".into();
+        // A non-default value, so this proves the write really round-trips.
+        s.enforce_on = "goals".into();
         set_quality_config(root.to_string_lossy().to_string(), s)
             .await
             .unwrap();
@@ -220,10 +221,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["plan_save_path"], "docs/plans");
         assert!(v["mcp"]["x"].is_object(), "unrelated keys must survive");
-        assert_eq!(v["quality"]["enforce_on"], "code_change");
+        assert_eq!(v["quality"]["enforce_on"], "goals");
 
         // And the harness reads back exactly what the panel wrote.
-        assert_eq!(QualityConfig::load(&root).enforce_on, EnforceOn::CodeChange);
+        assert_eq!(QualityConfig::load(&root).enforce_on, EnforceOn::Goals);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -237,7 +238,7 @@ mod tests {
         assert_eq!(info.stacks.len(), 1);
         assert_eq!(info.stacks[0].name, "rust");
         assert_eq!(info.stacks[0].test_cmd, "cargo test");
-        assert_eq!(info.settings.enforce_on, "goals");
+        assert_eq!(info.settings.enforce_on, "code_change");
         std::fs::remove_dir_all(&root).ok();
     }
 
