@@ -109,6 +109,41 @@ guidance mid-reasoning. `Esc` interrupts outright.
 - **Skills** — drop a `SKILL.md` into `.agents/skills/`, `.claudinio/skills/` or
   `.claude/skills/` and the agent discovers it.
 - **MCP** — connect Model Context Protocol servers over stdio or HTTP.
+- **Plugins** — install [Agent Plugins](https://agent-plugins.org) that bundle
+  skills and MCP servers into one portable package.
+
+#### Agent Plugins
+
+Claudinio Code is a conformant Agent Plugins v1.0.0 client. A plugin is a
+directory with a `plugin.json` manifest plus two optional component locations:
+
+```text
+my-plugin/
+├── plugin.json          # required manifest
+├── skills/              # each child directory with a SKILL.md is one skill
+│   └── summarize/SKILL.md
+└── mcp.json             # stdio and Streamable HTTP servers
+```
+
+Open **Settings › Plugins** to browse what is installed and to add more:
+
+- **Install from folder** — point it at a directory on disk.
+- **Install from URL** — a git or GitHub URL. A GitHub *tree* URL such as
+  `https://github.com/owner/repo/tree/main/plugins/deploy` carries the branch and
+  subdirectory, so plugins living inside a monorepo install without extra input.
+- **Create plugin** — scaffolds a spec-compliant package. For anything richer,
+  ask the agent: the built-in `plugin-crafter` skill writes and validates them.
+
+Plugins land in `~/.claudinio/plugins/` (or the project's `.claudinio/plugins/`)
+and are also discovered under `.agents/plugins/` and `.claude/plugins/`. Skills a
+plugin ships join the catalog; its MCP servers connect as `<plugin>.<server>`,
+each launched with `PLUGIN_ROOT` and a persistent `PLUGIN_DATA` directory. A
+plugin you disable contributes nothing, and enable state lives in your config —
+never in files the plugin author owns.
+
+Failures are contained the way the spec requires: an invalid manifest rejects
+that plugin alone, while a bad skill or a bad server entry only skips that entry.
+The explorer shows exactly what was skipped and why.
 
 The interface and the agent are English-only. The system prompts are written and
 tuned in English, and the agent asks you to write in English too — a localized

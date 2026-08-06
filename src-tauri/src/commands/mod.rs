@@ -10,6 +10,7 @@ pub mod ide;
 pub mod lsp;
 pub mod mcp;
 pub mod network_log;
+pub mod plugins;
 pub mod power;
 pub mod providers;
 pub mod quality;

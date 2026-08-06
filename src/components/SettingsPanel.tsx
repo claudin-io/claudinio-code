@@ -6,6 +6,7 @@ import { SettingsModels } from "./settings/SettingsModels";
 import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsMcp } from "./settings/SettingsMcp";
+import { SettingsPlugins } from "./settings/SettingsPlugins";
 import { SettingsQuality } from "./settings/SettingsQuality";
 
 interface SettingsPanelProps {
@@ -81,7 +82,7 @@ interface SettingsPanelProps {
   openSupportUrl: () => void;
 }
 
-type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'quality' | 'mcp';
+type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'quality' | 'mcp' | 'plugins';
 
 interface Category {
   id: CategoryId;
@@ -96,6 +97,7 @@ const CATEGORIES: Category[] = [
   { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)"] },
   { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
+  { id: 'plugins', icon: 'package', searchTerms: ["Plugins","Agent Plugins","Install from folder","Install from URL","Create plugin","plugin.json","mcp.json","Uninstall"] },
 ];
 
 function getCategoryLabel(id: CategoryId): string {
@@ -106,6 +108,7 @@ function getCategoryLabel(id: CategoryId): string {
     agent: 'Agent',
     quality: 'Quality',
     mcp: 'MCP',
+    plugins: 'Plugins',
   };
   return labels[id];
 }
@@ -336,6 +339,10 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   onAddServer={props.addMcpServerTemplate}
                   onTestAll={props.testAllMcpServers}
                 />
+              </Show>
+
+              <Show when={searchQuery() ? true : activeCategory() === 'plugins'}>
+                <SettingsPlugins workspaceRoot={props.activeWorkspace} />
               </Show>
             </div>
 

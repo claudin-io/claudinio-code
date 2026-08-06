@@ -1576,8 +1576,9 @@ pub async fn run_workflow_with_profile(
     blocks.extend(attachment_blocks);
     push_user_blocks(history, store, ctx, blocks);
 
-    let skill_mgr = crate::agent::skills::SkillManager::new(
+    let skill_mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
+        &config.plugins,
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     // The specs are the requirement. Putting them in the prompt is what makes

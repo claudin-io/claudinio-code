@@ -3,6 +3,7 @@ pub mod install_id;
 pub mod mcp;
 pub mod permissions;
 pub mod persist;
+pub mod plugins;
 pub mod provider;
 pub mod run_state;
 pub mod session;

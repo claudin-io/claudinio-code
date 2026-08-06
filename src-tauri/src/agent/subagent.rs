@@ -323,8 +323,9 @@ pub async fn run_subagent(
         .map(|m| m.cached_defs())
         .unwrap_or_default();
     let tools = api_tools(spec.mode, &mcp_defs, config);
-    let skill_mgr = crate::agent::skills::SkillManager::new(
+    let skill_mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
+        &config.plugins,
     );
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     let skills_hint = match &skills_section {

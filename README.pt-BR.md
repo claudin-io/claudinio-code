@@ -110,6 +110,41 @@ orientação no meio do raciocínio. `Esc` interrompe de vez.
 - **Skills** — jogue um `SKILL.md` em `.agents/skills/`, `.claudinio/skills/` ou
   `.claude/skills/` e o agente descobre sozinho.
 - **MCP** — conecte servidores Model Context Protocol via stdio ou HTTP.
+- **Plugins** — instale [Agent Plugins](https://agent-plugins.org), pacotes
+  portáveis que juntam skills e servidores MCP.
+
+#### Agent Plugins
+
+O Claudinio Code é um cliente conformante do Agent Plugins v1.0.0. Um plugin é um
+diretório com o manifesto `plugin.json` e dois locais de componentes opcionais:
+
+```text
+meu-plugin/
+├── plugin.json          # manifesto obrigatório
+├── skills/              # cada subdiretório com SKILL.md é uma skill
+│   └── summarize/SKILL.md
+└── mcp.json             # servidores stdio e Streamable HTTP
+```
+
+Abra **Settings › Plugins** para ver o que está instalado e adicionar mais:
+
+- **Install from folder** — aponte para um diretório no disco.
+- **Install from URL** — uma URL git ou GitHub. Uma URL de *tree* como
+  `https://github.com/owner/repo/tree/main/plugins/deploy` já carrega o branch e
+  o subdiretório, então plugins dentro de um monorepo instalam sem esforço extra.
+- **Create plugin** — gera um pacote em conformidade com a spec. Para algo mais
+  elaborado, peça ao agente: a skill embutida `plugin-crafter` escreve e valida.
+
+Plugins ficam em `~/.claudinio/plugins/` (ou no `.claudinio/plugins/` do projeto)
+e também são descobertos em `.agents/plugins/` e `.claude/plugins/`. As skills do
+plugin entram no catálogo; os servidores MCP conectam como `<plugin>.<servidor>`,
+cada um com `PLUGIN_ROOT` e um `PLUGIN_DATA` persistente. Um plugin desativado
+não contribui com nada, e o estado de ativação vive na sua config — nunca nos
+arquivos do autor do plugin.
+
+Falhas são contidas como a spec exige: um manifesto inválido rejeita só aquele
+plugin, enquanto uma skill ou um servidor inválido pula apenas aquela entrada. O
+explorador mostra exatamente o que foi pulado e por quê.
 
 A interface e o agente são apenas em inglês. Os system prompts são escritos e
 ajustados em inglês, e o agente pede que você também escreva em inglês — uma

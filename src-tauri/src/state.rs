@@ -14,6 +14,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Every MCP server that should be connected for a workspace: the ones the user
+/// configured, plus the ones enabled Agent Plugins contribute (keyed
+/// `<plugin>.<server>`). A user-configured server with the same key always wins,
+/// so a plugin can never silently take over an existing connection.
+pub fn effective_mcp_servers(
+    config: &AgentConfig,
+    workspace_root: Option<&std::path::Path>,
+) -> HashMap<String, crate::agent::provider::McpServerEntry> {
+    let mut servers = config.mcp.clone();
+    let records = crate::agent::plugins::discover(workspace_root);
+    let plugin_servers =
+        crate::agent::plugins::enabled_plugin_mcp_servers(&records, &config.plugins);
+    for (name, entry) in plugin_servers {
+        servers.entry(name).or_insert(entry);
+    }
+    servers
+}
+
 /// The conversation the user is currently in. The JSONL file at `store_path` is
 /// the source of truth for its history — it is reloaded on each message, so a
 /// session accumulates across turns and survives app restarts.
@@ -60,7 +78,10 @@ impl WorkspaceState {
         &self,
         config: &AgentConfig,
     ) -> Arc<crate::agent::mcp::McpManager> {
-        let fingerprint = serde_json::to_string(&config.mcp).unwrap_or_default();
+        let servers = effective_mcp_servers(config, Some(&self.root));
+        let mut sorted: Vec<_> = servers.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        let fingerprint = serde_json::to_string(&sorted).unwrap_or_default();
         {
             let current = self.mcp.lock().await;
             let current_fp = self.mcp_fingerprint.lock().await;
@@ -79,7 +100,7 @@ impl WorkspaceState {
         }
 
         let workspace_root = self.root.to_str();
-        let manager = crate::agent::mcp::McpManager::connect_all(&config.mcp, workspace_root).await;
+        let manager = crate::agent::mcp::McpManager::connect_all(&servers, workspace_root).await;
         *self.mcp.lock().await = Some(manager.clone());
         *self.mcp_fingerprint.lock().await = Some(fingerprint);
         manager
