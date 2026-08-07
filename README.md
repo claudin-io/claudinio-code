@@ -139,7 +139,15 @@ and are also discovered under `.agents/plugins/` and `.claude/plugins/`. Skills 
 plugin ships join the catalog; its MCP servers connect as `<plugin>.<server>`,
 each launched with `PLUGIN_ROOT` and a persistent `PLUGIN_DATA` directory. A
 plugin you disable contributes nothing, and enable state lives in your config —
-never in files the plugin author owns.
+never in files the plugin author owns. A plugin may also ship switched off, by
+declaring `enabledByDefault` under the `io.claudin.claudinio` extension
+namespace.
+
+What a plugin contributes always ranks below what you wrote yourself: its skills
+sit beneath your project, subfolder and user skills, so a plugin can never shadow
+one of yours, and a server you configured by hand wins over a plugin server of
+the same name. Installing or toggling a plugin reconnects MCP on its own — no
+restart.
 
 Failures are contained the way the spec requires: an invalid manifest rejects
 that plugin alone, while a bad skill or a bad server entry only skips that entry.

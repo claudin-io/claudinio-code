@@ -140,7 +140,14 @@ e também são descobertos em `.agents/plugins/` e `.claude/plugins/`. As skills
 plugin entram no catálogo; os servidores MCP conectam como `<plugin>.<servidor>`,
 cada um com `PLUGIN_ROOT` e um `PLUGIN_DATA` persistente. Um plugin desativado
 não contribui com nada, e o estado de ativação vive na sua config — nunca nos
-arquivos do autor do plugin.
+arquivos do autor do plugin. Um plugin também pode vir desligado, declarando
+`enabledByDefault` no namespace de extensão `io.claudin.claudinio`.
+
+O que um plugin contribui sempre fica abaixo do que você mesmo escreveu: as
+skills dele ficam atrás das suas skills de projeto, subpasta e usuário, então um
+plugin nunca sobrepõe uma sua, e um servidor que você configurou à mão vence um
+servidor de plugin com o mesmo nome. Instalar ou alternar um plugin reconecta o
+MCP sozinho — sem reiniciar.
 
 Falhas são contidas como a spec exige: um manifesto inválido rejeita só aquele
 plugin, enquanto uma skill ou um servidor inválido pula apenas aquela entrada. O
