@@ -117,6 +117,10 @@ pub struct AgentConfig {
     /// `merge_workspace_config`), overriding a global entry of the same name.
     #[serde(default)]
     pub mcp: std::collections::HashMap<String, McpServerEntry>,
+    /// Agent Plugins (https://agent-plugins.org) enable state, keyed by plugin
+    /// name. A discovered plugin with no entry here is enabled.
+    #[serde(default)]
+    pub plugins: std::collections::HashMap<String, PluginPrefs>,
     /// Prevent the system from sleeping while an agent session is actively
     /// running (display can still turn off). See commands::power.
     #[serde(default = "default_true")]
@@ -257,12 +261,31 @@ pub enum McpTransportConfig {
         args: Vec<String>,
         #[serde(default)]
         env: std::collections::HashMap<String, String>,
+        /// Working directory for the child process. `None` falls back to the
+        /// workspace root. Agent Plugins servers always set this to the plugin
+        /// root (or a validated `${PLUGIN_DATA}` path).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     Remote {
         url: String,
         #[serde(default)]
         headers: std::collections::HashMap<String, String>,
     },
+}
+
+/// Per-plugin user preferences. Kept separate from the plugin package so
+/// enabling/disabling never edits files the plugin owns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginPrefs {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for PluginPrefs {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +340,7 @@ impl Default for AgentConfig {
             override_base_url: None,
             override_api_key: None,
             mcp: std::collections::HashMap::new(),
+            plugins: std::collections::HashMap::new(),
             keep_awake: true,
             code_intel_enabled: true,
             preferred_ide: None,
@@ -524,6 +548,14 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
     {
         for (name, entry) in ws_servers {
             cfg.mcp.insert(name, entry);
+        }
+    }
+    if let Some(v) = obj.get("plugins")
+        && let Ok(ws_plugins) =
+            serde_json::from_value::<std::collections::HashMap<String, PluginPrefs>>(v.clone())
+    {
+        for (name, prefs) in ws_plugins {
+            cfg.plugins.insert(name, prefs);
         }
     }
     if let Some(v) = obj.get("handoff_context_tokens") {
@@ -1415,6 +1447,7 @@ mod tests {
                     command: "global-cmd".into(),
                     args: vec![],
                     env: Default::default(),
+                    cwd: None,
                 },
                 enabled: true,
             },

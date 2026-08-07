@@ -39,6 +39,8 @@ pub enum SkillScope {
     Project,
     Subfolder,
     User,
+    /// Contributed by an installed Agent Plugin (`skills/` inside the package).
+    Plugin,
 }
 
 /// A catalog entry that goes into the system prompt — only name + description.
@@ -148,13 +150,15 @@ fn scan_skills_dir(
     }
 }
 
-/// Priority order: Project > Subfolder > User > Builtin (fallback)
+/// Priority order: Project > Subfolder > User > Plugin > Builtin (fallback).
+/// A skill the user wrote always beats one a plugin shipped with the same name.
 fn has_higher_priority(current: &SkillScope, incoming: &SkillScope) -> bool {
     fn rank(s: &SkillScope) -> u8 {
         match s {
-            SkillScope::Project => 3,
-            SkillScope::Subfolder => 2,
-            SkillScope::User => 1,
+            SkillScope::Project => 4,
+            SkillScope::Subfolder => 3,
+            SkillScope::User => 2,
+            SkillScope::Plugin => 1,
             SkillScope::Builtin => 0,
         }
     }
@@ -183,8 +187,129 @@ When the user asks about doing something that sounds like a common development t
 \n\
 Note: If the user asks about customizing opencode itself (config, agents, subagents, MCP servers, permission rules), do NOT use this skill — refer them to the customize-opencode skill instead.";
 
+const BUILTIN_PLUGIN_CRAFTER: &str = "---\n\
+name: plugin-crafter\n\
+description: Authors a portable Agent Plugin (https://agent-plugins.org) — a directory with plugin.json plus optional skills/ and mcp.json. Use when the user asks to create, scaffold, package, publish or fix a plugin, turn existing skills or MCP servers into a plugin, or asks why a plugin fails to load.\n\
+---\n\
+\n\
+# plugin-crafter\n\
+\n\
+Build packages that satisfy Agent Plugins v1.0.0. The spec is the contract; a\n\
+package that violates it is rejected by every conformant client, not just this one.\n\
+\n\
+## 1. Interview first\n\
+\n\
+Before writing anything, settle: the plugin `name` (lowercase letters, digits,\n\
+`-` and `.` only; starts and ends alphanumeric; no `--` or `..`; 1-64 chars),\n\
+one-line purpose, which skills it ships, whether it needs MCP servers, and the\n\
+license. Do not invent an author — ask or omit the field.\n\
+\n\
+## 2. Layout\n\
+\n\
+```\n\
+my-plugin/\n\
+├── plugin.json          # required manifest, plugin root only\n\
+├── skills/              # each immediate child dir with SKILL.md is one skill\n\
+│   └── summarize/\n\
+│       ├── SKILL.md\n\
+│       ├── scripts/\n\
+│       └── references/\n\
+└── mcp.json             # optional MCP server configuration\n\
+```\n\
+\n\
+Skills are never searched recursively past the immediate child directory, and\n\
+component locations are fixed — `plugin.json` cannot relocate or inline them.\n\
+\n\
+## 3. plugin.json\n\
+\n\
+The schema is closed. The only permitted top-level fields are `$schema`, `name`,\n\
+`version`, `description`, `author`, `homepage`, `repository`, `license`,\n\
+`keywords` and `extensions`. Anything else (hooks, commands, agents, rules) must\n\
+live under a reverse-domain namespace in `extensions`, or in a top-level\n\
+directory named for that namespace.\n\
+\n\
+```json\n\
+{\n\
+  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n\
+  \"name\": \"my-plugin\",\n\
+  \"version\": \"0.1.0\",\n\
+  \"description\": \"What it does, in one line\",\n\
+  \"author\": { \"name\": \"...\", \"email\": \"...\", \"url\": \"...\" },\n\
+  \"license\": \"MIT\",\n\
+  \"keywords\": [\"deploy\"]\n\
+}\n\
+```\n\
+\n\
+`$schema` and `name` are required. `author` may only hold `name`, `email` and\n\
+`url`, all strings — any other key makes the manifest invalid and the whole\n\
+plugin is rejected.\n\
+\n\
+## 4. Skills\n\
+\n\
+Each `SKILL.md` follows the Agent Skills spec: YAML frontmatter with `name` and\n\
+`description`, then the body. The description is what a client matches against\n\
+a user's request, so write it as trigger conditions, not marketing. Keep bundled\n\
+helpers in `scripts/` and long material in `references/`, referenced by relative\n\
+path.\n\
+\n\
+## 5. mcp.json\n\
+\n\
+```json\n\
+{\n\
+  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n\
+  \"mcpServers\": {\n\
+    \"local\": {\n\
+      \"type\": \"stdio\",\n\
+      \"command\": \"./bin/server\",\n\
+      \"args\": [\"--data\", \"${PLUGIN_DATA}/state\"],\n\
+      \"env\": { \"CONFIG\": \"${PLUGIN_ROOT}/config.json\" },\n\
+      \"cwd\": \"${PLUGIN_ROOT}\"\n\
+    },\n\
+    \"remote\": { \"type\": \"streamable-http\", \"url\": \"https://api.example.com/mcp\" }\n\
+  }\n\
+}\n\
+```\n\
+\n\
+Rules that trip people up:\n\
+\n\
+* The `mcp.json` `$schema` version MUST match the one in `plugin.json`.\n\
+* `command` is a single token: a bare executable name, or a `./` path inside the\n\
+  plugin. Never a shell string, never `../`, and no placeholder expansion.\n\
+* Only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` expand, and only in `args`, `env`\n\
+  values and `cwd`. Expansion happens once and is not rescanned.\n\
+* `env` MUST NOT define `PLUGIN_ROOT` or `PLUGIN_DATA` — the client supplies them.\n\
+* Write persistent state (node_modules, venvs, caches) to `${PLUGIN_DATA}`; it\n\
+  survives plugin updates. `${PLUGIN_ROOT}` is for files shipped in the package.\n\
+* Remote `url` must be absolute, without user info or a fragment; non-loopback\n\
+  hosts must use https. Headers are visible package data — never put secrets in\n\
+  `env` or `headers`.\n\
+* `type` is required and each variant is closed: a field from the other variant\n\
+  makes that server entry invalid.\n\
+\n\
+## 6. Build and verify\n\
+\n\
+Write the files with `write_file`, then verify before declaring success:\n\
+\n\
+1. `plugin.json` parses and carries the exact canonical `$schema` string.\n\
+2. Every `SKILL.md` has valid frontmatter with a non-empty name and description.\n\
+3. `mcp.json`, if present, has only `$schema` and `mcpServers` at the top level.\n\
+4. No configured path escapes the plugin root.\n\
+\n\
+Then tell the user to open Plugins → Install from folder and point it at the\n\
+directory; the explorer reports diagnostics for anything still wrong. Skills the\n\
+plugin ships appear in the catalog once it is installed and enabled.\n\
+\n\
+## 7. Failure boundaries\n\
+\n\
+An invalid manifest rejects the entire plugin. An invalid skill or MCP server\n\
+entry only skips that entry. Prefer shipping a plugin whose components fail\n\
+independently over one that takes everything down with it.";
+
 /// All built-in skills shipped with the binary.
-const BUILTIN_SKILLS: &[(&str, &str)] = &[("find-skills", BUILTIN_FIND_SKILLS)];
+const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    ("find-skills", BUILTIN_FIND_SKILLS),
+    ("plugin-crafter", BUILTIN_PLUGIN_CRAFTER),
+];
 
 // ─── Skill Manager ────────────────────────────────────────────────────────────
 
@@ -193,13 +318,26 @@ pub struct SkillManager {
     workspace_root: Option<PathBuf>,
     /// Skills discovered at the last scan, keyed by name.
     skills: HashMap<String, SkillEntry>,
+    /// Per-plugin enable state, so a disabled plugin's skills stay out of the
+    /// catalog. Empty means every discovered plugin uses its own default.
+    plugin_prefs: HashMap<String, crate::agent::provider::PluginPrefs>,
 }
 
 impl SkillManager {
     pub fn new(workspace_root: Option<PathBuf>) -> Self {
+        Self::with_plugin_prefs(workspace_root, &HashMap::new())
+    }
+
+    /// Same as `new`, but honours the user's per-plugin enable state so a
+    /// disabled plugin contributes no skills.
+    pub fn with_plugin_prefs(
+        workspace_root: Option<PathBuf>,
+        prefs: &HashMap<String, crate::agent::provider::PluginPrefs>,
+    ) -> Self {
         let mut mgr = Self {
             workspace_root,
             skills: HashMap::new(),
+            plugin_prefs: prefs.clone(),
         };
         mgr.scan();
         mgr
@@ -227,6 +365,18 @@ impl SkillManager {
                     eprintln!("[skills] failed to parse built-in skill '{}': {e}", name);
                 }
             }
+        }
+
+        // 0.5. Skills contributed by installed Agent Plugins. They rank above
+        // built-ins but below anything the user wrote themselves.
+        let records = crate::agent::plugins::discover(self.workspace_root.as_deref());
+        for entry in crate::agent::plugins::enabled_plugin_skills(&records, &self.plugin_prefs) {
+            if let Some((_, existing_scope)) = all.get(&entry.name)
+                && has_higher_priority(existing_scope, &SkillScope::Plugin)
+            {
+                continue;
+            }
+            all.insert(entry.name.clone(), (entry, SkillScope::Plugin));
         }
 
         // 1. Project-level skills
@@ -676,6 +826,7 @@ mod tests {
         let empty = SkillManager {
             workspace_root: None,
             skills: HashMap::new(),
+            plugin_prefs: Default::default(),
         };
         let result = build_skills_system_prompt_section(&empty);
         assert!(result.is_none());
@@ -686,6 +837,7 @@ mod tests {
         let mut mgr = SkillManager {
             workspace_root: None,
             skills: HashMap::new(),
+            plugin_prefs: Default::default(),
         };
         let entry = SkillEntry {
             name: "pdf".into(),

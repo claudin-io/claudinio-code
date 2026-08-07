@@ -902,7 +902,7 @@ export interface SkillEntry {
   name: string;
   description: string;
   location: string;
-  scope: "builtin" | "project" | "subfolder" | "user";
+  scope: "builtin" | "project" | "subfolder" | "user" | "plugin";
   body?: string;
 }
 
@@ -910,7 +910,7 @@ export interface SkillCatalogEntry {
   name: string;
   description: string;
   location: string;
-  scope: "builtin" | "project" | "subfolder" | "user";
+  scope: "builtin" | "project" | "subfolder" | "user" | "plugin";
 }
 
 export interface SkillsResponse {
@@ -957,6 +957,130 @@ export function previewRemoteSkill(url: string): Promise<SkillEntry> {
 
 export function installRemoteSkill(workspace: string, args: InstallRemoteSkillArgs): Promise<SkillEntry> {
   return invoke<SkillEntry>("install_remote_skill", { workspace, args });
+}
+
+// --- Agent Plugins (https://agent-plugins.org) ---
+
+export interface PluginAuthor {
+  name?: string;
+  email?: string;
+  url?: string;
+}
+
+export interface PluginDiagnostic {
+  severity: "error" | "warning";
+  message: string;
+}
+
+export interface PluginSkillInfo {
+  name: string;
+  description: string;
+  location: string;
+}
+
+export interface PluginMcpInfo {
+  name: string;
+  qualifiedName: string;
+  transport: string;
+}
+
+export interface PluginInfo {
+  name: string;
+  root: string;
+  scope: "project" | "user";
+  enabled: boolean;
+  /** False when the manifest itself was rejected — no components load. */
+  valid: boolean;
+  version?: string;
+  description?: string;
+  author?: PluginAuthor;
+  homepage?: string;
+  repository?: string;
+  license?: string;
+  keywords: string[];
+  skills: PluginSkillInfo[];
+  mcpServers: PluginMcpInfo[];
+  diagnostics: PluginDiagnostic[];
+}
+
+export type PluginInstallScope = "user" | "project";
+
+export interface ScaffoldSkillInput {
+  name: string;
+  description: string;
+}
+
+export interface ScaffoldPluginArgs {
+  name: string;
+  description?: string;
+  version?: string;
+  authorName?: string;
+  authorEmail?: string;
+  authorUrl?: string;
+  homepage?: string;
+  repository?: string;
+  license?: string;
+  keywords?: string[];
+  skills?: ScaffoldSkillInput[];
+  mcpServers?: {
+    name: string;
+    transport: "stdio" | "streamable-http";
+    command?: string;
+    args?: string[];
+    url?: string;
+  }[];
+  dest?: string;
+  scope?: PluginInstallScope;
+  workspace?: string | null;
+}
+
+export interface ScaffoldPluginResult {
+  root: string;
+  files: string[];
+  plugin: PluginInfo;
+}
+
+export function listPlugins(workspace: string | null): Promise<PluginInfo[]> {
+  return invoke<PluginInfo[]>("plugins_list", { workspace });
+}
+
+/** Load a directory as a plugin without installing it, to preview diagnostics. */
+export function inspectPlugin(path: string): Promise<PluginInfo> {
+  return invoke<PluginInfo>("plugins_inspect", { path });
+}
+
+export function setPluginEnabled(
+  name: string,
+  enabled: boolean,
+  workspace: string | null,
+): Promise<PluginInfo[]> {
+  return invoke<PluginInfo[]>("plugins_set_enabled", { name, enabled, workspace });
+}
+
+export function installPluginFromPath(args: {
+  path: string;
+  scope?: PluginInstallScope;
+  workspace?: string | null;
+}): Promise<PluginInfo> {
+  return invoke<PluginInfo>("plugins_install_from_path", { args });
+}
+
+export function installPluginFromUrl(args: {
+  url: string;
+  gitRef?: string | null;
+  subdir?: string | null;
+  scope?: PluginInstallScope;
+  workspace?: string | null;
+}): Promise<PluginInfo> {
+  return invoke<PluginInfo>("plugins_install_from_url", { args });
+}
+
+export function uninstallPlugin(name: string, workspace: string | null): Promise<PluginInfo[]> {
+  return invoke<PluginInfo[]>("plugins_uninstall", { name, workspace });
+}
+
+export function scaffoldPlugin(args: ScaffoldPluginArgs): Promise<ScaffoldPluginResult> {
+  return invoke<ScaffoldPluginResult>("plugins_scaffold", { args });
 }
 
 // --- Context Warning ---

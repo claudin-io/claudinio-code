@@ -32,9 +32,13 @@ pub async fn mcp_list_servers(
     }
 
     // Not connected yet (or no workspace context): report configured-but-not-
-    // connected servers so the UI still has something to render.
-    Ok(effective
-        .mcp
+    // connected servers (including the ones plugins contribute) so the UI still
+    // has something to render.
+    let servers = crate::state::effective_mcp_servers(
+        &effective,
+        workspace.as_deref().map(std::path::Path::new),
+    );
+    Ok(servers
         .iter()
         .map(|(name, entry)| McpServerStatus {
             name: name.clone(),

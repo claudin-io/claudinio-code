@@ -189,8 +189,17 @@ async fn connect_one(
     workspace_root: Option<&str>,
 ) -> Result<(McpConnection, Vec<ToolDef>), String> {
     let service: RunningService<RoleClient, ()> = match &entry.transport {
-        McpTransportConfig::Stdio { command, args, env } => {
-            let workdir = workspace_root.map(|s| s.to_string());
+        McpTransportConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            // A server-specified cwd (Agent Plugins sets the plugin root) wins
+            // over the workspace root.
+            let workdir = cwd
+                .clone()
+                .or_else(|| workspace_root.map(|s| s.to_string()));
             let cmd = tokio::process::Command::new(command).configure(|c| {
                 c.args(args);
                 for (k, v) in env {
