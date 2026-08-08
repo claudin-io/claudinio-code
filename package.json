@@ -19,11 +19,11 @@
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.13",
     "fuse.js": "^7.5.0",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.7",
-    "mermaid": "^11.16.0",
+    "mermaid": "^11.16.1",
     "monaco-editor": "^0.56.0",
     "solid-js": "^1.9.3",
     "tailwindcss": "^4.3.3"

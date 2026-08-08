@@ -5,10 +5,17 @@ allowBuilds:
 # renders markdown of its own through it — LSP hover cards, suggestion details.
 # That copy is not the one src/lib/markdown.ts imports, so it sits outside the
 # sanitizer SECURITY.md names as the only markdown->HTML path, while still being
-# in the webview's rendering path. Everything below 3.4.12 carries known bypasses
-# (17 advisories), and upgrading monaco does not reach 3.4.12 — so pin the whole
-# tree to the one audited copy. Same major version, so the API is unchanged.
+# in the webview's rendering path. Everything below 3.4.13 carries known bypasses
+# (GHSA-55q2-fjhq-7xh7: an IN_PLACE hook removal leaves a detached subtree
+# executable), and upgrading monaco does not reach it — so pin the whole tree to
+# the one audited copy. Same major version, so the API is unchanged.
 #
-# Drop this once monaco-editor ships a release depending on >=3.4.12.
+# Drop this once monaco-editor ships a release depending on >=3.4.13.
+#
+# nanoid arrives only through postcss (vite's dependency, itself pulled by
+# @tailwindcss/vite), so there is nothing to upgrade directly: GHSA-2v37-7h3g-55p8
+# has to be closed with an override too. Drop it once postcss ships a release
+# depending on >=3.3.17.
 overrides:
-  dompurify: ^3.4.12
+  dompurify: ^3.4.13
+  nanoid: ^3.3.17
