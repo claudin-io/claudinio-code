@@ -319,6 +319,7 @@ export function toolIcon(name: string): IconName {
   if (name === "write_plan" || name === "finalize_plan") return "notebook-pen";
   if (name === "spawn_agents") return "spawn-swarm";
   if (name === "enter_plan_mode" || name === "exit_plan_mode") return "goal";
+  if (name.startsWith("browser")) return "globe";
   if (name.startsWith("mcp__")) return "package";
   return "terminal";
 }

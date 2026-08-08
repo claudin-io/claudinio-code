@@ -6,83 +6,15 @@ use crate::agent::provider::{ContentBlock, save_config};
 use crate::agent::session::{self, AgentEvent, SteeringEntry};
 use crate::agent::tools::{ReadTracker, ToolContext};
 use crate::agent::transition;
+use crate::imageutil::ImageAttachment;
 use crate::state::{AppState, SessionHandle};
-use base64::Engine;
-use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
 use tauri::ipc::Channel;
 use tokio::sync::Mutex;
-
-/// Compress an image to reduce its token footprint before base64-encoding.
-///
-/// Rules (in order):
-/// 1. Decode the image to get dimensions.
-/// 2. If the longest edge exceeds 1568 px (the Anthropic server-side resize
-///    threshold — beyond this the provider resizes server-side without quality
-///    gain), resize down to 1568 px.
-/// 3. Re-encode: JPEG at quality 80; convert large PNG/BMP to JPEG.
-/// 4. On any error, fall back to the original bytes silently.
-///
-/// Returns (compressed_bytes, media_type, width, height).
-fn compress_image(bytes: &[u8], media_type: &str, ext: &str) -> (Vec<u8>, String, u32, u32) {
-    let img = match image::load_from_memory(bytes) {
-        Ok(img) => img,
-        Err(_) => return (bytes.to_vec(), media_type.to_string(), 0, 0),
-    };
-    let (w, h) = img.dimensions();
-    let max_dim = 1568u32;
-    let (new_w, new_h) = if w > max_dim || h > max_dim {
-        let ratio = (w as f64).max(h as f64) / max_dim as f64;
-        (
-            (w as f64 / ratio).round() as u32,
-            (h as f64 / ratio).round() as u32,
-        )
-    } else {
-        (w, h)
-    };
-    let resized = if (new_w, new_h) != (w, h) {
-        img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
-    } else {
-        img
-    };
-    let final_w = resized.width();
-    let final_h = resized.height();
-    let encode_as_jpeg = ext == "png" || ext == "bmp";
-    let out_type = if encode_as_jpeg {
-        "image/jpeg"
-    } else {
-        media_type
-    };
-    let mut out = Vec::new();
-    let result = if out_type == "image/jpeg" {
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
-        enc.encode(
-            &resized.to_rgb8(),
-            resized.width(),
-            resized.height(),
-            image::ColorType::Rgb8.into(),
-        )
-    } else if out_type == "image/webp" {
-        let enc = image::codecs::webp::WebPEncoder::new_lossless(&mut out);
-        enc.encode(
-            &resized.to_rgba8(),
-            resized.width(),
-            resized.height(),
-            image::ColorType::Rgba8.into(),
-        )
-    } else {
-        resized.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
-    };
-    match result {
-        Ok(_) => (out, out_type.to_string(), final_w, final_h),
-        _ => (bytes.to_vec(), media_type.to_string(), w, h),
-    }
-}
 
 /// Process attachment inputs into content blocks and their lightweight metadata.
 /// Used by both `send_message` and `queue_steering`.
@@ -174,11 +106,9 @@ pub fn process_attachments(atts: &[AttachmentInput]) -> Vec<(ContentBlock, Attac
                 "bmp" => "image/bmp",
                 _ => "image/png",
             };
-            let (compressed_bytes, final_media_type, img_w, img_h) =
-                compress_image(&bytes, media_type, &ext);
-            let data = base64::engine::general_purpose::STANDARD.encode(&compressed_bytes);
+            let att = ImageAttachment::from_bytes(&bytes, media_type, &ext);
             results.push((
-                ContentBlock::image(&final_media_type, &data, img_w, img_h),
+                ContentBlock::image(&att.media_type, &att.data, att.width, att.height),
                 meta,
             ));
         } else if is_text {
@@ -314,6 +244,7 @@ pub async fn send_message(
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),
@@ -733,6 +664,7 @@ pub struct SetConfigArgs {
     pub handoff_context_tokens: Option<Option<u64>>,
     pub auto_commit_plan: Option<bool>,
     pub thinking_effort: Option<String>,
+    pub browser: Option<crate::browser::BrowserPrefs>,
 }
 
 #[tauri::command]
@@ -764,6 +696,16 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     }
     if let Some(keep_awake) = args.keep_awake {
         cfg.keep_awake = keep_awake;
+    }
+    if let Some(browser) = args.browser {
+        // Clamp on the boundary: these come from settings JSON a user may
+        // hand-edit, and a 0-wide viewport is not something to hand a browser.
+        let (w, h) = browser.clamped_viewport();
+        cfg.browser = crate::browser::BrowserPrefs {
+            viewport_width: w,
+            viewport_height: h,
+            ..browser
+        };
     }
     if let Some(max_golden_cycles) = args.max_golden_cycles {
         cfg.max_golden_cycles = max_golden_cycles;
@@ -858,6 +800,7 @@ pub async fn get_config(
         "preferredIde": cfg.preferred_ide,
         "handoffContextTokens": cfg.handoff_context_tokens,
         "thinkingEffort": cfg.thinking_effort,
+        "browser": cfg.browser,
         // Connected external providers — never the keys (hasApiKey precedent).
         "providers": cfg.providers.iter().map(|(id, p)| {
             (id.clone(), serde_json::json!({
@@ -1013,6 +956,7 @@ pub async fn compact_session(
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),
@@ -1172,6 +1116,7 @@ pub async fn continue_with_builder(
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(new_handle.store_path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),
@@ -1415,6 +1360,7 @@ pub async fn commit_and_push(
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(store.path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
+        browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
         plan_save_path: config.plan_save_path.clone(),

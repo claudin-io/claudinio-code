@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod auth;
+pub mod browser;
 pub mod clipboard;
 pub mod code_intel;
 pub mod context;

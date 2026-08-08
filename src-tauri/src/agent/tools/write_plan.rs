@@ -323,6 +323,7 @@ mod tests {
         use std::sync::Arc;
         crate::agent::tools::ToolContext {
             db_path: None,
+            browser: None,
             lsp_manager: None,
             workspace_root: Some(root.to_string_lossy().to_string()),
             embedding_model: Arc::new(tokio::sync::Mutex::new(None)),

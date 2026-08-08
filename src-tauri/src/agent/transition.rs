@@ -241,6 +241,7 @@ pub fn rebuild_tool_context(
         embedding_model: old_ctx.embedding_model.clone(),
         session_store_path: Some(new_store_path.to_string_lossy().to_string()),
         read_tracker: Arc::new(Mutex::new(crate::agent::tools::ReadTracker::default())),
+        browser: None,
         interrupt: old_ctx.interrupt.clone(),
         agent_config: Some(config),
         plan_save_path: old_ctx.plan_save_path.clone(),

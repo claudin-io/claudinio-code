@@ -19,7 +19,7 @@ hljs.registerLanguage("bash", langBash);
 hljs.registerLanguage("xml", langXml);
 hljs.registerLanguage("css", langCss);
 hljs.registerLanguage("markdown", langMarkdown);
-import type { ToolCallData, ToolResultData } from "../../lib/ipc";
+import type { ToolCallData, ToolImageData, ToolResultData } from "../../lib/ipc";
 import { Icon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
@@ -450,10 +450,31 @@ const GenericBody: Component<{ args: Record<string, unknown>; result?: ToolResul
 );
 
 // ── dispatcher ──────────────────────────────────────────────────────
+// ── images ──────────────────────────────────────────────────────────
+// Rendered for ANY tool whose result carried images, appended after the
+// tool-specific body. Browser screenshots and images returned by an MCP server
+// both land here without either needing its own renderer.
+const ToolImagesBody: Component<{ images?: ToolImageData[] }> = (props) => (
+  <Show when={props.images?.length}>
+    <div class="mt-2 space-y-2">
+      <For each={props.images}>
+        {(img) => (
+          <img
+            src={`data:${img.mediaType};base64,${img.data}`}
+            alt={`tool output ${img.width}×${img.height}`}
+            class="max-h-96 w-auto rounded-md border border-border-subtle"
+          />
+        )}
+      </For>
+    </div>
+  </Show>
+);
+
 export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }> = (props) => {
   const name = () => props.call.toolName;
 
   return (
+    <>
     <Switch fallback={<GenericBody args={props.call.args} result={props.result} />}>
       <Match when={name() === "bash"}>
         <BashBody
@@ -501,5 +522,7 @@ export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }
         <JsonListBody result={props.result} />
       </Match>
     </Switch>
+    <ToolImagesBody images={props.result?.images} />
+    </>
   );
 };

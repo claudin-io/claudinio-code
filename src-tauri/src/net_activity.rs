@@ -40,6 +40,7 @@ pub enum NetSource {
     EmbeddingModelDownload,
     WebSearch,
     Mcp,
+    ChromiumDownload,
 }
 
 fn source_to_str(source: NetSource) -> &'static str {
@@ -55,6 +56,7 @@ fn source_to_str(source: NetSource) -> &'static str {
         NetSource::EmbeddingModelDownload => "embedding_model_download",
         NetSource::WebSearch => "web_search",
         NetSource::Mcp => "mcp",
+        NetSource::ChromiumDownload => "chromium_download",
     }
 }
 

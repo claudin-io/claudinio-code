@@ -324,4 +324,27 @@ describe("ToolBody", () => {
     expect(document.body.textContent).toContain("acme/widgets");
     dispose();
   });
+
+  // Images are appended after whatever body the tool itself renders, so any
+  // tool that returns them displays them without its own renderer.
+  it("renders images attached to a tool result", () => {
+    const call = makeCall("mcp__playwright__screenshot", {});
+    const result: ToolResultData = {
+      ...makeResult("mcp__playwright__screenshot", "[image 1280x800]"),
+      images: [{ mediaType: "image/jpeg", data: "QUJD", width: 1280, height: 800 }],
+    };
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    const img = document.body.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img!.getAttribute("src")).toBe("data:image/jpeg;base64,QUJD");
+    dispose();
+  });
+
+  it("renders no img element when the result carries no images", () => {
+    const call = makeCall("mcp__github__list_issues", { repo: "acme/widgets" });
+    const result = makeResult("mcp__github__list_issues", "none");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.querySelector("img")).toBeNull();
+    dispose();
+  });
 });

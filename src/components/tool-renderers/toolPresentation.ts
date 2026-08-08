@@ -29,6 +29,9 @@ const TITLES: Record<string, string> = {
   go_to_definition: "Went to definition",
   find_references: "Found references",
   web_search: "Searched the web",
+  browser: "Used the browser",
+  browser_inspect: "Inspected the page",
+  browser_screenshot: "Took a screenshot",
   ask_user: "Asked you",
   tasks_get: "Checked tasks",
   tasks_set: "Updated tasks",
@@ -75,12 +78,41 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
   if (call.toolName === "bash" && SEARCH_COMMANDS.has(splitBashCommand(String(call.args.command ?? "")).lead)) {
     return { icon: "search", title: TITLES.grep };
   }
+  // The browser tool's action is what actually happened; "Used the browser"
+  // says nothing next to "Opened a page".
+  if (call.toolName === "browser_inspect") {
+    const byWhat: Record<string, string> = {
+      console: "Read the console",
+      network: "Read network activity",
+      text: "Read the page text",
+      html: "Read the page HTML",
+    };
+    const title = byWhat[String(call.args.what ?? "")];
+    if (title) return { icon: "globe", title };
+  }
+  if (call.toolName === "browser") {
+    const byAction: Record<string, string> = {
+      navigate: "Opened a page",
+      reload: "Reloaded the page",
+      back: "Went back",
+      url: "Checked the URL",
+      close: "Closed the browser",
+    };
+    const title = byAction[String(call.args.action ?? "")];
+    if (title) return { icon: "globe", title };
+  }
   return { icon: toolIcon(call.toolName), title: toolTitle(call.toolName) };
 }
 
 /** Tools whose body is always shown — small enough to skip the click-to-expand step. */
 export function alwaysShowsBody(name: string): boolean {
-  return name === "edit_file" || name === "ask_user" || name === "tasks_set";
+  return (
+    name === "edit_file" ||
+    name === "ask_user" ||
+    name === "tasks_set" ||
+    // A screenshot behind a click-to-expand is a screenshot nobody looks at.
+    name === "browser_screenshot"
+  );
 }
 
 function truncate(s: string, n: number): string {
@@ -115,6 +147,17 @@ export function toolSummary(call: ToolCallData): string {
       return String(args.file_path ?? "");
     case "grep":
       return `/${String(args.pattern ?? "")}/${args.path ? ` in ${args.path}` : ""}`;
+    case "browser":
+      return truncate(String(args.url ?? args.action ?? ""), 80);
+    case "browser_inspect":
+      return [String(args.what ?? ""), args.selector, args.filter]
+        .filter(Boolean)
+        .join(" ");
+    case "browser_screenshot": {
+      const target = String(args.target ?? "viewport");
+      if (target === "selector") return `${target} ${String(args.selector ?? "")}`;
+      return target;
+    }
     case "code_search":
     case "semantic_search":
     case "web_search":

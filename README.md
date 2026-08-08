@@ -87,6 +87,36 @@ Not just grep:
   `typescript-language-server` and `rust-analyzer`.
 - **Live reindexing** — a file watcher keeps the index in sync as you work.
 
+### It can see your app running
+
+Reading the code only gets you halfway. The agent drives a real browser, so it
+can change a component, look at what rendered, read the error in the console and
+fix it — without you copying anything back and forth.
+
+<p align="center">
+  <img src="docs/assets/browser.png" alt="The agent navigating a page and returning a screenshot inline in the timeline" width="880">
+</p>
+
+- **Screenshots come back as images**, not as a file path — the model actually
+  sees the layout. Capture the viewport, the whole page, one CSS selector, or an
+  arbitrary region.
+- **Console and network** — `console.*`, uncaught exceptions, CSP violations and
+  failed subresources, plus every request with status, size and timing. Reads
+  return only what is new since the last one, so polling in a loop stays cheap.
+- **Interaction** — click, type, press, focus, scroll to an element, wait for one
+  to appear.
+- **A dedicated browser, never yours.** A pinned Chrome for Testing build,
+  verified by checksum, running against its own profile directory. Your Chrome
+  profile — and the logged-in sessions in it — is never exposed to a page the
+  agent visits.
+- **Navigation is gated by origin.** `localhost` and your local network are
+  automatic; anything else asks for approval. `file://` and `javascript:` are
+  refused outright, and there is no arbitrary-JS escape hatch.
+
+The browser is a one-time ~190 MB download, started from **Settings › Browser**
+— never silently by a tool call. Turn the whole feature off there and the tools
+leave the prompt entirely.
+
 ### Parallel subagents
 
 The main agent delegates to parallel subagents (4 by default, configurable),
@@ -172,16 +202,21 @@ about it.
 | `go_to_definition` | auto | LSP definition |
 | `find_references` | auto | LSP references |
 | `web_search` | auto | Search the web |
+| `browser_inspect` | auto | Read the open page's console, network, text or HTML |
+| `browser_screenshot` | auto | Capture the viewport, full page, an element or a region |
 | `ask_user` | auto | Ask you a question, with options |
 | `tasks_get` / `tasks_set` | auto | Read and update the task list |
 | `write_plan` / `finalize_plan` | auto | Author and close out a plan document |
 | `enter_plan_mode` / `exit_plan_mode` | auto | Switch between Brain and Builder |
 | `spawn_agents` | auto | Launch parallel subagents |
+| **`browser`** | **origin-gated** | Navigate and interact with a page (local addresses are automatic; other origins ask) |
 | **`edit_file`** | **requires approval** | Propose an edit, shown as a diff |
 | **`bash`** | **requires approval** | Run a shell command (read-only commands are allowlisted) |
 
 File tools are confined to the opened workspace by a path guard that rejects
-traversal. A denylist blocks known-destructive commands outright. See
+traversal. A denylist blocks known-destructive commands outright. Anything the
+browser reads off a page is wrapped and labelled as untrusted data, because a
+page can contain text written to manipulate the model. See
 [SECURITY.md](SECURITY.md) for the full threat model, including what the
 project explicitly does *not* defend against.
 

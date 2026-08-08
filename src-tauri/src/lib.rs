@@ -1,8 +1,11 @@
 mod agent;
 pub(crate) mod askpass;
+pub mod browser;
 pub mod code_intel;
 mod commands;
+pub mod download;
 pub(crate) mod http;
+pub(crate) mod imageutil;
 mod lsp;
 pub(crate) mod net_activity;
 pub(crate) mod procutil;
@@ -102,6 +105,11 @@ pub fn run() {
             commands::plugins::plugins_install_from_url,
             commands::plugins::plugins_uninstall,
             commands::plugins::plugins_scaffold,
+            commands::browser::browser_status,
+            commands::browser::browser_install,
+            commands::browser::browser_uninstall,
+            commands::browser::browser_close,
+            commands::browser::browser_test,
             commands::mcp::mcp_list_servers,
             commands::mcp::mcp_test_server,
             commands::mcp::mcp_reconnect,
@@ -128,7 +136,13 @@ mod architecture_tests {
     #[test]
     fn core_modules_do_not_depend_on_the_command_layer() {
         let mut offenders = Vec::new();
-        for dir in ["src/agent", "src/code_intel", "src/lsp", "src/quality"] {
+        for dir in [
+            "src/agent",
+            "src/browser",
+            "src/code_intel",
+            "src/lsp",
+            "src/quality",
+        ] {
             visit(Path::new(dir), &mut |path, body| {
                 if body.contains("crate::commands") {
                     offenders.push(path.display().to_string());
