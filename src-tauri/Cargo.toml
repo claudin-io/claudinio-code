@@ -50,7 +50,7 @@ ignore = "0.4"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 tokio = { version = "1", features = ["sync", "io-util", "process", "macros", "net", "time"] }
 sysinfo = "0.39"
-hmac = "0.12"
+hmac = "0.13"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 csv = "1"
