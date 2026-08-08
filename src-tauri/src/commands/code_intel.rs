@@ -182,6 +182,7 @@ pub async fn open_workspace(
         mcp: tokio::sync::Mutex::new(None),
         mcp_fingerprint: tokio::sync::Mutex::new(None),
         index_progress: index_progress.clone(),
+        browser: Arc::new(crate::browser::BrowserHandle::new(root.clone())),
     });
     {
         let mut map = state.workspaces.lock().await;

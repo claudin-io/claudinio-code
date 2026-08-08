@@ -297,6 +297,7 @@ mod tests {
             },
             &ToolContext {
                 db_path: None,
+                browser: None,
                 lsp_manager: None,
                 workspace_root: None,
                 embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -330,6 +331,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = crate::agent::tools::ToolContext {
             db_path: None,
+            browser: None,
             lsp_manager: None,
             workspace_root: None,
             embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -375,6 +377,7 @@ mod tests {
         let canonical_tmp = std::fs::canonicalize(&tmp).unwrap_or(tmp.clone());
         let ctx = crate::agent::tools::ToolContext {
             db_path: None,
+            browser: None,
             lsp_manager: None,
             workspace_root: None,
             embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -419,6 +422,7 @@ mod tests {
         let start = Instant::now();
         let ctx = crate::agent::tools::ToolContext {
             db_path: None,
+            browser: None,
             lsp_manager: None,
             workspace_root: None,
             embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),

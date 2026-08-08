@@ -112,6 +112,7 @@ export interface AgentConfig {
   handoffContextTokens?: number | null;
   autoCommitPlan?: boolean;
   thinkingEffort?: string;
+  browser?: BrowserPrefs;
   providers?: Record<string, ConnectedProviderInfo>;
   workspaceConfig?: Record<string, unknown> | null;
 }
@@ -147,6 +148,7 @@ export interface SetConfigArgs {
   handoffContextTokens?: number | null;
   autoCommitPlan?: boolean;
   thinkingEffort?: ThinkingEffort;
+  browser?: BrowserPrefs;
 }
 
 export interface ApproveArgs {
@@ -249,6 +251,7 @@ export type AgentEvent =
   | { event: "Thinking"; data: string }
   | { event: "ToolCall"; data: ToolCallData }
   | { event: "ToolResult"; data: ToolResultData }
+  | { event: "ToolResultImages"; data: ToolResultImagesData }
   | { event: "AskUser"; data: AskUserData }
   | { event: "Done"; data: DoneData }
   | { event: "SteeringInjected"; data: { text: string; attachments?: Array<{ name: string; mediaType: string; size: number }> } }
@@ -333,6 +336,21 @@ export interface ToolResultData {
   toolName: string;
   output: string;
   error?: string | null;
+  /** Merged in from the ToolResultImages event that follows this one. */
+  images?: ToolImageData[];
+}
+
+/** An image a tool produced, already compressed and base64-encoded. */
+export interface ToolImageData {
+  mediaType: string;
+  data: string;
+  width: number;
+  height: number;
+}
+
+export interface ToolResultImagesData {
+  toolId: string;
+  images: ToolImageData[];
 }
 
 export interface DoneData {
@@ -555,6 +573,51 @@ export function getSessionStats(records: SessionRecord[]): {
 
 export function setConfig(args: SetConfigArgs): Promise<void> {
   return invoke<void>("set_config", { args });
+}
+
+// --- Browser ---
+
+export interface BrowserPrefs {
+  enabled: boolean;
+  headless: boolean;
+  chromePath?: string | null;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+export interface BrowserStatus {
+  installed: boolean;
+  version: string;
+  exePath?: string | null;
+  downloadSize: number;
+  systemChrome?: string | null;
+  supported: boolean;
+}
+
+export interface BrowserInstallProgress {
+  downloadedBytes: number;
+  totalBytes: number;
+  phase: "download" | "extract";
+}
+
+export function browserStatus(): Promise<BrowserStatus> {
+  return invoke<BrowserStatus>("browser_status");
+}
+
+export function browserInstall(): Promise<BrowserStatus> {
+  return invoke<BrowserStatus>("browser_install");
+}
+
+export function browserUninstall(): Promise<BrowserStatus> {
+  return invoke<BrowserStatus>("browser_uninstall");
+}
+
+export function browserTest(): Promise<string> {
+  return invoke<string>("browser_test");
+}
+
+export function browserClose(): Promise<void> {
+  return invoke<void>("browser_close");
 }
 
 export function getConfig(workspace?: string): Promise<AgentConfig> {

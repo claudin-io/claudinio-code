@@ -386,6 +386,15 @@ impl SessionStore {
 
     pub fn append(&self, record: &SessionRecord) -> Result<(), String> {
         let line = serde_json::to_string(record).map_err(|e| format!("serialize record: {e}"))?;
+        // Screenshots and attachments are ~200 KB of base64 each. Left inline
+        // they make the session file grow by megabytes per capture, and this
+        // file is re-read on every message. Cheap pre-check so the common
+        // image-free line never pays for the JSON round-trip.
+        let line = if line.contains(BASE64_MARKER) {
+            externalized(&line, &self.media_dir()).unwrap_or(line)
+        } else {
+            line
+        };
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -397,6 +406,10 @@ impl SessionStore {
 
     /// A best-effort append that never propagates errors — used inside the hot
     /// loop where a persistence hiccup must not abort the agent run.
+    fn media_dir(&self) -> std::path::PathBuf {
+        media_dir_for(&self.path)
+    }
+
     pub fn try_append(&self, record: &SessionRecord) {
         let _ = self.append(record);
     }
@@ -406,17 +419,157 @@ impl SessionStore {
 pub fn load_records(path: &Path) -> Result<Vec<SessionRecord>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open session file: {e}"))?;
     let reader = std::io::BufReader::new(file);
+    let media_dir = media_dir_for(path);
     let mut out = Vec::new();
     for line in reader.lines() {
         let line = line.map_err(|e| format!("read session file: {e}"))?;
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(rec) = serde_json::from_str::<SessionRecord>(&line) {
+        // Same pre-check as on the way out: only lines that actually reference
+        // an externalized image pay for the round-trip.
+        let rec = if line.contains(MEDIA_REF_PREFIX) {
+            rehydrated(&line, &media_dir).and_then(|v| serde_json::from_value(v).ok())
+        } else {
+            serde_json::from_str::<SessionRecord>(&line).ok()
+        };
+        if let Some(rec) = rec {
             out.push(rec);
         }
     }
     Ok(out)
+}
+
+/// Marker that tells `append` a line is worth scanning for image data.
+const BASE64_MARKER: &str = "\"base64\"";
+/// Prefix replacing the base64 payload of an externalized image.
+const MEDIA_REF_PREFIX: &str = "@media:";
+/// Below this an image is small enough that a separate file costs more than it
+/// saves (an inode and a syscall against a few KB of text).
+const MEDIA_INLINE_THRESHOLD: usize = 4096;
+
+fn media_dir_for(session_path: &Path) -> std::path::PathBuf {
+    session_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("media")
+}
+
+/// Move oversized base64 image payloads out to files, leaving a reference.
+///
+/// Returns `None` when nothing changed or anything went wrong, so the caller
+/// falls back to writing the line as-is — losing the size optimisation is
+/// always preferable to losing the record.
+fn externalized(line: &str, media_dir: &Path) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let mut wrote = false;
+    walk_images(&mut value, &mut |source| {
+        let data = source.get("data").and_then(|d| d.as_str())?;
+        if data.len() < MEDIA_INLINE_THRESHOLD || data.starts_with(MEDIA_REF_PREFIX) {
+            return None;
+        }
+        let media_type = source
+            .get("media_type")
+            .and_then(|m| m.as_str())
+            .unwrap_or("image/png");
+        let ext = media_type.rsplit('/').next().unwrap_or("png");
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).ok()?;
+
+        // Content-addressed, so the same screenshot referenced twice is stored
+        // once.
+        use sha2::Digest;
+        let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let name = format!("{}.{ext}", &digest[..32]);
+        let dest = media_dir.join(&name);
+        if !dest.exists() {
+            std::fs::create_dir_all(media_dir).ok()?;
+            std::fs::write(&dest, &bytes).ok()?;
+        }
+        wrote = true;
+        Some(format!("{MEDIA_REF_PREFIX}{name}"))
+    });
+    if !wrote {
+        return None;
+    }
+    serde_json::to_string(&value).ok()
+}
+
+/// Read externalized payloads back in.
+///
+/// A reference whose file is gone becomes a text note rather than a broken
+/// image: sending unresolvable data to the provider would fail the whole
+/// request, while a note degrades one block.
+fn rehydrated(line: &str, media_dir: &Path) -> Option<serde_json::Value> {
+    let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
+    walk_images(&mut value, &mut |source| {
+        let data = source.get("data").and_then(|d| d.as_str())?;
+        let name = data.strip_prefix(MEDIA_REF_PREFIX)?;
+        let bytes = std::fs::read(media_dir.join(name)).ok()?;
+        Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &bytes,
+        ))
+    });
+    // Any reference that could not be read is still a marker; turn those into
+    // text so nothing downstream tries to decode them.
+    replace_dangling_media(&mut value);
+    Some(value)
+}
+
+/// Apply `f` to every `{"type":"base64", "data":…}` source object, replacing
+/// `data` with whatever it returns.
+fn walk_images(
+    value: &mut serde_json::Value,
+    f: &mut impl FnMut(&serde_json::Map<String, serde_json::Value>) -> Option<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_source = map.get("type").and_then(|t| t.as_str()) == Some("base64")
+                && map.contains_key("data");
+            if is_source && let Some(replacement) = f(map) {
+                map.insert("data".into(), serde_json::Value::String(replacement));
+                return;
+            }
+            for (_, v) in map.iter_mut() {
+                walk_images(v, f);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items.iter_mut() {
+                walk_images(v, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Turn image blocks whose media file vanished into a plain text note.
+fn replace_dangling_media(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                let dangling = item
+                    .pointer("/source/data")
+                    .and_then(|d| d.as_str())
+                    .is_some_and(|d| d.starts_with(MEDIA_REF_PREFIX));
+                if dangling {
+                    *item = serde_json::json!({
+                        "type": "text",
+                        "text": "[image from an earlier step is no longer available]"
+                    });
+                } else {
+                    replace_dangling_media(item);
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                replace_dangling_media(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Rebuild the model conversation history from a session's records.
@@ -2115,5 +2268,168 @@ mod tests {
             }
         }
         assert_eq!(updated_at, 5);
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use crate::agent::provider::{ContentBlock, Message};
+
+    fn big_image_b64() -> String {
+        // Comfortably over MEDIA_INLINE_THRESHOLD, and valid base64.
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            vec![7u8; MEDIA_INLINE_THRESHOLD],
+        )
+    }
+
+    fn store_in(dir: &Path) -> SessionStore {
+        SessionStore {
+            path: dir.join("s.jsonl"),
+        }
+    }
+
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("claudinio_media_{name}_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_screenshot_round_trips_through_an_external_file() {
+        let dir = tmp_dir("roundtrip");
+        let store = store_in(&dir);
+        let data = big_image_b64();
+        store
+            .append(&SessionRecord::Turn {
+                ts: now_ms(),
+                message: Message {
+                    role: "user".into(),
+                    content: vec![
+                        ContentBlock::text("Screenshot of the page"),
+                        ContentBlock::image("image/jpeg", &data, 1280, 800),
+                    ],
+                },
+            })
+            .unwrap();
+
+        // The JSONL line must no longer carry the payload.
+        let raw = std::fs::read_to_string(&store.path).unwrap();
+        assert!(!raw.contains(&data), "base64 is still inline");
+        assert!(raw.contains(MEDIA_REF_PREFIX));
+        assert!(
+            raw.len() < data.len() / 4,
+            "line is still huge: {}",
+            raw.len()
+        );
+        assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 1);
+
+        // …and reading it back must produce the original bytes.
+        let records = load_records(&store.path).unwrap();
+        let SessionRecord::Turn { message, .. } = &records[0] else {
+            panic!("expected a Turn");
+        };
+        match &message.content[1] {
+            ContentBlock::Image { source, .. } => {
+                assert_eq!(source.data, data);
+                assert_eq!(source.media_type, "image/jpeg");
+            }
+            other => panic!("expected an image, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two identical screenshots must not become two files.
+    #[test]
+    fn identical_images_are_stored_once() {
+        let dir = tmp_dir("dedupe");
+        let store = store_in(&dir);
+        let data = big_image_b64();
+        for _ in 0..3 {
+            store
+                .append(&SessionRecord::Turn {
+                    ts: now_ms(),
+                    message: Message {
+                        role: "user".into(),
+                        content: vec![ContentBlock::image("image/jpeg", &data, 10, 10)],
+                    },
+                })
+                .unwrap();
+        }
+        assert_eq!(std::fs::read_dir(dir.join("media")).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Small payloads are not worth a file each.
+    #[test]
+    fn small_images_stay_inline() {
+        let dir = tmp_dir("inline");
+        let store = store_in(&dir);
+        store
+            .append(&SessionRecord::Turn {
+                ts: now_ms(),
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::image("image/png", "QUJD", 1, 1)],
+                },
+            })
+            .unwrap();
+        let raw = std::fs::read_to_string(&store.path).unwrap();
+        assert!(raw.contains("QUJD"));
+        assert!(!dir.join("media").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A deleted media file must degrade one block, not fail the whole load —
+    /// and must never reach the provider as undecodable data.
+    #[test]
+    fn a_missing_media_file_becomes_a_text_note() {
+        let dir = tmp_dir("dangling");
+        let store = store_in(&dir);
+        store
+            .append(&SessionRecord::Turn {
+                ts: now_ms(),
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::image("image/jpeg", big_image_b64(), 1, 1)],
+                },
+            })
+            .unwrap();
+        std::fs::remove_dir_all(dir.join("media")).unwrap();
+
+        let records = load_records(&store.path).unwrap();
+        let SessionRecord::Turn { message, .. } = &records[0] else {
+            panic!("expected a Turn");
+        };
+        assert_eq!(
+            message.content[0].get_text(),
+            Some("[image from an earlier step is no longer available]")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Sessions written before this existed have no markers and must load
+    /// byte-identically.
+    #[test]
+    fn records_without_images_are_untouched() {
+        let dir = tmp_dir("plain");
+        let store = store_in(&dir);
+        store
+            .append(&SessionRecord::Turn {
+                ts: now_ms(),
+                message: Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text("just text")],
+                },
+            })
+            .unwrap();
+        assert!(!dir.join("media").exists());
+        let records = load_records(&store.path).unwrap();
+        let SessionRecord::Turn { message, .. } = &records[0] else {
+            panic!("expected a Turn");
+        };
+        assert_eq!(message.content[0].get_text(), Some("just text"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

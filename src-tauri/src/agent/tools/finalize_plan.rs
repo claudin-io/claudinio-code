@@ -314,6 +314,7 @@ mod tests {
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
             read_tracker: Arc::new(Mutex::new(crate::agent::tools::ReadTracker::default())),
+            browser: None,
             interrupt: None,
             agent_config: None,
             plan_save_path: plan_save_path.map(|s| s.to_string()),

@@ -7,6 +7,7 @@ import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsMcp } from "./settings/SettingsMcp";
 import { SettingsPlugins } from "./settings/SettingsPlugins";
+import { SettingsBrowser } from "./settings/SettingsBrowser";
 import { SettingsQuality } from "./settings/SettingsQuality";
 
 interface SettingsPanelProps {
@@ -82,7 +83,7 @@ interface SettingsPanelProps {
   openSupportUrl: () => void;
 }
 
-type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'quality' | 'mcp' | 'plugins';
+type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'quality' | 'mcp' | 'browser' | 'plugins';
 
 interface Category {
   id: CategoryId;
@@ -97,6 +98,7 @@ const CATEGORIES: Category[] = [
   { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)"] },
   { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
+  { id: 'browser', icon: 'globe', searchTerms: ["Browser","Chromium","Screenshot","Console","Network","Headless","Viewport","Download","Install a browser"] },
   { id: 'plugins', icon: 'package', searchTerms: ["Plugins","Agent Plugins","Install from folder","Install from URL","Create plugin","plugin.json","mcp.json","Uninstall"] },
 ];
 
@@ -109,6 +111,7 @@ function getCategoryLabel(id: CategoryId): string {
     quality: 'Quality',
     mcp: 'MCP',
     plugins: 'Plugins',
+    browser: 'Browser',
   };
   return labels[id];
 }
@@ -339,6 +342,10 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   onAddServer={props.addMcpServerTemplate}
                   onTestAll={props.testAllMcpServers}
                 />
+              </Show>
+
+              <Show when={searchQuery() ? true : activeCategory() === 'browser'}>
+                <SettingsBrowser />
               </Show>
 
               <Show when={searchQuery() ? true : activeCategory() === 'plugins'}>

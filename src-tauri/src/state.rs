@@ -68,6 +68,11 @@ pub struct WorkspaceState {
     /// scan. `Some(progress)` = indexing in progress; `None` = indexing
     /// complete (or never started).
     pub index_progress: Arc<std::sync::Mutex<Option<IndexProgress>>>,
+    /// This workspace's dedicated Chromium, launched lazily on the first
+    /// browser tool call. Scoped to the workspace rather than the session for
+    /// the same reason as `mcp`: a page keeps its login and route across chat
+    /// turns instead of being relaunched every message.
+    pub browser: Arc<crate::browser::BrowserHandle>,
 }
 
 impl WorkspaceState {

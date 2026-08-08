@@ -87,6 +87,36 @@ Não é só grep:
   `typescript-language-server` e `rust-analyzer`.
 - **Reindexação viva** — um watcher mantém o índice em dia enquanto você trabalha.
 
+### Ele enxerga sua aplicação rodando
+
+Ler o código só resolve metade. O agente dirige um browser de verdade: muda um
+componente, olha o que renderizou, lê o erro no console e corrige — sem você
+ficar copiando e colando de um lado para o outro.
+
+<p align="center">
+  <img src="docs/assets/browser.png" alt="O agente navegando numa página e devolvendo um screenshot inline na timeline" width="880">
+</p>
+
+- **Screenshots voltam como imagem**, não como caminho de arquivo — o modelo
+  enxerga o layout de fato. Captura o viewport, a página inteira, um seletor CSS
+  ou uma região arbitrária.
+- **Console e network** — `console.*`, exceções não capturadas, violações de CSP
+  e subrecursos que falharam, mais cada request com status, tamanho e tempo. As
+  leituras trazem só o que é novo desde a última, então ler em loop sai barato.
+- **Interação** — clicar, digitar, teclar, focar, rolar até um elemento, esperar
+  um aparecer.
+- **Um browser dedicado, nunca o seu.** Um build fixado do Chrome for Testing,
+  verificado por checksum, rodando com diretório de perfil próprio. Seu perfil do
+  Chrome — e as sessões logadas nele — nunca fica exposto a uma página que o
+  agente visita.
+- **Navegação é barrada por origem.** `localhost` e sua rede local são
+  automáticos; qualquer outra coisa pede aprovação. `file://` e `javascript:` são
+  recusados, e não existe válvula de escape para JS arbitrário.
+
+O browser é um download único de ~190 MB, iniciado em **Configurações › Browser**
+— nunca silenciosamente por uma tool call. Desligue a feature ali e as tools
+somem inteiramente do prompt.
+
 ### Subagentes paralelos
 
 O agente principal delega para subagentes paralelos (4 por padrão, configurável),
@@ -173,18 +203,23 @@ tradução da UI.)
 | `go_to_definition` | automático | Definição via LSP |
 | `find_references` | automático | Referências via LSP |
 | `web_search` | automático | Busca na web |
+| `browser_inspect` | automático | Lê console, network, texto ou HTML da página aberta |
+| `browser_screenshot` | automático | Captura o viewport, a página inteira, um elemento ou uma região |
 | `ask_user` | automático | Faz uma pergunta a você, com opções |
 | `tasks_get` / `tasks_set` | automático | Lê e atualiza a lista de tarefas |
 | `write_plan` / `finalize_plan` | automático | Escreve e fecha um documento de plano |
 | `enter_plan_mode` / `exit_plan_mode` | automático | Alterna entre Brain e Builder |
 | `spawn_agents` | automático | Dispara subagentes paralelos |
+| **`browser`** | **barrado por origem** | Navega e interage com uma página (endereços locais são automáticos; outras origens perguntam) |
 | **`edit_file`** | **requer aprovação** | Propõe uma edição, exibida como diff |
 | **`bash`** | **requer aprovação** | Roda um comando de shell (comandos de leitura são allowlisted) |
 
 As ferramentas de arquivo ficam confinadas ao workspace aberto por um guard de
 caminho que rejeita traversal. Uma denylist bloqueia comandos sabidamente
-destrutivos. O modelo de ameaças completo — incluindo o que o projeto
-explicitamente *não* defende — está em [SECURITY.md](SECURITY.md).
+destrutivos. Tudo que o browser lê de uma página é embrulhado e marcado como
+dado não-confiável, porque uma página pode conter texto escrito para manipular o
+modelo. O modelo de ameaças completo — incluindo o que o projeto explicitamente
+*não* defende — está em [SECURITY.md](SECURITY.md).
 
 ## Arquitetura
 

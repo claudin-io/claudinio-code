@@ -40,6 +40,7 @@ import {
   type ToolCallData,
   type DoneData,
   type ToolResultData,
+  type ToolResultImagesData,
   type SubagentStartedData,
   type SubagentDoneData,
   type SessionSummary,
@@ -702,6 +703,26 @@ export const ChatPanel: Component<{
     return next;
   };
 
+  /** Attach the images from a ToolResultImages event to the tool row its
+   *  ToolResult just landed on. Separate event, so it always arrives second. */
+  const applyToolImagesIn = (
+    steps: TimelineItem[],
+    data: ToolResultImagesData,
+  ): TimelineItem[] => {
+    const idx = steps.findIndex(
+      (s) => s.type === "tool" && s.tool?.call.toolId === data.toolId,
+    );
+    if (idx === -1) return steps;
+    const next = [...steps];
+    const t = next[idx];
+    if (t.type !== "tool" || !t.tool?.result) return steps;
+    next[idx] = {
+      type: "tool",
+      tool: { ...t.tool, result: { ...t.tool.result, images: data.images } },
+    };
+    return next;
+  };
+
   const processSubagentEvent = (
     subagents: Record<string, SubagentTimelineState>,
     subagentId: string,
@@ -738,6 +759,8 @@ export const ChatPanel: Component<{
       }
     } else if (event.event === "ToolResult") {
       steps = applyToolResultIn(steps, event.data as ToolResultData);
+    } else if (event.event === "ToolResultImages") {
+      steps = applyToolImagesIn(steps, event.data as ToolResultImagesData);
     }
 
     return {
@@ -825,6 +848,10 @@ export const ChatPanel: Component<{
         setCurrentAskUser(null);
         setStatus("thinking");
       }
+      scrollToBottom();
+    } else if (event.event === "ToolResultImages") {
+      const data = event.data as ToolResultImagesData;
+      setCurrentSteps((prev) => applyToolImagesIn(prev, data));
       scrollToBottom();
     } else if (event.event === "AskUser") {
       setCurrentAskUser(event.data as AskUserData);

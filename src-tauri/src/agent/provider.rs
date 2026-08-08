@@ -121,6 +121,9 @@ pub struct AgentConfig {
     /// name. A discovered plugin with no entry here is enabled.
     #[serde(default)]
     pub plugins: std::collections::HashMap<String, PluginPrefs>,
+    /// Browser tool settings — see `crate::browser`.
+    #[serde(default)]
+    pub browser: crate::browser::BrowserPrefs,
     /// Prevent the system from sleeping while an agent session is actively
     /// running (display can still turn off). See commands::power.
     #[serde(default = "default_true")]
@@ -321,6 +324,7 @@ impl Default for AgentConfig {
         Self {
             base_url: "https://api.claudin.io".into(),
             api_key: String::new(),
+            browser: Default::default(),
             model: "claudinio".into(),
             brain_model: "claudius".into(),
             builder_model: "claudinio".into(),
@@ -569,6 +573,11 @@ pub struct Message {
     pub content: Vec<ContentBlock>,
 }
 
+/// ORDER MATTERS: this enum is `#[serde(untagged)]`, so deserialization tries
+/// the variants top to bottom and takes the first that fits structurally.
+/// Reordering it silently changes how archived session JSONL reloads. The
+/// discriminating fields are `text` / `source` / `id`+`name`+`input` /
+/// `tool_use_id`; `untagged_variants_round_trip` pins the behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ContentBlock {
@@ -593,8 +602,44 @@ pub enum ContentBlock {
         #[serde(rename = "type")]
         type_: String,
         tool_use_id: String,
-        content: String,
+        content: ToolResultContent,
     },
+}
+
+/// The payload of a `tool_result` block.
+///
+/// Anthropic accepts either a bare string or an array of content blocks, and
+/// `untagged` reproduces exactly that on the wire: `Text` serializes as a plain
+/// JSON string (so the tools that existed before images did are byte-identical
+/// to what they always sent) and `Blocks` as an array.
+///
+/// The same property makes the change free on the way in: session JSONL written
+/// before this type existed stored a bare string, and `untagged` deserializes
+/// it straight back into `Text`. Without that, every archived session would
+/// fail to reload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+impl ToolResultContent {
+    /// The textual part of the result, with any image blocks skipped.
+    /// Callers that only need to sniff the result (e.g. "did this start with
+    /// `Error`?") should go through here rather than matching the variant.
+    pub fn as_text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            ToolResultContent::Text(s) => std::borrow::Cow::Borrowed(s),
+            ToolResultContent::Blocks(blocks) => std::borrow::Cow::Owned(
+                blocks
+                    .iter()
+                    .filter_map(|b| b.get_text())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -652,12 +697,21 @@ impl ContentBlock {
         ContentBlock::ToolResult {
             type_: "tool_result".into(),
             tool_use_id: tool_use_id.into(),
-            content: content.into(),
+            content: ToolResultContent::Text(content.into()),
         }
     }
 
-    /// Extract text from a Text block. Used in tests.
-    #[allow(dead_code)]
+    /// A tool result carrying more than plain text — today, a summary line plus
+    /// the screenshots or images the tool produced.
+    pub fn tool_result_blocks(tool_use_id: impl Into<String>, blocks: Vec<ContentBlock>) -> Self {
+        ContentBlock::ToolResult {
+            type_: "tool_result".into(),
+            tool_use_id: tool_use_id.into(),
+            content: ToolResultContent::Blocks(blocks),
+        }
+    }
+
+    /// Extract text from a Text block.
     pub fn get_text(&self) -> Option<&str> {
         match self {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -1471,6 +1525,94 @@ mod tests {
         match &workspace_only.transport {
             McpTransportConfig::Remote { url, .. } => assert_eq!(url, "http://localhost:9000/mcp"),
             _ => panic!("expected remote transport"),
+        }
+    }
+
+    /// The compatibility guarantee that made `ToolResultContent` untagged:
+    /// every session JSONL written before images existed stored `content` as a
+    /// bare string. If this breaks, all archived sessions fail to reload.
+    #[test]
+    fn legacy_string_tool_result_still_deserializes() {
+        let legacy = r#"{"type":"tool_result","tool_use_id":"toolu_1","content":"fn main() {}"}"#;
+        let block: ContentBlock = serde_json::from_str(legacy).unwrap();
+        match block {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(matches!(content, ToolResultContent::Text(ref s) if s == "fn main() {}"));
+                // …and it must serialize back to a bare string, not an array,
+                // so the wire format for the 17 pre-existing tools is unchanged.
+                let round =
+                    serde_json::to_value(ContentBlock::tool_result("toolu_1", "fn main() {}"))
+                        .unwrap();
+                assert_eq!(round["content"], serde_json::json!("fn main() {}"));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    /// The multi-block form Anthropic expects when a tool returns pixels.
+    #[test]
+    fn tool_result_blocks_serialize_as_an_anthropic_content_array() {
+        let block = ContentBlock::tool_result_blocks(
+            "toolu_2",
+            vec![
+                ContentBlock::text("Screenshot of the login page"),
+                ContentBlock::image("image/jpeg", "QUJD", 1280, 800),
+            ],
+        );
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(v["type"], "tool_result");
+        assert_eq!(v["tool_use_id"], "toolu_2");
+        let arr = v["content"].as_array().unwrap();
+        assert_eq!(
+            arr[0],
+            serde_json::json!({"type":"text","text":"Screenshot of the login page"})
+        );
+        assert_eq!(
+            arr[1],
+            serde_json::json!({
+                "type": "image",
+                "source": {"type":"base64","media_type":"image/jpeg","data":"QUJD"}
+            })
+        );
+        // width/height are #[serde(skip)] — they exist only for the estimator
+        // and must never reach the API.
+        assert!(arr[1]["source"].get("width").is_none());
+    }
+
+    /// Guards the `ORDER MATTERS` comment on `ContentBlock`: each of the four
+    /// wire shapes has to land on its own variant.
+    #[test]
+    fn untagged_variants_round_trip() {
+        let cases: Vec<(ContentBlock, &str)> = vec![
+            (ContentBlock::text("hi"), "text"),
+            (ContentBlock::image("image/png", "AA", 1, 1), "image"),
+            (
+                ContentBlock::tool_use("id1", "grep", serde_json::json!({})),
+                "tool_use",
+            ),
+            (ContentBlock::tool_result("id1", "out"), "tool_result"),
+            (
+                ContentBlock::tool_result_blocks("id1", vec![ContentBlock::text("out")]),
+                "tool_result_blocks",
+            ),
+        ];
+        for (block, label) in cases {
+            let json = serde_json::to_string(&block).unwrap();
+            let back: ContentBlock = serde_json::from_str(&json).unwrap();
+            let same = match (&block, &back) {
+                (ContentBlock::Text { .. }, ContentBlock::Text { .. }) => true,
+                (ContentBlock::Image { .. }, ContentBlock::Image { .. }) => true,
+                (ContentBlock::ToolUse { .. }, ContentBlock::ToolUse { .. }) => true,
+                (
+                    ContentBlock::ToolResult { content: a, .. },
+                    ContentBlock::ToolResult { content: b, .. },
+                ) => std::mem::discriminant(a) == std::mem::discriminant(b),
+                _ => false,
+            };
+            assert!(
+                same,
+                "{label} deserialized into the wrong variant: {back:?}"
+            );
         }
     }
 

@@ -7,7 +7,7 @@
 
 use super::{
     AgentConfig, ContentBlock, Message, ResolvedProvider, STREAM_IDLE_TIMEOUT, StreamOutput,
-    TEXT_DELTA_THROTTLE, ToolDescription, Usage, maybe_emit_text_delta,
+    TEXT_DELTA_THROTTLE, ToolDescription, ToolResultContent, Usage, maybe_emit_text_delta,
 };
 use crate::agent::session::AgentEvent;
 use futures::StreamExt;
@@ -67,13 +67,64 @@ fn build_messages(messages: &[Message], system: Option<&str>) -> Vec<Value> {
                             tool_use_id,
                             content,
                             ..
-                        } => {
-                            out.push(json!({
-                                "role": "tool",
-                                "tool_call_id": tool_use_id,
-                                "content": content,
-                            }));
-                        }
+                        } => match content {
+                            ToolResultContent::Text(t) => {
+                                out.push(json!({
+                                    "role": "tool",
+                                    "tool_call_id": tool_use_id,
+                                    "content": t,
+                                }));
+                            }
+                            // OpenAI rejects image parts inside a `role:"tool"`
+                            // message, so the text goes in the tool message
+                            // (which must follow its tool_call immediately) and
+                            // the pixels ride along in the trailing user
+                            // message that `parts` is flushed into below.
+                            ToolResultContent::Blocks(blocks) => {
+                                let mut text = String::new();
+                                let mut image_count = 0usize;
+                                for b in blocks {
+                                    match b {
+                                        ContentBlock::Text { text: t, .. } => {
+                                            if !text.is_empty() {
+                                                text.push('\n');
+                                            }
+                                            text.push_str(t);
+                                        }
+                                        ContentBlock::Image { source, .. } => {
+                                            image_count += 1;
+                                            parts.push(json!({
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": format!(
+                                                        "data:{};base64,{}",
+                                                        source.media_type, source.data
+                                                    )
+                                                }
+                                            }));
+                                            only_text = None;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if image_count > 0 {
+                                    parts.push(json!({
+                                        "type": "text",
+                                        "text": format!(
+                                            "The {image_count} image(s) above are the result of tool call {tool_use_id}."
+                                        ),
+                                    }));
+                                    text.push_str(&format!(
+                                        "\n[{image_count} image(s) attached in the message that follows]"
+                                    ));
+                                }
+                                out.push(json!({
+                                    "role": "tool",
+                                    "tool_call_id": tool_use_id,
+                                    "content": text,
+                                }));
+                            }
+                        },
                         ContentBlock::Text { text, .. } => {
                             parts.push(json!({"type": "text", "text": text}));
                             if let Some(acc) = only_text.as_mut() {
@@ -661,6 +712,50 @@ mod tests {
         // residual user text follows
         assert_eq!(out[3]["role"], "user");
         assert_eq!(out[3]["content"], "continue");
+    }
+
+    /// OpenAI rejects image parts inside a `role:"tool"` message, so a tool
+    /// result carrying a screenshot has to split: text in the tool message
+    /// (which must still follow its tool_call directly) and the pixels in the
+    /// user message after it.
+    #[test]
+    fn test_build_messages_tool_result_images_move_to_the_following_user_message() {
+        let messages = vec![
+            Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::tool_use(
+                    "call_1",
+                    "browser_screenshot",
+                    serde_json::json!({"target": "viewport"}),
+                )],
+            },
+            Message {
+                role: "user".into(),
+                content: vec![ContentBlock::tool_result_blocks(
+                    "call_1",
+                    vec![
+                        ContentBlock::text("Screenshot of localhost:5173"),
+                        ContentBlock::image("image/jpeg", "AAAA", 1280, 800),
+                    ],
+                )],
+            },
+        ];
+        let out = build_messages(&messages, None);
+
+        assert_eq!(out[0]["role"], "assistant");
+        // The tool message stays a plain string and keeps its position.
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[1]["tool_call_id"], "call_1");
+        let tool_content = out[1]["content"].as_str().unwrap();
+        assert!(tool_content.starts_with("Screenshot of localhost:5173"));
+        assert!(tool_content.contains("1 image(s) attached"));
+        // The image rides in the user message that follows it.
+        assert_eq!(out[2]["role"], "user");
+        let parts = out[2]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(parts[0]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(out.len(), 3);
     }
 
     #[test]

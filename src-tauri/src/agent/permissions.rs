@@ -11,8 +11,77 @@ pub fn tool_permission(name: &str) -> PermissionLevel {
     match name {
         "edit_file" | "batch_edit" | "write_file" => PermissionLevel::RequiresApproval,
         "bash" => PermissionLevel::RequiresApproval,
+        // Read-only against a page the user already let the agent open. They
+        // reach no new origin, so re-prompting would be friction with no
+        // corresponding risk.
+        "browser_screenshot" | "browser_inspect" => PermissionLevel::Auto,
+        // Resolved per action and per URL by `browser_permission`.
+        "browser" => PermissionLevel::RequiresApproval,
         n if n.starts_with("mcp__") => PermissionLevel::RequiresApproval,
         _ => PermissionLevel::Auto,
+    }
+}
+
+/// Hosts that are this machine or its local network.
+///
+/// A dev server is what the agent is normally pointed at, and asking for
+/// approval on every reload of localhost is friction with no safety payoff.
+fn is_local_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.starts_with("192.168.")
+        || host.starts_with("10.")
+        || host.starts_with("127.")
+}
+
+/// Split `scheme://host[:port]/...` into its scheme and host.
+fn scheme_and_host(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip any userinfo, then the port. IPv6 literals keep their brackets
+    // until `is_local_host` trims them.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or("").to_string(),
+        None => authority.split(':').next().unwrap_or("").to_string(),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((scheme.to_ascii_lowercase(), host.to_ascii_lowercase()))
+}
+
+/// Permission for one `browser` action.
+///
+/// Navigation is the only action that reaches the network, so it is the only
+/// one gated. Everything else operates on a page the user already approved, and
+/// prompting again per step would make the tool unusable.
+pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
+    match action {
+        "navigate" => match url.and_then(scheme_and_host) {
+            // A browser that can open file:// is a file reader that bypasses
+            // the workspace containment every other tool obeys; chrome:// and
+            // devtools:// reach the browser's own internals; javascript: and
+            // data: are the script execution this tool deliberately omits.
+            Some((scheme, _)) if scheme != "http" && scheme != "https" => PermissionLevel::Denied,
+            Some((_, host)) if is_local_host(&host) => PermissionLevel::Auto,
+            Some(_) => PermissionLevel::RequiresApproval,
+            None => PermissionLevel::Denied,
+        },
+        // Everything else acts on a page the user already approved opening.
+        // Prompting per click would make the tool unusable for the case it
+        // exists for — driving a local dev server — and the meaningful gate is
+        // the one on which origin gets opened at all.
+        "reload" | "back" | "url" | "close" | "click" | "type" | "press" | "scroll_to"
+        | "focus" | "wait_for" => PermissionLevel::Auto,
+        // Unknown actions fail closed.
+        _ => PermissionLevel::RequiresApproval,
     }
 }
 
@@ -462,5 +531,79 @@ mod tests {
             tool_permission("read_file"),
             PermissionLevel::Auto
         ));
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::*;
+
+    fn level(action: &str, url: Option<&str>) -> String {
+        format!("{:?}", browser_permission(action, url))
+    }
+
+    #[test]
+    fn local_dev_servers_navigate_without_asking() {
+        for url in [
+            "http://localhost:5173",
+            "http://127.0.0.1:8080/admin",
+            "http://[::1]:3000",
+            "http://192.168.1.10:9000",
+            "http://app.localhost/",
+            "https://LOCALHOST:443/x",
+        ] {
+            assert_eq!(level("navigate", Some(url)), "Auto", "{url}");
+        }
+    }
+
+    #[test]
+    fn live_sites_require_approval() {
+        for url in [
+            "https://example.com",
+            "http://stripe.com/dashboard",
+            "https://user:pass@evil.com/",
+            // A local-looking host in the userinfo must not fool the parser.
+            "https://localhost@evil.com/",
+        ] {
+            assert_eq!(level("navigate", Some(url)), "RequiresApproval", "{url}");
+        }
+    }
+
+    #[test]
+    fn non_web_schemes_are_denied_outright() {
+        for url in [
+            "file:///etc/passwd",
+            "chrome://settings",
+            "devtools://devtools/x",
+            "javascript://localhost/%0aalert(1)",
+        ] {
+            assert_eq!(level("navigate", Some(url)), "Denied", "{url}");
+        }
+        assert_eq!(level("navigate", None), "Denied");
+        assert_eq!(level("navigate", Some("not a url")), "Denied");
+    }
+
+    #[test]
+    fn actions_on_an_already_open_page_do_not_reprompt() {
+        for action in ["reload", "back", "url", "close"] {
+            assert_eq!(level(action, None), "Auto", "{action}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_action_fails_closed() {
+        assert_eq!(level("exfiltrate", None), "RequiresApproval");
+    }
+
+    #[test]
+    fn screenshots_are_auto_but_the_browser_tool_is_gated() {
+        assert_eq!(
+            format!("{:?}", tool_permission("browser_screenshot")),
+            "Auto"
+        );
+        assert_eq!(
+            format!("{:?}", tool_permission("browser")),
+            "RequiresApproval"
+        );
     }
 }

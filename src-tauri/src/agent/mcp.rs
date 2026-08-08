@@ -3,7 +3,8 @@
 //! exposes them to the agent loop namespaced as `mcp__<server>__<tool>`.
 
 use crate::agent::provider::{McpServerEntry, McpTransportConfig};
-use crate::agent::tools::ToolDef;
+use crate::agent::tools::{ToolDef, ToolOutput};
+use crate::imageutil::ImageAttachment;
 use crate::procutil;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::RunningService;
@@ -125,12 +126,12 @@ impl McpManager {
     }
 
     /// Dispatch a namespaced tool call (`mcp__server__tool`) to the owning
-    /// connection and convert the result to plain text.
+    /// connection and convert the result into a `ToolOutput`.
     pub async fn call(
         &self,
         namespaced_name: &str,
         args: serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<ToolOutput, String> {
         let mut connections = self.connections.lock().await;
         let conn = connections
             .iter_mut()
@@ -150,7 +151,7 @@ impl McpManager {
             .map_err(|_| format!("MCP tool call to '{namespaced_name}' timed out"))?
             .map_err(|e| format!("MCP tool call failed: {e}"))?;
 
-        result_to_text(result)
+        result_to_output(result)
     }
 
     /// Cancel every underlying connection (kills stdio child processes).
@@ -269,13 +270,23 @@ async fn connect_one(
     ))
 }
 
-fn result_to_text(result: CallToolResult) -> Result<String, String> {
+/// Flatten an MCP tool result into something the agent loop can hand to a model.
+///
+/// Image blocks used to be dropped here with a "base64 data omitted" note,
+/// which made every image-producing MCP server useless. They now survive as
+/// real images, re-compressed on the way through: a server is free to return a
+/// 4000px screenshot, and passing that straight into the context would blow
+/// both the window and the token estimate.
+fn result_to_output(result: CallToolResult) -> Result<ToolOutput, String> {
     let mut parts = Vec::new();
+    let mut images = Vec::new();
     for block in &result.content {
         match block {
             ContentBlock::Text(t) => parts.push(t.text.clone()),
             ContentBlock::Image(img) => {
-                parts.push(format!("[image: {}, base64 data omitted]", img.mime_type));
+                let att = ImageAttachment::from_base64(&img.data, &img.mime_type);
+                parts.push(format!("[image {}x{}]", att.width, att.height));
+                images.push(att);
             }
             ContentBlock::Audio(audio) => {
                 parts.push(format!("[audio: {}, base64 data omitted]", audio.mime_type));
@@ -297,13 +308,19 @@ fn result_to_text(result: CallToolResult) -> Result<String, String> {
     }
     let text = parts.join("\n\n");
     if result.is_error == Some(true) {
-        Err(if text.is_empty() {
+        return Err(if text.is_empty() {
             "tool call failed".to_string()
         } else {
             text
-        })
+        });
+    }
+    if images.is_empty() {
+        Ok(ToolOutput::Text { content: text })
     } else {
-        Ok(text)
+        Ok(ToolOutput::Rich {
+            content: text,
+            images,
+        })
     }
 }
 
@@ -323,15 +340,46 @@ mod tests {
     }
 
     #[test]
-    fn test_result_to_text_joins_text_blocks_and_respects_is_error() {
+    fn test_result_to_output_joins_text_blocks_and_respects_is_error() {
         let ok = CallToolResult::success(vec![ContentBlock::Text(rmcp::model::TextContent::new(
             "hello",
         ))]);
-        assert_eq!(result_to_text(ok).unwrap(), "hello");
+        match result_to_output(ok).unwrap() {
+            ToolOutput::Text { content } => assert_eq!(content, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
 
         let err = CallToolResult::error(vec![ContentBlock::Text(rmcp::model::TextContent::new(
             "boom",
         ))]);
-        assert_eq!(result_to_text(err).unwrap_err(), "boom");
+        assert_eq!(result_to_output(err).unwrap_err(), "boom");
+    }
+
+    /// The regression this whole path exists for: an MCP server that returns a
+    /// screenshot used to have it replaced by "base64 data omitted".
+    #[test]
+    fn test_result_to_output_keeps_image_blocks() {
+        use base64::Engine;
+        use std::io::Cursor;
+
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(40, 20)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(&png);
+
+        let result = CallToolResult::success(vec![ContentBlock::Image(
+            rmcp::model::ImageContent::new(data, "image/png"),
+        )]);
+
+        match result_to_output(result).unwrap() {
+            ToolOutput::Rich { content, images } => {
+                assert_eq!(images.len(), 1);
+                assert_eq!((images[0].width, images[0].height), (40, 20));
+                assert!(!images[0].data.is_empty());
+                assert!(content.contains("40x20"), "got {content:?}");
+            }
+            other => panic!("expected Rich, got {other:?}"),
+        }
     }
 }

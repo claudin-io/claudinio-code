@@ -836,86 +836,25 @@ pub async fn ensure_model_downloaded(cache_dir: &Path) -> Result<(), String> {
             continue;
         }
 
-        let mut last_error = String::new();
-        let mut done = false;
-        for attempt in 0..DOWNLOAD_RETRIES {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(2 << (attempt - 1))).await;
-            }
-            match download_verified(&url, &dest, local_filename, sha256_hex, *expected_len).await {
-                Ok(()) => {
-                    done = true;
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("[embeddings] download attempt {} failed: {e}", attempt + 1);
-                    last_error = e;
-                }
-            }
-        }
-        if !done {
-            return Err(format!(
-                "download {local_filename} failed after {DOWNLOAD_RETRIES} attempts: {last_error}. \
-                 If the error is a hash mismatch, the model files changed upstream — \
-                 update the pinned hashes in embeddings.rs and fetch_embedding_model.py."
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-async fn download_verified(
-    url: &str,
-    dest: &Path,
-    local_filename: &str,
-    sha256_hex: &str,
-    expected_len: u64,
-) -> Result<(), String> {
-    use futures::StreamExt;
-    use sha2::Digest;
-
-    let net_guard = crate::net_activity::NetGuard::begin(
-        crate::net_activity::NetSource::EmbeddingModelDownload,
-        local_filename,
-    );
-    let client = crate::http::default_client();
-    let response = client
-        .get(url)
-        .send()
+        crate::download::download_verified_with_retries(
+            &url,
+            &dest,
+            local_filename,
+            sha256_hex,
+            *expected_len,
+            crate::net_activity::NetSource::EmbeddingModelDownload,
+            None,
+            DOWNLOAD_RETRIES,
+        )
         .await
-        .map_err(|e| format!("download {local_filename}: {e}"))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("download {local_filename} failed: HTTP {status}"));
+        .map_err(|e| {
+            format!(
+                "{e}. If the error is a hash mismatch, the model files changed upstream — \
+                 update the pinned hashes in embeddings.rs and fetch_embedding_model.py."
+            )
+        })?;
     }
 
-    let part_path = dest.with_extension("part");
-    let mut file = std::fs::File::create(&part_path)
-        .map_err(|e| format!("create {}: {e}", part_path.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut written: u64 = 0;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("read {local_filename}: {e}"))?;
-        std::io::Write::write_all(&mut file, &chunk)
-            .map_err(|e| format!("write {local_filename}: {e}"))?;
-        hasher.update(&chunk);
-        written += chunk.len() as u64;
-        net_guard.add_bytes(chunk.len() as u64);
-    }
-    drop(file);
-
-    let digest = format!("{:x}", hasher.finalize());
-    if written != expected_len || digest != sha256_hex {
-        let _ = std::fs::remove_file(&part_path);
-        return Err(format!(
-            "verification failed for {local_filename}: got {written} bytes sha256 {digest}, \
-             expected {expected_len} bytes sha256 {sha256_hex}"
-        ));
-    }
-    std::fs::rename(&part_path, dest).map_err(|e| format!("finalize {local_filename}: {e}"))?;
     Ok(())
 }
 
