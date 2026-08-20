@@ -38,6 +38,26 @@ fn budget_exceeded_message(body: &str) -> Option<String> {
 /// bytes coming) is.
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// The same guard, for a model running on this machine.
+///
+/// 90s is right for a network stream, where a long silence means the
+/// connection died. On loopback there is no connection to lose, and the
+/// silence means the model is still working: a 27B evaluating a large prompt
+/// takes minutes before its first token, and aborting there turns a slow
+/// answer into "Connection lost".
+const LOCAL_STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+
+impl ResolvedProvider {
+    /// How long a stream may go quiet before it is treated as dead.
+    pub fn stream_idle_timeout(&self) -> std::time::Duration {
+        if self.provider_id == crate::llama::LOCAL_PROVIDER_ID {
+            LOCAL_STREAM_IDLE_TIMEOUT
+        } else {
+            STREAM_IDLE_TIMEOUT
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub base_url: String,
@@ -1230,11 +1250,15 @@ pub async fn stream_message(
             });
         }
 
-        let chunk_result = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+        let idle_timeout = rp.stream_idle_timeout();
+        let chunk_result = match tokio::time::timeout(idle_timeout, stream.next()).await {
             Ok(Some(r)) => r,
             Ok(None) => break,
             Err(_) => {
-                return Err("stream error: no data received for 90s, connection stalled".into());
+                return Err(format!(
+                    "stream error: no data received for {}s, connection stalled",
+                    idle_timeout.as_secs()
+                ));
             }
         };
 
@@ -1744,6 +1768,25 @@ mod tests {
         assert_eq!(rp.model, "claudius");
         assert_eq!(rp.base_url, "https://api.claudin.io");
         assert_eq!(rp.api_key, "sk-claudinio");
+    }
+
+    /// Regression: a 27B evaluating a large prompt goes quiet for minutes
+    /// before its first token. Applying the network guard to loopback turned a
+    /// slow answer into "Connection lost — retrying", and the retry restarted
+    /// the same slow generation.
+    #[test]
+    fn a_local_stream_is_given_far_longer_to_produce_its_first_token() {
+        let cfg = cfg_with_openrouter();
+        let local = cfg.resolve_provider("local/abc");
+        let remote = cfg.resolve_provider("openrouter/openai/gpt-4o-mini");
+        let claudinio = cfg.resolve_provider("claudius");
+
+        assert_eq!(remote.stream_idle_timeout(), STREAM_IDLE_TIMEOUT);
+        assert_eq!(claudinio.stream_idle_timeout(), STREAM_IDLE_TIMEOUT);
+        assert!(
+            local.stream_idle_timeout() > STREAM_IDLE_TIMEOUT * 5,
+            "a local model needs minutes, not 90s"
+        );
     }
 
     #[test]

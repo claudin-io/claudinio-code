@@ -6,8 +6,8 @@
 //! expects from the Anthropic client.
 
 use super::{
-    AgentConfig, ContentBlock, Message, ResolvedProvider, STREAM_IDLE_TIMEOUT, StreamOutput,
-    TEXT_DELTA_THROTTLE, ToolDescription, ToolResultContent, Usage, maybe_emit_text_delta,
+    AgentConfig, ContentBlock, Message, ResolvedProvider, StreamOutput, TEXT_DELTA_THROTTLE,
+    ToolDescription, ToolResultContent, Usage, maybe_emit_text_delta,
 };
 use crate::agent::session::AgentEvent;
 use futures::StreamExt;
@@ -439,11 +439,15 @@ pub async fn stream_message(
             });
         }
 
-        let chunk_result = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+        let idle_timeout = rp.stream_idle_timeout();
+        let chunk_result = match tokio::time::timeout(idle_timeout, stream.next()).await {
             Ok(Some(r)) => r,
             Ok(None) => break,
             Err(_) => {
-                return Err("stream error: no data received for 90s, connection stalled".into());
+                return Err(format!(
+                    "stream error: no data received for {}s, connection stalled",
+                    idle_timeout.as_secs()
+                ));
             }
         };
 
@@ -614,7 +618,9 @@ pub async fn complete(
     let _net_guard = crate::net_activity::NetGuard::begin(net_source, rp.model.as_str());
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(90))
+        // Same reasoning as the streaming guard: a local model is slow, not
+        // unreachable, and a one-shot against a 27B can outlast 90s.
+        .timeout(rp.stream_idle_timeout())
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let max_tokens = rp

@@ -17,6 +17,10 @@ use std::sync::Arc;
 const DEFAULT_REPO: &str = "unsloth/Qwen3-0.6B-GGUF";
 const DEFAULT_QUANT: &str = "Q4_K_M";
 
+fn engine_label(use_mlx: bool) -> &'static str {
+    if use_mlx { "MLX" } else { "llama.cpp" }
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     let i = args.iter().position(|a| a == name)?;
     args.get(i + 1).cloned()
@@ -151,7 +155,14 @@ async fn main() {
         .gguf
         .as_ref()
         .is_some_and(|g| g.chat_template.is_some());
-    println!("template:   {has_template}");
+    println!(
+        "template:   {}",
+        if hf::is_mlx_repo(&detail.files) {
+            true
+        } else {
+            has_template
+        }
+    );
     let ctx = detail.gguf.as_ref().and_then(|g| g.context_length);
     let arch = detail.gguf.as_ref().and_then(|g| g.architecture.clone());
     let spec = if hf::is_mlx_repo(&detail.files) {
@@ -179,7 +190,7 @@ async fn main() {
         }
     };
 
-    println!("starting llama-server…");
+    println!("starting the {} server…", engine_label(use_mlx));
     let started = std::time::Instant::now();
     let endpoint = match supervisor::ensure_serving(&model.key, &prefs, 0).await {
         Ok(e) => e,
