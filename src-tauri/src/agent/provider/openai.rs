@@ -416,6 +416,15 @@ pub async fn stream_message(
     let mut stream = response.bytes_stream();
     let mut buf = String::new();
 
+    // For a local model, how long the prompt takes and how fast it then
+    // generates are the two numbers the user is judging it on — and the
+    // silence before the first token is what reads as a hang.
+    let local_key = (rp.provider_id == crate::llama::LOCAL_PROVIDER_ID).then(|| rp.model.clone());
+    let request_started = local_key
+        .as_deref()
+        .map(crate::llama::supervisor::note_request_start);
+    let mut first_token_seen = false;
+
     let mut text_deltas: Vec<String> = Vec::new();
     let mut thinking_text = String::new();
     let mut tool_acc: std::collections::BTreeMap<usize, ToolCallAcc> =
@@ -485,6 +494,17 @@ pub async fn stream_message(
                 &mut stop_reason,
                 &mut usage,
             )?;
+            // The first content out of the model: everything before this was
+            // the server reading the prompt, which is the silence the user
+            // sees.
+            if !first_token_seen
+                && !text_deltas.is_empty()
+                && let (Some(key), Some(started)) = (local_key.as_deref(), request_started)
+            {
+                first_token_seen = true;
+                let prompt_tokens = usage.as_ref().map_or(0, |u| u.input_tokens);
+                crate::llama::supervisor::note_first_token(key, started, prompt_tokens);
+            }
             maybe_emit_text_delta(
                 emit_text_deltas,
                 event_tx,
@@ -530,6 +550,12 @@ pub async fn stream_message(
             tool_uses.len(),
             text_deltas.len()
         );
+    }
+
+    // Rates come from the server's own counters on the next poll; this closes
+    // the phase so the status bar stops saying "generating".
+    if let Some(key) = local_key.as_deref() {
+        crate::llama::supervisor::note_request_end(key, 0.0, 0.0);
     }
 
     Ok(StreamOutput {

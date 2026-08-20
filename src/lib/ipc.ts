@@ -724,6 +724,7 @@ export interface LocalModelView extends LocalModel {
   running: boolean;
   complete: boolean;
   fit: Fit;
+  benchmark?: ModelBenchmark | null;
 }
 
 /** Emitted on "local-model-download-progress" and
@@ -809,10 +810,29 @@ export function localTestModel(key: string): Promise<string> {
 }
 
 /** What a resident model is costing and producing right now. */
+/** What a local model is doing. `loading` and `readingPrompt` are the phases
+ *  that produce no output, which is what reads as a hang. */
+export type LocalPhase = "loading" | "readingPrompt" | "generating" | "idle" | "sleeping";
+
+/** What a model has cost on this machine: a benchmark of your hardware, not
+ *  of the model's published numbers. */
+export interface ModelBenchmark {
+  modelKey: string;
+  loadSeconds: number;
+  loadSamples: number;
+  firstTokenSeconds: number;
+  tokensPerSecond: number;
+  promptTokensPerSecond: number;
+  generationSamples: number;
+  lastPromptTokens: number;
+  lastRunAt: string;
+}
+
 export interface LocalModelStats {
   modelKey: string;
   displayName: string;
   engine: LocalEngine;
+  phase: LocalPhase;
   /** Weights plus KV cache: the number that explains a large context. */
   memoryBytes: number;
   ctxSize: number;

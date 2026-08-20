@@ -1,11 +1,22 @@
 import { createSignal, onCleanup, onMount, Show, For, type Component } from "solid-js";
-import { localRuntimeStats, type LocalModelStats } from "../lib/ipc";
+import { localRuntimeStats, type LocalModelStats, type LocalPhase } from "../lib/ipc";
 import { Icon } from "./Icon";
 
 /** Slow on purpose: this is a status line, not telemetry. Each poll is three
  *  loopback requests per resident model, and nothing here changes in a way a
  *  human reads faster than this. */
 const POLL_MS = 4000;
+
+/// What each phase is called on screen. `loading` and `readingPrompt` are the
+/// ones worth naming: both produce no tokens, and without a label a minute of
+/// silence is indistinguishable from a hang.
+const PHASE_LABEL: Record<LocalPhase, string> = {
+  loading: "loading model",
+  readingPrompt: "reading prompt",
+  generating: "generating",
+  idle: "idle",
+  sleeping: "unloaded",
+};
 
 function mem(bytes: number): string {
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)}GB`;
@@ -51,9 +62,12 @@ export const LocalModelIndicator: Component<{ visible?: () => boolean }> = (prop
       >
         <Icon name="monitor" class={`h-3.5 w-3.5 ${primary()!.busy ? "text-accent" : ""}`} />
         <span classList={{ "text-accent": primary()!.busy }}>
-          {primary()!.sleeping
-            ? "idle"
-            : `${primary()!.tokensPerSecond.toFixed(1)} tok/s`}
+          {/* While nothing is coming out, say which kind of nothing it is. */}
+          {primary()!.phase === "loading" || primary()!.phase === "readingPrompt"
+            ? PHASE_LABEL[primary()!.phase]
+            : primary()!.phase === "sleeping"
+              ? "unloaded"
+              : `${primary()!.tokensPerSecond.toFixed(1)} tok/s`}
         </span>
       </button>
 
@@ -64,8 +78,7 @@ export const LocalModelIndicator: Component<{ visible?: () => boolean }> = (prop
               <div class="space-y-1">
                 <div class="truncate text-sm text-ink">{s.displayName}</div>
                 <div class="text-[11px] text-ink-faint">
-                  {s.engine === "mlx" ? "MLX" : "llama.cpp"}
-                  {s.sleeping ? " · weights unloaded" : s.busy ? " · generating" : " · idle"}
+                  {s.engine === "mlx" ? "MLX" : "llama.cpp"} · {PHASE_LABEL[s.phase]}
                 </div>
                 <dl class="mt-1 space-y-0.5 text-[11px]">
                   <div class="flex justify-between">

@@ -7,6 +7,7 @@
 //! needs to exist: fetching the binary, downloading GGUF weights, and keeping
 //! exactly one server process per loaded model.
 
+pub mod bench;
 pub mod catalog;
 pub mod curated;
 pub mod hardware;

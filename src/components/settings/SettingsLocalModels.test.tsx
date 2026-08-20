@@ -193,6 +193,38 @@ describe("SettingsLocalModels", () => {
     );
   });
 
+  /// The point of measuring here: two models on the same machine, comparable
+  /// in a way their published numbers are not.
+  it("shows what a model has cost on this machine", async () => {
+    const el = await mount({
+      models: [
+        model({
+          benchmark: {
+            modelKey: "518f7f28dd2a35e7",
+            loadSeconds: 42.5,
+            loadSamples: 3,
+            firstTokenSeconds: 6.2,
+            tokensPerSecond: 13.9,
+            promptTokensPerSecond: 240.9,
+            generationSamples: 5,
+            lastPromptTokens: 12000,
+            lastRunAt: "2026-08-20T00:00:00Z",
+          },
+        }),
+      ],
+    });
+    expect(el.textContent).toContain("13.9 tok/s");
+    expect(el.textContent).toContain("6.2s to first token");
+    expect(el.textContent).toContain("43s to load");
+  });
+
+  /// A model that has never run has nothing to say, and an empty row of zeroes
+  /// would read as "this model is broken".
+  it("says nothing about a model that has never run", async () => {
+    const el = await mount({ models: [model()] });
+    expect(el.textContent).not.toContain("to first token");
+  });
+
   it("warns when a model has no chat template", async () => {
     const el = await mount({ models: [model({ hasChatTemplate: false })] });
     expect(el.textContent).toContain("tool calls will not work");

@@ -58,6 +58,12 @@ function hubUrl(repo: string): string {
   return `https://huggingface.co/${repo}`;
 }
 
+/** A duration a human reads at a glance: seconds below a minute, else m:ss. */
+function secs(value: number): string {
+  if (value < 60) return `${value.toFixed(value < 10 ? 1 : 0)}s`;
+  return `${Math.floor(value / 60)}m${String(Math.round(value % 60)).padStart(2, "0")}s`;
+}
+
 function mb(bytes: number): string {
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
   return `${Math.round(bytes / 1_000_000)} MB`;
@@ -464,6 +470,12 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
           <h4 class="text-sm font-medium text-ink">Installed models</h4>
           <span class="text-[11px] text-ink-faint">{mb(usage() ?? 0)} on disk</span>
         </div>
+        <Show when={(installed() ?? []).some((m) => m.benchmark?.generationSamples)}>
+          <p class="mt-1 text-[11px] text-ink-faint">
+            Timings are measured on this machine as you use each model, so they are
+            comparable with each other in a way published numbers are not.
+          </p>
+        </Show>
         <Show
           when={(installed() ?? []).length > 0}
           fallback={<p class="mt-1 text-xs text-ink-faint">No models downloaded yet.</p>}
@@ -490,6 +502,21 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
                         · <span class="text-danger">no chat template — tool calls will not work</span>
                       </Show>
                     </div>
+                    {/* Measured here, on this machine: published numbers
+                        describe someone else's hardware. */}
+                    <Show when={m.benchmark && m.benchmark.generationSamples > 0}>
+                      <div class="truncate font-mono text-[11px] text-ink-faint">
+                        {m.benchmark!.tokensPerSecond.toFixed(1)} tok/s
+                        <Show when={m.benchmark!.firstTokenSeconds > 0}>
+                          {" · "}
+                          {secs(m.benchmark!.firstTokenSeconds)} to first token
+                        </Show>
+                        <Show when={m.benchmark!.loadSamples > 0}>
+                          {" · "}
+                          {secs(m.benchmark!.loadSeconds)} to load
+                        </Show>
+                      </div>
+                    </Show>
                   </div>
                   <div class="flex shrink-0 gap-2">
                     <button

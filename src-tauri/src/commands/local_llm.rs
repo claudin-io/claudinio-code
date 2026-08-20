@@ -63,6 +63,8 @@ pub struct LocalModelView {
     pub running: bool,
     pub complete: bool,
     pub fit: Fit,
+    /// What this model has cost on this machine, if it has been run.
+    pub benchmark: Option<crate::llama::bench::ModelBenchmark>,
 }
 
 /// A model offered as a starting point.
@@ -447,12 +449,14 @@ pub async fn local_cancel_install(state: State<'_, AppState>, key: String) -> Re
 #[tauri::command]
 pub async fn local_list_models() -> Result<Vec<LocalModelView>, String> {
     let hw = hardware::detect();
+    let benchmarks = crate::llama::bench::load();
     let mut out = Vec::new();
     for model in catalog::load()?.entries {
         out.push(LocalModelView {
             running: supervisor::is_running(&model.key).await,
             complete: catalog::is_complete(&model),
             fit: hardware::fit_verdict(model.total_bytes, &hw),
+            benchmark: benchmarks.entries.get(&model.key).cloned(),
             model,
         });
     }
@@ -465,6 +469,7 @@ pub async fn local_remove_model(key: String) -> Result<(), String> {
     // Stop first: on Windows the GGUF is mapped by the running server and the
     // delete would fail with a sharing violation.
     supervisor::stop(&key).await;
+    crate::llama::bench::forget(&key);
     catalog::remove(&key)
 }
 
@@ -567,6 +572,7 @@ mod tests {
             running: false,
             complete: true,
             fit: Fit::Comfortable,
+            benchmark: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"displayName\":\"m\""), "{json}");

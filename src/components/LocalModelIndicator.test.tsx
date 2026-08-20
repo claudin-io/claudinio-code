@@ -25,6 +25,7 @@ const stats = (over: Partial<LocalModelStats> = {}): LocalModelStats => ({
   modelKey: "abc",
   displayName: "Qwen3-8B (Q4_K_M)",
   engine: "mlx",
+  phase: "generating",
   memoryBytes: 19_400_000_000,
   ctxSize: 131_072,
   ctxUsed: 4_210,
@@ -59,10 +60,23 @@ describe("LocalModelIndicator", () => {
 
   /// A sleeping model costs no memory and produces nothing; showing its last
   /// rate would read as if it were still working.
-  it("says idle when the weights have been unloaded", async () => {
-    const el = await mount([stats({ sleeping: true })]);
-    expect(el.textContent).toContain("idle");
+  it("says so when the weights have been unloaded", async () => {
+    const el = await mount([stats({ sleeping: true, phase: "sleeping" })]);
+    expect(el.textContent).toContain("unloaded");
     expect(el.textContent).not.toContain("tok/s");
+  });
+
+  /// Loading a 27B takes minutes and produces nothing. Showing "0.0 tok/s"
+  /// there is indistinguishable from a hang, which is what it looked like.
+  it("names the phase while nothing is coming out", async () => {
+    const loading = await mount([stats({ phase: "loading", tokensPerSecond: 0 })]);
+    expect(loading.textContent).toContain("loading model");
+    expect(loading.textContent).not.toContain("0.0 tok/s");
+    dispose?.();
+    host?.remove();
+
+    const reading = await mount([stats({ phase: "readingPrompt", tokensPerSecond: 0 })]);
+    expect(reading.textContent).toContain("reading prompt");
   });
 
   it("expands to the numbers that explain the memory cost", async () => {

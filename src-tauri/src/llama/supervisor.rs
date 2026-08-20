@@ -47,6 +47,105 @@ pub struct Endpoint {
     pub model_key: String,
 }
 
+/// What a local model is doing right now.
+///
+/// Reported separately from the process registry because the slowest phase —
+/// loading tens of gigabytes of weights — happens *before* there is a process
+/// to ask, and that is exactly when the user most needs to be told something
+/// is happening.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Phase {
+    /// Weights are being read into memory. Minutes, for a large model.
+    Loading,
+    /// The server has the request and is evaluating the prompt. No tokens come
+    /// out during this, which is what reads as a hang.
+    ReadingPrompt,
+    Generating,
+    /// Loaded and waiting.
+    #[default]
+    Idle,
+    /// llama-server unloaded the weights after an idle period.
+    Sleeping,
+}
+
+type Phases = Arc<std::sync::Mutex<HashMap<String, Phase>>>;
+
+fn phases() -> &'static Phases {
+    static PHASES: OnceLock<Phases> = OnceLock::new();
+    PHASES.get_or_init(|| Arc::new(std::sync::Mutex::new(HashMap::new())))
+}
+
+/// A request has been sent; the server is evaluating the prompt.
+///
+/// Returns the instant to measure time-to-first-token from. Kept here rather
+/// than in the provider so both engines are measured the same way and the
+/// phase and the benchmark cannot drift apart.
+pub fn note_request_start(model_key: &str) -> Instant {
+    set_phase(model_key, Phase::ReadingPrompt);
+    Instant::now()
+}
+
+/// The first token arrived. This is the number that decides whether the app
+/// felt stuck, so it is recorded even if the run is later cancelled.
+pub fn note_first_token(model_key: &str, started: Instant, prompt_tokens: u32) {
+    set_phase(model_key, Phase::Generating);
+    let elapsed = started.elapsed().as_secs_f64();
+    let key = model_key.to_string();
+    // Off the request path: this writes a file, and a benchmark must never
+    // slow down the thing it is measuring.
+    tokio::task::spawn_blocking(move || {
+        crate::llama::bench::update(&key, |b| {
+            b.record_generation(
+                elapsed,
+                b.tokens_per_second,
+                b.prompt_tokens_per_second,
+                prompt_tokens,
+            );
+        });
+    });
+}
+
+/// The stream finished. `tokens_per_second` is what the server reported for
+/// this run, not an average.
+pub fn note_request_end(model_key: &str, tokens_per_second: f64, prompt_tokens_per_second: f64) {
+    set_phase(model_key, Phase::Idle);
+    if tokens_per_second <= 0.0 {
+        return;
+    }
+    let key = model_key.to_string();
+    tokio::task::spawn_blocking(move || {
+        crate::llama::bench::update(&key, |b| {
+            // Fold the rates into the same sample the first token opened, so a
+            // run counts once.
+            let samples = b.generation_samples.max(1);
+            b.tokens_per_second =
+                (b.tokens_per_second * (samples - 1) as f64 + tokens_per_second) / samples as f64;
+            b.prompt_tokens_per_second = (b.prompt_tokens_per_second * (samples - 1) as f64
+                + prompt_tokens_per_second)
+                / samples as f64;
+        });
+    });
+}
+
+/// Record what `model_key` is doing. Cheap and lock-light: called on every
+/// request boundary and on the first token of a stream.
+pub fn set_phase(model_key: &str, phase: Phase) {
+    if let Ok(mut map) = phases().lock() {
+        map.insert(model_key.to_string(), phase);
+    }
+}
+
+pub fn clear_phase(model_key: &str) {
+    if let Ok(mut map) = phases().lock() {
+        map.remove(model_key);
+    }
+}
+
+fn phase_of(model_key: &str) -> Option<Phase> {
+    phases().lock().ok().and_then(|m| m.get(model_key).copied())
+}
+
 /// What the settings UI shows about a resident model.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -461,6 +560,8 @@ pub async fn ensure_serving(
     let pid_file = pid_file_for(model_key)?;
     kill_recorded_orphan(&pid_file, &exe);
 
+    set_phase(model_key, Phase::Loading);
+    let load_started = Instant::now();
     let mut last_err = String::new();
     for _ in 0..PORT_ATTEMPTS {
         let port = reserve_port()?;
@@ -529,6 +630,12 @@ pub async fn ensure_serving(
                 });
                 let endpoint = instance.endpoint(model_key);
                 map.insert(model_key.to_string(), instance);
+                set_phase(model_key, Phase::Idle);
+                let seconds = load_started.elapsed().as_secs_f64();
+                let key = model_key.to_string();
+                tokio::task::spawn_blocking(move || {
+                    crate::llama::bench::update(&key, |b| b.record_load(seconds));
+                });
                 return Ok(endpoint);
             }
             Err(e) => {
@@ -554,6 +661,7 @@ pub async fn ensure_serving(
             }
         }
     }
+    clear_phase(model_key);
     Err(last_err)
 }
 
@@ -580,6 +688,7 @@ async fn terminate(instance: Arc<Instance>) {
 /// Stop the server for one model, if any. Must be awaited before deleting the
 /// weights: on Windows the GGUF is mapped and cannot be removed while it runs.
 pub async fn stop(model_key: &str) {
+    clear_phase(model_key);
     let instance = { registry().lock().await.remove(model_key) };
     if let Some(instance) = instance {
         terminate(instance).await;
@@ -638,6 +747,7 @@ pub struct LocalModelStats {
     pub model_key: String,
     pub display_name: String,
     pub engine: Engine,
+    pub phase: Phase,
     /// Resident memory of the server process: weights plus KV cache. This is
     /// the number that explains why a large context is not free.
     pub memory_bytes: u64,
@@ -773,8 +883,32 @@ pub async fn stats() -> Vec<LocalModelStats> {
             .map(|(k, v)| (k.clone(), Arc::clone(v)))
             .collect()
     };
+    // A model being loaded has no process to inspect yet — and that is the
+    // phase that takes minutes, so reporting nothing here is exactly backwards.
+    let loading: Vec<LocalModelStats> = phases()
+        .lock()
+        .map(|map| {
+            map.iter()
+                .filter(|(key, phase)| {
+                    **phase == Phase::Loading && !instances.iter().any(|(k, _)| k == *key)
+                })
+                .map(|(key, _)| LocalModelStats {
+                    model_key: key.clone(),
+                    display_name: catalog::find(key)
+                        .map(|m| m.display_name)
+                        .unwrap_or_else(|_| key.clone()),
+                    engine: catalog::find(key)
+                        .map(|m| Engine::for_format(&m.format))
+                        .unwrap_or_default(),
+                    phase: Phase::Loading,
+                    ..Default::default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     if instances.is_empty() {
-        return Vec::new();
+        return loading;
     }
 
     let mut sys = sysinfo::System::new();
@@ -795,6 +929,7 @@ pub async fn stats() -> Vec<LocalModelStats> {
                 .map(|m| m.display_name)
                 .unwrap_or_else(|_| key.clone()),
             engine: inst.engine,
+            phase: phase_of(&key).unwrap_or(Phase::Idle),
             ctx_size: inst.ctx_size,
             memory_bytes: inst
                 .pid
@@ -808,8 +943,12 @@ pub async fn stats() -> Vec<LocalModelStats> {
             Engine::Mlx => read_mlx_stats(&client, &base, &inst.api_key, &mut stat).await,
             Engine::Llamacpp => read_llamacpp_stats(&client, &base, &inst.api_key, &mut stat).await,
         }
+        if stat.sleeping {
+            stat.phase = Phase::Sleeping;
+        }
         out.push(stat);
     }
+    out.extend(loading);
     out.sort_by(|a, b| a.model_key.cmp(&b.model_key));
     out
 }
