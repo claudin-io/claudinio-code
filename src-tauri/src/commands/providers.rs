@@ -26,6 +26,12 @@ pub struct ModelGroup {
     #[serde(rename = "providerName")]
     pub provider_name: String,
     pub models: Vec<String>,
+    /// Human-readable name per model id, for ids that do not read as names.
+    /// A locally served model is keyed by a content hash — right for a
+    /// directory, unusable in a picker — so it ships its label alongside.
+    /// Empty for providers whose ids are already their names.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub labels: std::collections::HashMap<String, String>,
 }
 
 /// OpenRouter OAuth PKCE connect: browser consent → loopback callback →
@@ -357,6 +363,7 @@ pub async fn list_all_models(state: State<'_, AppState>) -> Result<Vec<ModelGrou
         models: crate::commands::agent::list_models(state.clone())
             .await
             .unwrap_or_else(|_| vec!["claudinio".into(), "claudius".into()]),
+        labels: std::collections::HashMap::new(),
     }];
 
     let connected: Vec<(String, Option<String>)> = {
@@ -393,6 +400,39 @@ pub async fn list_all_models(state: State<'_, AppState>) -> Result<Vec<ModelGrou
             provider_name: label.unwrap_or_else(|| id.clone()),
             models: models.into_iter().map(|m| format!("{id}/{m}")).collect(),
             provider_id: id,
+            labels: std::collections::HashMap::new(),
+        });
+    }
+
+    // Locally served models. Not a connected provider — they have no account
+    // and no catalog entry — so they are appended from what is on disk rather
+    // than from `config.providers`. An empty group is skipped: an empty
+    // "Local" heading in the picker reads as something being broken.
+    let local_enabled = { state.config.lock().await.local.enabled };
+    let local: Vec<(String, String)> = if !local_enabled {
+        Vec::new()
+    } else {
+        crate::llama::catalog::load()
+            .map(|c| {
+                c.entries
+                    .into_iter()
+                    .filter(crate::llama::catalog::is_complete)
+                    .map(|m| {
+                        (
+                            format!("{}/{}", crate::llama::LOCAL_PROVIDER_ID, m.key),
+                            m.display_name,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if !local.is_empty() {
+        groups.push(ModelGroup {
+            provider_id: crate::llama::LOCAL_PROVIDER_ID.into(),
+            provider_name: "Local (llama.cpp)".into(),
+            models: local.iter().map(|(id, _)| id.clone()).collect(),
+            labels: local.into_iter().collect(),
         });
     }
 

@@ -124,6 +124,9 @@ pub struct AgentConfig {
     /// Browser tool settings — see `crate::browser`.
     #[serde(default)]
     pub browser: crate::browser::BrowserPrefs,
+    /// Local inference settings — see `crate::llama`.
+    #[serde(default)]
+    pub local: crate::llama::LocalPrefs,
     /// Prevent the system from sleeping while an agent session is actively
     /// running (display can still turn off). See commands::power.
     #[serde(default = "default_true")]
@@ -352,6 +355,7 @@ impl Default for AgentConfig {
             auto_commit_plan: true,
             thinking_effort: default_thinking_effort(),
             providers: std::collections::HashMap::new(),
+            local: crate::llama::LocalPrefs::default(),
         }
     }
 }
@@ -388,6 +392,25 @@ impl AgentConfig {
     /// slash, or an unknown prefix — is the unchanged Claudinio path,
     /// preserving the override_base_url/override_api_key BYOK precedence.
     pub fn resolve_provider(&self, model: &str) -> ResolvedProvider {
+        // Locally served models are not a connected provider: there is no
+        // account, no key and no catalog entry, and the port belongs to a
+        // process rather than to the config. Resolving them here instead of
+        // writing a synthetic `ProviderEntry` into config.json means there is
+        // no second copy of the model list to fall out of sync with what is
+        // actually on disk. `resolve_provider_live` fills in the real address.
+        if let Some(rest) = model.strip_prefix(&format!("{}/", crate::llama::LOCAL_PROVIDER_ID)) {
+            return ResolvedProvider {
+                protocol: Protocol::OpenAiChat,
+                base_url: String::new(),
+                api_key: String::new(),
+                model: rest.to_string(),
+                provider_id: crate::llama::LOCAL_PROVIDER_ID.to_string(),
+                // Local inference costs no money, and (0,0) makes the existing
+                // accounting report exactly zero rather than nothing at all.
+                pricing: Some((0.0, 0.0)),
+                max_output_tokens: None,
+            };
+        }
         if let Some((prefix, rest)) = model.split_once('/')
             && let Some(entry) = self.providers.get(prefix)
         {
@@ -431,6 +454,46 @@ impl AgentConfig {
             max_output_tokens: None,
         }
     }
+}
+
+/// `resolve_provider`, plus the side effect a local model needs: its server has
+/// to be running before the request is built, and the port and api-key it hands
+/// back are per-process, so they cannot come from the config.
+///
+/// Every LLM entry point goes through this instead of `resolve_provider`, which
+/// is what makes "start the model on first use" automatic rather than something
+/// the session loop has to remember.
+pub async fn resolve_provider_live(
+    config: &AgentConfig,
+    model: &str,
+) -> Result<ResolvedProvider, String> {
+    let mut rp = config.resolve_provider(model);
+    if rp.provider_id == crate::llama::LOCAL_PROVIDER_ID {
+        // A model selected before the feature was switched off would otherwise
+        // fail with a connection error to a port nobody is listening on.
+        if !config.local.enabled {
+            return Err(
+                "local models are switched off — enable them in Settings → Local models".into(),
+            );
+        }
+        // The window is sized to what this session can actually reach before it
+        // hands off, not to whatever the GGUF advertises: the difference is
+        // pure KV cache the app would never fill.
+        let ctx_budget = u32::try_from(config.effective_handoff_threshold()).unwrap_or(u32::MAX);
+        let endpoint =
+            crate::llama::supervisor::ensure_serving(&rp.model, &config.local, ctx_budget).await?;
+        rp.base_url = endpoint.base_url;
+        rp.api_key = endpoint.api_key;
+        // A 4k-context model 400s on the 32k default. Half the served window is
+        // a safe ceiling for a reply: the prompt has to fit in the other half.
+        let model_ctx = crate::llama::catalog::find(&rp.model)
+            .ok()
+            .and_then(|m| m.context_length);
+        let served = crate::llama::effective_ctx(&config.local, model_ctx, ctx_budget);
+        let window = if served > 0 { Some(served) } else { model_ctx };
+        rp.max_output_tokens = window.map(|ctx| (ctx / 2).clamp(512, 8192));
+    }
+    Ok(rp)
 }
 
 pub fn config_path() -> Result<std::path::PathBuf, String> {
@@ -846,7 +909,7 @@ pub async fn classify_turn_completion(
     model: &str,
     assistant_text: &str,
 ) -> Result<String, String> {
-    let rp = config.resolve_provider(model);
+    let rp = resolve_provider_live(config, model).await?;
     if rp.protocol == Protocol::OpenAiChat {
         return openai::complete(
             &rp,
@@ -934,7 +997,7 @@ pub async fn one_shot(
     user: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let rp = config.resolve_provider(model);
+    let rp = resolve_provider_live(config, model).await?;
     if rp.protocol == Protocol::OpenAiChat {
         return openai::complete(
             &rp,
@@ -1041,7 +1104,7 @@ pub async fn stream_message(
     // subagent goal, …). Not sent to the API.
     net_detail: &str,
 ) -> Result<StreamOutput, String> {
-    let rp = config.resolve_provider(model);
+    let rp = resolve_provider_live(config, model).await?;
     if rp.protocol == Protocol::OpenAiChat {
         return openai::stream_message(
             &rp,
@@ -1681,6 +1744,43 @@ mod tests {
         assert_eq!(rp.model, "claudius");
         assert_eq!(rp.base_url, "https://api.claudin.io");
         assert_eq!(rp.api_key, "sk-claudinio");
+    }
+
+    #[test]
+    fn test_resolve_provider_local_speaks_openai_at_zero_cost() {
+        let cfg = cfg_with_openrouter();
+        let rp = cfg.resolve_provider("local/0123456789abcdef");
+        assert_eq!(rp.protocol, Protocol::OpenAiChat);
+        assert_eq!(rp.provider_id, "local");
+        assert_eq!(rp.model, "0123456789abcdef");
+        assert_eq!(rp.pricing, Some((0.0, 0.0)));
+        assert!(!rp.is_claudinio());
+        // The address is deliberately empty: it belongs to a process, and
+        // `resolve_provider_live` is what fills it in.
+        assert!(rp.base_url.is_empty());
+        assert!(rp.api_key.is_empty());
+    }
+
+    /// A user who connects a provider literally named "local" must not be able
+    /// to shadow local inference, and vice versa.
+    #[test]
+    fn test_resolve_provider_local_wins_over_a_connected_entry() {
+        let mut cfg = cfg_with_openrouter();
+        cfg.providers.insert(
+            "local".into(),
+            ProviderEntry {
+                api_key: "sk-x".into(),
+                base_url: "https://example.invalid/v1".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: Default::default(),
+            },
+        );
+        let rp = cfg.resolve_provider("local/abc");
+        assert_eq!(rp.base_url, "", "local inference must not be shadowed");
+        assert_eq!(rp.pricing, Some((0.0, 0.0)));
     }
 
     #[test]

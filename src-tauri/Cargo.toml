@@ -161,6 +161,13 @@ image = "0.25"
 # Extracting the Chrome for Testing archive. Pure Rust on purpose: shelling out
 # to `unzip`/`tar` depends on a resolved PATH and is unreliable on Windows.
 zip = { version = "4", default-features = false, features = ["deflate"] }
+# llama.cpp ships its macOS/Linux release binaries as .tar.gz. Pure Rust for
+# the same reason as `zip`: shelling out to `tar` needs a resolved PATH and
+# does not exist on Windows.
+tar = "0.4"
+# `rust_backend` (miniz_oxide) instead of a C zlib: the Windows CRT clash
+# documented on `tokenizers` above is not worth re-litigating for gzip.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # CDP transport. The DevTools endpoint is always ws:// on 127.0.0.1, never TLS,
 # so no TLS backend is pulled in.
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect"] }

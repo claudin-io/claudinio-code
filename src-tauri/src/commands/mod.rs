@@ -8,6 +8,7 @@ pub mod enhance;
 pub mod fs;
 pub mod git;
 pub mod ide;
+pub mod local_llm;
 pub mod lsp;
 pub mod mcp;
 pub mod network_log;

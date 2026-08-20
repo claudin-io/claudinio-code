@@ -6,10 +6,12 @@ mod commands;
 pub mod download;
 pub(crate) mod http;
 pub(crate) mod imageutil;
+pub mod llama;
 mod lsp;
 pub(crate) mod net_activity;
 pub(crate) mod procutil;
 pub mod quality;
+pub(crate) mod randutil;
 mod state;
 pub(crate) mod workspace_path;
 
@@ -29,6 +31,8 @@ pub fn run() {
             askpass::set_app_handle(tauri::AppHandle::clone(app.handle()));
             askpass::start();
             commands::system_stats::start_poller(app.handle().clone());
+            // An older pin's runtime is dead weight the user cannot see.
+            llama::provision::gc_stale_installs();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -110,6 +114,24 @@ pub fn run() {
             commands::browser::browser_uninstall,
             commands::browser::browser_close,
             commands::browser::browser_test,
+            commands::local_llm::local_status,
+            commands::local_llm::local_hardware,
+            commands::local_llm::local_curated_models,
+            commands::local_llm::local_install_server,
+            commands::local_llm::local_uninstall_server,
+            commands::local_llm::local_search_models,
+            commands::local_llm::local_repo_quants,
+            commands::local_llm::local_install_model,
+            commands::local_llm::local_cancel_install,
+            commands::local_llm::local_list_models,
+            commands::local_llm::local_remove_model,
+            commands::local_llm::local_unload_model,
+            commands::local_llm::local_server_logs,
+            commands::local_llm::local_disk_usage,
+            commands::local_llm::local_test_model,
+            commands::local_llm::local_runtime_stats,
+            commands::local_llm::local_install_mlx,
+            commands::local_llm::local_uninstall_mlx,
             commands::mcp::mcp_list_servers,
             commands::mcp::mcp_test_server,
             commands::mcp::mcp_reconnect,
@@ -119,8 +141,16 @@ pub fn run() {
             commands::ide::open_in_ide,
             askpass::answer_askpass,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // `kill_on_drop` covers a panic, but not process exit: the server
+            // registry is a static and is never dropped, so without this a
+            // quit leaves llama-server holding the model's worth of RAM.
+            if matches!(event, tauri::RunEvent::Exit) {
+                tauri::async_runtime::block_on(llama::supervisor::stop_all());
+            }
+        });
 }
 
 #[cfg(test)]
@@ -140,6 +170,7 @@ mod architecture_tests {
             "src/agent",
             "src/browser",
             "src/code_intel",
+            "src/llama",
             "src/lsp",
             "src/quality",
         ] {

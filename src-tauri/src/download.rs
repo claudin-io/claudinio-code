@@ -19,6 +19,62 @@ pub type ProgressFn = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 pub const DEFAULT_RETRIES: usize = 3;
 
+/// Download a file whose content hash upstream does not publish.
+///
+/// The Hub only exposes a sha256 for LFS objects: an MLX model's weights have
+/// one, but its `config.json` and `tokenizer.json` are ordinary git blobs and
+/// do not. Those are small and structured, so this verifies the length and —
+/// for JSON — that the result parses, which catches the failure that actually
+/// happens (a truncated download or an HTML error page saved as if it were the
+/// file). It is a weaker guarantee than `download_verified` and is deliberately
+/// not used for weights.
+pub async fn download_sized(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    expected_len: u64,
+    source: NetSource,
+) -> Result<(), String> {
+    let net_guard = NetGuard::begin(source, label);
+    let client = crate::http::default_client();
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("download {label}: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("download {label} failed: HTTP {status}"));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("download {label}: {e}"))?;
+    net_guard.add_bytes(bytes.len() as u64);
+
+    if expected_len > 0 && bytes.len() as u64 != expected_len {
+        return Err(format!(
+            "download {label}: expected {expected_len} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    if dest.extension().is_some_and(|e| e == "json")
+        && serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
+    {
+        return Err(format!("download {label}: not valid JSON"));
+    }
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    // Staged and renamed like the verified path, so an interrupted write can
+    // never be mistaken for a complete file.
+    let part_path = dest.with_extension("part");
+    std::fs::write(&part_path, &bytes)
+        .map_err(|e| format!("write {}: {e}", part_path.display()))?;
+    std::fs::rename(&part_path, dest).map_err(|e| format!("commit {}: {e}", dest.display()))
+}
+
 /// Download `url` to `dest`, verifying length and sha256 before committing.
 #[allow(clippy::too_many_arguments)]
 pub async fn download_verified(

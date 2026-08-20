@@ -813,6 +813,7 @@ function App() {
         configBuilderModel={configBuilderModel}
         setConfigBuilderModel={setConfigBuilderModel}
         modelGroups={modelGroups}
+        onModelsChanged={refreshProviders}
         configMaxParallelAgents={configMaxParallelAgents}
         setConfigMaxParallelAgents={setConfigMaxParallelAgents}
         configMaxRounds={configMaxRounds}

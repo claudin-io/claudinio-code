@@ -129,6 +129,10 @@ pub struct AppState {
     /// Cancel signal for a pending OAuth loopback wait (OpenRouter connect),
     /// so the UI can abort instead of sitting out the 120s callback timeout.
     pub oauth_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// Cancel signals for in-flight GGUF downloads, keyed by model key. A 20 GB
+    /// download the user cannot abort is not a download, it is a hostage
+    /// situation.
+    pub local_downloads: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
     pub records_cache: crate::agent::persist::RecordsCache,
 }
@@ -143,6 +147,7 @@ impl AppState {
             steering: Arc::new(Mutex::new(HashMap::new())),
             modes: Arc::new(Mutex::new(HashMap::new())),
             oauth_cancel: Mutex::new(None),
+            local_downloads: Mutex::new(HashMap::new()),
             embedding_model: Arc::new(Mutex::new(None)),
             records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(
                 NonZeroUsize::new(64).unwrap(),

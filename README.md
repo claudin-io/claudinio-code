@@ -188,6 +188,34 @@ tuned in English, and the agent asks you to write in English too — a localized
 shell around an English-speaking agent was worse than being straightforward
 about it.
 
+### It can run the model on your machine
+
+Settings → **Local models** downloads llama.cpp and a GGUF model from Hugging
+Face, and the model then shows up in the Brain and Builder pickers under
+*Local*. Nothing leaves the computer and nothing is billed — useful for code
+that cannot go to a third party, for working offline, and for not paying per
+token while you experiment.
+
+The recommended list is short on purpose: every model on it was checked to
+actually drive the agent's tool loop, which most GGUF repositories say nothing
+about. You can also search the Hub directly for any GGUF repo; the quantization
+table shows each option's size against your machine's memory and preselects the
+best one that fits. Downloads are verified against Hugging Face's own checksums
+and resume shard by shard.
+
+Be honest with yourself about the trade: a local 8B is not a hosted frontier
+model, and a model that cannot hold a tool-calling loop together will spin. The
+**Test** button next to an installed model tells you whether it works before you
+find out mid-task.
+
+On Apple Silicon it runs through **MLX**, Apple's own framework, which
+generates faster than llama.cpp on the same weights; everywhere else, and on a
+Mac if you prefer it, llama.cpp reads GGUF. The engine is a setting, and each
+one has its own downloads because they take different model formats.
+
+The status bar shows what a loaded model is costing while it runs: memory
+resident, context used against context served, and the current token rate.
+
 ## The tools the model can call
 
 | Tool | Approval | What it does |

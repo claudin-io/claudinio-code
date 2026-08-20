@@ -64,6 +64,7 @@ import { setWorkspaceStatus, isBusy } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
 import { GitIndicator } from "./GitIndicator";
 import { NetworkIndicator } from "./NetworkIndicator";
+import { LocalModelIndicator } from "./LocalModelIndicator";
 import NetworkActivityModal from "./NetworkActivityModal";
 import { cpuPercent, memoryRssBytes, formatMemory } from "../lib/systemStats";
 import { GitChangesModal } from "./GitChangesModal";
@@ -1528,6 +1529,7 @@ export const ChatPanel: Component<{
           </button>
           <GitIndicator workspace={props.workspace} active={props.isActive()} onShowChanges={() => setShowGitModal(true)} />
           <NetworkIndicator workspace={props.workspace} onClick={() => setShowNetModal(true)} />
+          <LocalModelIndicator visible={props.isActive} />
           <span class="font-mono text-[11px] text-ink-faint whitespace-nowrap">
             CPU {cpuPercent().toFixed(0)}% · MEM {formatMemory(memoryRssBytes())}
           </span>
