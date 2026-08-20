@@ -70,6 +70,26 @@ impl Engine {
             Engine::Mlx => "mlx",
         }
     }
+
+    /// The engine that can actually load a given model format.
+    ///
+    /// Which engine serves a model is a property of the *model*, not a user
+    /// preference: handing a GGUF to MLX aborts inside the model factory, and
+    /// no setting can make it work. `LocalPrefs::engine` decides what to
+    /// download next; this decides what to run.
+    pub fn for_format(format: &str) -> Engine {
+        match format {
+            "mlx" => Engine::Mlx,
+            _ => Engine::Llamacpp,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::Llamacpp => "llama.cpp",
+            Engine::Mlx => "MLX",
+        }
+    }
 }
 
 /// User-facing knobs for local inference, persisted inside `AgentConfig`.
@@ -82,8 +102,8 @@ pub struct LocalPrefs {
     pub server_path: Option<String>,
     #[serde(default)]
     pub backend: provision::Backend,
-    /// Read through `effective_engine`, never directly: a config synced from a
-    /// Mac names an engine this machine may not have.
+    /// Which engine to *prefer for new downloads*, not which one runs a given
+    /// model — that follows the model's own format (see `Engine::for_format`).
     #[serde(default)]
     pub engine: Engine,
     /// Context window in tokens; 0 means "whatever the model declares".
@@ -120,7 +140,7 @@ fn default_max_loaded() -> u32 {
 }
 
 impl LocalPrefs {
-    /// The engine to actually run.
+    /// The engine to prefer when downloading something new.
     ///
     /// Falls back to llama.cpp when the configured one is not available here —
     /// config.json syncs between machines, and "mlx" arriving on a Windows box
@@ -318,6 +338,18 @@ mod tests {
 
     /// The case that makes the platform-dependent default safe: config.json
     /// synced from a Mac names an engine a Windows box cannot run.
+    /// The bug this prevents: MLX became the default on Apple Silicon while a
+    /// user's installed models were all GGUF, so the sidecar was handed a
+    /// `.gguf` and aborted inside the model factory.
+    #[test]
+    fn the_engine_follows_the_model_format_not_the_preference() {
+        assert_eq!(Engine::for_format("gguf"), Engine::Llamacpp);
+        assert_eq!(Engine::for_format("mlx"), Engine::Mlx);
+        // An unknown format is GGUF: that is what every catalog entry written
+        // before formats existed was.
+        assert_eq!(Engine::for_format(""), Engine::Llamacpp);
+    }
+
     #[test]
     fn a_synced_mlx_config_degrades_instead_of_failing() {
         let prefs = LocalPrefs {

@@ -28,8 +28,23 @@ pub struct HfModelSummary {
 pub struct HfTreeFile {
     pub path: String,
     pub size: u64,
+    /// "file" or "directory". The tree lists directories as entries too, and
+    /// requesting one from `/resolve/` is a 404 — which is how a download of an
+    /// otherwise fine repo failed on its first item.
+    #[serde(rename = "type", default = "default_entry_type")]
+    pub kind: String,
     #[serde(default)]
     pub lfs: Option<HfLfs>,
+}
+
+fn default_entry_type() -> String {
+    "file".into()
+}
+
+impl HfTreeFile {
+    pub fn is_file(&self) -> bool {
+        self.kind == "file"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +99,7 @@ pub fn mlx_files(files: &[HfTreeFile]) -> Vec<HfTreeFile> {
     const SKIP: &[&str] = &[".gitattributes", "README.md", "LICENSE", ".gitignore"];
     files
         .iter()
+        .filter(|f| f.is_file())
         .filter(|f| {
             let name = f.path.rsplit('/').next().unwrap_or(&f.path);
             !SKIP.contains(&name) && !name.starts_with('.')
@@ -114,11 +130,36 @@ pub fn mlx_quant(repo: &str) -> String {
     "unknown".into()
 }
 
+/// Whether the Hub says a repo is gated.
+///
+/// The list endpoints omit the field entirely — only the per-repo detail
+/// carries it — so an absent value means "not gated". Treating absent as
+/// gated (which `!matches!(v, Bool(false))` does) marked every search result
+/// as gated and filtered every trending result away.
+fn is_gated(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(b) => *b,
+        // "auto" / "manual" are the gating modes; null and absent are not.
+        serde_json::Value::String(s) => !s.is_empty() && s != "false",
+        _ => false,
+    }
+}
+
 pub fn resolve_url(repo: &str, path: &str) -> String {
     format!("{RESOLVE}/{repo}/resolve/main/{path}")
 }
 
-pub async fn search(query: &str, limit: usize) -> Result<Vec<HfModelSummary>, String> {
+/// What the Hub is trending right now, restricted to models this engine can
+/// load and to things that are actually usable as a coding assistant.
+///
+/// Replaces a hand-maintained list, which went stale the week it was written.
+/// The cost is that nobody has checked these drive a tool-calling loop — the
+/// quant table still reports whether a chat template exists, which is the part
+/// that decides it.
+pub async fn trending(
+    engine: crate::llama::Engine,
+    limit: usize,
+) -> Result<Vec<HfModelSummary>, String> {
     #[derive(Deserialize)]
     struct Row {
         id: String,
@@ -130,8 +171,172 @@ pub async fn search(query: &str, limit: usize) -> Result<Vec<HfModelSummary>, St
         gated: serde_json::Value,
     }
 
+    let filter = match engine {
+        crate::llama::Engine::Mlx => "mlx",
+        crate::llama::Engine::Llamacpp => "gguf",
+    };
+    // Over-fetch: the local filter below drops a good share of any page.
+    let fetch = (limit * 4).clamp(20, 100);
+    let url = format!("{API}?filter={filter}&sort=trendingScore&direction=-1&limit={fetch}");
+    let _guard = NetGuard::begin(NetSource::HuggingFaceApi, "trending models");
+    let rows: Vec<Row> = crate::http::default_client()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("hugging face trending: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("hugging face trending: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("hugging face trending: unexpected response: {e}"))?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|r| is_usable_assistant(&r.id))
+        .filter(|r| !is_gated(&r.gated))
+        .take(limit)
+        .map(|r| HfModelSummary {
+            repo: r.id,
+            downloads: r.downloads,
+            likes: r.likes,
+            gated: false,
+        })
+        .collect())
+}
+
+/// Whether a repo name looks like something the agent could drive.
+///
+/// Name-based and therefore crude, but the search response carries no file
+/// list — the alternative is a request per result. It exists to keep embedding
+/// and speech models, which rank high on downloads and cannot chat at all, out
+/// of a list headed "suggested".
+fn is_usable_assistant(repo: &str) -> bool {
+    let name = repo.rsplit('/').next().unwrap_or(repo).to_lowercase();
+    // These dominate trending and are tuned away from instruction following —
+    // not what "suggested for coding" should offer.
+    const NOT_FOR_WORK: &[&str] = &[
+        "uncensored",
+        "abliterated",
+        "roleplay",
+        "rp-",
+        "erp",
+        "nsfw",
+        "waifu",
+        "horny",
+        "smut",
+        "storywriter",
+        "novel",
+    ];
+    const NOT_CHAT: &[&str] = &[
+        "embed",
+        "embedding",
+        "bge-",
+        "gte-",
+        "e5-",
+        "reranker",
+        "rerank",
+        "whisper",
+        "wav2vec",
+        "parakeet",
+        "tts",
+        "vits",
+        "bark",
+        "musicgen",
+        "stable-diffusion",
+        "sdxl",
+        "flux",
+        "vae",
+        "clip-",
+        "sam-",
+        "yolo",
+        "ocr",
+        "detr",
+    ];
+    if NOT_CHAT.iter().any(|marker| name.contains(marker)) {
+        return false;
+    }
+    if NOT_FOR_WORK.iter().any(|marker| name.contains(marker)) {
+        return false;
+    }
+    // Base checkpoints continue text rather than following instructions, which
+    // is not something an agent loop can use.
+    if name.ends_with("-base") || name.contains("-base-") {
+        return false;
+    }
+    true
+}
+
+/// A repository the user named directly, rather than a search term.
+///
+/// Copying the address bar is the natural gesture once you have found a model
+/// on the Hub, and search does not find a repo by its full URL. Accepts a URL
+/// (with or without scheme, `/tree/main`, a trailing slash or query string) and
+/// the bare `owner/name` form.
+pub fn parse_repo_ref(input: &str) -> Option<String> {
+    let text = input.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let rest = text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))
+        .unwrap_or(text);
+    let rest = rest
+        .strip_prefix("huggingface.co/")
+        .or_else(|| rest.strip_prefix("www.huggingface.co/"))
+        .or_else(|| rest.strip_prefix("hf.co/"))
+        .unwrap_or(rest);
+
+    // Drop anything after the repo path: /tree/main, /blob/..., ?query, #frag.
+    let rest = rest.split(['?', '#']).next()?.trim_end_matches('/');
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    // `datasets/foo/bar` and `spaces/...` are not models.
+    if matches!(owner, "datasets" | "spaces" | "docs" | "models") {
+        return None;
+    }
+    let valid = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !valid(owner) || !valid(name) {
+        return None;
+    }
+    Some(format!("{owner}/{name}"))
+}
+
+/// Search the Hub, restricted to what the given engine can actually load.
+///
+/// The Hub's own `filter` does this: `gguf` and `mlx` are library tags it
+/// maintains. Filtering here rather than after the fact matters because the
+/// search response carries no file list — telling the formats apart locally
+/// would mean a request per result.
+pub async fn search(
+    query: &str,
+    limit: usize,
+    engine: crate::llama::Engine,
+) -> Result<Vec<HfModelSummary>, String> {
+    #[derive(Deserialize)]
+    struct Row {
+        id: String,
+        #[serde(default)]
+        downloads: u64,
+        #[serde(default)]
+        likes: u64,
+        #[serde(default)]
+        gated: serde_json::Value,
+    }
+
+    let filter = match engine {
+        crate::llama::Engine::Mlx => "mlx",
+        crate::llama::Engine::Llamacpp => "gguf",
+    };
     let url = format!(
-        "{API}?filter=gguf&search={}&sort=downloads&direction=-1&limit={limit}",
+        "{API}?filter={filter}&search={}&sort=downloads&direction=-1&limit={limit}",
         urlencode(query)
     );
     let _guard = NetGuard::begin(NetSource::HuggingFaceApi, "model search");
@@ -152,8 +357,7 @@ pub async fn search(query: &str, limit: usize) -> Result<Vec<HfModelSummary>, St
             repo: r.id,
             downloads: r.downloads,
             likes: r.likes,
-            // `gated` is false, "auto" or "manual" — anything but false gates.
-            gated: !matches!(r.gated, serde_json::Value::Bool(false)),
+            gated: is_gated(&r.gated),
         })
         .collect())
 }
@@ -194,7 +398,7 @@ pub async fn repo_detail(repo: &str) -> Result<HfRepoDetail, String> {
 
     Ok(HfRepoDetail {
         repo: repo.to_string(),
-        gated: !matches!(info.gated, serde_json::Value::Bool(false)),
+        gated: is_gated(&info.gated),
         gguf: info.gguf,
         files,
     })
@@ -237,7 +441,7 @@ pub fn group_quants(files: &[HfTreeFile]) -> Vec<QuantOption> {
     use std::collections::BTreeMap;
     let mut buckets: BTreeMap<String, Vec<HfTreeFile>> = BTreeMap::new();
     for f in files {
-        if !f.path.to_lowercase().ends_with(".gguf") {
+        if !f.is_file() || !f.path.to_lowercase().ends_with(".gguf") {
             continue;
         }
         // Only LFS files carry a sha256, and without one there is nothing to
@@ -313,11 +517,30 @@ mod tests {
     fn lfs_file(path: &str, size: u64) -> HfTreeFile {
         HfTreeFile {
             path: path.into(),
+            kind: "file".into(),
             size,
             lfs: Some(HfLfs {
                 oid: "a".repeat(64),
                 size,
             }),
+        }
+    }
+
+    fn plain_file(path: &str, size: u64) -> HfTreeFile {
+        HfTreeFile {
+            path: path.into(),
+            kind: "file".into(),
+            size,
+            lfs: None,
+        }
+    }
+
+    fn directory(path: &str) -> HfTreeFile {
+        HfTreeFile {
+            path: path.into(),
+            size: 0,
+            kind: "directory".into(),
+            lfs: None,
         }
     }
 
@@ -378,11 +601,7 @@ mod tests {
 
     #[test]
     fn group_quants_ignores_files_without_a_checksum() {
-        let files = vec![HfTreeFile {
-            path: "m-Q4_K_M.gguf".into(),
-            size: 10,
-            lfs: None,
-        }];
+        let files = vec![plain_file("m-Q4_K_M.gguf", 10)];
         assert!(group_quants(&files).is_empty());
     }
 
@@ -425,21 +644,25 @@ mod tests {
             lfs_file("model.safetensors", 4_000_000_000),
             HfTreeFile {
                 path: "config.json".into(),
+                kind: "file".into(),
                 size: 900,
                 lfs: None,
             },
             HfTreeFile {
                 path: "tokenizer.json".into(),
+                kind: "file".into(),
                 size: 7_000_000,
                 lfs: None,
             },
             HfTreeFile {
                 path: "README.md".into(),
+                kind: "file".into(),
                 size: 100,
                 lfs: None,
             },
             HfTreeFile {
                 path: ".gitattributes".into(),
+                kind: "file".into(),
                 size: 10,
                 lfs: None,
             },
@@ -451,6 +674,33 @@ mod tests {
         assert!(has("model.safetensors"));
         assert!(!has("README.md"), "docs are not weights");
         assert!(!has(".gitattributes"));
+    }
+
+    /// Regression: a repo with a subdirectory lists that directory as a tree
+    /// entry, and `GET /resolve/main/<dir>` is a 404 — the first item of a
+    /// 20 GB download failed on it.
+    #[test]
+    fn directories_are_not_downloaded_as_files() {
+        let files = vec![
+            directory("optiq"),
+            lfs_file("model-00001-of-00004.safetensors", 5_324_175_241),
+            plain_file("optiq/metadata.json", 52_391),
+        ];
+        let kept: Vec<String> = mlx_files(&files).into_iter().map(|f| f.path).collect();
+        assert!(
+            !kept.iter().any(|p| p == "optiq"),
+            "directory kept: {kept:?}"
+        );
+        // The files *inside* it are real and must survive.
+        assert!(kept.iter().any(|p| p == "optiq/metadata.json"));
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn a_tree_entry_carries_its_type() {
+        let raw = r#"{"type":"directory","oid":"abc","size":0,"path":"optiq"}"#;
+        let entry: HfTreeFile = serde_json::from_str(raw).unwrap();
+        assert!(!entry.is_file());
     }
 
     #[test]
@@ -469,6 +719,101 @@ mod tests {
         assert_eq!(mlx_quant("mlx-community/Qwen3-8B-4bit"), "4BIT");
         assert_eq!(mlx_quant("mlx-community/Qwen3-8B-bf16"), "BF16");
         assert_eq!(mlx_quant("someone/plain-model"), "unknown");
+    }
+
+    #[test]
+    fn suggestions_exclude_models_that_cannot_chat() {
+        // These outrank real assistants on downloads and would otherwise head
+        // a list the user is invited to pick from.
+        for repo in [
+            "mixedbread-ai/mxbai-embed-large-v1",
+            "BAAI/bge-small-en-v1.5",
+            "openai/whisper-large-v3",
+            "black-forest-labs/FLUX.1-dev",
+            "Qwen/Qwen3-8B-Base",
+        ] {
+            assert!(!is_usable_assistant(repo), "{repo} should be filtered out");
+        }
+    }
+
+    /// The list endpoints omit `gated` entirely. Reading an absent field as
+    /// "gated" filtered every trending result away and labelled every search
+    /// result as gated — the whole list came back empty.
+    #[test]
+    fn an_absent_gated_field_does_not_mean_gated() {
+        assert!(!is_gated(&serde_json::Value::Null));
+        assert!(!is_gated(&serde_json::json!(false)));
+        assert!(is_gated(&serde_json::json!(true)));
+        assert!(is_gated(&serde_json::json!("auto")));
+        assert!(is_gated(&serde_json::json!("manual")));
+    }
+
+    /// "Suggested for coding" should not be headed by roleplay tunes, which is
+    /// what trending is mostly made of.
+    #[test]
+    fn suggestions_exclude_models_tuned_away_from_work() {
+        for repo in [
+            "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+            "PocketAiHub/Qwen3.8-27B-Abliterated-MLX",
+            "someone/Mistral-7B-roleplay-v2",
+        ] {
+            assert!(!is_usable_assistant(repo), "{repo} should be filtered out");
+        }
+    }
+
+    #[test]
+    fn suggestions_keep_instruction_tuned_models() {
+        for repo in [
+            "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            "mlx-community/Qwen3.8-27B-OptiQ-4bit",
+            "unsloth/gpt-oss-20b-GGUF",
+            "bartowski/mistralai_Devstral-Small-2507-GGUF",
+        ] {
+            assert!(is_usable_assistant(repo), "{repo} should be kept");
+        }
+    }
+
+    #[test]
+    fn a_pasted_hub_url_names_a_repo() {
+        let expected = Some("mlx-community/Qwen3.8-27B-OptiQ-4bit".to_string());
+        for input in [
+            "https://huggingface.co/mlx-community/Qwen3.8-27B-OptiQ-4bit",
+            "https://huggingface.co/mlx-community/Qwen3.8-27B-OptiQ-4bit/",
+            "https://huggingface.co/mlx-community/Qwen3.8-27B-OptiQ-4bit/tree/main",
+            "huggingface.co/mlx-community/Qwen3.8-27B-OptiQ-4bit",
+            "https://hf.co/mlx-community/Qwen3.8-27B-OptiQ-4bit?library=mlx",
+            "mlx-community/Qwen3.8-27B-OptiQ-4bit",
+            "  mlx-community/Qwen3.8-27B-OptiQ-4bit  ",
+        ] {
+            assert_eq!(parse_repo_ref(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_search_term_is_not_a_repo_reference() {
+        for input in ["qwen coder", "", "qwen3", "some/thing/else/deep"] {
+            let parsed = parse_repo_ref(input);
+            assert!(
+                parsed.as_deref() != Some(input.trim()) || input.contains('/'),
+                "{input} was taken for a repo"
+            );
+        }
+        assert_eq!(parse_repo_ref("qwen coder"), None);
+        assert_eq!(parse_repo_ref(""), None);
+        assert_eq!(parse_repo_ref("qwen3"), None);
+    }
+
+    /// Datasets and spaces share the URL shape but are not models.
+    #[test]
+    fn non_model_hub_urls_are_rejected() {
+        assert_eq!(
+            parse_repo_ref("https://huggingface.co/datasets/owner/name"),
+            None
+        );
+        assert_eq!(
+            parse_repo_ref("https://huggingface.co/spaces/owner/name"),
+            None
+        );
     }
 
     #[test]

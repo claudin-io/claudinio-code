@@ -65,12 +65,23 @@ pub struct LocalModelView {
     pub fit: Fit,
 }
 
+/// A model offered as a starting point.
+///
+/// Sourced from what the Hub is trending, filtered to what the preferred engine
+/// can load; the built-in list is the offline fallback, and says so.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CuratedView {
-    #[serde(flatten)]
-    pub model: crate::llama::curated::CuratedModel,
-    pub fits: bool,
+pub struct SuggestedModel {
+    pub repo: String,
+    pub display_name: String,
+    pub downloads: u64,
+    pub likes: u64,
+    /// Only the built-in entries carry one — nobody has written a sentence
+    /// about a repo that started trending this morning.
+    pub blurb: Option<String>,
+    /// True when this came from the built-in list because the Hub was
+    /// unreachable, so the UI can say why it is showing what it is showing.
+    pub offline: bool,
 }
 
 #[tauri::command]
@@ -126,16 +137,41 @@ pub fn local_hardware() -> HardwareProfile {
     hardware::detect()
 }
 
+/// Models to suggest: what the Hub is trending for this engine, falling back to
+/// the built-in list when the Hub cannot be reached.
 #[tauri::command]
-pub fn local_curated_models() -> Vec<CuratedView> {
+pub async fn local_curated_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<SuggestedModel>, String> {
+    let engine = { state.config.lock().await.local.effective_engine() };
+    if let Ok(trending) = hf::trending(engine, 12).await
+        && !trending.is_empty()
+    {
+        return Ok(trending
+            .into_iter()
+            .map(|m| SuggestedModel {
+                display_name: m.repo.rsplit('/').next().unwrap_or(&m.repo).to_string(),
+                repo: m.repo,
+                downloads: m.downloads,
+                likes: m.likes,
+                blurb: None,
+                offline: false,
+            })
+            .collect());
+    }
+
     let hw = hardware::detect();
-    crate::llama::curated::for_hardware(&hw)
+    Ok(crate::llama::curated::for_hardware(&hw)
         .into_iter()
-        .map(|m| CuratedView {
-            fits: crate::llama::curated::fits(m, &hw),
-            model: m.clone(),
+        .map(|m| SuggestedModel {
+            repo: m.repo.to_string(),
+            display_name: m.display_name.to_string(),
+            downloads: 0,
+            likes: 0,
+            blurb: Some(m.blurb.to_string()),
+            offline: true,
         })
-        .collect()
+        .collect())
 }
 
 /// Download and unpack the pinned `llama-server`.
@@ -176,15 +212,39 @@ pub async fn local_uninstall_server(state: State<'_, AppState>) -> Result<LocalS
     Ok(crate::llama::status(&prefs))
 }
 
+/// Search the Hub, or resolve a repository the user named outright.
+///
+/// Pasting the address bar is the natural gesture once you have found a model
+/// on the Hub, and search does not match a full URL — so a pasted URL (or a
+/// bare `owner/name`) is looked up directly instead. A named repo is never
+/// filtered by engine: naming it is the whole point.
 #[tauri::command]
 pub async fn local_search_models(
     query: String,
     limit: Option<usize>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<HfModelSummary>, String> {
-    if query.trim().is_empty() {
+    let query = query.trim();
+    if query.is_empty() {
         return Ok(Vec::new());
     }
-    hf::search(query.trim(), limit.unwrap_or(20).clamp(1, 50)).await
+
+    if let Some(repo) = hf::parse_repo_ref(query) {
+        let detail = hf::repo_detail(&repo)
+            .await
+            .map_err(|e| format!("{repo}: {e}"))?;
+        return Ok(vec![HfModelSummary {
+            repo: detail.repo,
+            downloads: 0,
+            likes: 0,
+            gated: detail.gated,
+        }]);
+    }
+
+    // Only offer what the preferred engine can load: a GGUF listed while MLX
+    // is selected is a download that ends in an unusable model.
+    let engine = { state.config.lock().await.local.effective_engine() };
+    hf::search(query, limit.unwrap_or(20).clamp(1, 50), engine).await
 }
 
 /// The quantizations a repo offers, sized, fit-checked and with one

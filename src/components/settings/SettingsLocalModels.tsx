@@ -76,7 +76,9 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
   const [message, setMessage] = createSignal<{ kind: "ok" | "err"; text: string } | null>(null);
 
   const [query, setQuery] = createSignal("");
-  const [results, setResults] = createSignal<{ repo: string; downloads: number; gated: boolean }[]>([]);
+  const [results, setResults] = createSignal<{ repo: string; downloads: number; gated: boolean }[]>(
+    [],
+  );
   const [openRepo, setOpenRepo] = createSignal<RepoQuants | null>(null);
   const [downloadingKey, setDownloadingKey] = createSignal<string | null>(null);
 
@@ -531,25 +533,26 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
       <div>
         <h4 class="text-sm font-medium text-ink">Add a model</h4>
         <p class="mt-1 text-xs text-ink-faint">
-          Recommended models are ones we checked can drive the agent's tool loop. You can also
-          search the Hugging Face Hub for any GGUF repository.
+          Suggestions are what the Hugging Face Hub is trending for the selected engine. Search
+          the Hub, or paste a model's URL to go straight to it. Only models the selected engine
+          can load are listed — the two engines read different formats.
         </p>
 
         <div class="mt-2 space-y-2">
+          <Show when={curated()?.some((c) => c.offline)}>
+            <p class="text-[11px] text-ink-faint">
+              Could not reach the Hub — showing the built-in list instead.
+            </p>
+          </Show>
           <For each={curated()}>
             {(c) => (
               <div class="flex items-center justify-between gap-3 rounded-md border border-border-subtle bg-surface-1 p-2">
                 <div class="min-w-0">
-                  <div class="truncate text-sm text-ink">
-                    {c.displayName}{" "}
-                    <span class="text-[11px] text-ink-faint">{c.params}</span>
-                    <Show when={!c.fits}>
-                      <span class="ml-2 text-[11px] text-danger">
-                        wants {c.minRamGb} GB RAM
-                      </span>
-                    </Show>
+                  <div class="truncate text-sm text-ink">{c.displayName}</div>
+                  <div class="truncate text-[11px] text-ink-faint">
+                    {c.blurb ??
+                      `${c.repo} · ${c.downloads.toLocaleString()} downloads`}
                   </div>
-                  <div class="truncate text-[11px] text-ink-faint">{c.blurb}</div>
                 </div>
                 <button
                   disabled={busy()}
@@ -566,7 +569,7 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
         <div class="mt-3 flex gap-2">
           <input
             type="text"
-            placeholder="Search Hugging Face for GGUF models…"
+            placeholder="Search the Hub, or paste a model URL…"
             class="min-w-0 flex-1 rounded border border-border-subtle bg-surface-1 px-2 py-1 text-sm"
             value={query()}
             onInput={(e) => setQuery(e.currentTarget.value)}

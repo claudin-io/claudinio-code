@@ -668,14 +668,17 @@ export interface HardwareProfile {
   gpuName?: string | null;
 }
 
-export interface CuratedModel {
+/** A model offered as a starting point: what the Hub is trending for the
+ *  preferred engine, or the built-in list when the Hub is unreachable. */
+export interface SuggestedModel {
   repo: string;
   displayName: string;
-  preferredQuant: string;
-  minRamGb: number;
-  params: string;
-  blurb: string;
-  fits: boolean;
+  downloads: number;
+  likes: number;
+  /** Only the built-in entries carry one. */
+  blurb?: string | null;
+  /** True when the Hub could not be reached and this is the fallback list. */
+  offline: boolean;
 }
 
 export interface HfModelSummary {
@@ -745,8 +748,8 @@ export function localHardware(): Promise<HardwareProfile> {
   return invoke<HardwareProfile>("local_hardware");
 }
 
-export function localCuratedModels(): Promise<CuratedModel[]> {
-  return invoke<CuratedModel[]>("local_curated_models");
+export function localCuratedModels(): Promise<SuggestedModel[]> {
+  return invoke<SuggestedModel[]>("local_curated_models");
 }
 
 export function localInstallServer(): Promise<LocalStatus> {

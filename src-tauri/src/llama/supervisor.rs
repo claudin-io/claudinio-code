@@ -295,6 +295,7 @@ fn health_deadline(file_bytes: u64) -> Duration {
 /// wait. A dead child ends it immediately: waiting out a ten-minute deadline on
 /// a process that already exited helps nobody.
 async fn wait_for_health(
+    engine: Engine,
     port: u16,
     api_key: &str,
     child: &mut Child,
@@ -305,7 +306,10 @@ async fn wait_for_health(
     let started = Instant::now();
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(format!("llama-server exited during startup ({status})"));
+            return Err(format!(
+                "the {} server exited during startup ({status})",
+                engine.label()
+            ));
         }
         if let Ok(resp) = client
             .get(&url)
@@ -319,7 +323,8 @@ async fn wait_for_health(
         }
         if started.elapsed() > deadline {
             return Err(format!(
-                "llama-server did not become ready within {}s",
+                "the {} server did not become ready within {}s",
+                engine.label(),
                 deadline.as_secs()
             ));
         }
@@ -414,7 +419,18 @@ pub async fn ensure_serving(
         }
     }
 
-    let engine = prefs.effective_engine();
+    // The engine is decided by the model, not by the preference: handing a
+    // GGUF to MLX aborts inside its model factory, and the user's preference
+    // cannot change what the weights are.
+    let engine = Engine::for_format(&model.format);
+    if !engine.is_available() {
+        return Err(format!(
+            "{} is a {} model, and the {} engine is not available on this machine",
+            model.display_name,
+            model.format.to_uppercase(),
+            engine.label()
+        ));
+    }
     // llama.cpp is handed a file, MLX a directory; the catalog knows which
     // because it recorded the format when the model was installed.
     let model_path = catalog::model_path(&model)?;
@@ -488,6 +504,7 @@ pub async fn ensure_serving(
         }
 
         match wait_for_health(
+            engine,
             port,
             &api_key,
             &mut child,
@@ -526,7 +543,8 @@ pub async fn ensure_serving(
                 } else {
                     let shown: Vec<&str> = tail.iter().rev().take(8).map(String::as_str).collect();
                     format!(
-                        "{e}\nllama-server said: {}",
+                        "{e}\n{} said: {}",
+                        engine.label(),
                         shown.into_iter().rev().collect::<Vec<_>>().join(" / ")
                     )
                 };
@@ -868,6 +886,20 @@ mod tests {
             Some(56.4486)
         );
         assert_eq!(prom_value(body, "llamacpp:nope"), None);
+    }
+
+    /// Regression: MLX became the default on Apple Silicon while the installed
+    /// models were GGUF, and the sidecar was handed a `.gguf` — which aborts
+    /// inside its model factory with a stack trace, not a message.
+    #[test]
+    fn a_gguf_model_never_selects_the_mlx_engine() {
+        assert_eq!(Engine::for_format("gguf"), Engine::Llamacpp);
+        let mut s = spec();
+        s.engine = Engine::for_format("gguf");
+        assert!(
+            build_args(&s).iter().any(|a| a == "--jinja"),
+            "llama.cpp argv"
+        );
     }
 
     #[test]

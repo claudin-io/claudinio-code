@@ -9,7 +9,7 @@ use crate::download::{DEFAULT_RETRIES, ProgressFn, download_verified_with_retrie
 use crate::llama::hf::{self, HfTreeFile, QuantOption};
 use crate::net_activity::NetSource;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,7 +157,9 @@ pub fn primary_gguf(model: &LocalModel) -> Result<PathBuf, String> {
         .files
         .first()
         .ok_or_else(|| format!("model {} has no files", model.key))?;
-    let path = model_dir(&model.key)?.join(local_name(&first.path));
+    let rel = local_path(&model.format, &first.path)
+        .ok_or_else(|| format!("model {} has an unusable file path", model.key))?;
+    let path = model_dir(&model.key)?.join(rel);
     if !path.is_file() {
         return Err(format!(
             "model {} is missing {} — reinstall it",
@@ -168,19 +170,47 @@ pub fn primary_gguf(model: &LocalModel) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Weights are stored flat under the model dir; a repo may nest them.
-fn local_name(repo_path: &str) -> &str {
-    repo_path.rsplit('/').next().unwrap_or(repo_path)
+/// Where a repo file lands under the model directory.
+///
+/// A GGUF is stored flat: it is one file (or a shard set) and the repo layout
+/// is irrelevant. An MLX model is a *directory* the loader walks, so its
+/// structure has to survive — flattening `optiq/metadata.json` to
+/// `metadata.json` produces a model that downloads fine and then fails to load.
+///
+/// Returns `None` when the path would escape the model directory. The path
+/// comes from a remote API, so it is not trusted: the same lesson as archive
+/// extraction, where treating `..` as ordinary let an entry write outside.
+fn local_path(format: &str, repo_path: &str) -> Option<PathBuf> {
+    if format != "mlx" {
+        let name = repo_path.rsplit('/').next().unwrap_or(repo_path);
+        return safe_relative(name);
+    }
+    safe_relative(repo_path)
+}
+
+fn safe_relative(rel: &str) -> Option<PathBuf> {
+    let path = Path::new(rel);
+    if rel.is_empty() || path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
 }
 
 pub fn is_complete(model: &LocalModel) -> bool {
     let Ok(dir) = model_dir(&model.key) else {
         return false;
     };
-    model
-        .files
-        .iter()
-        .all(|f| std::fs::metadata(dir.join(local_name(&f.path))).is_ok_and(|m| m.len() == f.size))
+    model.files.iter().all(|f| {
+        local_path(&model.format, &f.path)
+            .and_then(|rel| std::fs::metadata(dir.join(rel)).ok())
+            .is_some_and(|m| m.len() == f.size)
+    })
 }
 
 pub fn disk_usage() -> Result<u64, String> {
@@ -190,9 +220,11 @@ pub fn disk_usage() -> Result<u64, String> {
         .iter()
         .flat_map(|m| {
             let dir = model_dir(&m.key).ok();
+            let format = m.format.clone();
             m.files.iter().filter_map(move |f| {
-                dir.as_ref()
-                    .and_then(|d| std::fs::metadata(d.join(local_name(&f.path))).ok())
+                local_path(&format, &f.path)
+                    .and_then(|rel| dir.as_ref().map(|d| d.join(rel)))
+                    .and_then(|p| std::fs::metadata(p).ok())
                     .map(|meta| meta.len())
             })
         })
@@ -258,7 +290,10 @@ pub async fn install(
         .files
         .first()
         .ok_or_else(|| "this quantization has no files".to_string())?;
-    let key = model_key(&spec.repo, local_name(&first.path));
+    let key = model_key(
+        &spec.repo,
+        first.path.rsplit('/').next().unwrap_or(&first.path),
+    );
     let dir = model_dir(&key)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
@@ -290,7 +325,9 @@ pub async fn install(
     let file_count = files.len();
 
     for (i, file) in files.iter().enumerate() {
-        let dest = dir.join(local_name(&file.path));
+        let rel = local_path(&spec.format, &file.path)
+            .ok_or_else(|| format!("refusing {}: it escapes the model directory", file.path))?;
+        let dest = dir.join(rel);
         if std::fs::metadata(&dest).is_ok_and(|m| m.len() == file.size) {
             overall_done += file.size;
             continue;
@@ -453,11 +490,13 @@ mod tests {
         let files = vec![
             HfTreeFile {
                 path: "model.safetensors".into(),
+                kind: "file".into(),
                 size: 10,
                 lfs: None,
             },
             HfTreeFile {
                 path: "README.md".into(),
+                kind: "file".into(),
                 size: 1,
                 lfs: None,
             },
@@ -500,15 +539,6 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c, "same filename in a different repo must not collide");
         assert_eq!(a.len(), 16);
-    }
-
-    #[test]
-    fn local_name_flattens_a_nested_repo_path() {
-        assert_eq!(
-            local_name("Q4_K_M/model-00001-of-00002.gguf"),
-            "model-00001-of-00002.gguf"
-        );
-        assert_eq!(local_name("model.gguf"), "model.gguf");
     }
 
     #[test]

@@ -12,7 +12,7 @@ import {
   localHardware,
   localListModels,
   localStatus,
-  type CuratedModel,
+  type SuggestedModel,
   type LocalModelView,
   type LocalStatus,
   type ModelDownloadProgress,
@@ -108,7 +108,7 @@ async function mount(
     status?: LocalStatus;
     models?: LocalModelView[];
     enabled?: boolean;
-    curated?: CuratedModel[];
+    curated?: SuggestedModel[];
   } = {},
 ) {
   vi.mocked(getConfig).mockResolvedValue({
@@ -219,12 +219,11 @@ describe("SettingsLocalModels", () => {
       curated: [
         {
           repo: "unsloth/Qwen3-8B-GGUF",
-          displayName: "Qwen3 8B",
-          preferredQuant: "Q4_K_M",
-          minRamGb: 16,
-          params: "8B",
-          blurb: "",
-          fits: true,
+          displayName: "Qwen3-8B-GGUF",
+          downloads: 1000,
+          likes: 10,
+          blurb: null,
+          offline: false,
         },
       ],
     });
