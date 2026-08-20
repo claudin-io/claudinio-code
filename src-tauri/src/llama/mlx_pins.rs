@@ -3,6 +3,6 @@
 // Regenerate with:
 //   python3 scripts/pin_mlx.py > src-tauri/src/llama/mlx_pins.rs
 
-pub const MLX_VERSION: &str = "v0.1.1";
-pub const MLX_SHA256: &str = "e8d296e46bf9b1bcb7492c1685e8871d35d7b0deb601bd7dc9dd887c9327b089";
-pub const MLX_SIZE: u64 = 18857962;
+pub const MLX_VERSION: &str = "v0.1.3";
+pub const MLX_SHA256: &str = "6e08fa988819cf7796b82a7aa21e94de5afe00adf652d7486ada60997f88fce3";
+pub const MLX_SIZE: u64 = 20076920;
