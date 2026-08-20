@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import {
   getConfig,
+  openExternalUrl,
   setConfig,
   localCancelInstall,
   localInstallModel,
@@ -33,6 +34,7 @@ vi.mock("../../lib/ipc", () => ({
   localRepoQuants: vi.fn(),
   localInstallModel: vi.fn(),
   localCancelInstall: vi.fn(),
+  openExternalUrl: vi.fn(),
   localRemoveModel: vi.fn(),
   localUnloadModel: vi.fn(),
   localServerLogs: vi.fn(),
@@ -177,6 +179,18 @@ describe("SettingsLocalModels", () => {
     expect(el.textContent).toContain("Qwen3-8B-GGUF (Q4_K_M)");
     expect(el.textContent).toContain("4.7 GB");
     expect(el.textContent).toContain("up to 40960 ctx");
+  });
+
+  /// Trending is a reason to go look at a model before committing 20 GB of
+  /// download to it.
+  it("opens an installed model's page on the Hub", async () => {
+    const el = await mount({ models: [model()] });
+    const link = el.querySelector<HTMLButtonElement>('button[title="Open on Hugging Face"]');
+    expect(link).toBeTruthy();
+    link!.click();
+    expect(openExternalUrl).toHaveBeenCalledWith(
+      "https://huggingface.co/unsloth/Qwen3-8B-GGUF",
+    );
   });
 
   it("warns when a model has no chat template", async () => {

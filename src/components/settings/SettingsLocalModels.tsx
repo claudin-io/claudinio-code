@@ -13,6 +13,7 @@ import {
   getConfig,
   setConfig,
   localCancelInstall,
+  openExternalUrl,
   localCuratedModels,
   localDiskUsage,
   localHardware,
@@ -50,6 +51,12 @@ const DEFAULT_PREFS: LocalPrefs = {
   sleepIdleSeconds: 300,
   maxLoadedModels: 1,
 };
+
+/** The model's page on the Hub. Trending is a reason to look before you spend
+ *  20 GB on a download. */
+function hubUrl(repo: string): string {
+  return `https://huggingface.co/${repo}`;
+}
 
 function mb(bytes: number): string {
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
@@ -486,6 +493,13 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
                   </div>
                   <div class="flex shrink-0 gap-2">
                     <button
+                      onClick={() => openExternalUrl(hubUrl(m.repo))}
+                      title="Open on Hugging Face"
+                      class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
+                    >
+                      <Icon name="external-link" class="h-3 w-3" />
+                    </button>
+                    <button
                       disabled={busy()}
                       onClick={() => run(() => localTestModel(m.key))}
                       class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
@@ -554,13 +568,22 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
                       `${c.repo} · ${c.downloads.toLocaleString()} downloads`}
                   </div>
                 </div>
-                <button
-                  disabled={busy()}
-                  onClick={() => openQuants(c.repo)}
-                  class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
-                >
-                  Choose
-                </button>
+                <div class="flex shrink-0 gap-2">
+                  <button
+                    onClick={() => openExternalUrl(hubUrl(c.repo))}
+                    title="Open on Hugging Face"
+                    class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
+                  >
+                    <Icon name="external-link" class="h-3 w-3" />
+                  </button>
+                  <button
+                    disabled={busy()}
+                    onClick={() => openQuants(c.repo)}
+                    class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
+                  >
+                    Choose
+                  </button>
+                </div>
               </div>
             )}
           </For>
@@ -588,16 +611,25 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
           <div class="mt-2 space-y-1">
             <For each={results()}>
               {(r) => (
-                <button
-                  disabled={busy()}
-                  onClick={() => openQuants(r.repo)}
-                  class="flex w-full items-center justify-between gap-3 rounded-md border border-border-subtle bg-surface-1 p-2 text-left hover:bg-surface-2 disabled:opacity-50"
-                >
-                  <span class="truncate text-sm text-ink">{r.repo}</span>
-                  <span class="shrink-0 text-[11px] text-ink-faint">
-                    {r.gated ? "gated" : `${r.downloads.toLocaleString()} downloads`}
-                  </span>
-                </button>
+                <div class="flex w-full items-center justify-between gap-3 rounded-md border border-border-subtle bg-surface-1 p-2">
+                  <button
+                    disabled={busy()}
+                    onClick={() => openQuants(r.repo)}
+                    class="min-w-0 flex-1 text-left disabled:opacity-50"
+                  >
+                    <span class="block truncate text-sm text-ink">{r.repo}</span>
+                    <span class="text-[11px] text-ink-faint">
+                      {r.gated ? "gated" : `${r.downloads.toLocaleString()} downloads`}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => openExternalUrl(hubUrl(r.repo))}
+                    title="Open on Hugging Face"
+                    class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
+                  >
+                    <Icon name="external-link" class="h-3 w-3" />
+                  </button>
+                </div>
               )}
             </For>
           </div>
@@ -605,7 +637,16 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
 
         <Show when={openRepo()}>
           <div class="mt-3 rounded-md border border-border-subtle bg-surface-1 p-3">
-            <div class="text-sm text-ink">{openRepo()!.repo}</div>
+            <div class="flex items-center justify-between gap-2">
+              <div class="min-w-0 truncate text-sm text-ink">{openRepo()!.repo}</div>
+              <button
+                onClick={() => openExternalUrl(hubUrl(openRepo()!.repo))}
+                title="Open on Hugging Face"
+                class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
+              >
+                <Icon name="external-link" class="h-3 w-3" />
+              </button>
+            </div>
             <div class="text-[11px] text-ink-faint">
               <Show when={openRepo()!.contextLength}>{openRepo()!.contextLength} ctx · </Show>
               <Show when={openRepo()!.architecture}>{openRepo()!.architecture} · </Show>
