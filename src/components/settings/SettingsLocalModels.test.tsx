@@ -307,6 +307,90 @@ describe("SettingsLocalModels", () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  /// MLX suggestions arrive pre-sorted by RAM tier from the backend; grouping
+  /// consecutive entries must keep that order and flag this machine's tier.
+  it("groups MLX suggestions by RAM tier and marks this machine's", async () => {
+    const el = await mount({
+      curated: [
+        {
+          repo: "mlx-community/Qwen3-4B-8bit",
+          displayName: "Qwen3-4B",
+          downloads: 1000,
+          likes: 10,
+          blurb: null,
+          offline: false,
+          ramTier: { label: "8GB", note: "Small but capable", minRamGb: 8, isMachineTier: false },
+        },
+        {
+          repo: "mlx-community/Qwen3-8B-8bit",
+          displayName: "Qwen3-8B",
+          downloads: 2000,
+          likes: 20,
+          blurb: null,
+          offline: false,
+          ramTier: { label: "32GB", note: "Strong coding + reasoning", minRamGb: 32, isMachineTier: true },
+        },
+      ],
+    });
+    expect(el.textContent).toContain("8GB");
+    expect(el.textContent).toContain("Small but capable");
+    expect(el.textContent).toContain("32GB");
+    expect(el.textContent).toContain("Strong coding + reasoning");
+    expect(el.textContent).toContain("Your Mac");
+    expect(el.textContent).toContain("picked for your machine's memory");
+    expect(el.textContent).not.toContain("trending");
+  });
+
+  /// llama.cpp has no RAM-tier notion — its list must stay the flat trending
+  /// view, chip-free.
+  it("keeps the trending list plain for llama.cpp", async () => {
+    const el = await mount({
+      curated: [
+        {
+          repo: "unsloth/Qwen3-8B-GGUF",
+          displayName: "Qwen3-8B-GGUF",
+          downloads: 1000,
+          likes: 10,
+          blurb: null,
+          offline: false,
+        },
+      ],
+    });
+    expect(el.textContent).toContain("trending");
+    expect(el.textContent).not.toContain("Your Mac");
+  });
+
+  /// Tier mode only changes how suggestions are presented — Choose still has
+  /// to open the same quant picker for the tiered repo.
+  it("opens the quant picker for a RAM-tier suggestion", async () => {
+    const el = await mount({
+      curated: [
+        {
+          repo: "mlx-community/Qwen3-8B-8bit",
+          displayName: "Qwen3-8B",
+          downloads: 2000,
+          likes: 20,
+          blurb: null,
+          offline: false,
+          ramTier: { label: "32GB", note: "Strong coding + reasoning", minRamGb: 32, isMachineTier: true },
+        },
+      ],
+    });
+    vi.mocked(localRepoQuants).mockResolvedValue({
+      repo: "mlx-community/Qwen3-8B-8bit",
+      gated: false,
+      quants: [{ quant: "8bit", totalBytes: 9_000_000_000, shards: 1, fit: "comfortable" }],
+      recommended: "8bit",
+      contextLength: 40960,
+      hasChatTemplate: true,
+      architecture: "qwen3",
+      format: "mlx",
+    });
+    buttonWithText(el, "Choose").click();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    expect(localRepoQuants).toHaveBeenCalledWith("mlx-community/Qwen3-8B-8bit");
+  });
+
   it("re-reads the model list when the feature is switched on", async () => {
     const el = await mount({ enabled: false });
     vi.mocked(setConfig).mockResolvedValue(undefined);

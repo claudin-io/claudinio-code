@@ -84,6 +84,20 @@ pub struct SuggestedModel {
     /// True when this came from the built-in list because the Hub was
     /// unreachable, so the UI can say why it is showing what it is showing.
     pub offline: bool,
+    /// Set only for MLX RAM-tier suggestions; lets the UI group entries by
+    /// memory tier without duplicating hardware logic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ram_tier: Option<SuggestedTier>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedTier {
+    pub label: String,
+    pub note: String,
+    pub min_ram_gb: u32,
+    /// True for the tier this machine's own RAM falls into.
+    pub is_machine_tier: bool,
 }
 
 #[tauri::command]
@@ -140,12 +154,42 @@ pub fn local_hardware() -> HardwareProfile {
 }
 
 /// Models to suggest: what the Hub is trending for this engine, falling back to
-/// the built-in list when the Hub cannot be reached.
+/// the built-in list when the Hub cannot be reached. MLX skips the Hub
+/// entirely — it gets RAM-tier picks from the built-in tiers instead.
 #[tauri::command]
 pub async fn local_curated_models(
     state: State<'_, AppState>,
 ) -> Result<Vec<SuggestedModel>, String> {
     let engine = { state.config.lock().await.local.effective_engine() };
+
+    // MLX models are whole repositories, so trending is less useful here than
+    // a tiered short list that fits the machine's memory.
+    if engine == crate::llama::Engine::Mlx {
+        let hw = hardware::detect();
+        let current_idx = crate::llama::mlx_tiers::current_tier_index(&hw);
+        let tiers = crate::llama::mlx_tiers::for_machine(&hw);
+        return Ok(tiers
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, tier)| {
+                tier.models.iter().map(move |m| SuggestedModel {
+                    repo: m.repo.to_string(),
+                    display_name: m.display_name.to_string(),
+                    downloads: 0,
+                    likes: 0,
+                    blurb: None,
+                    offline: false,
+                    ram_tier: Some(SuggestedTier {
+                        label: tier.label.to_string(),
+                        note: tier.note.to_string(),
+                        min_ram_gb: tier.min_ram_gb,
+                        is_machine_tier: idx == current_idx,
+                    }),
+                })
+            })
+            .collect());
+    }
+
     if let Ok(trending) = hf::trending(engine, 12).await
         && !trending.is_empty()
     {
@@ -158,6 +202,7 @@ pub async fn local_curated_models(
                 likes: m.likes,
                 blurb: None,
                 offline: false,
+                ram_tier: None,
             })
             .collect());
     }
@@ -172,6 +217,7 @@ pub async fn local_curated_models(
             likes: 0,
             blurb: Some(m.blurb.to_string()),
             offline: true,
+            ram_tier: None,
         })
         .collect())
 }
@@ -549,6 +595,36 @@ mod tests {
             "\"overallTotal\"",
             "\"phase\"",
         ] {
+            assert!(json.contains(field), "{field} missing from {json}");
+        }
+    }
+
+    #[test]
+    fn suggested_model_omits_ram_tier_when_absent_and_serializes_camel_case() {
+        let plain = SuggestedModel {
+            repo: "r/m".into(),
+            display_name: "m".into(),
+            downloads: 0,
+            likes: 0,
+            blurb: None,
+            offline: false,
+            ram_tier: None,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("ramTier"), "{json}");
+        assert!(json.contains("\"displayName\":\"m\""), "{json}");
+
+        let tiered = SuggestedModel {
+            ram_tier: Some(SuggestedTier {
+                label: "32GB".into(),
+                note: "Strong coding + reasoning".into(),
+                min_ram_gb: 32,
+                is_machine_tier: true,
+            }),
+            ..plain
+        };
+        let json = serde_json::to_string(&tiered).unwrap();
+        for field in ["\"ramTier\"", "\"minRamGb\"", "\"isMachineTier\""] {
             assert!(json.contains(field), "{field} missing from {json}");
         }
     }

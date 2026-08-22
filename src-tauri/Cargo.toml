@@ -187,3 +187,7 @@ rmcp = { version = "2", default-features = false, features = [
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[dev-dependencies]
+# Paused clocks. A test that guards a 900s idle timeout must not take 900s.
+tokio = { version = "1", features = ["test-util"] }

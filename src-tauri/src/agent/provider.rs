@@ -47,6 +47,66 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// answer into "Connection lost".
 const LOCAL_STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
+/// How often the Stop flag is re-read while a request is parked on an await.
+/// Short enough that Stop feels instant, cheap enough to run for a whole turn.
+const INTERRUPT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Resolves once the user presses Stop.
+///
+/// Polled rather than awaited: the flag is an `AtomicBool` shared with the
+/// `interrupt_session` command, and a `Notify` would have to be threaded
+/// through every holder of a `SteeringController`.
+async fn stop_pressed(interrupt: &AtomicBool) {
+    while !interrupt.load(Ordering::SeqCst) {
+        tokio::time::sleep(INTERRUPT_POLL).await;
+    }
+}
+
+/// Run `fut`, giving up the moment the user presses Stop. `None` means Stop won.
+///
+/// Checking the flag between chunks is enough for a hosted model, which is
+/// never quiet for long. A local one has two windows where nothing moves for
+/// minutes — starting its server, and reading the prompt — and a Stop pressed
+/// in either would otherwise sit unread until the model finally spoke.
+async fn until_stopped<F: std::future::Future>(
+    fut: F,
+    interrupt: &AtomicBool,
+) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        out = fut => Some(out),
+        () = stop_pressed(interrupt) => None,
+    }
+}
+
+/// What ended the wait for the next SSE chunk.
+pub(crate) enum Chunk<T> {
+    Next(T),
+    /// The server closed the stream.
+    End,
+    Interrupted,
+    /// Nothing arrived within the idle timeout.
+    Stalled,
+}
+
+/// `stream.next()` with the two exits a streaming turn also needs: the idle
+/// timeout, and the user's Stop.
+pub(crate) async fn next_chunk<S>(
+    stream: &mut S,
+    idle: std::time::Duration,
+    interrupt: &AtomicBool,
+) -> Chunk<S::Item>
+where
+    S: futures::Stream + Unpin,
+{
+    match until_stopped(tokio::time::timeout(idle, stream.next()), interrupt).await {
+        Some(Ok(Some(item))) => Chunk::Next(item),
+        Some(Ok(None)) => Chunk::End,
+        Some(Err(_)) => Chunk::Stalled,
+        None => Chunk::Interrupted,
+    }
+}
+
 impl ResolvedProvider {
     /// How long a stream may go quiet before it is treated as dead.
     pub fn stream_idle_timeout(&self) -> std::time::Duration {
@@ -900,6 +960,19 @@ pub struct StreamOutput {
     pub interrupted: bool,
 }
 
+impl StreamOutput {
+    /// The turn the user stopped before the model produced anything.
+    pub(crate) fn stopped() -> Self {
+        Self {
+            text_deltas: Vec::new(),
+            tool_uses: Vec::new(),
+            stop_reason: Some("interrupted".into()),
+            usage: None,
+            interrupted: true,
+        }
+    }
+}
+
 /// System prompt for the completion judge. Deliberately demands a single
 /// sentinel token so the caller never has to parse natural language — this is
 /// what keeps the mechanism language-agnostic (the judged text may be in any
@@ -1124,7 +1197,19 @@ pub async fn stream_message(
     // subagent goal, …). Not sent to the API.
     net_detail: &str,
 ) -> Result<StreamOutput, String> {
-    let rp = resolve_provider_live(config, model).await?;
+    // Starting a local server means loading weights: tens of seconds to
+    // minutes, all of it before a single byte of the request moves. Stop has to
+    // be honoured here, or it does nothing at all for the whole load.
+    let Some(resolved) = until_stopped(resolve_provider_live(config, model), interrupt).await
+    else {
+        // The supervisor set the phase before it started loading, and nobody
+        // else will clear it now that the load is abandoned.
+        if let Some(rest) = model.strip_prefix(&format!("{}/", crate::llama::LOCAL_PROVIDER_ID)) {
+            crate::llama::supervisor::clear_phase(rest);
+        }
+        return Ok(StreamOutput::stopped());
+    };
+    let rp = resolved?;
     if rp.protocol == Protocol::OpenAiChat {
         return openai::stream_message(
             &rp,
@@ -1175,15 +1260,17 @@ pub async fn stream_message(
 
     let url = format!("{}/v1/messages", rp.base_url.trim_end_matches('/'));
 
-    let response = client
+    let request = client
         .post(&url)
         .header("Content-Type", "application/json")
         .header("x-api-key", &rp.api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .send();
+    let Some(response) = until_stopped(request, interrupt).await else {
+        return Ok(StreamOutput::stopped());
+    };
+    let response = response.map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1251,10 +1338,22 @@ pub async fn stream_message(
         }
 
         let idle_timeout = rp.stream_idle_timeout();
-        let chunk_result = match tokio::time::timeout(idle_timeout, stream.next()).await {
-            Ok(Some(r)) => r,
-            Ok(None) => break,
-            Err(_) => {
+        let chunk_result = match next_chunk(&mut stream, idle_timeout, interrupt).await {
+            Chunk::Next(r) => r,
+            Chunk::End => break,
+            Chunk::Interrupted => {
+                // Dropping the stream closes the connection, which is what
+                // tells the server to stop generating.
+                drop(stream);
+                return Ok(StreamOutput {
+                    text_deltas,
+                    tool_uses,
+                    stop_reason: Some("interrupted".into()),
+                    usage: None,
+                    interrupted: true,
+                });
+            }
+            Chunk::Stalled => {
                 return Err(format!(
                     "stream error: no data received for {}s, connection stalled",
                     idle_timeout.as_secs()
@@ -1768,6 +1867,38 @@ mod tests {
         assert_eq!(rp.model, "claudius");
         assert_eq!(rp.base_url, "https://api.claudin.io");
         assert_eq!(rp.api_key, "sk-claudinio");
+    }
+
+    /// Regression: Stop was only read between chunks, so during the exact
+    /// silence the test above buys a local model — the whole prompt evaluation —
+    /// pressing Stop did nothing for up to the 900s idle timeout.
+    #[tokio::test(start_paused = true)]
+    async fn stop_is_read_while_the_stream_is_still_silent() {
+        let interrupt = AtomicBool::new(false);
+        // A stream that never yields, standing in for a model reading a prompt.
+        let mut silent = futures::stream::pending::<u8>();
+
+        let waiting = next_chunk(&mut silent, LOCAL_STREAM_IDLE_TIMEOUT, &interrupt);
+        let pressing = async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            interrupt.store(true, Ordering::SeqCst);
+        };
+        let (chunk, ()) = tokio::join!(waiting, pressing);
+
+        assert!(
+            matches!(chunk, Chunk::Interrupted),
+            "Stop must end the wait, not sit out the idle timeout"
+        );
+    }
+
+    /// The other half of the same guard: a silent stream that nobody stopped
+    /// still has to be declared dead once the idle timeout passes.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_stream_still_stalls_when_nobody_presses_stop() {
+        let interrupt = AtomicBool::new(false);
+        let mut silent = futures::stream::pending::<u8>();
+        let chunk = next_chunk(&mut silent, STREAM_IDLE_TIMEOUT, &interrupt).await;
+        assert!(matches!(chunk, Chunk::Stalled));
     }
 
     /// Regression: a 27B evaluating a large prompt goes quiet for minutes

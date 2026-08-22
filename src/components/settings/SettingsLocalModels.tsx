@@ -35,6 +35,7 @@ import {
   type LocalPrefs,
   type ModelDownloadProgress,
   type RepoQuants,
+  type SuggestedModel,
 } from "../../lib/ipc";
 import { Icon } from "../Icon";
 
@@ -56,6 +57,38 @@ const DEFAULT_PREFS: LocalPrefs = {
  *  20 GB on a download. */
 function hubUrl(repo: string): string {
   return `https://huggingface.co/${repo}`;
+}
+
+/** True when the curated list is RAM-tier picks for MLX rather than trending. */
+function isTierList(list: SuggestedModel[] | undefined): boolean {
+  return !!list?.length && list.every((c) => c.ramTier !== undefined);
+}
+
+/** Consecutive entries sharing a tier label, in the order the backend sent
+ *  them. */
+interface TierGroup {
+  label: string;
+  note: string;
+  isMachineTier: boolean;
+  entries: SuggestedModel[];
+}
+
+function groupByRamTier(list: SuggestedModel[]): TierGroup[] {
+  const groups: TierGroup[] = [];
+  for (const c of list) {
+    const last = groups[groups.length - 1];
+    if (last && c.ramTier && last.label === c.ramTier.label) {
+      last.entries.push(c);
+      continue;
+    }
+    groups.push({
+      label: c.ramTier!.label,
+      note: c.ramTier!.note,
+      isMachineTier: c.ramTier!.isMachineTier,
+      entries: [c],
+    });
+  }
+  return groups;
 }
 
 /** A duration a human reads at a glance: seconds below a minute, else m:ss. */
@@ -236,6 +269,40 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
     if (hw.gpuName) parts.push(`${hw.gpuName}${hw.vramBytes ? ` (${mb(hw.vramBytes)})` : ""}`);
     return parts.join(" · ");
   };
+
+  // MLX suggestions arrive as RAM-tier picks; llama.cpp keeps the flat
+  // trending list.
+  const tierGroups = createMemo<TierGroup[] | null>(() => {
+    const list = curated();
+    return list && isTierList(list) ? groupByRamTier(list) : null;
+  });
+
+  const suggestionCard = (c: SuggestedModel) => (
+    <div class="flex items-center justify-between gap-3 rounded-md border border-border-subtle bg-surface-1 p-2">
+      <div class="min-w-0">
+        <div class="truncate text-sm text-ink">{c.displayName}</div>
+        <div class="truncate text-[11px] text-ink-faint">
+          {c.blurb ?? `${c.repo} · ${c.downloads.toLocaleString()} downloads`}
+        </div>
+      </div>
+      <div class="flex shrink-0 gap-2">
+        <button
+          onClick={() => openExternalUrl(hubUrl(c.repo))}
+          title="Open on Hugging Face"
+          class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
+        >
+          <Icon name="external-link" class="h-3 w-3" />
+        </button>
+        <button
+          disabled={busy()}
+          onClick={() => openQuants(c.repo)}
+          class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
+        >
+          Choose
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <div class="space-y-5">
@@ -573,47 +640,51 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
       {/* Add a model */}
       <div>
         <h4 class="text-sm font-medium text-ink">Add a model</h4>
-        <p class="mt-1 text-xs text-ink-faint">
-          Suggestions are what the Hugging Face Hub is trending for the selected engine. Search
-          the Hub, or paste a model's URL to go straight to it. Only models the selected engine
-          can load are listed — the two engines read different formats.
-        </p>
+        <Show
+          when={tierGroups()}
+          fallback={
+            <p class="mt-1 text-xs text-ink-faint">
+              Suggestions are what the Hugging Face Hub is trending for the selected engine.
+              Search the Hub, or paste a model's URL to go straight to it. Only models the
+              selected engine can load are listed — the two engines read different formats.
+            </p>
+          }
+        >
+          <p class="mt-1 text-xs text-ink-faint">
+            Suggestions picked for your machine's memory. Search the Hub, or paste a model's
+            URL to go straight to it.
+          </p>
+        </Show>
 
         <div class="mt-2 space-y-2">
-          <Show when={curated()?.some((c) => c.offline)}>
+          <Show when={!tierGroups() && curated()?.some((c) => c.offline)}>
             <p class="text-[11px] text-ink-faint">
               Could not reach the Hub — showing the built-in list instead.
             </p>
           </Show>
-          <For each={curated()}>
-            {(c) => (
-              <div class="flex items-center justify-between gap-3 rounded-md border border-border-subtle bg-surface-1 p-2">
-                <div class="min-w-0">
-                  <div class="truncate text-sm text-ink">{c.displayName}</div>
-                  <div class="truncate text-[11px] text-ink-faint">
-                    {c.blurb ??
-                      `${c.repo} · ${c.downloads.toLocaleString()} downloads`}
+          <Show
+            when={tierGroups()}
+            fallback={<For each={curated()}>{(c) => suggestionCard(c)}</For>}
+          >
+            <For each={tierGroups()}>
+              {(g) => (
+                <div>
+                  <div class="mt-2 flex items-baseline gap-2">
+                    <span class="text-xs font-medium text-ink">{g.label}</span>
+                    <span class="text-[11px] text-ink-faint">{g.note}</span>
+                    <Show when={g.isMachineTier}>
+                      <span class="rounded bg-surface-3 px-1.5 py-0.5 text-[10px] font-medium text-ink">
+                        Your Mac
+                      </span>
+                    </Show>
+                  </div>
+                  <div class="mt-1 space-y-2">
+                    <For each={g.entries}>{(c) => suggestionCard(c)}</For>
                   </div>
                 </div>
-                <div class="flex shrink-0 gap-2">
-                  <button
-                    onClick={() => openExternalUrl(hubUrl(c.repo))}
-                    title="Open on Hugging Face"
-                    class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3"
-                  >
-                    <Icon name="external-link" class="h-3 w-3" />
-                  </button>
-                  <button
-                    disabled={busy()}
-                    onClick={() => openQuants(c.repo)}
-                    class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
-                  >
-                    Choose
-                  </button>
-                </div>
-              </div>
-            )}
-          </For>
+              )}
+            </For>
+          </Show>
         </div>
 
         <div class="mt-3 flex gap-2">

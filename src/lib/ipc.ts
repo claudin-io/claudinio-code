@@ -679,6 +679,8 @@ export interface SuggestedModel {
   blurb?: string | null;
   /** True when the Hub could not be reached and this is the fallback list. */
   offline: boolean;
+  /** Set only when the engine is MLX and these are RAM-tier picks, not trending. */
+  ramTier?: { label: string; note: string; minRamGb: number; isMachineTier: boolean };
 }
 
 export interface HfModelSummary {

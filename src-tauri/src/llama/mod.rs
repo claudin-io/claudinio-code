@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod curated;
 pub mod hardware;
 pub mod hf;
+pub mod mlx_tiers;
 pub mod provision;
 pub mod supervisor;
 

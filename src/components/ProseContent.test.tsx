@@ -13,6 +13,19 @@ beforeAll(() => {
       addListener() {}, removeListener() {}, dispatchEvent() { return false; },
     });
   }
+  // jsdom's localStorage here is a broken empty Object — theme.ts reads
+  // localStorage.getItem synchronously during ProseContent's effect (via
+  // resolvedTheme), so stub it like App.test.ts does.
+  const lsStore = new Map<string, string>();
+  const lsMock: Storage = {
+    getItem: (k: string) => lsStore.get(k) ?? null,
+    setItem: (k: string, v: string) => { lsStore.set(k, v); },
+    removeItem: (k: string) => { lsStore.delete(k); },
+    clear: () => lsStore.clear(),
+    get length() { return lsStore.size; },
+    key: (i: number) => [...lsStore.keys()][i] ?? null,
+  };
+  Object.defineProperty(window, "localStorage", { value: lsMock, writable: false });
 });
 
 // Control the (otherwise ~2-3 MB, lazily imported) mermaid runtime so these

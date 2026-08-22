@@ -6,11 +6,10 @@
 //! expects from the Anthropic client.
 
 use super::{
-    AgentConfig, ContentBlock, Message, ResolvedProvider, StreamOutput, TEXT_DELTA_THROTTLE,
-    ToolDescription, ToolResultContent, Usage, maybe_emit_text_delta,
+    AgentConfig, Chunk, ContentBlock, Message, ResolvedProvider, StreamOutput, TEXT_DELTA_THROTTLE,
+    ToolDescription, ToolResultContent, Usage, maybe_emit_text_delta, next_chunk, until_stopped,
 };
 use crate::agent::session::AgentEvent;
-use futures::StreamExt;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
@@ -380,14 +379,16 @@ pub async fn stream_message(
     let body = build_request(rp, config, messages, tools, system, true, max_tokens);
     let url = format!("{}/chat/completions", rp.base_url.trim_end_matches('/'));
 
-    let response = client
+    let request = client
         .post(&url)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", rp.api_key))
         .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .send();
+    let Some(response) = until_stopped(request, interrupt).await else {
+        return Ok(StreamOutput::stopped());
+    };
+    let response = response.map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -436,23 +437,27 @@ pub async fn stream_message(
     let mut last_flush = std::time::Instant::now() - TEXT_DELTA_THROTTLE;
     let mut done = false;
 
+    // Set when the user pressed Stop. The exit runs after the loop rather than
+    // inside it so the local model's phase is closed on the way out — a Stop
+    // that leaves the status bar reading "generating" looks like a Stop that
+    // did nothing.
+    let mut stopped = false;
+
     'outer: loop {
         if interrupt.load(Ordering::SeqCst) {
-            drop(stream);
-            return Ok(StreamOutput {
-                text_deltas,
-                tool_uses: finalize_tool_calls(tool_acc),
-                stop_reason: Some("interrupted".into()),
-                usage: None,
-                interrupted: true,
-            });
+            stopped = true;
+            break 'outer;
         }
 
         let idle_timeout = rp.stream_idle_timeout();
-        let chunk_result = match tokio::time::timeout(idle_timeout, stream.next()).await {
-            Ok(Some(r)) => r,
-            Ok(None) => break,
-            Err(_) => {
+        let chunk_result = match next_chunk(&mut stream, idle_timeout, interrupt).await {
+            Chunk::Next(r) => r,
+            Chunk::End => break,
+            Chunk::Interrupted => {
+                stopped = true;
+                break 'outer;
+            }
+            Chunk::Stalled => {
                 return Err(format!(
                     "stream error: no data received for {}s, connection stalled",
                     idle_timeout.as_secs()
@@ -513,6 +518,22 @@ pub async fn stream_message(
                 &mut last_flush,
             );
         }
+    }
+
+    if stopped {
+        // Dropping the stream closes the connection, which is what tells the
+        // server to stop generating.
+        drop(stream);
+        if let Some(key) = local_key.as_deref() {
+            crate::llama::supervisor::note_request_end(key, 0.0, 0.0);
+        }
+        return Ok(StreamOutput {
+            text_deltas,
+            tool_uses: finalize_tool_calls(tool_acc),
+            stop_reason: Some("interrupted".into()),
+            usage: None,
+            interrupted: true,
+        });
     }
 
     // Some providers close the stream without a trailing newline after the
