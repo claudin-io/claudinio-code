@@ -1324,9 +1324,11 @@ export const ChatPanel: Component<{
     flushPendingDone();
     try {
       await newSession(props.workspace);
-    } catch {
-      /* fresh session is best-effort */
+    } catch (e) {
+      showToast(`Could not start a new session: ${String(e)}`);
+      return;
     }
+    setActiveSessionId(null);
     setMessages([]);
     setCurrentSteps([]);
     setThinkingStart(0);
@@ -1341,9 +1343,11 @@ export const ChatPanel: Component<{
     flushPendingDone();
     try {
       await newSession(props.workspace);
-    } catch {
-      /* fresh session is best-effort */
+    } catch (e) {
+      showToast(`Could not start a new session: ${String(e)}`);
+      return;
     }
+    setActiveSessionId(null);
     setMessages([]);
     setCurrentSteps([]);
     setThinkingStart(0);

@@ -167,3 +167,25 @@ O backend continua idêntico: `new_session` (`commands/agent.rs:472`) só libera
 1. Ajustar `startNewSession` para só limpar a UI após sucesso, mostrar toast em falha e zerar `activeSessionId` no sucesso.
 2. Ajustar `handleConfirmNew` com a mesma lógica (fechar popover primeiro).
 3. Rodar o harness de qualidade (tests + coverage) para confirmar que nada quebrou.
+
+
+## Implementation Log — 2026-08-23 01:09
+**Summary:** Fixed new-session-continues-previous bug: ChatPanel.tsx now only clears UI after backend confirms new session; shows toast on failure.
+**Changed files:** A	docs/plans/2026-08-23_fix-local-session-continues-previous.md
+**Commits:** fae439d docs(plan): fix-local-session-continues-previous
+**Journal:** All three tasks completed and verified:
+
+1. **startNewSession** (ChatPanel.tsx:1319): catch block now calls `showToast(error)` and early-returns instead of swallowing the error and clearing the UI unconditionally. Success path adds `setActiveSessionId(null)` before the existing clear block.
+
+2. **handleConfirmNew** (ChatPanel.tsx:1341): identical fix — `setShowNewPopover(false)` remains first (popover closes regardless), then the same catch/early-return + success setActiveSessionId pattern.
+
+3. **Verification**: 740 JS tests pass, 0 failures. grep confirmed only two call sites in source (line 1506 onClick, line 1550 onConfirm prop), both arity-0 — signatures unchanged. No new imports needed (showToast and setActiveSessionId already in scope).
+
+**Key decision**: The fix is purely frontend — the backend already isolates sessions correctly (active_session is only released on successful new_session). The bug was that the frontend assumed newSession() always succeeded and cleared the UI anyway, causing state desync when the IPC call failed (e.g., due to local model lock contention). Now the frontend respects the IPC result.
+
+**No files changed other than src/components/ChatPanel.tsx.**
+
+**Task journal:**
+- Ajustar startNewSession para limpar UI só após sucesso e zerar activeSessionId: Verified by reading back lines 1322-1344 of ChatPanel.tsx: startNewSession now has catch(e) with showToast+return, and setActiveSessionId(null) before the clear block. No other changes in the function.
+- Ajustar handleConfirmNew com a mesma lógica de falha/limpeza: Verified by reading back lines 1346-1365 of ChatPanel.tsx: handleConfirmNew now has catch(e) with showToast+return, setShowNewPopover(false) is still first, and setActiveSessionId(null) before the clear block. No other changes in the function.
+- Rodar harness de qualidade e verificar a correção: run_quality: 740 tests passed, 0 failed. grep confirms only two call sites in source (line 1506 startNewSession(), line 1550 onConfirm=handleConfirmNew), both arity-0 — signatures unchanged. Manual read-back of lines 1319-1365 confirms both catch blocks now showToast+return and success paths include setActiveSessionId(null).
