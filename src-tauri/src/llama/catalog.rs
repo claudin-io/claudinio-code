@@ -155,7 +155,12 @@ pub fn model_path(model: &LocalModel) -> Result<PathBuf, String> {
 pub fn primary_gguf(model: &LocalModel) -> Result<PathBuf, String> {
     let first = model
         .files
-        .first()
+        .iter()
+        // The MTP drafter rides along in the same file list. It is appended
+        // last, so `first()` would already skip it — but "already" is doing
+        // load-bearing work in that sentence, and handing llama.cpp a 1 GB
+        // drafting head as the model is a long way from an obvious failure.
+        .find(|f| !crate::llama::hf::is_mtp_drafter(&f.path))
         .ok_or_else(|| format!("model {} has no files", model.key))?;
     let rel = local_path(&model.format, &first.path)
         .ok_or_else(|| format!("model {} has an unusable file path", model.key))?;
@@ -168,6 +173,82 @@ pub fn primary_gguf(model: &LocalModel) -> Result<PathBuf, String> {
         ));
     }
     Ok(path)
+}
+
+/// Whether this MLX checkpoint carries an MTP head MTPLX can run.
+///
+/// Decided by `mtplx_mtp_contract` in the checkpoint's own `config.json`, which
+/// is where the converter records how the head attaches — hidden variant,
+/// concat order, position mode. Its presence is the only honest signal: MTPLX
+/// refuses to bolt a head onto a trunk it cannot prove it was trained against,
+/// and a repo merely *named* MTP proves nothing. `Qwen3.8-27B-MTP-Q4_K_M.gguf`
+/// and `mlx-community/Qwen3.8-27B-MTP-4bit` are both called MTP and neither is
+/// this.
+pub fn is_mtplx_model(model: &LocalModel) -> bool {
+    if model.format != "mlx" {
+        return false;
+    }
+    let Ok(dir) = model_dir(&model.key) else {
+        return false;
+    };
+    let Ok(data) = std::fs::read_to_string(dir.join("config.json")) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return false;
+    };
+    config.get("mtplx_mtp_contract").is_some()
+}
+
+/// Whether this installed MLX checkpoint is a drafter rather than a model.
+///
+/// Read from the checkpoint's own `config.json`, not from a list of repo
+/// names: `mlx-community/Qwen3.8-27B-MTP-4bit` is 0.24 GB of drafting head
+/// that installs like any other MLX repo, and a hardcoded list only ever knows
+/// about the drafters someone already ran into. Listed as a model it reaches
+/// the Brain and Builder pickers, where choosing it produces a server that
+/// loads and then answers nothing.
+///
+/// The two markers are the two that exist: `qwen3_5_mtp` and `gemma4_assistant`
+/// are how the only published drafters name themselves. This is a heuristic on
+/// a naming convention and will need revisiting when a third one appears.
+pub fn is_mlx_drafter(model: &LocalModel) -> bool {
+    if model.format != "mlx" {
+        return false;
+    }
+    let Ok(dir) = model_dir(&model.key) else {
+        return false;
+    };
+    let Ok(data) = std::fs::read_to_string(dir.join("config.json")) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return false;
+    };
+    let Some(kind) = config.get("model_type").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    kind.ends_with("_mtp") || kind.ends_with("_assistant")
+}
+
+/// The MTP drafter installed with this model, if it has one.
+///
+/// `None` covers three cases the caller treats identically: an MLX model
+/// (whose drafter is a separate repo, see `mlx_mtp`), a repo that ships no
+/// drafter, and a model installed before drafters were downloaded at all.
+/// Speculation changes speed and not output, so every one of them is a reason
+/// to run without it rather than to fail.
+pub fn drafter_gguf(model: &LocalModel) -> Option<PathBuf> {
+    if model.format == "mlx" {
+        return None;
+    }
+    let file = model
+        .files
+        .iter()
+        .find(|f| crate::llama::hf::is_mtp_drafter(&f.path))?;
+    let rel = local_path(&model.format, &file.path)?;
+    let path = model_dir(&model.key).ok()?.join(rel);
+    path.is_file().then_some(path)
 }
 
 /// Where a repo file lands under the model directory.
@@ -237,14 +318,23 @@ pub fn spec_from_quant(
     has_chat_template: bool,
     architecture: Option<String>,
     option: &QuantOption,
+    drafter: Option<&HfTreeFile>,
 ) -> DownloadSpec {
     let short = repo.rsplit('/').next().unwrap_or(repo);
+    let mut files = option.files.clone();
+    // Appended last so `primary_gguf` and `model_key` keep seeing the weights
+    // first, and so the drafter is the last thing downloaded: a cancelled
+    // install then leaves a model that works without speculation rather than
+    // a drafter with nothing to draft for.
+    if let Some(drafter) = drafter {
+        files.push(drafter.clone());
+    }
     DownloadSpec {
         format: "gguf".into(),
         repo: repo.to_string(),
         quant: option.quant.clone(),
         display_name: format!("{short} ({})", option.quant),
-        files: option.files.clone(),
+        files,
         context_length: detail_ctx,
         has_chat_template,
         architecture,
@@ -549,9 +639,84 @@ mod tests {
             total_bytes: 1,
             shards: 1,
         };
-        let spec = spec_from_quant("unsloth/Qwen3-8B-GGUF", Some(4096), true, None, &opt);
+        let spec = spec_from_quant("unsloth/Qwen3-8B-GGUF", Some(4096), true, None, &opt, None);
         assert_eq!(spec.display_name, "Qwen3-8B-GGUF (Q4_K_M)");
         assert_eq!(spec.context_length, Some(4096));
+        assert!(spec.files.is_empty(), "no drafter, no extra file");
+    }
+
+    /// The drafter goes last so that `model_key` and `primary_gguf` keep
+    /// keying off the weights, and so a cancelled install leaves a model that
+    /// merely cannot speculate.
+    #[test]
+    fn the_drafter_is_appended_after_the_weights() {
+        let weights = crate::llama::hf::HfTreeFile {
+            path: "Qwen3.8-27B-Q4_0.gguf".into(),
+            size: 16_000,
+            lfs: None,
+            kind: "file".into(),
+        };
+        let drafter = crate::llama::hf::HfTreeFile {
+            path: "MTP/mtp-Qwen3.8-27B-Q4_0.gguf".into(),
+            size: 1_370,
+            lfs: None,
+            kind: "file".into(),
+        };
+        let opt = QuantOption {
+            quant: "Q4_0".into(),
+            files: vec![weights],
+            total_bytes: 16_000,
+            shards: 1,
+        };
+        let spec = spec_from_quant(
+            "unsloth/Qwen3.8-27B-GGUF",
+            None,
+            true,
+            None,
+            &opt,
+            Some(&drafter),
+        );
+        assert_eq!(spec.files.len(), 2);
+        assert_eq!(spec.files[0].path, "Qwen3.8-27B-Q4_0.gguf");
+        assert_eq!(spec.files[1].path, "MTP/mtp-Qwen3.8-27B-Q4_0.gguf");
+    }
+
+    /// The drafter that prompted this: `mlx-community/Qwen3.8-27B-MTP-4bit`
+    /// installs through the ordinary MLX path, so nothing before the config is
+    /// read distinguishes 0.24 GB of drafting head from a model.
+    #[test]
+    fn a_drafter_checkpoint_is_told_from_a_model_by_its_config() {
+        let dir = std::env::temp_dir().join(format!("drafter-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let check = |json: &str| {
+            std::fs::write(dir.join("config.json"), json).unwrap();
+            // `is_mlx_drafter` resolves the directory from the key, so the
+            // test drives the predicate underneath it with the same rule.
+            let kind: serde_json::Value = serde_json::from_str(json).unwrap();
+            let kind = kind
+                .get("model_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            kind.ends_with("_mtp") || kind.ends_with("_assistant")
+        };
+
+        assert!(check(r#"{"model_type":"qwen3_5_mtp"}"#));
+        assert!(check(r#"{"model_type":"gemma4_assistant"}"#));
+        assert!(!check(r#"{"model_type":"qwen3_5"}"#));
+        assert!(!check(r#"{"model_type":"gemma4"}"#));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A GGUF model is never a drafter by this test, whatever its config says:
+    /// its drafter lives inside its own file list instead.
+    #[test]
+    fn a_gguf_entry_is_never_taken_for_an_mlx_drafter() {
+        let mut m = model();
+        m.format = "gguf".into();
+        assert!(!is_mlx_drafter(&m));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use crate::llama::catalog::{self, InstallProgress, InstallProgressFn, LocalModel};
 use crate::llama::hardware::{self, Fit, HardwareProfile};
 use crate::llama::hf::{self, HfModelSummary, QuantOption};
-use crate::llama::{LocalStatus, provision, supervisor};
+use crate::llama::{LocalStatus, mlx_mtp, provision, supervisor};
 use crate::state::AppState;
 use serde::Serialize;
 use std::sync::Arc;
@@ -65,6 +65,25 @@ pub struct LocalModelView {
     pub fit: Fit,
     /// What this model has cost on this machine, if it has been run.
     pub benchmark: Option<crate::llama::bench::ModelBenchmark>,
+    /// Whether this model can speculate, and whether it can right now.
+    pub mtp: MtpSupport,
+}
+
+/// What the MTP toggle can and cannot do for one model.
+///
+/// Three states rather than a boolean, because "your model cannot do this" and
+/// "your model can, once you download one more gigabyte" are different answers
+/// and only the second one is actionable.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MtpSupport {
+    /// A drafter exists for this model upstream.
+    pub supported: bool,
+    /// The drafter's repo, so the UI can name what it is offering to download.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drafter_repo: Option<String>,
+    /// The drafter is already on disk; the toggle alone turns it on.
+    pub drafter_installed: bool,
 }
 
 /// A model offered as a starting point.
@@ -423,7 +442,14 @@ pub async fn local_install_model(
             first.path.rsplit('/').next().unwrap_or(&first.path),
         );
         (
-            catalog::spec_from_quant(&detail.repo, ctx, has_template, arch, option),
+            catalog::spec_from_quant(
+                &detail.repo,
+                ctx,
+                has_template,
+                arch,
+                option,
+                hf::mtp_drafter(&detail.files),
+            ),
             key,
         )
     };
@@ -482,6 +508,25 @@ pub async fn local_install_model(
     Ok(model)
 }
 
+/// Download the MTP drafter that pairs with `repo`.
+///
+/// Its own command rather than part of installing the model: the drafter is
+/// another gigabyte for a feature the user may never switch on, and a model
+/// that downloads more than the user asked for is a model they stop trusting
+/// with their bandwidth.
+#[tauri::command]
+pub async fn local_install_drafter(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo: String,
+) -> Result<LocalModel, String> {
+    let drafter =
+        mlx_mtp::drafter_for(repo.trim()).ok_or_else(|| format!("{repo} has no MTP drafter"))?;
+    // A drafter is an MLX repository like any other, so the quant argument is
+    // the same placeholder `local_install_model` uses for the MLX path.
+    local_install_model(app, state, drafter.to_string(), "mlx".into()).await
+}
+
 #[tauri::command]
 pub async fn local_cancel_install(state: State<'_, AppState>, key: String) -> Result<(), String> {
     let pending = state.local_downloads.lock().await;
@@ -496,14 +541,39 @@ pub async fn local_cancel_install(state: State<'_, AppState>, key: String) -> Re
 pub async fn local_list_models() -> Result<Vec<LocalModelView>, String> {
     let hw = hardware::detect();
     let benchmarks = crate::llama::bench::load();
+    let entries = catalog::load()?.entries;
+    // A drafter has no tokenizer and answers nothing; it is a component of the
+    // model it was installed for, not a model. Listing it would offer the user
+    // a chat model that loads and then says nothing.
+    let installed_drafters: Vec<&str> = entries
+        .iter()
+        .filter(|e| mlx_mtp::is_drafter(&e.repo) || catalog::is_mlx_drafter(e))
+        .map(|e| e.repo.as_str())
+        .collect();
     let mut out = Vec::new();
-    for model in catalog::load()?.entries {
+    for model in entries
+        .iter()
+        .filter(|e| !mlx_mtp::is_drafter(&e.repo) && !catalog::is_mlx_drafter(e))
+    {
+        // GGUF and MLX answer this differently: a GGUF drafter arrives inside
+        // the model's own repo and is therefore already on disk, while an MLX
+        // drafter is a separate repo that has to be downloaded on its own.
+        let gguf_drafter = catalog::drafter_gguf(model).is_some();
+        let drafter_repo = mlx_mtp::drafter_for(&model.repo);
         out.push(LocalModelView {
             running: supervisor::is_running(&model.key).await,
-            complete: catalog::is_complete(&model),
+            complete: catalog::is_complete(model),
             fit: hardware::fit_verdict(model.total_bytes, &hw),
             benchmark: benchmarks.entries.get(&model.key).cloned(),
-            model,
+            mtp: MtpSupport {
+                supported: drafter_repo.is_some() || gguf_drafter,
+                drafter_repo: drafter_repo.map(str::to_string),
+                drafter_installed: gguf_drafter
+                    || drafter_repo.is_some_and(|d| {
+                        installed_drafters.iter().any(|i| i.eq_ignore_ascii_case(d))
+                    }),
+            },
+            model: model.clone(),
         });
     }
     out.sort_by(|a, b| a.model.display_name.cmp(&b.model.display_name));
@@ -649,10 +719,13 @@ mod tests {
             complete: true,
             fit: Fit::Comfortable,
             benchmark: None,
+            mtp: MtpSupport::default(),
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"displayName\":\"m\""), "{json}");
         assert!(json.contains("\"running\":false"), "{json}");
         assert!(json.contains("\"fit\":\"comfortable\""), "{json}");
+        assert!(json.contains("\"supported\":false"), "{json}");
+        assert!(json.contains("\"drafterInstalled\":false"), "{json}");
     }
 }

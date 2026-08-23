@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod curated;
 pub mod hardware;
 pub mod hf;
+pub mod mlx_mtp;
 pub mod mlx_tiers;
 pub mod provision;
 pub mod supervisor;
@@ -25,16 +26,26 @@ pub const LOCAL_PROVIDER_ID: &str = "local";
 
 /// Which local inference engine to run.
 ///
-/// Two engines rather than one because they are good at different things:
+/// Three engines rather than one because they are good at different things:
 /// llama.cpp runs everywhere and reads GGUF, MLX is Apple-Silicon-only and
 /// measurably faster there (~27% on generation, measured on an M2 Max with
 /// Qwen3-0.6B 4-bit: 277 tok/s llama.cpp vs 353 tok/s MLX). They also take
 /// different model formats, so the engine decides which catalog applies.
+///
+/// `Mtplx` is the odd one out and earns its place on one number. It reads the
+/// same MLX repositories as `Mlx`, but runs the multi-token-prediction head the
+/// checkpoint already carries instead of a separate drafter — measured at
+/// **2.24x** over autoregressive decoding on an M2 Max with
+/// `Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed` (14.7 → 33.0 tok/s), where the
+/// external-drafter path we built for `Mlx` came out *slower* than no
+/// speculation at all. It is also the only Python one, which is a real cost:
+/// see `provision::mtplx_exe`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Llamacpp,
     Mlx,
+    Mtplx,
 }
 
 impl Default for Engine {
@@ -60,7 +71,9 @@ impl Engine {
     pub fn is_available(self) -> bool {
         match self {
             Engine::Llamacpp => true,
-            Engine::Mlx => cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            Engine::Mlx | Engine::Mtplx => {
+                cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            }
         }
     }
 
@@ -69,7 +82,10 @@ impl Engine {
     pub fn model_format(self) -> &'static str {
         match self {
             Engine::Llamacpp => "gguf",
-            Engine::Mlx => "mlx",
+            // MTPLX reads an ordinary MLX repository — safetensors plus
+            // tokenizer — that happens to carry MTP weights and a contract
+            // describing them. Same format, same catalog, same downloader.
+            Engine::Mlx | Engine::Mtplx => "mlx",
         }
     }
 
@@ -90,7 +106,27 @@ impl Engine {
         match self {
             Engine::Llamacpp => "llama.cpp",
             Engine::Mlx => "MLX",
+            Engine::Mtplx => "MTPLX",
         }
+    }
+
+    /// The engine to actually run `model` under.
+    ///
+    /// `for_format` cannot answer this alone any more: `Mlx` and `Mtplx` read
+    /// the same format, and which one applies is a fact about the checkpoint —
+    /// whether it carries an MTP head and the contract describing it. A model
+    /// without one served through MTPLX is MTPLX doing MLX's job with a Python
+    /// interpreter attached, so the fallback is always plain `Mlx`.
+    pub fn for_model(model: &catalog::LocalModel, prefs: &LocalPrefs) -> Engine {
+        let base = Engine::for_format(&model.format);
+        if base == Engine::Mlx
+            && prefs.mtp_enabled
+            && Engine::Mtplx.is_available()
+            && catalog::is_mtplx_model(model)
+        {
+            return Engine::Mtplx;
+        }
+        base
     }
 }
 
@@ -126,6 +162,32 @@ pub struct LocalPrefs {
     /// local, but a pair of 7Bs is already ~9 GB, so the default is one.
     #[serde(default = "default_max_loaded")]
     pub max_loaded_models: u32,
+    /// Turn on MTP speculative decoding for models that have a drafter.
+    ///
+    /// Off by default, and deliberately a preference rather than something
+    /// inferred from the model: the drafter is another gigabyte resident and
+    /// the speed-up depends on how predictable *this user's* prompts are, so
+    /// it is theirs to switch off when it does not pay.
+    #[serde(default)]
+    pub mtp_enabled: bool,
+    /// Tokens proposed per speculation round. 4 is upstream's default; below 2
+    /// there is nothing to speculate on.
+    #[serde(default = "default_draft_block_size")]
+    pub draft_block_size: u32,
+    /// An `mtplx` binary to serve MTPLX-capable checkpoints with.
+    ///
+    /// Pointed at rather than provisioned, deliberately and only for now.
+    /// Every other engine here is a pinned archive verified against a sha256
+    /// before it runs; MTPLX is a Python package, and `pip install` resolves an
+    /// unpinned dependency tree over the network at install time. That is a
+    /// different security posture than the rest of this module holds itself to,
+    /// and it deserves its own decision rather than arriving behind a 2.24x.
+    #[serde(default)]
+    pub mtplx_path: Option<String>,
+}
+
+fn default_draft_block_size() -> u32 {
+    4
 }
 
 fn default_gpu_layers() -> String {
@@ -168,6 +230,9 @@ impl Default for LocalPrefs {
             parallel: default_parallel(),
             sleep_idle_seconds: default_sleep_idle(),
             max_loaded_models: default_max_loaded(),
+            mtp_enabled: false,
+            draft_block_size: default_draft_block_size(),
+            mtplx_path: None,
         }
     }
 }

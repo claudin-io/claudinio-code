@@ -626,7 +626,7 @@ export function browserClose(): Promise<void> {
 
 export type LlamaBackend = "auto" | "cpu" | "vulkan";
 /** llama.cpp runs everywhere; MLX is Apple Silicon only and faster there. */
-export type LocalEngine = "llamacpp" | "mlx";
+export type LocalEngine = "llamacpp" | "mlx" | "mtplx";
 export type Fit = "comfortable" | "tight" | "wontFit";
 
 export interface LocalPrefs {
@@ -639,6 +639,17 @@ export interface LocalPrefs {
   parallel: number;
   sleepIdleSeconds: number;
   maxLoadedModels: number;
+  /** MTP speculative decoding, for the models that have a drafter. Off by
+   *  default: the drafter is another model resident in memory, and whether it
+   *  pays depends on how predictable this user's prompts are. */
+  mtpEnabled: boolean;
+  /** Tokens proposed per speculation round. Under MTPLX this is the depth
+   *  plus one. */
+  draftBlockSize: number;
+  /** Path to an `mtplx` binary, which serves MLX checkpoints carrying their own
+   *  MTP head. Pointed at rather than installed by the app — it is a Python
+   *  package, not a pinned archive like the other two engines. */
+  mtplxPath?: string | null;
 }
 
 export interface LocalStatus {
@@ -727,6 +738,15 @@ export interface LocalModelView extends LocalModel {
   complete: boolean;
   fit: Fit;
   benchmark?: ModelBenchmark | null;
+  mtp: MtpSupport;
+}
+
+/** Whether one model can speculate, and whether it can right now. `supported`
+ *  without `drafterInstalled` is the actionable case: one download away. */
+export interface MtpSupport {
+  supported: boolean;
+  drafterRepo?: string | null;
+  drafterInstalled: boolean;
 }
 
 /** Emitted on "local-model-download-progress" and
@@ -781,6 +801,12 @@ export function localRepoQuants(repo: string): Promise<RepoQuants> {
 
 export function localInstallModel(repo: string, quant: string): Promise<LocalModel> {
   return invoke<LocalModel>("local_install_model", { repo, quant });
+}
+
+/** Download the drafter that pairs with `repo`. Separate from installing the
+ *  model because it is another gigabyte for a feature that may stay off. */
+export function localInstallDrafter(repo: string): Promise<LocalModel> {
+  return invoke<LocalModel>("local_install_drafter", { repo });
 }
 
 export function localCancelInstall(key: string): Promise<void> {

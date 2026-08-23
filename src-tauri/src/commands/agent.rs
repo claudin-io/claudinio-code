@@ -715,6 +715,9 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
         cfg.local = crate::llama::LocalPrefs {
             parallel: local.parallel.clamp(1, 16),
             max_loaded_models: local.max_loaded_models.clamp(1, 2),
+            // Below 2 there is no block to speculate on and the engine refuses
+            // to start; above 8 the drafts miss more often than they save.
+            draft_block_size: local.draft_block_size.clamp(2, 8),
             ..local
         };
     }

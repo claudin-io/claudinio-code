@@ -21,6 +21,7 @@ import {
   localInstallMlx,
   localInstallServer,
   localListModels,
+  localInstallDrafter,
   localRemoveModel,
   localRepoQuants,
   localSearchModels,
@@ -51,6 +52,9 @@ const DEFAULT_PREFS: LocalPrefs = {
   parallel: 1,
   sleepIdleSeconds: 300,
   maxLoadedModels: 1,
+  mtpEnabled: false,
+  draftBlockSize: 4,
+  mtplxPath: null,
 };
 
 /** The model's page on the Hub. Trending is a reason to look before you spend
@@ -501,6 +505,44 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
             <span class="text-xs text-ink-faint">seconds idle (0 = never)</span>
           </div>
 
+          <label class="mt-3 flex items-center gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={prefs().mtpEnabled}
+              onChange={(e) => save({ mtpEnabled: e.currentTarget.checked })}
+            />
+            Speculative decoding (MTP)
+            <span class="text-xs text-ink-faint">
+              faster replies on models that have a drafter
+            </span>
+          </label>
+
+          <Show when={prefs().mtpEnabled}>
+            <div class="mt-2">
+              <label class="text-sm text-ink">MTPLX binary (optional)</label>
+              <input
+                type="text"
+                placeholder="Path to an mtplx binary"
+                class="mt-2 w-full rounded border border-border-subtle bg-surface-1 px-2 py-1 text-sm"
+                value={prefs().mtplxPath ?? ""}
+                onChange={(e) => save({ mtplxPath: e.currentTarget.value || null })}
+              />
+              <p class="mt-1 text-xs text-ink-faint">
+                For MLX models that carry their own MTP head, MTPLX runs it directly instead of
+                loading a second drafter model — measured here at 2.24x. It is a Python package, so
+                the app does not install it for you.
+              </p>
+            </div>
+          </Show>
+
+          <p class="mt-1 text-xs text-ink-faint">
+            A drafter proposes several tokens at once and the model checks them in a single pass,
+            throwing away the guesses it rejects. Replies come out faster without getting worse —
+            though not word-for-word what the same prompt would have produced with this off, since
+            checking a batch shifts the arithmetic slightly. It costs about a gigabyte of memory
+            while the model is loaded, and only some models have a drafter.
+          </p>
+
           <p class="mt-1 text-xs text-ink-faint">
             A model often advertises far more context than a session ever reaches — and every
             unused token still costs memory the moment it loads. Left at 0, the window is sized
@@ -600,6 +642,22 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
                     >
                       Test
                     </button>
+                    <Show when={prefs().mtpEnabled && m.mtp.supported && !m.mtp.drafterInstalled}>
+                      <button
+                        disabled={busy()}
+                        title={`Downloads ${m.mtp.drafterRepo}`}
+                        onClick={() =>
+                          run(async () => {
+                            await localInstallDrafter(m.repo);
+                            await Promise.all([refetchInstalled(), refetchUsage()]);
+                            return "Drafter installed.";
+                          })
+                        }
+                        class="rounded-md border border-border-subtle bg-surface-2 px-2 py-1 text-xs text-ink hover:bg-surface-3 disabled:opacity-50"
+                      >
+                        Get drafter
+                      </button>
+                    </Show>
                     <Show when={m.running}>
                       <button
                         disabled={busy()}

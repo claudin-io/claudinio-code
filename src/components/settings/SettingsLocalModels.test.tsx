@@ -93,6 +93,7 @@ const model = (over: Partial<LocalModelView> = {}): LocalModelView => ({
   installedAt: "2026-08-19T00:00:00Z",
   running: false,
   complete: true,
+  mtp: { supported: false, drafterInstalled: false },
   fit: "comfortable",
   ...over,
 });

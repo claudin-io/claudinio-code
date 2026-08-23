@@ -172,7 +172,8 @@ pub async fn trending(
     }
 
     let filter = match engine {
-        crate::llama::Engine::Mlx => "mlx",
+        // Same Hub library tag: MTPLX serves MLX repositories.
+        crate::llama::Engine::Mlx | crate::llama::Engine::Mtplx => "mlx",
         crate::llama::Engine::Llamacpp => "gguf",
     };
     // Over-fetch: the local filter below drops a good share of any page.
@@ -332,7 +333,8 @@ pub async fn search(
     }
 
     let filter = match engine {
-        crate::llama::Engine::Mlx => "mlx",
+        // Same Hub library tag: MTPLX serves MLX repositories.
+        crate::llama::Engine::Mlx | crate::llama::Engine::Mtplx => "mlx",
         crate::llama::Engine::Llamacpp => "gguf",
     };
     let url = format!(
@@ -432,6 +434,43 @@ fn quant_of(path: &str) -> Option<String> {
     Some(quant.to_uppercase())
 }
 
+/// Whether a GGUF in a repo tree is an MTP drafter rather than a model.
+///
+/// Repos ship it beside the weights, under `MTP/` and named `mtp-*` — one
+/// small file whose tensors are the target's multi-token-prediction head.
+/// llama.cpp calls it a "sidecar" and infers `--spec-type draft-mtp` from its
+/// presence.
+///
+/// It has to be recognised *before* quants are grouped, and not only so it can
+/// be installed: `MTP/mtp-Qwen3.8-27B-Q4_0.gguf` parses to the same `Q4_0`
+/// token as the 16 GB model beside it, and two unsharded files under one token
+/// make `group_quants` drop both. Today that repo offers every quantization
+/// except the one the drafter collides with, silently.
+pub fn is_mtp_drafter(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    if !name.ends_with(".gguf") {
+        return false;
+    }
+    name.starts_with("mtp-") || lower.split('/').any(|part| part == "mtp")
+}
+
+/// The repo's MTP drafter, if it ships one.
+///
+/// Smallest wins when a repo ships several: they are drafts of the same head at
+/// different quantizations, the acceptance rate barely moves between them, and
+/// the whole point is a file small enough that verifying it costs less than
+/// generating without it.
+pub fn mtp_drafter(files: &[HfTreeFile]) -> Option<&HfTreeFile> {
+    files
+        .iter()
+        .filter(|f| f.is_file() && is_mtp_drafter(&f.path))
+        // No checksum, no install: the drafter goes down the same verified
+        // path as the weights.
+        .filter(|f| f.lfs.is_some())
+        .min_by_key(|f| f.lfs.as_ref().map_or(f.size, |l| l.size))
+}
+
 /// Group a repo tree into downloadable quantizations.
 ///
 /// Incomplete shard sets are dropped rather than offered: half a model
@@ -442,6 +481,10 @@ pub fn group_quants(files: &[HfTreeFile]) -> Vec<QuantOption> {
     let mut buckets: BTreeMap<String, Vec<HfTreeFile>> = BTreeMap::new();
     for f in files {
         if !f.is_file() || !f.path.to_lowercase().ends_with(".gguf") {
+            continue;
+        }
+        // Not a quantization of the model — see `is_mtp_drafter`.
+        if is_mtp_drafter(&f.path) {
             continue;
         }
         // Only LFS files carry a sha256, and without one there is nothing to
@@ -588,6 +631,54 @@ mod tests {
 
         let q4 = opts.iter().find(|o| o.quant == "Q4_K_M").unwrap();
         assert_eq!(q4.shards, 1);
+    }
+
+    /// Regression, with the exact filenames from `unsloth/Qwen3.8-27B-GGUF`:
+    /// the drafter's name ends in the same `Q4_0` token as the model beside
+    /// it, and two unsharded files under one token make the whole bucket get
+    /// dropped. Before the drafter was recognised, that repo offered every
+    /// quantization except this one, with nothing to say why.
+    #[test]
+    fn an_mtp_drafter_does_not_swallow_the_quant_it_is_named_after() {
+        let files = vec![
+            lfs_file("Qwen3.8-27B-Q4_0.gguf", 16_060_000_000),
+            lfs_file("MTP/mtp-Qwen3.8-27B-Q4_0.gguf", 1_370_000_000),
+        ];
+        let quants = group_quants(&files);
+        assert_eq!(quants.len(), 1, "{quants:?}");
+        assert_eq!(quants[0].quant, "Q4_0");
+        assert_eq!(quants[0].files.len(), 1);
+        assert_eq!(quants[0].files[0].path, "Qwen3.8-27B-Q4_0.gguf");
+        // The size shown to the user must be the model's, not both together.
+        assert_eq!(quants[0].total_bytes, 16_060_000_000);
+    }
+
+    #[test]
+    fn the_drafter_is_found_by_name_or_by_folder() {
+        assert!(is_mtp_drafter("MTP/mtp-Qwen3.8-27B-Q4_0.gguf"));
+        assert!(is_mtp_drafter("mtp-Qwen3.8-27B-Q4_0.gguf"));
+        assert!(is_mtp_drafter("mtp/whatever-Q4_0.gguf"));
+        // A model that merely has the letters in its name is not a drafter:
+        // plenty of Qwen3.8 repos put MTP in the model filename itself.
+        assert!(!is_mtp_drafter("Qwen3.8-27B-MTP-Q4_K_M.gguf"));
+        assert!(!is_mtp_drafter("Qwen3.8-27B-Q4_0.gguf"));
+        assert!(!is_mtp_drafter("MTP/notes.txt"));
+    }
+
+    #[test]
+    fn the_smallest_drafter_wins_and_an_unverifiable_one_never_does() {
+        let files = vec![
+            lfs_file("MTP/mtp-model-Q8_0.gguf", 3_000),
+            lfs_file("MTP/mtp-model-Q4_0.gguf", 1_000),
+            lfs_file("Qwen3.8-27B-Q4_K_M.gguf", 16_000),
+        ];
+        assert_eq!(
+            mtp_drafter(&files).map(|f| f.path.as_str()),
+            Some("MTP/mtp-model-Q4_0.gguf")
+        );
+        // No checksum, no install — same rule the weights follow.
+        assert!(mtp_drafter(&[plain_file("MTP/mtp-model-Q4_0.gguf", 1_000)]).is_none());
+        assert!(mtp_drafter(&[lfs_file("Qwen3.8-27B-Q4_K_M.gguf", 16_000)]).is_none());
     }
 
     #[test]

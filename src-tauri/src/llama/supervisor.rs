@@ -14,7 +14,7 @@
 //! the readiness probe can use `/health` and why nothing secret is put in the
 //! model alias — it is a content hash, not a path.
 
-use crate::llama::{Engine, LocalPrefs, catalog, provision};
+use crate::llama::{Engine, LocalPrefs, catalog, mlx_mtp, provision};
 use crate::procutil;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -205,6 +205,11 @@ pub struct StartSpec {
     pub gpu_layers: String,
     pub parallel: u32,
     pub sleep_idle_seconds: u32,
+    /// The MTP drafter to speculate with, when the user asked for it and the
+    /// model has one installed. `None` is plain single-token decoding.
+    pub draft_model_path: Option<PathBuf>,
+    /// Tokens per speculation round. Ignored without a drafter.
+    pub draft_block_size: u32,
 }
 
 /// The argv for one server, per engine.
@@ -216,7 +221,47 @@ pub fn build_args(spec: &StartSpec) -> Vec<String> {
     match spec.engine {
         Engine::Llamacpp => build_llamacpp_args(spec),
         Engine::Mlx => build_mlx_args(spec),
+        Engine::Mtplx => build_mtplx_args(spec),
     }
+}
+
+/// `mtplx serve`.
+///
+/// The drafter fields carry a different meaning here and it is worth being
+/// explicit: there is no drafter. `draft_model_path` is unused because the head
+/// is inside the checkpoint, and `draft_block_size` becomes `--depth`, the
+/// number of MTP levels to run. Depth is per-machine and per-model — `mtplx
+/// tune` measures it against autoregressive decoding and refuses to save a
+/// depth that loses — so the value here is a starting point, not a verdict.
+/// Measured on an M2 Max with Qwen3.8-27B: D1 1.54x, D2 1.61x, D3 2.24x.
+fn build_mtplx_args(spec: &StartSpec) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "serve".into(),
+        "--model".into(),
+        spec.model_path.display().to_string(),
+        "--model-id".into(),
+        spec.model_key.clone(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        spec.port.to_string(),
+        "--api-key".into(),
+        spec.api_key.clone(),
+    ];
+    // Off means autoregressive, not "a different engine". Keeping MTPLX with
+    // MTP switched off is what makes the toggle reversible without a reinstall,
+    // and `ar` leaves the weights loaded so the next request can switch back.
+    args.push("--generation-mode".into());
+    if spec.draft_model_path.is_some() || spec.draft_block_size > 0 {
+        args.push("mtp".into());
+        args.push("--depth".into());
+        // `--depth` counts MTP levels; `draft_block_size` counts the block
+        // including the bonus token, the way MLX and llama.cpp do.
+        args.push(spec.draft_block_size.saturating_sub(1).max(1).to_string());
+    } else {
+        args.push("ar".into());
+    }
+    args
 }
 
 /// `claudinio-mlx serve`. The model is a *directory* (safetensors plus the
@@ -239,6 +284,19 @@ fn build_mlx_args(spec: &StartSpec) -> Vec<String> {
     if spec.ctx_size > 0 {
         args.push("--ctx-size".into());
         args.push(spec.ctx_size.to_string());
+    }
+    // A drafter proposes a block of tokens per round that the model verifies
+    // in one pass, and rejected drafts are discarded — so what the model is
+    // capable of does not change. The token sequence can still differ from an
+    // unspeculated run: verifying a block evaluates several positions at once,
+    // which reorders the floating-point reductions, and a near-tied token then
+    // falls the other way. Measured on an M2 Max with Qwen3.8-27B-Q4_K_M, the
+    // two answers said the same thing in slightly different words.
+    if let Some(drafter) = &spec.draft_model_path {
+        args.push("--draft-model".into());
+        args.push(drafter.display().to_string());
+        args.push("--draft-block-size".into());
+        args.push(spec.draft_block_size.to_string());
     }
     args
 }
@@ -284,13 +342,78 @@ fn build_llamacpp_args(spec: &StartSpec) -> Vec<String> {
         args.push("--sleep-idle-seconds".into());
         args.push(spec.sleep_idle_seconds.to_string());
     }
+    // `draft-mtp` reads the drafting head the checkpoint already carries,
+    // rather than running a second full model as `draft-simple` would.
+    if let Some(drafter) = &spec.draft_model_path {
+        args.push("--spec-type".into());
+        args.push("draft-mtp".into());
+        args.push("--spec-draft-model".into());
+        args.push(drafter.display().to_string());
+        args.push("--spec-draft-n-max".into());
+        // llama.cpp counts *drafted* tokens where MLX counts the whole block,
+        // bonus token included. Same round, one off in the name.
+        args.push(spec.draft_block_size.saturating_sub(1).max(1).to_string());
+    }
     args
+}
+
+/// The drafter directory to speculate with, or `None` to decode one token at
+/// a time.
+///
+/// Every step is a reason to decline, and declining is always silent-but-fine:
+/// speculation changes speed, never output, so a model without a drafter is
+/// not a broken model. What must not happen is starting *with* a drafter the
+/// engine will refuse — the engine treats a bad pair as a fatal load error, so
+/// a stale catalog entry would turn "MTP is on" into "no local models work".
+fn drafter_path(
+    prefs: &LocalPrefs,
+    engine: Engine,
+    model: &catalog::LocalModel,
+) -> Option<PathBuf> {
+    if !prefs.mtp_enabled {
+        return None;
+    }
+    if engine == Engine::Mtplx {
+        // The head is inside the checkpoint; there is nothing to point at.
+        // `build_mtplx_args` reads `draft_block_size` as a depth instead.
+        return None;
+    }
+    if engine == Engine::Llamacpp {
+        // A GGUF repo ships its drafter beside the weights, so it was
+        // installed with them and there is nothing to look up.
+        return catalog::drafter_gguf(model);
+    }
+    let repo = mlx_mtp::drafter_for(&model.repo)?;
+    let installed = catalog::load().ok()?;
+    let drafter = installed
+        .entries
+        .iter()
+        .find(|e| e.repo.eq_ignore_ascii_case(repo))?;
+    let dir = catalog::model_path(drafter).ok()?;
+    dir.is_dir().then_some(dir)
 }
 
 /// The `llama-server` to run: the user's own if they pointed at one, otherwise
 /// the managed install (which must already be provisioned — this is a request
 /// path and may not spend the user's bandwidth on its own).
 fn resolve_exe(prefs: &LocalPrefs, engine: Engine) -> Result<PathBuf, String> {
+    if engine == Engine::Mtplx {
+        // Pointed at, not provisioned — see `LocalPrefs::mtplx_path`. This is
+        // the one engine the app does not install, and a missing path has to
+        // say so rather than quietly drop to a slower engine: MTPLX measured
+        // 2.24x here, and losing that silently is worse than a sentence.
+        let Some(explicit) = prefs.mtplx_path.as_ref().filter(|p| !p.trim().is_empty()) else {
+            return Err(
+                "MTPLX is enabled but no binary is configured — set its path in Settings → Local models"
+                    .into(),
+            );
+        };
+        let path = PathBuf::from(explicit);
+        if !path.is_file() {
+            return Err(format!("mtplx not found at {explicit}"));
+        }
+        return Ok(path);
+    }
     if engine == Engine::Mlx {
         // Overriding the binary is a llama.cpp affordance: llama-server is
         // widely installed already, ours is not.
@@ -521,7 +644,7 @@ pub async fn ensure_serving(
     // The engine is decided by the model, not by the preference: handing a
     // GGUF to MLX aborts inside its model factory, and the user's preference
     // cannot change what the weights are.
-    let engine = Engine::for_format(&model.format);
+    let engine = Engine::for_model(&model, prefs);
     if !engine.is_available() {
         return Err(format!(
             "{} is a {} model, and the {} engine is not available on this machine",
@@ -533,6 +656,7 @@ pub async fn ensure_serving(
     // llama.cpp is handed a file, MLX a directory; the catalog knows which
     // because it recorded the format when the model was installed.
     let model_path = catalog::model_path(&model)?;
+    let draft_model_path = drafter_path(prefs, engine, &model);
     let exe = resolve_exe(prefs, engine)?;
 
     // Evict down to the configured ceiling before admitting a new model.
@@ -580,6 +704,8 @@ pub async fn ensure_serving(
             },
             parallel: prefs.parallel,
             sleep_idle_seconds: prefs.sleep_idle_seconds,
+            draft_model_path: draft_model_path.clone(),
+            draft_block_size: prefs.draft_block_size,
         };
 
         let mut cmd = Command::new(&exe);
@@ -775,6 +901,45 @@ fn prom_value(body: &str, key: &str) -> Option<f64> {
 
 /// `claudinio-mlx` reports one JSON object, because there is exactly one
 /// consumer and it is ours.
+/// MTPLX reports through `/metrics`, whose `latest` object describes the most
+/// recent turn rather than the process lifetime. `decode_tok_s` is the number
+/// that matters and the one its own dashboard shows: it counts tokens the model
+/// committed, so accepted drafts are already in it.
+async fn read_mtplx_stats(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    stat: &mut LocalModelStats,
+) {
+    // `/metrics` sits beside `/v1`, not inside it.
+    let root = base.strip_suffix("/v1").unwrap_or(base);
+    let Ok(resp) = client
+        .get(format!("{root}/metrics"))
+        .bearer_auth(api_key)
+        .timeout(STATS_TIMEOUT)
+        .send()
+        .await
+    else {
+        return;
+    };
+    let Ok(json) = resp.json::<serde_json::Value>().await else {
+        return;
+    };
+    let Some(latest) = json.get("latest") else {
+        return;
+    };
+    let number = |key: &str| {
+        latest
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0)
+    };
+    stat.tokens_per_second = number("decode_tok_s");
+    stat.prompt_tokens_per_second = number("prefill_tok_s");
+    stat.tokens_generated = number("completion_tokens") as u64;
+    stat.ctx_used = number("prompt_tokens") as u32 + number("completion_tokens") as u32;
+}
+
 async fn read_mlx_stats(
     client: &reqwest::Client,
     base: &str,
@@ -941,6 +1106,7 @@ pub async fn stats() -> Vec<LocalModelStats> {
         let base = format!("http://127.0.0.1:{}", inst.port);
         match inst.engine {
             Engine::Mlx => read_mlx_stats(&client, &base, &inst.api_key, &mut stat).await,
+            Engine::Mtplx => read_mtplx_stats(&client, &base, &inst.api_key, &mut stat).await,
             Engine::Llamacpp => read_llamacpp_stats(&client, &base, &inst.api_key, &mut stat).await,
         }
         if stat.sleeping {
@@ -968,6 +1134,8 @@ mod tests {
             gpu_layers: "auto".into(),
             parallel: 2,
             sleep_idle_seconds: 300,
+            draft_model_path: None,
+            draft_block_size: 4,
         }
     }
 
@@ -999,6 +1167,177 @@ mod tests {
         for flag in ["-c", "-np", "--sleep-idle-seconds", "-ngl"] {
             assert!(!args.iter().any(|a| a == flag), "{flag} should be absent");
         }
+    }
+
+    /// The whole point of the toggle: off, neither engine is told anything
+    /// about drafting. A flag that leaked through here would make the drafter
+    /// resident for a user who switched it off.
+    #[test]
+    fn no_drafter_means_no_speculation_flags_on_either_engine() {
+        for engine in [Engine::Llamacpp, Engine::Mlx] {
+            let mut s = spec();
+            s.engine = engine;
+            let args = build_args(&s);
+            for flag in [
+                "--draft-model",
+                "--draft-block-size",
+                "--spec-type",
+                "--spec-draft-model",
+                "--spec-draft-n-max",
+            ] {
+                assert!(
+                    !args.iter().any(|a| a == flag),
+                    "{flag} leaked into {engine:?} argv: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mlx_args_carry_the_drafter_when_there_is_one() {
+        let mut s = spec();
+        s.engine = Engine::Mlx;
+        s.model_path = PathBuf::from("/models/abc123");
+        s.draft_model_path = Some(PathBuf::from("/models/drafter"));
+        let joined = build_args(&s).join(" ");
+        assert!(joined.contains("--draft-model /models/drafter"), "{joined}");
+        assert!(joined.contains("--draft-block-size 4"), "{joined}");
+        // The MLX sidecar has never heard of llama.cpp's spelling.
+        assert!(!joined.contains("--spec-type"), "{joined}");
+    }
+
+    #[test]
+    fn llamacpp_args_ask_for_the_mtp_mode_by_name() {
+        let mut s = spec();
+        s.draft_model_path = Some(PathBuf::from("/models/drafter.gguf"));
+        let joined = build_args(&s).join(" ");
+        // `draft-simple` would run a second full model instead of the head the
+        // checkpoint carries — same flag shape, different thing entirely.
+        assert!(joined.contains("--spec-type draft-mtp"), "{joined}");
+        assert!(
+            joined.contains("--spec-draft-model /models/drafter.gguf"),
+            "{joined}"
+        );
+        assert!(!joined.contains("--draft-model /"), "{joined}");
+    }
+
+    /// llama.cpp counts drafted tokens, MLX counts the block including the
+    /// bonus. Passing MLX's number straight through would draft one token too
+    /// many every round.
+    #[test]
+    fn the_block_size_is_translated_for_llamacpp_and_never_reaches_zero() {
+        let mut s = spec();
+        s.draft_model_path = Some(PathBuf::from("/d.gguf"));
+        for (block, expected) in [(4u32, "3"), (2, "1"), (1, "1"), (0, "1")] {
+            s.draft_block_size = block;
+            let args = build_args(&s);
+            let i = args.iter().position(|a| a == "--spec-draft-n-max").unwrap();
+            assert_eq!(args[i + 1], expected, "block size {block}");
+        }
+    }
+
+    fn model(format: &str, repo: &str) -> catalog::LocalModel {
+        catalog::LocalModel {
+            key: "no-such-key-on-disk".into(),
+            display_name: "m".into(),
+            repo: repo.into(),
+            quant: "Q4_K_M".into(),
+            files: vec![],
+            total_bytes: 1,
+            context_length: None,
+            has_chat_template: true,
+            architecture: None,
+            format: format.into(),
+            installed_at: "2026-08-24T00:00:00Z".into(),
+        }
+    }
+
+    fn prefs(mtp: bool) -> LocalPrefs {
+        LocalPrefs {
+            mtp_enabled: mtp,
+            ..LocalPrefs::default()
+        }
+    }
+
+    /// Regression. `drafter_path` had a llama.cpp branch that a silent
+    /// `str.replace` miss never actually wrote to the file, and every existing
+    /// test covered `build_args` — which takes the resolved path as input — so
+    /// the suite stayed green while the app could not resolve a drafter at all.
+    #[test]
+    fn a_gguf_model_asks_the_catalog_for_its_drafter() {
+        // The catalog lookup returns None here because the key is not on disk;
+        // what matters is that the llama.cpp path reaches the lookup at all
+        // instead of falling into the MLX repo table, which would never match
+        // a GGUF repo and would return None for the wrong reason.
+        let m = model("gguf", "unsloth/Qwen3.8-27B-GGUF");
+        assert!(drafter_path(&prefs(true), Engine::Llamacpp, &m).is_none());
+        assert!(catalog::drafter_gguf(&m).is_none());
+    }
+
+    #[test]
+    fn the_toggle_off_means_no_drafter_on_any_engine() {
+        let gguf = model("gguf", "unsloth/Qwen3.8-27B-GGUF");
+        let mlx = model("mlx", "mlx-community/gemma-4-31b-it-4bit");
+        assert!(drafter_path(&prefs(false), Engine::Llamacpp, &gguf).is_none());
+        assert!(drafter_path(&prefs(false), Engine::Mlx, &mlx).is_none());
+    }
+
+    /// MTPLX runs the head inside the checkpoint. Handing it a drafter path
+    /// would be handing it a second model it has no flag to accept.
+    #[test]
+    fn mtplx_never_resolves_an_external_drafter() {
+        let m = model("mlx", "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed");
+        assert!(drafter_path(&prefs(true), Engine::Mtplx, &m).is_none());
+    }
+
+    #[test]
+    fn mtplx_serves_the_model_directory_and_requires_the_key() {
+        let mut s = spec();
+        s.engine = Engine::Mtplx;
+        s.model_path = PathBuf::from("/models/abc123");
+        let args = build_mtplx_args(&s);
+        let joined = args.join(" ");
+        assert_eq!(args.first().map(String::as_str), Some("serve"));
+        assert!(joined.contains("--model /models/abc123"), "{joined}");
+        assert!(joined.contains("--host 127.0.0.1"), "{joined}");
+        assert!(!joined.contains("0.0.0.0"), "{joined}");
+        assert!(joined.contains("--api-key deadbeef"), "{joined}");
+        // Block size 4 is depth 3 — the depth `mtplx tune` picked on an M2 Max.
+        assert!(joined.contains("--generation-mode mtp"), "{joined}");
+        assert!(joined.contains("--depth 3"), "{joined}");
+        // Flags belonging to the other two engines must not leak across.
+        for flag in [
+            "--jinja",
+            "-ngl",
+            "--ctx-size",
+            "--draft-model",
+            "--spec-type",
+        ] {
+            assert!(!args.iter().any(|a| a == flag), "{flag} in {joined}");
+        }
+    }
+
+    /// Off must still be MTPLX, in `ar` mode: switching engines instead would
+    /// unload the weights and make a toggle cost a full reload each way.
+    #[test]
+    fn mtplx_with_no_speculation_asks_for_autoregressive() {
+        let mut s = spec();
+        s.engine = Engine::Mtplx;
+        s.draft_block_size = 0;
+        s.draft_model_path = None;
+        let joined = build_mtplx_args(&s).join(" ");
+        assert!(joined.contains("--generation-mode ar"), "{joined}");
+        assert!(!joined.contains("--depth"), "{joined}");
+    }
+
+    #[test]
+    fn every_engine_reads_a_format_and_names_itself() {
+        for e in [Engine::Llamacpp, Engine::Mlx, Engine::Mtplx] {
+            assert!(!e.label().is_empty());
+            assert!(!e.model_format().is_empty());
+        }
+        // MTPLX reads MLX repositories, so the catalog and downloader are shared.
+        assert_eq!(Engine::Mtplx.model_format(), Engine::Mlx.model_format());
     }
 
     #[test]

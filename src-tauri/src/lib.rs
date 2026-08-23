@@ -122,6 +122,7 @@ pub fn run() {
             commands::local_llm::local_search_models,
             commands::local_llm::local_repo_quants,
             commands::local_llm::local_install_model,
+            commands::local_llm::local_install_drafter,
             commands::local_llm::local_cancel_install,
             commands::local_llm::local_list_models,
             commands::local_llm::local_remove_model,
