@@ -209,3 +209,14 @@ O backend continua idêntico: `new_session` (`commands/agent.rs:472`) só libera
 - Ajustar startNewSession para limpar UI só após sucesso e zerar activeSessionId: Verified by reading back lines 1322-1344 of ChatPanel.tsx: startNewSession now has catch(e) with showToast+return, and setActiveSessionId(null) before the clear block. No other changes in the function.
 - Ajustar handleConfirmNew com a mesma lógica de falha/limpeza: Verified by reading back lines 1346-1365 of ChatPanel.tsx: handleConfirmNew now has catch(e) with showToast+return, setShowNewPopover(false) is still first, and setActiveSessionId(null) before the clear block. No other changes in the function.
 - Rodar harness de qualidade e verificar a correção: run_quality: 740 tests passed, 0 failed. grep confirms only two call sites in source (line 1506 startNewSession(), line 1550 onConfirm=handleConfirmNew), both arity-0 — signatures unchanged. Manual read-back of lines 1319-1365 confirms both catch blocks now showToast+return and success paths include setActiveSessionId(null).
+
+
+## Implementation Log — 2026-08-23 02:01
+**Summary:** MCP server spawns now inherit login-shell PATH, fixing \"failed to spawn 'npx': No such file or directory\"
+**Changed files:** M src-tauri/src/agent/mcp.rs
+**Commits:** _(git unavailable or none)_
+**Journal:** The MCP stdio spawner used tokio::process::Command directly without setting PATH, so spawned servers (npx) couldn't find Homebrew binaries. The bash tool already had a login_path() resolver that extracts the login shell PATH (and falls back to scanning /opt/homebrew/bin, ~/.cargo/bin, nvm). Wired that same resolver into connect_one in mcp.rs, with user-specified PATH in the server env map taking precedence. Rust tests pass (exit code) and JS 740/740 green.
+
+**Task journal:**
+- Fix MCP server PATH resolution: Applied fix at mcp.rs:208-210. Added PATH env resolution via login_path() in connect_one Stdio transport branch. User's explicit PATH in env takes precedence.; Verified: clean compile, zero warnings.
+- Verify with run_quality: run_quality: rust tests PASS (exit code), js 740 passed / 0 failed. Verdict: pass.

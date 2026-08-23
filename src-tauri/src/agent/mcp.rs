@@ -206,6 +206,11 @@ async fn connect_one(
                 for (k, v) in env {
                     c.env(k, v);
                 }
+                // Inherit the login shell PATH so MCP servers can find npx, cargo, etc.
+                // User's explicit PATH in env takes precedence.
+                if !env.contains_key("PATH") {
+                    c.env("PATH", crate::agent::tools::bash::login_path());
+                }
                 if let Some(dir) = &workdir {
                     c.current_dir(dir);
                 }
