@@ -665,6 +665,14 @@ export interface LocalStatus {
   mlxInstalled: boolean;
   mlxVersion: string;
   mlxDownloadSize: number;
+  /** MTPLX is a Python environment rather than a binary, so "installed" means
+   *  a pinned interpreter, a venv and a pinned release — all built by the app. */
+  mtplxSupported: boolean;
+  mtplxInstalled: boolean;
+  mtplxVersion: string;
+  /** The pinned interpreter only; the wheels pip resolves afterwards have no
+   *  size known ahead of time. A floor, not a total. */
+  mtplxDownloadSize: number;
   /** What will actually run, after falling back if the configured engine is
    *  not available on this machine. */
   engine: LocalEngine;
@@ -785,6 +793,30 @@ export function localUninstallServer(): Promise<LocalStatus> {
 
 export function localInstallMlx(): Promise<LocalStatus> {
   return invoke<LocalStatus>("local_install_mlx");
+}
+
+/** A Hub model with a size measured against this machine's memory. */
+export interface SizedModel {
+  repo: string;
+  downloads: number;
+  likes: number;
+  /** Weights only — a few percent under the download. */
+  totalBytes: number;
+  fit: Fit;
+}
+
+/** MTPLX-capable models that fit this machine, best first. Live from the Hub:
+ *  the `mtplx` tag is how a converter says a checkpoint carries an MTP head. */
+export function localMtplxModels(limit?: number): Promise<SizedModel[]> {
+  return invoke<SizedModel[]>("local_mtplx_models", { limit: limit ?? null });
+}
+
+export function localInstallMtplx(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_install_mtplx");
+}
+
+export function localUninstallMtplx(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_uninstall_mtplx");
 }
 
 export function localUninstallMlx(): Promise<LocalStatus> {

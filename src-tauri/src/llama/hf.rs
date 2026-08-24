@@ -156,6 +156,45 @@ pub fn resolve_url(repo: &str, path: &str) -> String {
 /// The cost is that nobody has checked these drive a tool-calling loop — the
 /// quant table still reports whether a chat template exists, which is the part
 /// that decides it.
+/// The Hub library tag that finds this engine's models.
+///
+/// `mtplx` is its own tag rather than a slice of `mlx`, and that is the whole
+/// discovery story: a checkpoint only speculates if it carries an MTP head, the
+/// tag is how its author says so, and the alternative would be reading
+/// `config.json` for every candidate.
+fn library_tag(engine: crate::llama::Engine) -> &'static str {
+    match engine {
+        crate::llama::Engine::Llamacpp => "gguf",
+        crate::llama::Engine::Mlx => "mlx",
+        crate::llama::Engine::Mtplx => "mtplx",
+    }
+}
+
+/// Weights, in bytes, from the tensor table the Hub already computed.
+///
+/// The list endpoint returns a parameter count per dtype, which is enough to
+/// size a model without a tree request each — the difference between one HTTP
+/// call for a whole suggestion list and one per entry. Quantized MLX weights
+/// arrive packed into `U32`, so the count is words rather than parameters and
+/// the width table has to be applied per dtype rather than assuming 2 bytes.
+///
+/// Weights only: tokenizer and config are not tensors, so this runs a few
+/// percent under the download. Measured against three repos, it lands 4-5%
+/// low — fine for deciding what fits in memory, and deliberately the
+/// conservative direction for a number a download bar is not based on.
+pub fn safetensors_bytes(parameters: &std::collections::HashMap<String, u64>) -> u64 {
+    fn width(dtype: &str) -> u64 {
+        match dtype {
+            "F64" | "I64" | "U64" => 8,
+            "F32" | "I32" | "U32" => 4,
+            "F8_E4M3" | "F8_E5M2" | "I8" | "U8" | "BOOL" => 1,
+            // F16, BF16, I16, U16 and anything new enough to be unknown.
+            _ => 2,
+        }
+    }
+    parameters.iter().map(|(d, n)| width(d) * n).sum()
+}
+
 pub async fn trending(
     engine: crate::llama::Engine,
     limit: usize,
@@ -171,11 +210,7 @@ pub async fn trending(
         gated: serde_json::Value,
     }
 
-    let filter = match engine {
-        // Same Hub library tag: MTPLX serves MLX repositories.
-        crate::llama::Engine::Mlx | crate::llama::Engine::Mtplx => "mlx",
-        crate::llama::Engine::Llamacpp => "gguf",
-    };
+    let filter = library_tag(engine);
     // Over-fetch: the local filter below drops a good share of any page.
     let fetch = (limit * 4).clamp(20, 100);
     let url = format!("{API}?filter={filter}&sort=trendingScore&direction=-1&limit={fetch}");
@@ -203,6 +238,120 @@ pub async fn trending(
             gated: false,
         })
         .collect())
+}
+
+/// MTPLX-capable models that fit this machine, largest first.
+///
+/// Dynamic on purpose, where the MLX suggestions are a hand-written RAM-tier
+/// table: MTPLX models are published by whoever converts them, the catalog
+/// grows without us, and a table would be stale the week after it shipped. The
+/// `mtplx` tag plus the Hub's own tensor accounting is enough to both find them
+/// and size them, in one request.
+///
+/// Ranked by fit first and popularity second, not by size. Sorting on size
+/// alone looked right and was not: on a 64 GB machine it filled the list with
+/// 29.5 GB `Tight` third-party conversions and pushed
+/// `Qwen3.8-27B-MTPLX-Optimized-Speed` — the 20.4 GB build measured at 2.24x
+/// here, with twice the downloads of anything near it — off the end entirely.
+/// A model that fits comfortably beats a larger one that barely fits, and a
+/// conversion thousands of people run beats one nobody has.
+///
+/// `Fit::WontFit` is dropped rather than greyed out, so a machine too small for
+/// anything gets an empty list and the UI says so — more honest than offering a
+/// download that will swap.
+pub async fn mtplx_suggestions(
+    hw: &crate::llama::hardware::HardwareProfile,
+    limit: usize,
+) -> Result<Vec<SizedModel>, String> {
+    #[derive(Deserialize)]
+    struct Safetensors {
+        #[serde(default)]
+        parameters: std::collections::HashMap<String, u64>,
+    }
+    #[derive(Deserialize)]
+    struct Row {
+        id: String,
+        #[serde(default)]
+        downloads: u64,
+        #[serde(default)]
+        likes: u64,
+        #[serde(default)]
+        gated: serde_json::Value,
+        #[serde(default)]
+        safetensors: Option<Safetensors>,
+    }
+
+    // The Hub's whole page, not a multiple of `limit`. Ranking happens after
+    // the fit filter, and the models a small machine can run are the least
+    // downloaded ones — Qwen3.5-4B-MTPLX is 2.4 GB with 569 downloads, so a
+    // shallow fetch sorted by popularity never reaches it, and a 16 GB Mac is
+    // told nothing fits when three things do.
+    const FETCH: usize = 100;
+    let tag = library_tag(crate::llama::Engine::Mtplx);
+    // Built in one piece: a `\`-continued literal here was reflowed by rustfmt
+    // into a run of spaces inside the query string.
+    let url = format!(
+        "{API}?filter={tag}&sort=downloads&direction=-1&limit={FETCH}&expand[]=safetensors&expand[]=downloads&expand[]=likes&expand[]=gated"
+    );
+    let _guard = NetGuard::begin(NetSource::HuggingFaceApi, "mtplx models");
+    let rows: Vec<Row> = crate::http::default_client()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("hugging face mtplx models: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("hugging face mtplx models: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("hugging face mtplx models: unexpected response: {e}"))?;
+
+    let mut out: Vec<SizedModel> = rows
+        .into_iter()
+        .filter(|r| !is_gated(&r.gated))
+        .filter_map(|r| {
+            // No tensor table, no size, and without a size there is no honest
+            // way to say whether it fits.
+            let bytes = safetensors_bytes(&r.safetensors?.parameters);
+            if bytes == 0 {
+                return None;
+            }
+            Some(SizedModel {
+                repo: r.id,
+                downloads: r.downloads,
+                likes: r.likes,
+                total_bytes: bytes,
+                fit: crate::llama::hardware::fit_verdict(bytes, hw),
+            })
+        })
+        .filter(|m| m.fit != crate::llama::hardware::Fit::WontFit)
+        .filter(|m| is_usable_assistant(&m.repo))
+        .collect();
+
+    out.sort_by(|a, b| {
+        let rank = |f: crate::llama::hardware::Fit| match f {
+            crate::llama::hardware::Fit::Comfortable => 0,
+            crate::llama::hardware::Fit::Tight => 1,
+            crate::llama::hardware::Fit::WontFit => 2,
+        };
+        rank(a.fit)
+            .cmp(&rank(b.fit))
+            .then(b.downloads.cmp(&a.downloads))
+            .then(b.total_bytes.cmp(&a.total_bytes))
+    });
+    out.truncate(limit);
+    Ok(out)
+}
+
+/// A Hub model with a size the machine can be measured against.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SizedModel {
+    pub repo: String,
+    pub downloads: u64,
+    pub likes: u64,
+    /// Weights only — see `safetensors_bytes`.
+    pub total_bytes: u64,
+    pub fit: crate::llama::hardware::Fit,
 }
 
 /// Whether a repo name looks like something the agent could drive.
@@ -333,7 +482,6 @@ pub async fn search(
     }
 
     let filter = match engine {
-        // Same Hub library tag: MTPLX serves MLX repositories.
         crate::llama::Engine::Mlx | crate::llama::Engine::Mtplx => "mlx",
         crate::llama::Engine::Llamacpp => "gguf",
     };
@@ -638,6 +786,53 @@ mod tests {
     /// it, and two unsharded files under one token make the whole bucket get
     /// dropped. Before the drafter was recognised, that repo offered every
     /// quantization except this one, with nothing to say why.
+    /// The numbers are the real tensor tables from
+    /// `Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed` and its Quality sibling,
+    /// checked against what the Hub reports those repos actually occupy.
+    #[test]
+    fn safetensors_bytes_lands_just_under_the_real_download() {
+        let speed = std::collections::HashMap::from([
+            ("BF16".to_string(), 1_950_715_120u64),
+            ("U32".to_string(), 4_135_649_280),
+        ]);
+        let bytes = safetensors_bytes(&speed);
+        // usedStorage for that repo is 21.55 GB; weights alone are 20.44 GB.
+        assert_eq!(bytes, 20_444_027_360);
+        let real = 21_552_630_833u64;
+        assert!(bytes < real, "must not over-report");
+        assert!(
+            (real - bytes) * 100 / real < 10,
+            "within 10% of the download, got {bytes} vs {real}"
+        );
+    }
+
+    /// Quantized MLX weights arrive packed in `U32`, so the count is words and
+    /// not parameters. Treating every dtype as 2 bytes — the obvious shortcut —
+    /// halves a 4-bit model's size and tells a 16 GB Mac that a 20 GB model
+    /// fits comfortably.
+    #[test]
+    fn packed_quantized_weights_are_four_bytes_a_word() {
+        let packed = std::collections::HashMap::from([("U32".to_string(), 1_000u64)]);
+        assert_eq!(safetensors_bytes(&packed), 4_000);
+        let half = std::collections::HashMap::from([("BF16".to_string(), 1_000u64)]);
+        assert_eq!(safetensors_bytes(&half), 2_000);
+        // An unknown dtype falls back to 2 rather than to zero: a model of size
+        // zero would be offered to every machine.
+        let exotic = std::collections::HashMap::from([("F4_SOMETHING".to_string(), 1_000u64)]);
+        assert_eq!(safetensors_bytes(&exotic), 2_000);
+        assert_eq!(safetensors_bytes(&std::collections::HashMap::new()), 0);
+    }
+
+    #[test]
+    fn each_engine_looks_under_its_own_hub_tag() {
+        use crate::llama::Engine;
+        assert_eq!(library_tag(Engine::Llamacpp), "gguf");
+        assert_eq!(library_tag(Engine::Mlx), "mlx");
+        // Not "mlx": a checkpoint only speculates if it carries an MTP head,
+        // and the separate tag is how its author says so.
+        assert_eq!(library_tag(Engine::Mtplx), "mtplx");
+    }
+
     #[test]
     fn an_mtp_drafter_does_not_swallow_the_quant_it_is_named_after() {
         let files = vec![

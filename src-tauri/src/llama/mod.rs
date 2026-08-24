@@ -292,6 +292,15 @@ pub struct LocalStatus {
     pub mlx_installed: bool,
     pub mlx_version: String,
     pub mlx_download_size: u64,
+    /// MTPLX is provisioned separately again, and unlike the other two it is a
+    /// Python environment rather than a binary — so "installed" means an
+    /// interpreter, a venv and a pinned release, all of which the app builds.
+    pub mtplx_supported: bool,
+    pub mtplx_installed: bool,
+    pub mtplx_version: String,
+    /// The pinned interpreter only. The wheels `pip` resolves afterwards have
+    /// no size known ahead of time, so the UI calls this a floor.
+    pub mtplx_download_size: u64,
     pub engine: Engine,
 }
 
@@ -313,6 +322,10 @@ pub fn status(prefs: &LocalPrefs) -> LocalStatus {
         mlx_installed: provision::mlx_installed(),
         mlx_version: provision::mlx_version().to_string(),
         mlx_download_size: provision::mlx_download_size(),
+        mtplx_supported: Engine::Mtplx.is_available(),
+        mtplx_installed: provision::mtplx_installed(),
+        mtplx_version: provision::mtplx_version().to_string(),
+        mtplx_download_size: provision::mtplx_download_size(),
         engine: prefs.effective_engine(),
     }
 }

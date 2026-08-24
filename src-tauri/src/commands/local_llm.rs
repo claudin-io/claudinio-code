@@ -167,6 +167,56 @@ pub async fn local_uninstall_mlx(state: State<'_, AppState>) -> Result<LocalStat
     Ok(crate::llama::status(&prefs))
 }
 
+/// Build the MTPLX environment: a pinned interpreter, a venv, a pinned release.
+///
+/// Its own command for the same reason `local_install_mlx` is: the runtimes are
+/// independent, and a user can have any combination of the three.
+#[tauri::command]
+pub async fn local_install_mtplx(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<LocalStatus, String> {
+    let emitter = app.clone();
+    let on_progress: crate::download::ProgressFn = Arc::new(move |downloaded, total| {
+        let _ = emitter.emit(
+            "llama-server-install-progress",
+            ModelDownloadProgress {
+                key: "mtplx".into(),
+                file_index: 1,
+                file_count: 1,
+                downloaded_bytes: downloaded,
+                total_bytes: total,
+                overall_done: downloaded,
+                overall_total: total,
+                phase: "download",
+            },
+        );
+    });
+    provision::ensure_mtplx_installed(Some(&on_progress)).await?;
+    let prefs = { state.config.lock().await.local.clone() };
+    Ok(crate::llama::status(&prefs))
+}
+
+#[tauri::command]
+pub async fn local_uninstall_mtplx(state: State<'_, AppState>) -> Result<LocalStatus, String> {
+    supervisor::stop_all().await;
+    provision::mtplx_uninstall()?;
+    let prefs = { state.config.lock().await.local.clone() };
+    Ok(crate::llama::status(&prefs))
+}
+
+/// MTPLX models that fit this machine.
+///
+/// Live from the Hub rather than a curated table: the `mtplx` tag is how a
+/// converter says a checkpoint carries an MTP head, and the catalog grows
+/// without us. Sized against the machine's own memory, largest first, with
+/// nothing offered that cannot fit.
+#[tauri::command]
+pub async fn local_mtplx_models(limit: Option<usize>) -> Result<Vec<hf::SizedModel>, String> {
+    let hw = hardware::detect();
+    hf::mtplx_suggestions(&hw, limit.unwrap_or(8)).await
+}
+
 #[tauri::command]
 pub fn local_hardware() -> HardwareProfile {
     hardware::detect()

@@ -349,6 +349,169 @@ pub async fn ensure_mlx_installed(on_progress: Option<&ProgressFn>) -> Result<Pa
     Ok(exe)
 }
 
+// ---------------------------------------------------------------- MTPLX ---
+//
+// The only engine here that is a Python package. Everything below exists to
+// make that invisible: the user turns MTPLX on and the app produces a working
+// interpreter, a venv and a pinned MTPLX in it, with no Homebrew, no PATH and
+// no `pip` of their own involved.
+
+include!("mtplx_pins.rs");
+
+pub fn mtplx_install_dir() -> Result<PathBuf, String> {
+    Ok(llama_dir()?.join(format!("mtplx-{MTPLX_VERSION}")))
+}
+
+/// The bundled interpreter.
+///
+/// Directly under the install dir, not under `python/`: the tarball's root is
+/// a `python/` directory and `extract_tar_gz` strips the common root — which is
+/// what makes llama.cpp's tag directory disappear, and does the same here.
+fn mtplx_python(dir: &Path) -> PathBuf {
+    dir.join("bin").join("python3")
+}
+
+/// The `mtplx` entry point the supervisor runs.
+pub fn mtplx_exe() -> Result<PathBuf, String> {
+    Ok(mtplx_install_dir()?.join("venv").join("bin").join("mtplx"))
+}
+
+pub fn mtplx_installed() -> bool {
+    match (mtplx_install_dir(), mtplx_exe()) {
+        (Ok(dir), Ok(exe)) => dir.join(READY_MARKER).exists() && exe.is_file(),
+        _ => false,
+    }
+}
+
+pub fn mtplx_version() -> &'static str {
+    MTPLX_VERSION
+}
+
+/// What the install costs in bandwidth, as far as it can be known up front.
+///
+/// Only the interpreter has a pinned size; the wheels `pip` then resolves do
+/// not, and MLX alone is a large one. Reporting the honest floor and calling it
+/// a floor beats a confident number that is wrong by 200 MB.
+pub fn mtplx_download_size() -> u64 {
+    PYTHON_SIZE
+}
+
+/// Build a working MTPLX: unpack the pinned interpreter, make a venv, install
+/// the pinned release into it.
+///
+/// Callers must have user consent before reaching here — this spends a few
+/// hundred MB of someone's bandwidth.
+pub async fn ensure_mtplx_installed(on_progress: Option<&ProgressFn>) -> Result<PathBuf, String> {
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return Err("MTPLX is Apple Silicon only".into());
+    }
+    let exe = mtplx_exe()?;
+    if mtplx_installed() {
+        return Ok(exe);
+    }
+
+    let dir = mtplx_install_dir()?;
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("clear {}: {e}", dir.display()))?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+
+    let archive = llama_dir()?.join(format!("cpython-{PYTHON_VERSION}.tar.gz"));
+    download_verified_with_retries(
+        PYTHON_URL,
+        &archive,
+        &format!("Python {PYTHON_VERSION}"),
+        PYTHON_SHA256,
+        PYTHON_SIZE,
+        NetSource::LlamaServerDownload,
+        on_progress,
+        DEFAULT_RETRIES,
+    )
+    .await?;
+
+    let archive_for_task = archive.clone();
+    let dir_for_task = dir.clone();
+    tokio::task::spawn_blocking(move || extract_tar_gz(&archive_for_task, &dir_for_task))
+        .await
+        .map_err(|e| format!("extract task failed: {e}"))??;
+    let _ = std::fs::remove_file(&archive);
+
+    let python = mtplx_python(&dir);
+    if !python.is_file() {
+        return Err(format!(
+            "the extracted interpreter has no bin/python3 under {}",
+            dir.display()
+        ));
+    }
+
+    run_tool(
+        &python,
+        &[
+            "-m",
+            "venv",
+            "--copies",
+            &dir.join("venv").display().to_string(),
+        ],
+        "create the MTPLX environment",
+    )
+    .await?;
+
+    let pip = dir.join("venv").join("bin").join("pip");
+    // `--no-input` because a pip that stops to ask something has nobody to ask:
+    // this runs with no terminal attached and would hang until the user gave up
+    // on the app rather than on the install.
+    run_tool(
+        &pip,
+        &[
+            "install",
+            "--no-input",
+            "--disable-pip-version-check",
+            &format!("mtplx[server]=={MTPLX_VERSION}"),
+        ],
+        "install MTPLX",
+    )
+    .await?;
+
+    if !exe.is_file() {
+        return Err("pip reported success but produced no mtplx executable".into());
+    }
+    std::fs::write(dir.join(READY_MARKER), MTPLX_VERSION)
+        .map_err(|e| format!("write ready marker: {e}"))?;
+    Ok(exe)
+}
+
+/// Run one step of the install, failing with what it actually printed.
+///
+/// `pip` and `venv` report their real problem on stderr and exit non-zero with
+/// nothing on stdout, so a bare exit code reaches the user as "install failed"
+/// and nothing else.
+async fn run_tool(exe: &Path, args: &[&str], what: &str) -> Result<(), String> {
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    crate::procutil::no_window_tokio(&mut cmd);
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("could not {what}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+    let detail: Vec<&str> = tail.into_iter().rev().collect();
+    Err(format!("could not {what}: {}", detail.join(" / ")))
+}
+
+pub fn mtplx_uninstall() -> Result<(), String> {
+    let dir = mtplx_install_dir()?;
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
 pub fn mlx_uninstall() -> Result<(), String> {
     let dir = mlx_install_dir()?;
     if dir.exists() {

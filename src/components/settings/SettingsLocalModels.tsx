@@ -27,7 +27,10 @@ import {
   localSearchModels,
   localStatus,
   localTestModel,
+  localInstallMtplx,
+  localMtplxModels,
   localUninstallMlx,
+  localUninstallMtplx,
   localUninstallServer,
   localUnloadModel,
   type Fit,
@@ -119,6 +122,13 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
   const [curated] = createResource(localCuratedModels);
   const [installed, { refetch: refetchInstalled }] = createResource(localListModels);
   const [usage, { refetch: refetchUsage }] = createResource(localDiskUsage);
+  // Keyed on the install flag: with no runtime there is nothing to suggest for,
+  // and the Hub should not be asked on behalf of a user who never turned this
+  // on. Re-runs by itself the moment the install finishes.
+  const [mtplxModels] = createResource(
+    () => (prefs().mtpEnabled && status()?.mtplxInstalled) || undefined,
+    () => localMtplxModels(6),
+  );
 
   const [progress, setProgress] = createSignal<ModelDownloadProgress | null>(null);
   const [runtimeProgress, setRuntimeProgress] = createSignal<ModelDownloadProgress | null>(null);
@@ -184,6 +194,21 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
       await localUninstallMlx();
       await refetchStatus();
       return "MLX runtime removed.";
+    });
+
+  const installMtplx = () =>
+    run(async () => {
+      await localInstallMtplx();
+      await refetchStatus();
+      setRuntimeProgress(null);
+      return "MTPLX ready.";
+    });
+
+  const removeMtplx = () =>
+    run(async () => {
+      await localUninstallMtplx();
+      await refetchStatus();
+      return "MTPLX removed.";
     });
 
   const installRuntime = () =>
@@ -517,21 +542,92 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
             </span>
           </label>
 
-          <Show when={prefs().mtpEnabled}>
-            <div class="mt-2">
-              <label class="text-sm text-ink">MTPLX binary (optional)</label>
-              <input
-                type="text"
-                placeholder="Path to an mtplx binary"
-                class="mt-2 w-full rounded border border-border-subtle bg-surface-1 px-2 py-1 text-sm"
-                value={prefs().mtplxPath ?? ""}
-                onChange={(e) => save({ mtplxPath: e.currentTarget.value || null })}
-              />
-              <p class="mt-1 text-xs text-ink-faint">
-                For MLX models that carry their own MTP head, MTPLX runs it directly instead of
-                loading a second drafter model — measured here at 2.24x. It is a Python package, so
-                the app does not install it for you.
-              </p>
+          <Show when={prefs().mtpEnabled && status()?.mtplxSupported}>
+            <div class="mt-3 rounded-md border border-border-subtle bg-surface-1 p-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-sm text-ink">
+                    MTPLX runtime{" "}
+                    <span class="text-xs text-ink-faint">{status()?.mtplxVersion}</span>
+                  </div>
+                  <p class="mt-1 text-xs text-ink-faint">
+                    Some MLX models carry their own MTP head. MTPLX runs it directly — no second
+                    model in memory — and was 2.24x faster than plain decoding on an M2 Max.
+                  </p>
+                  <Show when={!status()?.mtplxInstalled}>
+                    <div class="mt-1 text-[11px] text-ink-faint">
+                      One-time setup: {mb(status()?.mtplxDownloadSize ?? 0)} for its own Python, plus
+                      the packages it then installs. Nothing needs to be on your machine first.
+                    </div>
+                  </Show>
+                </div>
+                <Show
+                  when={status()?.mtplxInstalled}
+                  fallback={
+                    <button
+                      disabled={busy()}
+                      onClick={installMtplx}
+                      class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
+                    >
+                      Set up
+                    </button>
+                  }
+                >
+                  <button
+                    disabled={busy()}
+                    onClick={removeMtplx}
+                    class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
+                  >
+                    Remove MTPLX
+                  </button>
+                </Show>
+              </div>
+
+              <Show when={status()?.mtplxInstalled}>
+                <div class="mt-3 border-t border-border-subtle pt-3">
+                  <div class="text-xs text-ink">Models that fit this Mac</div>
+                  <Show
+                    when={(mtplxModels() ?? []).length > 0}
+                    fallback={
+                      <p class="mt-1 text-xs text-ink-faint">
+                        {mtplxModels() === undefined
+                          ? "Looking…"
+                          : "No MTPLX model is small enough for this machine's memory yet."}
+                      </p>
+                    }
+                  >
+                    <div class="mt-2 flex flex-col gap-1">
+                      <For each={mtplxModels()}>
+                        {(m) => (
+                          <div class="flex items-center justify-between gap-3 text-xs">
+                            <span class="min-w-0 truncate text-ink" title={m.repo}>
+                              {m.repo}
+                            </span>
+                            <span class="shrink-0 text-ink-faint">
+                              {mb(m.totalBytes)}
+                              {m.fit === "tight" ? " · tight" : ""}
+                            </span>
+                            <button
+                              disabled={busy()}
+                              onClick={() =>
+                                run(async () => {
+                                  await localInstallModel(m.repo, "mlx");
+                                  await Promise.all([refetchInstalled(), refetchUsage()]);
+                                  props.onChanged?.();
+                                  return "Installed.";
+                                })
+                              }
+                              class="shrink-0 rounded border border-border-subtle bg-surface-2 px-2 py-0.5 text-ink hover:bg-surface-3 disabled:opacity-50"
+                            >
+                              Get
+                            </button>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+              </Show>
             </div>
           </Show>
 

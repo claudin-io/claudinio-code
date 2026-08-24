@@ -398,21 +398,24 @@ fn drafter_path(
 /// path and may not spend the user's bandwidth on its own).
 fn resolve_exe(prefs: &LocalPrefs, engine: Engine) -> Result<PathBuf, String> {
     if engine == Engine::Mtplx {
-        // Pointed at, not provisioned — see `LocalPrefs::mtplx_path`. This is
-        // the one engine the app does not install, and a missing path has to
-        // say so rather than quietly drop to a slower engine: MTPLX measured
-        // 2.24x here, and losing that silently is worse than a sentence.
-        let Some(explicit) = prefs.mtplx_path.as_ref().filter(|p| !p.trim().is_empty()) else {
-            return Err(
-                "MTPLX is enabled but no binary is configured — set its path in Settings → Local models"
-                    .into(),
-            );
-        };
-        let path = PathBuf::from(explicit);
-        if !path.is_file() {
-            return Err(format!("mtplx not found at {explicit}"));
+        // An `mtplx` the user installed themselves wins, the way `server_path`
+        // does for llama-server — someone who already has one should not pay
+        // for a second copy. Otherwise the managed environment, which the app
+        // builds from a pinned interpreter and a pinned release.
+        if let Some(explicit) = prefs.mtplx_path.as_ref().filter(|p| !p.trim().is_empty()) {
+            let path = PathBuf::from(explicit);
+            if !path.is_file() {
+                return Err(format!("mtplx not found at {explicit}"));
+            }
+            return Ok(path);
         }
-        return Ok(path);
+        return provision::mtplx_exe().and_then(|exe| {
+            if exe.is_file() {
+                Ok(exe)
+            } else {
+                Err("MTPLX is not installed — install it in Settings → Local models".into())
+            }
+        });
     }
     if engine == Engine::Mlx {
         // Overriding the binary is a llama.cpp affordance: llama-server is

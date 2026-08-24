@@ -76,6 +76,10 @@ const status = (over: Partial<LocalStatus> = {}): LocalStatus => ({
   mlxInstalled: false,
   mlxVersion: "v0.1.0",
   mlxDownloadSize: 50_000_000,
+  mtplxSupported: false,
+  mtplxInstalled: false,
+  mtplxVersion: "2.9.1",
+  mtplxDownloadSize: 25_151_480,
   engine: "llamacpp",
   ...over,
 });
