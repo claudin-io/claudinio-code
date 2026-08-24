@@ -223,6 +223,20 @@ pub fn uninstall() -> Result<(), String> {
 
 /// Delete installs from an older pin. Without this every bump leaks a full
 /// copy of the runtime, and the user has no way to see it.
+/// Whether a directory under `llama_dir()` belongs to a runtime this build
+/// still uses.
+///
+/// Every runtime installed here must be listed. The sweep deletes whatever is
+/// not, so an omission is not a leak — it is the app erasing a working install
+/// on the next launch, then reporting the runtime as missing. That is exactly
+/// what happened to MTPLX: 588 MB removed at startup, and a "not installed"
+/// error pointing at a Settings button the user had already pressed.
+fn is_current_install(name: &str) -> bool {
+    name.starts_with(&format!("{LLAMA_BUILD}-"))
+        || name == format!("mlx-{MLX_VERSION}")
+        || name == format!("mtplx-{MTPLX_VERSION}")
+}
+
 pub fn gc_stale_installs() {
     let Ok(dir) = llama_dir() else { return };
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -234,10 +248,7 @@ pub fn gc_stale_installs() {
             continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        // The MLX runtime lives here too and is versioned independently.
-        let current =
-            name.starts_with(&format!("{LLAMA_BUILD}-")) || name == format!("mlx-{MLX_VERSION}");
-        if !current {
+        if !is_current_install(name) {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
@@ -789,6 +800,39 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Regression, and the reason this predicate exists as a function at all:
+    /// the sweep runs at every launch and deletes what it does not recognise,
+    /// so a runtime missing from the list is erased between one session and the
+    /// next. MTPLX was — 588 MB of interpreter and venv gone at startup, with
+    /// the app then reporting it as not installed.
+    #[test]
+    fn every_runtime_this_build_installs_survives_the_sweep() {
+        assert!(is_current_install(&format!("mlx-{MLX_VERSION}")));
+        assert!(is_current_install(&format!("mtplx-{MTPLX_VERSION}")));
+        assert!(is_current_install(&format!("{LLAMA_BUILD}-macos-arm64")));
+    }
+
+    #[test]
+    fn an_older_version_of_any_runtime_is_swept() {
+        assert!(!is_current_install("mlx-v0.0.1"));
+        assert!(!is_current_install("mtplx-0.0.1"));
+        assert!(!is_current_install("b1-macos-arm64"));
+        // A bare runtime name with no version is not an install this build made.
+        assert!(!is_current_install("mtplx"));
+        assert!(!is_current_install("mlx"));
+    }
+
+    /// `mtplx-2.9.1` must not be kept alive by the `mlx-` comparison, nor the
+    /// other way round: the two names share a prefix only if you squint, and a
+    /// `starts_with` here would keep every stale MLX install forever.
+    #[test]
+    fn the_two_apple_runtimes_do_not_cover_for_each_other() {
+        assert!(!is_current_install("mlx-2.9.1"));
+        assert!(!is_current_install(&format!("mtplx-{MLX_VERSION}")));
+    }
+
     use super::*;
 
     #[test]
