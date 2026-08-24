@@ -168,7 +168,7 @@ async fn main() {
     let spec = if hf::is_mlx_repo(&detail.files) {
         catalog::mlx_spec(&detail.repo, &detail.files, ctx, true, arch)
     } else {
-        catalog::spec_from_quant(&detail.repo, ctx, has_template, arch, option)
+        catalog::spec_from_quant(&detail.repo, ctx, has_template, arch, option, None)
     };
 
     let progress: catalog::InstallProgressFn = Arc::new(|p: catalog::InstallProgress| {

@@ -833,8 +833,6 @@ mod tests {
         assert!(!is_current_install(&format!("mtplx-{MLX_VERSION}")));
     }
 
-    use super::*;
-
     #[test]
     fn every_pinned_asset_has_a_plausible_hash_and_size() {
         assert!(!LLAMA_ASSETS.is_empty());
