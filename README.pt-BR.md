@@ -46,6 +46,20 @@ Baixe o instalador da sua plataforma em
 | Linux (x64) | `Claudinio-Code-Linux-x64-*.AppImage` / `*.deb` |
 | Linux (ARM64) | `Claudinio-Code-Linux-arm64-*.AppImage` / `*.deb` |
 
+**Em CPU sem AVX** — Intel Celeron e Pentium N/J, Atom, Core anteriores a 2013 —
+os builds x64 acima abortam no startup (`Illegal instruction` no Linux,
+`0xc000001d` no Windows). O ONNX Runtime, que move a busca semântica, traz
+kernels que essas CPUs não conseguem decodificar. Baixe o artefato `-baseline`:
+
+| Plataforma | Artefato |
+|---|---|
+| Windows (x64, sem AVX) | `Claudinio-Code-Windows-x64-baseline-*.exe` |
+| Linux (x64, sem AVX) | `Claudinio-Code-Linux-x64-baseline-*.AppImage` / `*.deb` |
+
+É o mesmo app com um backend de embeddings em Rust puro — mesmo modelo, mesmos
+resultados, indexação mais lenta — e ele não é servido pelo updater automático,
+então baixe de novo para atualizar.
+
 O app se atualiza sozinho: os artefatos são assinados e o updater embutido
 verifica a assinatura antes de instalar.
 

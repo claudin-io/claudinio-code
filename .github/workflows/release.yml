@@ -116,6 +116,21 @@ jobs:
             bundle-path: src-tauri/target/release/bundle/
             candle: true
 
+          # Linux x64 BASELINE — same trade for the same reason, on the other
+          # OS that ships an x86-64 binary. ONNX Runtime is linked statically
+          # into the Linux binary too, so a CPU without AVX/AVX2 (Celeron and
+          # Pentium N/J, Atom, pre-2013 Core) dies with SIGILL before the
+          # window ever appears — reported in #50 on a Celeron N4000. candle
+          # is compiled from source at the target's default x86-64 baseline,
+          # which is SSE2-only, so this artifact starts on those machines.
+          - platform: linux-x64-baseline
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            bundle-args: '-- --no-default-features --features embeddings-candle'
+            artifact-name: Claudinio-Code-Linux-x64-baseline
+            bundle-path: src-tauri/target/release/bundle/
+            candle: true
+
     runs-on: ${{ matrix.os }}
     environment: RELEASE
 
@@ -204,6 +219,17 @@ jobs:
           # (LNK2005/LNK1169). The other C++ CRT outlier, esaxx-rs, is removed by
           # dropping tokenizers' esaxx_fast feature (see src-tauri/Cargo.toml).
           echo "RUSTFLAGS=-Ctarget-feature=-crt-static" >> "$GITHUB_ENV"
+
+      - name: Pin baseline codegen (Linux baseline)
+        if: matrix.candle && runner.os == 'Linux'
+        shell: bash
+        run: |
+          # rustc already defaults to the x86-64 baseline (SSE2) for this
+          # target, so this changes no instruction selection today. It states
+          # the artifact's contract where CI can enforce it: whatever anyone
+          # later puts in .cargo/config.toml, the build that exists to run on
+          # a CPU without AVX cannot be handed a richer -Ctarget-cpu.
+          echo "RUSTFLAGS=-Ctarget-cpu=x86-64" >> "$GITHUB_ENV"
 
       - name: Import Apple Developer Certificate
         if: runner.os == 'macOS'
@@ -362,11 +388,21 @@ jobs:
           add_platform "linux-x86_64"   "$(asset '*Linux*.AppImage' '*arm64*')"
           add_platform "linux-aarch64"  "$(asset '*Linux-arm64*.AppImage')"
 
-          # Guard: x86_64 entries must never point at arm64 artifacts
+          # Guard: x86_64 entries must never point at arm64 artifacts, and no
+          # entry may point at a baseline artifact — those are a manual
+          # download for CPUs without AVX, and auto-updating a normal machine
+          # onto one would silently swap ONNX Runtime for the slower candle
+          # backend.
           for key in windows-x86_64 linux-x86_64; do
             url=$(echo "$platforms" | jq -r --arg k "$key" '.[$k].url // ""')
             case "$url" in
               *arm64*) echo "❌ $key URL points at an arm64 artifact: $url"; exit 1 ;;
+            esac
+          done
+          for key in $(echo "$platforms" | jq -r 'keys[]'); do
+            url=$(echo "$platforms" | jq -r --arg k "$key" '.[$k].url // ""')
+            case "$url" in
+              *baseline*) echo "❌ $key URL points at a baseline artifact: $url"; exit 1 ;;
             esac
           done
 
@@ -419,6 +455,20 @@ jobs:
             echo "| macOS (Apple Silicon) | \`Claudinio-Code-macOS-arm64-*.dmg\` |"
             echo "| Linux (x64) | \`Claudinio-Code-Linux-x64-*.deb\` / \`*.AppImage\` |"
             echo "| Linux (ARM64) | \`Claudinio-Code-Linux-arm64-*.deb\` / \`*.AppImage\` |"
+            echo ""
+            echo "**CPUs without AVX/AVX2** (Intel Celeron & Pentium N/J, Atom,"
+            echo "pre-2013 Core, Sandy/Ivy Bridge): the normal x64 builds abort at"
+            echo "startup — \`Illegal instruction\` on Linux, \`0xc000001d\` on"
+            echo "Windows — because ONNX Runtime's kernels are not baseline-safe."
+            echo "Use the \`-baseline\` artifact below instead. It is the same app"
+            echo "with a pure-Rust embedding backend: semantic search still works,"
+            echo "same model, same results, just slower to index. These are not"
+            echo "served by the auto-updater, so re-download to upgrade."
+            echo ""
+            echo "| Platform | File |"
+            echo "|----------|------|"
+            echo "| Windows (x64, no AVX) | \`Claudinio-Code-Windows-x64-baseline-*.exe\` |"
+            echo "| Linux (x64, no AVX) | \`Claudinio-Code-Linux-x64-baseline-*.deb\` / \`*.AppImage\` |"
             echo ""
             echo "---"
             echo ""

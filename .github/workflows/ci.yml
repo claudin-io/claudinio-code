@@ -109,16 +109,16 @@ jobs:
         run: cargo test
 
       # Everything above builds the default feature set (ort). The candle
-      # backend sits behind `embeddings-candle`, which is compiled by exactly
-      # one job in the whole repo -- windows-x64-baseline in release.yml -- and
-      # that job only runs on a tag. So a change to the candle path can be
-      # green here and still break the release; dependabot #35 was, and the
-      # v0.1.16 release shipped nothing for the same reason.
+      # backend sits behind `embeddings-candle`, which is compiled only by the
+      # baseline jobs in release.yml -- windows-x64-baseline and
+      # linux-x64-baseline -- and those run only on a tag. So a change to the
+      # candle path can be green here and still break the release; dependabot
+      # #35 was, and the v0.1.16 release shipped nothing for the same reason.
       #
       # A type error is platform-independent, so checking it here on Linux
-      # catches that class even though the baseline artifact is Windows.
-      # `check` rather than `test`: the failure mode is compilation, and this
-      # adds only ~16 crates on top of the tree already built above.
+      # catches that class for both baseline artifacts. `check` rather than
+      # `test`: the failure mode is compilation, and this adds only ~16 crates
+      # on top of the tree already built above.
       - name: Check candle backend (baseline release config)
         working-directory: src-tauri
         run: cargo check --all-targets --no-default-features --features embeddings-candle
