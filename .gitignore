@@ -49,3 +49,7 @@ videos/*/audio_engine_meta.json
 # `mtplx tune` writes its per-depth logs and verdict here when run from the
 # repo root.
 outputs/
+
+# Rust profiler output and the app's former-name state directory
+*.profraw
+.overclock-app/
