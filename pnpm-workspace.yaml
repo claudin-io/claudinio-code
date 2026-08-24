@@ -15,7 +15,7 @@ allowBuilds:
 # nanoid arrives only through postcss (vite's dependency, itself pulled by
 # @tailwindcss/vite), so there is nothing to upgrade directly: GHSA-2v37-7h3g-55p8
 # has to be closed with an override too. Drop it once postcss ships a release
-# depending on >=3.3.17.
+# depending on >=3.3.18.
 overrides:
   dompurify: ^3.4.13
-  nanoid: ^3.3.17
+  nanoid: ^3.3.18
