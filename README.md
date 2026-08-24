@@ -45,6 +45,20 @@ Download the installer for your platform from
 | Linux (x64) | `Claudinio-Code-Linux-x64-*.AppImage` / `*.deb` |
 | Linux (ARM64) | `Claudinio-Code-Linux-arm64-*.AppImage` / `*.deb` |
 
+**On a CPU without AVX** — Intel Celeron and Pentium N/J, Atom, pre-2013 Core —
+the x64 builds above abort at startup (`Illegal instruction` on Linux,
+`0xc000001d` on Windows). ONNX Runtime, which powers semantic search, ships
+kernels those CPUs cannot decode. Download the `-baseline` artifact instead:
+
+| Platform | Artifact |
+|---|---|
+| Windows (x64, no AVX) | `Claudinio-Code-Windows-x64-baseline-*.exe` |
+| Linux (x64, no AVX) | `Claudinio-Code-Linux-x64-baseline-*.AppImage` / `*.deb` |
+
+It is the same app with a pure-Rust embedding backend — same model, same
+results, slower to index — and it is not served by the auto-updater, so
+re-download it to upgrade.
+
 The app updates itself: release artifacts are signed and the built-in updater
 verifies the signature before installing.
 
