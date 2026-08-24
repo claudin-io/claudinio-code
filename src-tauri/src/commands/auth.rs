@@ -37,20 +37,7 @@ struct ExchangeError {
     upgrade_url: Option<String>,
 }
 
-pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Random hex string of `n_bytes` bytes, sourced from `uuid`'s CSPRNG-backed
-/// v4 generator so we don't need to add a dedicated `rand` dependency.
-pub(crate) fn random_hex(n_bytes: usize) -> String {
-    let mut bytes = Vec::with_capacity(n_bytes);
-    while bytes.len() < n_bytes {
-        bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
-    }
-    bytes.truncate(n_bytes);
-    hex_encode(&bytes)
-}
+pub(crate) use crate::randutil::{hex_encode, random_hex};
 
 /// Percent-decode a query string value. Our own params (code/state) never
 /// need it in practice, but this keeps the callback parser correct if a

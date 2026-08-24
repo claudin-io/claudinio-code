@@ -8,6 +8,7 @@ import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsMcp } from "./settings/SettingsMcp";
 import { SettingsPlugins } from "./settings/SettingsPlugins";
 import { SettingsBrowser } from "./settings/SettingsBrowser";
+import { SettingsLocalModels } from "./settings/SettingsLocalModels";
 import { SettingsQuality } from "./settings/SettingsQuality";
 
 interface SettingsPanelProps {
@@ -73,6 +74,8 @@ interface SettingsPanelProps {
   onOpenrouterConnect: () => void;
   onOpenrouterCancel: () => void;
   onDisconnectProvider: (providerId: string) => void;
+  /** Re-reads the model groups: downloading a local model adds one. */
+  onModelsChanged: () => void;
   onOpenProviderCatalog: () => void;
   saveConfig: () => Promise<void>;
   doLogin: () => Promise<void>;
@@ -83,7 +86,7 @@ interface SettingsPanelProps {
   openSupportUrl: () => void;
 }
 
-type CategoryId = 'general' | 'models' | 'account' | 'agent' | 'quality' | 'mcp' | 'browser' | 'plugins';
+type CategoryId = 'general' | 'models' | 'local' | 'account' | 'agent' | 'quality' | 'mcp' | 'browser' | 'plugins';
 
 interface Category {
   id: CategoryId;
@@ -94,6 +97,7 @@ interface Category {
 const CATEGORIES: Category[] = [
   { id: 'general', icon: 'sliders', searchTerms: ["Language","Theme","Keep awake while working","Plan save path","Preferred IDE","Auto-commit plan on finalize","Code intelligence"] },
   { id: 'models', icon: 'brain', searchTerms: ["Brain Model","Builder Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override"] },
+  { id: 'local', icon: 'monitor', searchTerms: ["Local models","llama.cpp","GGUF","Hugging Face","Quantization","Offline","VRAM","Backend","Vulkan","Download a model","Runtime"] },
   { id: 'account', icon: 'key', searchTerms: ["Account","Sign in with claudin.io","Sign out","API Key","Support","Providers","More providers\u2026","Connect","Access hundreds of models through one account, via OAuth."] },
   { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)"] },
   { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
@@ -106,6 +110,7 @@ function getCategoryLabel(id: CategoryId): string {
   const labels: Record<CategoryId, string> = {
     general: 'General',
     models: 'Models',
+    local: 'Local models',
     account: 'Account',
     agent: 'Agent',
     quality: 'Quality',
@@ -346,6 +351,10 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
 
               <Show when={searchQuery() ? true : activeCategory() === 'browser'}>
                 <SettingsBrowser />
+              </Show>
+
+              <Show when={searchQuery() ? true : activeCategory() === 'local'}>
+                <SettingsLocalModels onChanged={props.onModelsChanged} />
               </Show>
 
               <Show when={searchQuery() ? true : activeCategory() === 'plugins'}>

@@ -113,6 +113,7 @@ export interface AgentConfig {
   autoCommitPlan?: boolean;
   thinkingEffort?: string;
   browser?: BrowserPrefs;
+  local?: LocalPrefs;
   providers?: Record<string, ConnectedProviderInfo>;
   workspaceConfig?: Record<string, unknown> | null;
 }
@@ -149,6 +150,7 @@ export interface SetConfigArgs {
   autoCommitPlan?: boolean;
   thinkingEffort?: ThinkingEffort;
   browser?: BrowserPrefs;
+  local?: LocalPrefs;
 }
 
 export interface ApproveArgs {
@@ -620,6 +622,293 @@ export function browserClose(): Promise<void> {
   return invoke<void>("browser_close");
 }
 
+// --- Local models (llama.cpp) ---
+
+export type LlamaBackend = "auto" | "cpu" | "vulkan";
+/** llama.cpp runs everywhere; MLX is Apple Silicon only and faster there. */
+export type LocalEngine = "llamacpp" | "mlx" | "mtplx";
+export type Fit = "comfortable" | "tight" | "wontFit";
+
+export interface LocalPrefs {
+  enabled: boolean;
+  serverPath?: string | null;
+  backend: LlamaBackend;
+  engine: LocalEngine;
+  ctxSize: number;
+  gpuLayers: string;
+  parallel: number;
+  sleepIdleSeconds: number;
+  maxLoadedModels: number;
+  /** MTP speculative decoding, for the models that have a drafter. Off by
+   *  default: the drafter is another model resident in memory, and whether it
+   *  pays depends on how predictable this user's prompts are. */
+  mtpEnabled: boolean;
+  /** Tokens proposed per speculation round. Under MTPLX this is the depth
+   *  plus one. */
+  draftBlockSize: number;
+  /** Path to an `mtplx` binary, which serves MLX checkpoints carrying their own
+   *  MTP head. Pointed at rather than installed by the app — it is a Python
+   *  package, not a pinned archive like the other two engines. */
+  mtplxPath?: string | null;
+}
+
+export interface LocalStatus {
+  supported: boolean;
+  build: string;
+  target?: string | null;
+  serverInstalled: boolean;
+  exePath?: string | null;
+  downloadSize: number;
+  systemServer?: string | null;
+  /** The MLX runtime is independent of the llama.cpp one. */
+  mlxSupported: boolean;
+  mlxInstalled: boolean;
+  mlxVersion: string;
+  mlxDownloadSize: number;
+  /** MTPLX is a Python environment rather than a binary, so "installed" means
+   *  a pinned interpreter, a venv and a pinned release — all built by the app. */
+  mtplxSupported: boolean;
+  mtplxInstalled: boolean;
+  mtplxVersion: string;
+  /** The pinned interpreter only; the wheels pip resolves afterwards have no
+   *  size known ahead of time. A floor, not a total. */
+  mtplxDownloadSize: number;
+  /** What will actually run, after falling back if the configured engine is
+   *  not available on this machine. */
+  engine: LocalEngine;
+}
+
+export interface HardwareProfile {
+  totalRamBytes: number;
+  availableRamBytes: number;
+  vramBytes?: number | null;
+  unifiedMemory: boolean;
+  logicalCores: number;
+  gpuName?: string | null;
+}
+
+/** A model offered as a starting point: what the Hub is trending for the
+ *  preferred engine, or the built-in list when the Hub is unreachable. */
+export interface SuggestedModel {
+  repo: string;
+  displayName: string;
+  downloads: number;
+  likes: number;
+  /** Only the built-in entries carry one. */
+  blurb?: string | null;
+  /** True when the Hub could not be reached and this is the fallback list. */
+  offline: boolean;
+  /** Set only when the engine is MLX and these are RAM-tier picks, not trending. */
+  ramTier?: { label: string; note: string; minRamGb: number; isMachineTier: boolean };
+}
+
+export interface HfModelSummary {
+  repo: string;
+  downloads: number;
+  likes: number;
+  gated: boolean;
+}
+
+export interface QuantOption {
+  quant: string;
+  totalBytes: number;
+  shards: number;
+  fit: Fit;
+}
+
+export interface RepoQuants {
+  repo: string;
+  gated: boolean;
+  quants: QuantOption[];
+  recommended?: string | null;
+  contextLength?: number | null;
+  hasChatTemplate: boolean;
+  architecture?: string | null;
+  /** Which engine can run what this repo publishes. */
+  format: "gguf" | "mlx";
+}
+
+export interface LocalModel {
+  key: string;
+  displayName: string;
+  repo: string;
+  quant: string;
+  totalBytes: number;
+  contextLength?: number | null;
+  hasChatTemplate: boolean;
+  architecture?: string | null;
+  format: "gguf" | "mlx";
+  installedAt: string;
+}
+
+export interface LocalModelView extends LocalModel {
+  running: boolean;
+  complete: boolean;
+  fit: Fit;
+  benchmark?: ModelBenchmark | null;
+  mtp: MtpSupport;
+}
+
+/** Whether one model can speculate, and whether it can right now. `supported`
+ *  without `drafterInstalled` is the actionable case: one download away. */
+export interface MtpSupport {
+  supported: boolean;
+  drafterRepo?: string | null;
+  drafterInstalled: boolean;
+}
+
+/** Emitted on "local-model-download-progress" and
+ *  "llama-server-install-progress". `overall*` spans every shard — a
+ *  three-shard model whose bar resets twice reads as a stuck download. */
+export interface ModelDownloadProgress {
+  key: string;
+  fileIndex: number;
+  fileCount: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  overallDone: number;
+  overallTotal: number;
+  phase: "download" | "verify" | "done";
+}
+
+export function localStatus(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_status");
+}
+
+export function localHardware(): Promise<HardwareProfile> {
+  return invoke<HardwareProfile>("local_hardware");
+}
+
+export function localCuratedModels(): Promise<SuggestedModel[]> {
+  return invoke<SuggestedModel[]>("local_curated_models");
+}
+
+export function localInstallServer(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_install_server");
+}
+
+export function localUninstallServer(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_uninstall_server");
+}
+
+export function localInstallMlx(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_install_mlx");
+}
+
+/** A Hub model with a size measured against this machine's memory. */
+export interface SizedModel {
+  repo: string;
+  downloads: number;
+  likes: number;
+  /** Weights only — a few percent under the download. */
+  totalBytes: number;
+  fit: Fit;
+}
+
+/** MTPLX-capable models that fit this machine, best first. Live from the Hub:
+ *  the `mtplx` tag is how a converter says a checkpoint carries an MTP head. */
+export function localMtplxModels(limit?: number): Promise<SizedModel[]> {
+  return invoke<SizedModel[]>("local_mtplx_models", { limit: limit ?? null });
+}
+
+export function localInstallMtplx(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_install_mtplx");
+}
+
+export function localUninstallMtplx(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_uninstall_mtplx");
+}
+
+export function localUninstallMlx(): Promise<LocalStatus> {
+  return invoke<LocalStatus>("local_uninstall_mlx");
+}
+
+export function localSearchModels(query: string, limit?: number): Promise<HfModelSummary[]> {
+  return invoke<HfModelSummary[]>("local_search_models", { query, limit: limit ?? null });
+}
+
+export function localRepoQuants(repo: string): Promise<RepoQuants> {
+  return invoke<RepoQuants>("local_repo_quants", { repo });
+}
+
+export function localInstallModel(repo: string, quant: string): Promise<LocalModel> {
+  return invoke<LocalModel>("local_install_model", { repo, quant });
+}
+
+/** Download the drafter that pairs with `repo`. Separate from installing the
+ *  model because it is another gigabyte for a feature that may stay off. */
+export function localInstallDrafter(repo: string): Promise<LocalModel> {
+  return invoke<LocalModel>("local_install_drafter", { repo });
+}
+
+export function localCancelInstall(key: string): Promise<void> {
+  return invoke<void>("local_cancel_install", { key });
+}
+
+export function localListModels(): Promise<LocalModelView[]> {
+  return invoke<LocalModelView[]>("local_list_models");
+}
+
+export function localRemoveModel(key: string): Promise<void> {
+  return invoke<void>("local_remove_model", { key });
+}
+
+export function localUnloadModel(key: string): Promise<void> {
+  return invoke<void>("local_unload_model", { key });
+}
+
+export function localServerLogs(key: string): Promise<string[]> {
+  return invoke<string[]>("local_server_logs", { key });
+}
+
+export function localDiskUsage(): Promise<number> {
+  return invoke<number>("local_disk_usage");
+}
+
+export function localTestModel(key: string): Promise<string> {
+  return invoke<string>("local_test_model", { key });
+}
+
+/** What a resident model is costing and producing right now. */
+/** What a local model is doing. `loading` and `readingPrompt` are the phases
+ *  that produce no output, which is what reads as a hang. */
+export type LocalPhase = "loading" | "readingPrompt" | "generating" | "idle" | "sleeping";
+
+/** What a model has cost on this machine: a benchmark of your hardware, not
+ *  of the model's published numbers. */
+export interface ModelBenchmark {
+  modelKey: string;
+  loadSeconds: number;
+  loadSamples: number;
+  firstTokenSeconds: number;
+  tokensPerSecond: number;
+  promptTokensPerSecond: number;
+  generationSamples: number;
+  lastPromptTokens: number;
+  lastRunAt: string;
+}
+
+export interface LocalModelStats {
+  modelKey: string;
+  displayName: string;
+  engine: LocalEngine;
+  phase: LocalPhase;
+  /** Weights plus KV cache: the number that explains a large context. */
+  memoryBytes: number;
+  ctxSize: number;
+  ctxUsed: number;
+  tokensPerSecond: number;
+  promptTokensPerSecond: number;
+  tokensGenerated: number;
+  busy: boolean;
+  /** Weights unloaded after an idle period; the port is still there. */
+  sleeping: boolean;
+}
+
+export function localRuntimeStats(): Promise<LocalModelStats[]> {
+  return invoke<LocalModelStats[]>("local_runtime_stats");
+}
+
 export function getConfig(workspace?: string): Promise<AgentConfig> {
   return invoke<AgentConfig>("get_config", { workspace: workspace ?? null });
 }
@@ -727,6 +1016,10 @@ export interface ModelGroup {
   providerId: string;
   providerName: string;
   models: string[];
+  /** Display name per model id, for ids that are not readable on their own
+   *  (a local model is keyed by a content hash). Absent for providers whose
+   *  ids already read as names. */
+  labels?: Record<string, string>;
 }
 
 /** OpenRouter OAuth PKCE connect; resolves with the live model list. */

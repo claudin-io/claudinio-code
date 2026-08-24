@@ -31,6 +31,12 @@ const GROUPS: ModelGroup[] = [
     providerName: "OpenRouter",
     models: ["openrouter/openai/gpt-4o-mini", "openrouter/deepseek/deepseek-chat"],
   },
+  {
+    providerId: "local",
+    providerName: "Local (llama.cpp)",
+    models: ["local/b55d3d9e4269fdb3"],
+    labels: { "local/b55d3d9e4269fdb3": "Qwen3.8-27B-GGUF (IQ3_S)" },
+  },
 ];
 
 describe("ModelSelect", () => {
@@ -65,11 +71,13 @@ describe("ModelSelect", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Claudinio");
     expect(text).toContain("OpenRouter");
-    // one badge for the openrouter group only
+    // one badge for the openrouter group only: "Experimental" means a
+    // third-party catalog provider, which neither Claudinio nor a local model is
     const badges = Array.from(container.querySelectorAll("span")).filter(
       (s) => s.textContent === "Experimental",
     );
     expect(badges.length).toBe(1);
+    expect(text).toContain("Local (llama.cpp)");
     // external models display without their provider prefix
     expect(text).toContain("openai/gpt-4o-mini");
     expect(text).not.toContain("openrouter/openai/gpt-4o-mini");
@@ -97,6 +105,53 @@ describe("ModelSelect", () => {
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flush();
     expect(container.textContent).toContain("No models match your search.");
+  });
+
+  /// A local model's id is the content hash of its weights — right for a
+  /// directory name, unreadable in a picker. The group carries the label.
+  it("shows a labelled model by name, not by its id", async () => {
+    mount();
+    container.querySelector("button")!.click();
+    await flush();
+    const text = container.textContent ?? "";
+    expect(text).toContain("Qwen3.8-27B-GGUF (IQ3_S)");
+    expect(text).not.toContain("b55d3d9e4269fdb3");
+  });
+
+  it("shows the label on the trigger when a labelled model is selected", () => {
+    mount("local/b55d3d9e4269fdb3");
+    expect(container.querySelector("button")!.textContent).toContain("Qwen3.8-27B-GGUF (IQ3_S)");
+  });
+
+  /// A model configured before it was deleted still has to render as something.
+  it("falls back to the raw id when no group claims it", () => {
+    mount("local/gone-from-disk");
+    expect(container.querySelector("button")!.textContent).toContain("local/gone-from-disk");
+  });
+
+  it("finds a labelled model by its name", async () => {
+    mount();
+    container.querySelector("button")!.click();
+    await flush();
+    const search = container.querySelector<HTMLInputElement>("input[type=text]")!;
+    search.value = "qwen";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    const text = container.textContent ?? "";
+    expect(text).toContain("Qwen3.8-27B-GGUF (IQ3_S)");
+    expect(text).not.toContain("gpt-4o-mini");
+  });
+
+  it("selecting a labelled model calls onChange with the id, not the label", async () => {
+    const onChange = vi.fn();
+    mount("claudinio", onChange);
+    container.querySelector("button")!.click();
+    await flush();
+    const option = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Qwen3.8-27B-GGUF"),
+    )!;
+    option.click();
+    expect(onChange).toHaveBeenCalledWith("local/b55d3d9e4269fdb3");
   });
 
   it("selecting a model calls onChange with the qualified id", async () => {

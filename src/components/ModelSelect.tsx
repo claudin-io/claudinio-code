@@ -12,12 +12,28 @@ interface ModelSelectProps {
   triggerClassList?: Accessor<Record<string, boolean>>;
 }
 
-/** Strip the provider prefix for display: "openrouter/openai/gpt-4o-mini"
- * shown as "openai/gpt-4o-mini" inside the OpenRouter group. Claudinio ids
- * are unqualified and pass through. */
-function displayName(qualifiedId: string, providerId: string): string {
-  const prefix = `${providerId}/`;
+/** How a model id is shown inside its own group.
+ *
+ * A group may supply a label, which wins: a local model's id is a content hash
+ * ("local/b55d3d9e4269fdb3") and reads as noise. Otherwise the provider prefix
+ * is stripped — "openrouter/openai/gpt-4o-mini" shows as "openai/gpt-4o-mini"
+ * inside the OpenRouter group. Claudinio ids are unqualified and pass through. */
+function displayName(qualifiedId: string, group: ModelGroup): string {
+  const label = group.labels?.[qualifiedId];
+  if (label) return label;
+  const prefix = `${group.providerId}/`;
   return qualifiedId.startsWith(prefix) ? qualifiedId.slice(prefix.length) : qualifiedId;
+}
+
+/** The label for whatever is currently selected, searched across every group
+ * because the trigger button has no group context of its own. Falls back to the
+ * raw id, which is right for a model that is configured but no longer listed. */
+function selectedLabel(value: string, groups: ModelGroup[]): string {
+  for (const g of groups) {
+    const label = g.labels?.[value];
+    if (label) return label;
+  }
+  return value;
 }
 
 /** Searchable, provider-grouped model picker. Claudinio's group comes first
@@ -36,7 +52,10 @@ export const ModelSelect: Component<ModelSelectProps> = (props) => {
       .map((g) => ({
         ...g,
         models: g.models.filter(
-          (m) => m.toLowerCase().includes(q) || g.providerName.toLowerCase().includes(q),
+          (m) =>
+            m.toLowerCase().includes(q) ||
+            displayName(m, g).toLowerCase().includes(q) ||
+            g.providerName.toLowerCase().includes(q),
         ),
       }))
       .filter((g) => g.models.length > 0);
@@ -68,7 +87,7 @@ export const ModelSelect: Component<ModelSelectProps> = (props) => {
           ...(props.triggerClassList?.() ?? {}),
         }}
       >
-        <span class="truncate">{props.value()}</span>
+        <span class="truncate">{selectedLabel(props.value(), props.groups())}</span>
         <Icon name="chevron-down" class="h-3 w-3 shrink-0 text-ink-faint" />
       </button>
 
@@ -100,7 +119,10 @@ export const ModelSelect: Component<ModelSelectProps> = (props) => {
                     <span class="text-[10px] font-medium uppercase tracking-wide text-ink-faint">
                       {group.providerName}
                     </span>
-                    <Show when={group.providerId !== "claudinio"}>
+                    {/* "Experimental" marks a third-party provider reached
+                        through the models.dev catalog. A local model is not
+                        that — the group name already says what it is. */}
+                    <Show when={group.providerId !== "claudinio" && group.providerId !== "local"}>
                       <span class="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-px text-[9px] text-amber-600">
                         {"Experimental"}
                       </span>
@@ -117,7 +139,7 @@ export const ModelSelect: Component<ModelSelectProps> = (props) => {
                           "text-ink": props.value() !== m,
                         }}
                       >
-                        <span class="truncate">{displayName(m, group.providerId)}</span>
+                        <span class="truncate">{displayName(m, group)}</span>
                         <Show when={props.value() === m}>
                           <Icon name="check" class="h-3 w-3 shrink-0" />
                         </Show>

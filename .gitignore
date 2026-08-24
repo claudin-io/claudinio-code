@@ -39,3 +39,17 @@ videos/*/assets/logo.png
 videos/*/capture/assets/
 videos/*/audio_meta.json
 videos/*/audio_engine_meta.json
+
+# Local working copy of the MLX sidecar, which lives in its own repository
+# (claudin-io/claudinio-mlx) so the Metal build — xcodebuild plus a ~690 MB
+# toolchain component — stays out of this repo's release path. Kept here only
+# for local rebuilds; the app consumes the pinned release, never this tree.
+/mlx-sidecar/
+
+# `mtplx tune` writes its per-depth logs and verdict here when run from the
+# repo root.
+outputs/
+
+# Rust profiler output and the app's former-name state directory
+*.profraw
+.overclock-app/

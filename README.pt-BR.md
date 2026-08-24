@@ -189,6 +189,34 @@ casca localizada em volta de um agente que só fala inglês era pior do que ser
 direto sobre isso. (Este README é uma cortesia de documentação, não uma
 tradução da UI.)
 
+### Ele pode rodar o modelo na sua máquina
+
+Ajustes → **Local models** baixa o llama.cpp e um modelo GGUF do Hugging Face, e
+o modelo passa a aparecer nos seletores de Brain e Builder em *Local*. Nada sai
+do computador e nada é cobrado — útil para código que não pode ir para terceiros,
+para trabalhar offline e para não pagar por token enquanto você experimenta.
+
+A lista recomendada é curta de propósito: cada modelo nela foi verificado como
+capaz de conduzir o loop de ferramentas do agente, algo sobre o qual a maioria
+dos repositórios GGUF não diz nada. Você também pode buscar qualquer repositório
+GGUF direto no Hub; a tabela de quantizações mostra o tamanho de cada opção
+contra a memória da sua máquina e pré-seleciona a melhor que cabe. Os downloads
+são verificados contra os próprios checksums do Hugging Face e retomam arquivo a
+arquivo.
+
+Seja honesto quanto à troca: um 8B local não é um modelo de fronteira hospedado,
+e um modelo que não sustenta um loop de tool calling vai patinar. O botão
+**Test**, ao lado de um modelo instalado, diz se ele funciona antes de você
+descobrir no meio da tarefa.
+
+No Apple Silicon ele roda com **MLX**, o framework da própria Apple, que gera
+mais rápido que o llama.cpp com os mesmos pesos; em qualquer outro lugar — e no
+Mac, se você preferir — o llama.cpp lê GGUF. O engine é uma configuração, e cada
+um tem seus próprios downloads, porque usam formatos de modelo diferentes.
+
+A barra de status mostra o que um modelo carregado está custando enquanto roda:
+memória residente, contexto usado contra contexto servido, e a taxa de tokens.
+
 ## As ferramentas que o modelo pode chamar
 
 | Ferramenta | Aprovação | O que faz |

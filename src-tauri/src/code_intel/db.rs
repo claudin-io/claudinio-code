@@ -920,8 +920,10 @@ impl IndexDb {
                 let blob: Vec<u8> = row.get(12)?;
                 // Blob length defines the dimension — self-describing across model swaps.
                 let embedding: Vec<f32> = blob
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap_or([0; 4])))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&chunk| f32::from_le_bytes(chunk))
                     .collect();
                 Ok((
                     SymbolRecord {
@@ -970,8 +972,10 @@ impl IndexDb {
             .query_map(params![page_size, offset], |row| {
                 let blob: Vec<u8> = row.get(12)?;
                 let embedding: Vec<f32> = blob
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap_or([0; 4])))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&chunk| f32::from_le_bytes(chunk))
                     .collect();
                 Ok((
                     SymbolRecord {

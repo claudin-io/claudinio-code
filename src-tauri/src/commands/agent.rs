@@ -665,6 +665,7 @@ pub struct SetConfigArgs {
     pub auto_commit_plan: Option<bool>,
     pub thinking_effort: Option<String>,
     pub browser: Option<crate::browser::BrowserPrefs>,
+    pub local: Option<crate::llama::LocalPrefs>,
 }
 
 #[tauri::command]
@@ -705,6 +706,19 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
             viewport_width: w,
             viewport_height: h,
             ..browser
+        };
+    }
+    if let Some(local) = args.local {
+        // Clamped on the boundary, like `browser` above: these reach the
+        // llama-server command line, where a 0-slot server or a hundred
+        // resident models is not a setting, it is a hang.
+        cfg.local = crate::llama::LocalPrefs {
+            parallel: local.parallel.clamp(1, 16),
+            max_loaded_models: local.max_loaded_models.clamp(1, 2),
+            // Below 2 there is no block to speculate on and the engine refuses
+            // to start; above 8 the drafts miss more often than they save.
+            draft_block_size: local.draft_block_size.clamp(2, 8),
+            ..local
         };
     }
     if let Some(max_golden_cycles) = args.max_golden_cycles {
@@ -801,6 +815,7 @@ pub async fn get_config(
         "handoffContextTokens": cfg.handoff_context_tokens,
         "thinkingEffort": cfg.thinking_effort,
         "browser": cfg.browser,
+        "local": cfg.local,
         // Connected external providers — never the keys (hasApiKey precedent).
         "providers": cfg.providers.iter().map(|(id, p)| {
             (id.clone(), serde_json::json!({

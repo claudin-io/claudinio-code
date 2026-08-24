@@ -41,6 +41,9 @@ pub enum NetSource {
     WebSearch,
     Mcp,
     ChromiumDownload,
+    LlamaServerDownload,
+    LocalModelDownload,
+    HuggingFaceApi,
 }
 
 fn source_to_str(source: NetSource) -> &'static str {
@@ -57,6 +60,9 @@ fn source_to_str(source: NetSource) -> &'static str {
         NetSource::WebSearch => "web_search",
         NetSource::Mcp => "mcp",
         NetSource::ChromiumDownload => "chromium_download",
+        NetSource::LlamaServerDownload => "llama_server_download",
+        NetSource::LocalModelDownload => "local_model_download",
+        NetSource::HuggingFaceApi => "hugging_face_api",
     }
 }
 

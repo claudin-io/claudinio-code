@@ -6,11 +6,10 @@
 //! expects from the Anthropic client.
 
 use super::{
-    AgentConfig, ContentBlock, Message, ResolvedProvider, STREAM_IDLE_TIMEOUT, StreamOutput,
-    TEXT_DELTA_THROTTLE, ToolDescription, ToolResultContent, Usage, maybe_emit_text_delta,
+    AgentConfig, Chunk, ContentBlock, Message, ResolvedProvider, StreamOutput, TEXT_DELTA_THROTTLE,
+    ToolDescription, ToolResultContent, Usage, maybe_emit_text_delta, next_chunk, until_stopped,
 };
 use crate::agent::session::AgentEvent;
-use futures::StreamExt;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
@@ -380,14 +379,16 @@ pub async fn stream_message(
     let body = build_request(rp, config, messages, tools, system, true, max_tokens);
     let url = format!("{}/chat/completions", rp.base_url.trim_end_matches('/'));
 
-    let response = client
+    let request = client
         .post(&url)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", rp.api_key))
         .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .send();
+    let Some(response) = until_stopped(request, interrupt).await else {
+        return Ok(StreamOutput::stopped());
+    };
+    let response = response.map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -416,6 +417,15 @@ pub async fn stream_message(
     let mut stream = response.bytes_stream();
     let mut buf = String::new();
 
+    // For a local model, how long the prompt takes and how fast it then
+    // generates are the two numbers the user is judging it on — and the
+    // silence before the first token is what reads as a hang.
+    let local_key = (rp.provider_id == crate::llama::LOCAL_PROVIDER_ID).then(|| rp.model.clone());
+    let request_started = local_key
+        .as_deref()
+        .map(crate::llama::supervisor::note_request_start);
+    let mut first_token_seen = false;
+
     let mut text_deltas: Vec<String> = Vec::new();
     let mut thinking_text = String::new();
     let mut tool_acc: std::collections::BTreeMap<usize, ToolCallAcc> =
@@ -427,23 +437,31 @@ pub async fn stream_message(
     let mut last_flush = std::time::Instant::now() - TEXT_DELTA_THROTTLE;
     let mut done = false;
 
+    // Set when the user pressed Stop. The exit runs after the loop rather than
+    // inside it so the local model's phase is closed on the way out — a Stop
+    // that leaves the status bar reading "generating" looks like a Stop that
+    // did nothing.
+    let mut stopped = false;
+
     'outer: loop {
         if interrupt.load(Ordering::SeqCst) {
-            drop(stream);
-            return Ok(StreamOutput {
-                text_deltas,
-                tool_uses: finalize_tool_calls(tool_acc),
-                stop_reason: Some("interrupted".into()),
-                usage: None,
-                interrupted: true,
-            });
+            stopped = true;
+            break 'outer;
         }
 
-        let chunk_result = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
-            Ok(Some(r)) => r,
-            Ok(None) => break,
-            Err(_) => {
-                return Err("stream error: no data received for 90s, connection stalled".into());
+        let idle_timeout = rp.stream_idle_timeout();
+        let chunk_result = match next_chunk(&mut stream, idle_timeout, interrupt).await {
+            Chunk::Next(r) => r,
+            Chunk::End => break,
+            Chunk::Interrupted => {
+                stopped = true;
+                break 'outer;
+            }
+            Chunk::Stalled => {
+                return Err(format!(
+                    "stream error: no data received for {}s, connection stalled",
+                    idle_timeout.as_secs()
+                ));
             }
         };
 
@@ -481,6 +499,17 @@ pub async fn stream_message(
                 &mut stop_reason,
                 &mut usage,
             )?;
+            // The first content out of the model: everything before this was
+            // the server reading the prompt, which is the silence the user
+            // sees.
+            if !first_token_seen
+                && !text_deltas.is_empty()
+                && let (Some(key), Some(started)) = (local_key.as_deref(), request_started)
+            {
+                first_token_seen = true;
+                let prompt_tokens = usage.as_ref().map_or(0, |u| u.input_tokens);
+                crate::llama::supervisor::note_first_token(key, started, prompt_tokens);
+            }
             maybe_emit_text_delta(
                 emit_text_deltas,
                 event_tx,
@@ -489,6 +518,22 @@ pub async fn stream_message(
                 &mut last_flush,
             );
         }
+    }
+
+    if stopped {
+        // Dropping the stream closes the connection, which is what tells the
+        // server to stop generating.
+        drop(stream);
+        if let Some(key) = local_key.as_deref() {
+            crate::llama::supervisor::note_request_end(key, 0.0, 0.0);
+        }
+        return Ok(StreamOutput {
+            text_deltas,
+            tool_uses: finalize_tool_calls(tool_acc),
+            stop_reason: Some("interrupted".into()),
+            usage: None,
+            interrupted: true,
+        });
     }
 
     // Some providers close the stream without a trailing newline after the
@@ -526,6 +571,12 @@ pub async fn stream_message(
             tool_uses.len(),
             text_deltas.len()
         );
+    }
+
+    // Rates come from the server's own counters on the next poll; this closes
+    // the phase so the status bar stops saying "generating".
+    if let Some(key) = local_key.as_deref() {
+        crate::llama::supervisor::note_request_end(key, 0.0, 0.0);
     }
 
     Ok(StreamOutput {
@@ -614,7 +665,9 @@ pub async fn complete(
     let _net_guard = crate::net_activity::NetGuard::begin(net_source, rp.model.as_str());
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(90))
+        // Same reasoning as the streaming guard: a local model is slow, not
+        // unreachable, and a one-shot against a 27B can outlast 90s.
+        .timeout(rp.stream_idle_timeout())
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
     let max_tokens = rp
