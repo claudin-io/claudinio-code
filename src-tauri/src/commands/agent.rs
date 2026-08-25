@@ -245,17 +245,6 @@ pub async fn send_message(
     // only place that knows whether a session was just created, just cleared,
     // or is being picked up after a restart.
     let hook_ctx = {
-        let set = ws.resolve_hooks(&config).await;
-        let ctx = crate::agent::hooks::HookCtx::new(
-            set,
-            state.hook_trust.clone(),
-            &handle.id,
-            handle.store_path.clone(),
-            ws.root.clone(),
-        )
-        .with_store(store.clone())
-        .with_interrupt(Some(steering.interrupt.clone()));
-
         // Only the first message of a session starts it. The second one is not
         // a new session, and firing SessionStart per turn would make a memory
         // hook re-introduce itself every time the user typed.
@@ -272,12 +261,15 @@ pub async fn send_message(
             // app restarted, or the user opened it from the history list.
             Some(crate::agent::hooks::SessionStartSource::Resume)
         };
-        if let Some(src) = source
-            && let Ok(mut pending) = ctx.pending_session_start.lock()
-        {
-            *pending = Some(src);
-        }
-        Arc::new(ctx)
+        build_hook_ctx(
+            ws.resolve_hooks(&config).await,
+            state.hook_trust.clone(),
+            &handle.id,
+            &handle.store_path,
+            &ws.root,
+            Some(steering.interrupt.clone()),
+            source,
+        )
     };
 
     let ctx = ToolContext {
@@ -373,6 +365,41 @@ pub async fn send_message(
     });
 
     Ok(SessionStarted { session_id })
+}
+
+/// Build the hook context for a run.
+///
+/// Every entry point that starts a run — or compacts one — needs this, and the
+/// only thing that differs between them is which `SessionStart`, if any, the run
+/// should report. Getting it wrong in one place would leave a whole surface
+/// (manual compaction, Builder continuation, commit & push) quietly hookless.
+#[allow(clippy::too_many_arguments)]
+fn build_hook_ctx(
+    set: Arc<crate::agent::hooks::HookSet>,
+    trust: Arc<crate::agent::hooks::TrustStore>,
+    session_id: &str,
+    store_path: &std::path::Path,
+    workspace_root: &std::path::Path,
+    interrupt: Option<Arc<std::sync::atomic::AtomicBool>>,
+    session_start: Option<crate::agent::hooks::SessionStartSource>,
+) -> Arc<crate::agent::hooks::HookCtx> {
+    let ctx = crate::agent::hooks::HookCtx::new(
+        set,
+        trust,
+        session_id,
+        store_path.to_path_buf(),
+        workspace_root.to_path_buf(),
+    )
+    .with_store(SessionStore {
+        path: store_path.to_path_buf(),
+    })
+    .with_interrupt(interrupt);
+    if let Some(src) = session_start
+        && let Ok(mut pending) = ctx.pending_session_start.lock()
+    {
+        *pending = Some(src);
+    }
+    Arc::new(ctx)
 }
 
 /// The `AppState` maps a session transition needs, cloned so the spawned run
@@ -1033,7 +1060,17 @@ pub async fn compact_session(
     let db_path: Option<String> = Some(ws.index_db_path.to_string_lossy().to_string());
 
     let ctx = ToolContext {
-        hooks: None,
+        // No SessionStart: this is not a run, it is a compaction. PreCompact is
+        // the event that belongs here, and it fires with `trigger: "manual"`.
+        hooks: Some(build_hook_ctx(
+            ws.resolve_hooks(&config).await,
+            state.hook_trust.clone(),
+            &handle.id,
+            &handle.store_path,
+            &ws.root,
+            Some(steering.interrupt.clone()),
+            None,
+        )),
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,
@@ -1195,7 +1232,17 @@ pub async fn continue_with_builder(
     let mcp = ws.ensure_mcp_connected(&config).await;
 
     let ctx = ToolContext {
-        hooks: None,
+        // A linked session starting from a kickoff document — the same shape as
+        // a context handoff, and reported the same way.
+        hooks: Some(build_hook_ctx(
+            ws.resolve_hooks(&config).await,
+            state.hook_trust.clone(),
+            &new_handle.id,
+            &new_handle.store_path,
+            &ws.root,
+            Some(steering.interrupt.clone()),
+            Some(crate::agent::hooks::SessionStartSource::Compact),
+        )),
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,
@@ -1440,7 +1487,20 @@ pub async fn commit_and_push(
     let mcp = ws.ensure_mcp_connected(&config).await;
 
     let ctx = ToolContext {
-        hooks: None,
+        // Commit & push runs `bash` against the user's repository with git
+        // auto-approved, which is precisely what a Bash guard hook exists for —
+        // so PreToolUse and PostToolUse fire. There is no user prompt and no
+        // conversation here, so SessionStart, UserPromptSubmit and Stop do not
+        // (see the profile check in `run_workflow_with_profile`).
+        hooks: Some(build_hook_ctx(
+            ws.resolve_hooks(&config).await,
+            state.hook_trust.clone(),
+            &id,
+            &store.path,
+            &ws.root,
+            Some(steering.interrupt.clone()),
+            None,
+        )),
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,

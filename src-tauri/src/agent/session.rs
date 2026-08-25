@@ -1724,9 +1724,14 @@ pub async fn run_workflow_with_profile(
             }
         }
 
-        let out =
-            crate::agent::hooks::fire_user_prompt_submit(hooks, &user_message, Some(event_tx))
-                .await;
+        // Not for GitSync: commit & push has no user prompt to submit, and a
+        // hook that reads `.prompt` would be handed a git instruction the user
+        // never typed.
+        let out = if profile == PromptProfile::Standard {
+            crate::agent::hooks::fire_user_prompt_submit(hooks, &user_message, Some(event_tx)).await
+        } else {
+            crate::agent::hooks::BatchOutcome::default()
+        };
         // A blocked prompt takes the same path a rejected one does: persisted
         // as `Rejected` so it never vanishes from the JSONL, and returned as an
         // error the existing UI already renders. The model never sees it.
@@ -2642,6 +2647,7 @@ pub async fn run_workflow_with_profile(
             // hook in a fight with the harness's own continuation logic and
             // produce two nudges for one unfinished turn.
             if let Some(h) = &ctx.hooks
+                && profile == PromptProfile::Standard
                 && guards.stop_hook_blocks < MAX_STOP_HOOK_BLOCKS
             {
                 let out =
