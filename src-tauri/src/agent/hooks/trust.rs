@@ -83,6 +83,9 @@ impl TrustStore {
         }
     }
 
+    /// A store at an explicit path. Used by tests, which must not read or
+    /// write the developer's real approvals.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_path(path: PathBuf) -> Self {
         Self { path }
     }
@@ -94,6 +97,7 @@ impl TrustStore {
             .join("hook-trust.json")
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn path(&self) -> &Path {
         &self.path
     }

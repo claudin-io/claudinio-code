@@ -136,6 +136,15 @@ pub struct GuardState {
     /// was red at the finish line. Bounded so a suite the model cannot fix
     /// stops the run honestly instead of looping.
     pub quality_retries: u32,
+    /// True once a `Stop` hook has refused to let this run end.
+    ///
+    /// Unlike the streak counters this is never reset. The protocol's contract
+    /// is that a hook seeing `stop_hook_active: true` lets the run finish, and
+    /// resetting it would make that promise a lie.
+    pub stop_hook_active: bool,
+    /// How many times it has refused, so a hook that never relents cannot hold
+    /// a session open forever. See `session::MAX_STOP_HOOK_BLOCKS`.
+    pub stop_hook_blocks: u32,
 }
 
 #[cfg(test)]

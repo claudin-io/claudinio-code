@@ -39,6 +39,11 @@ pub struct HookJsonOutput {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookSpecificOutput {
+    /// Echoed back by every well-behaved hook and read by nobody here: which
+    /// event fired is something we already know. Kept in the type because
+    /// accepting a documented field and ignoring it is the whole posture of
+    /// this parser — see the module header.
+    #[allow(dead_code)]
     pub hook_event_name: Option<String>,
     /// PreToolUse: `allow` | `deny` | `ask`.
     pub permission_decision: Option<String>,
@@ -110,13 +115,6 @@ impl PreToolVerdict {
             PreToolVerdict::Allow { .. } => 1,
             PreToolVerdict::Ask { .. } => 2,
             PreToolVerdict::Deny { .. } => 3,
-        }
-    }
-    pub fn reason(&self) -> Option<&str> {
-        match self {
-            PreToolVerdict::None => None,
-            PreToolVerdict::Allow { reason } | PreToolVerdict::Ask { reason } => reason.as_deref(),
-            PreToolVerdict::Deny { reason } => Some(reason),
         }
     }
 }
@@ -214,10 +212,10 @@ fn interpret_success(event: HookEvent, stdout: &str) -> HookEffect {
         // Plain text. Context for the two events that splice stdout, and
         // transcript-only everywhere else.
         let mut eff = HookEffect::default();
-        if event.plain_stdout_is_context() {
-            if let Some(t) = first_nonempty(trimmed) {
-                eff.additional_context = Some(t.to_string());
-            }
+        if event.plain_stdout_is_context()
+            && let Some(t) = first_nonempty(trimmed)
+        {
+            eff.additional_context = Some(t.to_string());
         }
         return eff;
     }
@@ -338,9 +336,6 @@ pub struct BatchOutcome {
 }
 
 impl BatchOutcome {
-    pub fn blocked(&self) -> bool {
-        !self.blocking_reasons.is_empty()
-    }
     /// The injected context, in the order the hooks were resolved. Stable across
     /// runs so the prompt prefix stays cacheable.
     pub fn context(&self) -> Option<String> {

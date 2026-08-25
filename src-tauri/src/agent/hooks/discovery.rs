@@ -92,7 +92,7 @@ pub struct ResolvedHook {
     /// The other places that declared the identical command. It runs once.
     pub also_from: Vec<HookSource>,
     #[serde(skip)]
-    pub(super) order: (u8, usize, usize),
+    pub(crate) order: (u8, usize, usize),
 }
 
 impl ResolvedHook {
@@ -137,10 +137,6 @@ pub struct HookSet {
 }
 
 impl HookSet {
-    pub fn is_empty(&self) -> bool {
-        self.hooks.is_empty()
-    }
-
     /// The hooks that fire for a tool call.
     pub fn select_tool(&self, event: HookEvent, native_tool: &str) -> Vec<&ResolvedHook> {
         self.hooks
@@ -352,7 +348,7 @@ pub fn resolve_with_home(
         }
     }
 
-    flat.sort_by(|a, b| a.order.cmp(&b.order));
+    flat.sort_by_key(|h| h.order);
 
     // Dedup on the expanded command. The same hook declared in two files is one
     // program; running it twice would double an injected context and could
@@ -382,8 +378,10 @@ pub fn resolve_with_home(
     }
 
     for h in &deduped {
-        if let Some(m) = &h.matcher {
-            if !super::matcher::matcher_is_valid_regex(m) {
+        if let Some(m) = &h.matcher
+            && !super::matcher::matcher_is_valid_regex(m)
+        {
+            {
                 diags.push(HookDiagnostic {
                     source: h.source.label(),
                     message: format!(
@@ -739,7 +737,7 @@ mod tests {
 
     #[test]
     fn no_workspace_means_no_hooks() {
-        assert!(resolve_with_home(None, &cfg(), None).is_empty());
+        assert!(resolve_with_home(None, &cfg(), None).hooks.is_empty());
     }
 
     #[test]
@@ -748,7 +746,11 @@ mod tests {
         write(&ws.join(".claude/settings.json"), &hooks_json("x"));
         let mut c = cfg();
         c.hooks_enabled = false;
-        assert!(resolve_with_home(Some(&ws), &c, Some(&hm(&ws))).is_empty());
+        assert!(
+            resolve_with_home(Some(&ws), &c, Some(&hm(&ws)))
+                .hooks
+                .is_empty()
+        );
         std::fs::remove_dir_all(&ws).ok();
     }
 
@@ -839,7 +841,11 @@ mod tests {
             "claudinio-brain".into(),
             crate::agent::provider::PluginPrefs { enabled: false },
         );
-        assert!(resolve_with_home(Some(&ws), &c, Some(&hm(&ws))).is_empty());
+        assert!(
+            resolve_with_home(Some(&ws), &c, Some(&hm(&ws)))
+                .hooks
+                .is_empty()
+        );
         std::fs::remove_dir_all(&ws).ok();
     }
 

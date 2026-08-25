@@ -355,6 +355,11 @@ pub async fn run_subagent(
     let mut total_out = 0u32;
     let mut total_cost = 0.0f64;
     let mut rounds: u32 = 0;
+    // A Stop hook that always blocks would keep a subagent alive forever.
+    // Bounded the same way the quality retries and the continuation judge are,
+    // and for the same reason.
+    let mut stop_hook_active = false;
+    let mut stop_hook_blocks: u32 = 0;
     let interrupt = &steering.interrupt;
 
     // Network-indicator label: the subagent's goal, truncated for the tooltip.
@@ -431,6 +436,34 @@ pub async fn run_subagent(
         }
 
         if stream_output.tool_uses.is_empty() {
+            // ── Hooks: SubagentStop ─────────────────────────────────────────
+            //
+            // Here rather than after `SubagentDone` in `run_spawn_agents`,
+            // because a blocking SubagentStop has to have something left to
+            // continue, and by the time the parent sees the result there is not.
+            if let Some(h) = &ctx.hooks
+                && stop_hook_blocks < session::MAX_STOP_HOOK_BLOCKS
+            {
+                let out = crate::agent::hooks::fire_subagent_stop(
+                    h,
+                    stop_hook_active,
+                    session_id,
+                    Some(event_tx),
+                )
+                .await;
+                if let Some(reason) = out.blocking_message() {
+                    stop_hook_active = true;
+                    stop_hook_blocks += 1;
+                    history.push(Message {
+                        role: "user".into(),
+                        content: vec![ContentBlock::text(format!(
+                            "<hook-feedback>\n{reason}\n</hook-feedback>"
+                        ))],
+                    });
+                    continue;
+                }
+            }
+
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
                 let est =
                     session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
@@ -454,6 +487,7 @@ pub async fn run_subagent(
 
         let mut tool_assistant_blocks: Vec<ContentBlock> = Vec::new();
         let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
+        let mut hook_tool_feedback: Vec<String> = Vec::new();
 
         if !assistant_text.is_empty() {
             tool_assistant_blocks.push(ContentBlock::text(&assistant_text));
@@ -500,20 +534,74 @@ pub async fn run_subagent(
                 tool_input.clone(),
             ));
 
+            // Hooks apply to a subagent's tool calls exactly as they do to the
+            // parent's. A guard that only watched the main loop would be a
+            // guard the model can walk around by delegating.
+            let hook_input = tool_input.clone();
+            let hook_pre = match &ctx.hooks {
+                Some(h) => {
+                    crate::agent::hooks::fire_pre_tool_use(
+                        h,
+                        &tool_name,
+                        &hook_input,
+                        Some(event_tx),
+                    )
+                    .await
+                }
+                None => crate::agent::hooks::BatchOutcome::default(),
+            };
+
             let perm = permissions::tool_permission(&tool_name);
-            let block = session::run_tool(
-                &tool_name,
-                &tool_use_id,
-                tool_input,
-                perm,
-                event_tx,
-                approvals,
-                answers,
-                session_id,
-                ctx,
-                config,
-            )
-            .await;
+            let block =
+                if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_pre.verdict {
+                    session::deny_tool(
+                        &tool_name,
+                        &tool_use_id,
+                        &hook_input,
+                        reason,
+                        event_tx,
+                        session_id,
+                    )
+                } else {
+                    session::run_tool(
+                        &tool_name,
+                        &tool_use_id,
+                        tool_input,
+                        perm,
+                        event_tx,
+                        approvals,
+                        answers,
+                        session_id,
+                        ctx,
+                        config,
+                        &hook_pre.verdict,
+                    )
+                    .await
+                };
+
+            if let Some(h) = &ctx.hooks
+                && !matches!(
+                    hook_pre.verdict,
+                    crate::agent::hooks::PreToolVerdict::Deny { .. }
+                )
+            {
+                let response = session::tool_response_for_hook(&block);
+                let out = crate::agent::hooks::fire_post_tool_use(
+                    h,
+                    &tool_name,
+                    &hook_input,
+                    &response,
+                    Some(event_tx),
+                )
+                .await;
+                if let Some(msg) = out.blocking_message() {
+                    hook_tool_feedback.push(msg);
+                }
+                if let Some(text) = out.context() {
+                    hook_tool_feedback.push(text);
+                }
+            }
+
             tool_result_blocks.push(block);
         }
 
@@ -525,6 +613,15 @@ pub async fn run_subagent(
             role: "user".into(),
             content: tool_result_blocks,
         });
+        if !hook_tool_feedback.is_empty() {
+            let text = hook_tool_feedback.join("\n\n");
+            history.push(Message {
+                role: "user".into(),
+                content: vec![ContentBlock::text(format!(
+                    "<hook-feedback>\n{text}\n</hook-feedback>"
+                ))],
+            });
+        }
     }
 
     SubagentResult {

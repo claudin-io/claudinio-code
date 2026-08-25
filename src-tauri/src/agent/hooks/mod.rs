@@ -44,9 +44,7 @@ pub mod payload;
 pub mod runner;
 pub mod trust;
 
-pub use config::{HookEvent, HooksBlock};
-#[allow(unused_imports)]
-pub use discovery::HookDiagnostic;
+pub use config::HookEvent;
 pub use discovery::{HookSet, HookSource, ResolvedHook, resolve};
 pub use outcome::{BatchOutcome, HookStatus, PreToolVerdict};
 pub use payload::{CompactTrigger, SessionEndReason, SessionStartSource};
@@ -56,7 +54,7 @@ use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::session::AgentEvent;
 use runner::{HookRun, RunEnv};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
@@ -101,19 +99,6 @@ impl HookCtx {
             pending_session_start: Arc::new(Mutex::new(None)),
             awaiting_notified: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    /// A context with nothing in it. Used where hooks do not apply (no
-    /// workspace, tests, the summary agent) so call sites never branch on
-    /// `Option<HookCtx>`.
-    pub fn empty() -> Self {
-        Self::new(
-            Arc::new(HookSet::default()),
-            Arc::new(TrustStore::with_path(PathBuf::new())),
-            "",
-            PathBuf::new(),
-            PathBuf::new(),
-        )
     }
 
     /// Re-point at a different session, keeping the resolved set and the
@@ -486,29 +471,10 @@ pub fn fire_notification(ctx: &HookCtx, message: &str, event_tx: Option<&Channel
     });
 }
 
-/// Resolve a workspace's hooks and build the context for a run.
-pub fn build_ctx(
-    workspace: Option<&Path>,
-    config: &crate::agent::provider::AgentConfig,
-    session_id: &str,
-    transcript_path: PathBuf,
-) -> HookCtx {
-    let set = resolve(workspace, config);
-    let cwd = workspace
-        .map(|w| w.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    HookCtx::new(
-        Arc::new(set),
-        Arc::new(TrustStore::new()),
-        session_id,
-        transcript_path,
-        cwd,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn tmp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("cc-hooks-e2e-{name}-{}", std::process::id()));
@@ -722,7 +688,13 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_context_fires_nothing_and_costs_nothing() {
-        let ctx = HookCtx::empty();
+        let ctx = HookCtx::new(
+            Arc::new(HookSet::default()),
+            Arc::new(TrustStore::with_path(PathBuf::new())),
+            "",
+            PathBuf::new(),
+            PathBuf::new(),
+        );
         for e in HookEvent::ALL {
             assert!(!ctx.has(*e));
         }

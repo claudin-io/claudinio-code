@@ -66,11 +66,11 @@ fn aliased_tool_input(native_tool: &str, tool_input: &Value) -> Value {
         return tool_input.clone();
     };
     let mut m = obj.clone();
-    if matches!(native_tool, "read_file" | "edit_file" | "list_dir") && !m.contains_key("file_path")
+    if matches!(native_tool, "read_file" | "edit_file" | "list_dir")
+        && !m.contains_key("file_path")
+        && let Some(p) = obj.get("path")
     {
-        if let Some(p) = obj.get("path") {
-            m.insert("file_path".into(), p.clone());
-        }
+        m.insert("file_path".into(), p.clone());
     }
     if native_tool == "edit_file" {
         if let Some(v) = obj.get("old_string") {

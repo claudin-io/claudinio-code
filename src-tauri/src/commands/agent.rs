@@ -177,6 +177,7 @@ pub async fn send_message(
 
     // Continue the workspace's active session, or start a fresh one persisted
     // to its own JSONL file.
+    let mut session_is_new = false;
     let handle = {
         let mut guard = ws.active_session.lock().await;
         match guard.as_ref() {
@@ -189,6 +190,7 @@ pub async fn send_message(
                     store_path: store.path,
                 };
                 *guard = Some(h.clone());
+                session_is_new = true;
                 h
             }
         }
@@ -237,7 +239,49 @@ pub async fn send_message(
 
     let mcp = ws.ensure_mcp_connected(&config).await;
 
+    // Hooks: resolve the set for this run and decide which SessionStart, if
+    // any, this message is. The four sources map onto states the command layer
+    // already tracks, and the decision has to happen here because it is the
+    // only place that knows whether a session was just created, just cleared,
+    // or is being picked up after a restart.
+    let hook_ctx = {
+        let set = ws.resolve_hooks(&config).await;
+        let ctx = crate::agent::hooks::HookCtx::new(
+            set,
+            state.hook_trust.clone(),
+            &handle.id,
+            handle.store_path.clone(),
+            ws.root.clone(),
+        )
+        .with_store(store.clone())
+        .with_interrupt(Some(steering.interrupt.clone()));
+
+        // Only the first message of a session starts it. The second one is not
+        // a new session, and firing SessionStart per turn would make a memory
+        // hook re-introduce itself every time the user typed.
+        let first_run_here = state.session_started.lock().await.insert(handle.id.clone());
+        let cleared = ws.cleared.swap(false, std::sync::atomic::Ordering::SeqCst);
+        let source = if !first_run_here {
+            None
+        } else if cleared {
+            Some(crate::agent::hooks::SessionStartSource::Clear)
+        } else if session_is_new {
+            Some(crate::agent::hooks::SessionStartSource::Startup)
+        } else {
+            // The session exists on disk but this process has not run it: the
+            // app restarted, or the user opened it from the history list.
+            Some(crate::agent::hooks::SessionStartSource::Resume)
+        };
+        if let Some(src) = source
+            && let Ok(mut pending) = ctx.pending_session_start.lock()
+        {
+            *pending = Some(src);
+        }
+        Arc::new(ctx)
+    };
+
     let ctx = ToolContext {
+        hooks: Some(hook_ctx),
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,
@@ -425,6 +469,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
                                 });
                             ctx = transition::rebuild_tool_context(
                                 &ctx,
+                                &new_handle.id,
                                 &new_handle.store_path,
                                 new_mode_ctl.clone(),
                                 cfg.clone(),
@@ -471,8 +516,29 @@ fn spawn_run_loop(args: RunLoopArgs) {
 #[tauri::command]
 pub async fn new_session(workspace: String, state: State<'_, AppState>) -> Result<(), String> {
     let ws = state.workspace(&workspace).await?;
+    let config = state.config.lock().await.clone();
     let mut guard = ws.active_session.lock().await;
     if let Some(h) = guard.as_ref() {
+        // SessionEnd, awaited: this is the user clearing the conversation, and
+        // a hook whose job is to write down what the session learned has to get
+        // to run before the session it learned it in stops being the active one.
+        let hooks = crate::agent::hooks::HookCtx::new(
+            ws.resolve_hooks(&config).await,
+            state.hook_trust.clone(),
+            &h.id,
+            h.store_path.clone(),
+            ws.root.clone(),
+        )
+        .with_store(SessionStore {
+            path: h.store_path.clone(),
+        });
+        crate::agent::hooks::fire_session_end(
+            &hooks,
+            crate::agent::hooks::SessionEndReason::Clear,
+            None,
+        )
+        .await;
+        state.session_started.lock().await.remove(&h.id);
         state.remove_steering(&h.id).await;
         state.modes.lock().await.remove(&h.id);
         // A session abandoned before any real content (only meta/mode records,
@@ -491,6 +557,8 @@ pub async fn new_session(workspace: String, state: State<'_, AppState>) -> Resul
         }
     }
     *guard = None;
+    // The next run in this workspace is a `clear`, not a `startup`.
+    ws.cleared.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
@@ -965,6 +1033,7 @@ pub async fn compact_session(
     let db_path: Option<String> = Some(ws.index_db_path.to_string_lossy().to_string());
 
     let ctx = ToolContext {
+        hooks: None,
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,
@@ -993,6 +1062,7 @@ pub async fn compact_session(
         &state.answers,
         &handle.id,
         &steering,
+        crate::agent::hooks::CompactTrigger::Manual,
     )
     .await?;
 
@@ -1125,6 +1195,7 @@ pub async fn continue_with_builder(
     let mcp = ws.ensure_mcp_connected(&config).await;
 
     let ctx = ToolContext {
+        hooks: None,
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,
@@ -1369,6 +1440,7 @@ pub async fn commit_and_push(
     let mcp = ws.ensure_mcp_connected(&config).await;
 
     let ctx = ToolContext {
+        hooks: None,
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
         workspace_root,

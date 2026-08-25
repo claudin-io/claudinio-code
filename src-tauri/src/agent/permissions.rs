@@ -1,6 +1,9 @@
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize)]
+/// `PartialEq` so a resolved permission can be asserted on directly: the
+/// decision this enum carries is a security decision, and a test that has to
+/// go through a Tauri channel to check it is a test nobody writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PermissionLevel {
     Auto,
     RequiresApproval,

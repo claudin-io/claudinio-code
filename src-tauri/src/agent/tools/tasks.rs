@@ -305,6 +305,7 @@ mod lld_gate_tests {
         let store = root.join("session.jsonl");
         std::fs::write(&store, "").unwrap();
         let ctx = crate::agent::tools::ToolContext {
+            hooks: None,
             db_path: None,
             browser: None,
             lsp_manager: None,

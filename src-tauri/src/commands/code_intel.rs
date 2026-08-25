@@ -183,6 +183,9 @@ pub async fn open_workspace(
         mcp_fingerprint: tokio::sync::Mutex::new(None),
         index_progress: index_progress.clone(),
         browser: Arc::new(crate::browser::BrowserHandle::new(root.clone())),
+        hooks: tokio::sync::Mutex::new(None),
+        hooks_fingerprint: tokio::sync::Mutex::new(None),
+        cleared: std::sync::atomic::AtomicBool::new(false),
     });
     {
         let mut map = state.workspaces.lock().await;

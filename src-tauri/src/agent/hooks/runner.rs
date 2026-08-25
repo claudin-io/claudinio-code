@@ -117,6 +117,9 @@ async fn spawn_and_wait(hook: &ResolvedHook, payload: &str, env: &RunEnv) -> Run
     let sleep = tokio::time::sleep(Duration::from_secs(hook.timeout_secs));
     tokio::pin!(sleep);
 
+    // Not a loop over retries: `tokio::select!` needs a block it can `break`
+    // out of, and two of the three branches return early instead.
+    #[allow(clippy::never_loop)]
     let status = loop {
         tokio::select! {
             done = child.wait() => break done,
@@ -453,11 +456,20 @@ mod tests {
             .map(|n| hook(HookEvent::Stop, &s, &[n]))
             .collect();
         let refs: Vec<&ResolvedHook> = hooks.iter().collect();
+
+        // Calibrated against one run rather than against a fixed number: this
+        // suite runs its own tests in parallel, so a wall-clock budget picked
+        // on an idle machine is a flake on a busy one.
+        let solo_start = std::time::Instant::now();
+        run_one(&hooks[0], &serde_json::json!({}), &env(&d)).await;
+        let solo = solo_start.elapsed();
+
         let started = std::time::Instant::now();
         let runs = run_batch(&refs, &serde_json::json!({}), &env(&d)).await;
+        let batch = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_millis(1000),
-            "three 0.4s hooks ran sequentially"
+            batch < solo * 2,
+            "three hooks took {batch:?}, one takes {solo:?} — they ran sequentially"
         );
         assert_eq!(
             runs.iter().map(|r| r.stdout.as_str()).collect::<Vec<_>>(),

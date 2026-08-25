@@ -60,22 +60,20 @@ pub fn canonical_alias(native: &str) -> &str {
         .unwrap_or(native)
 }
 
-/// The native tools an alias reaches. Used by the settings panel to answer
-/// "what will this matcher actually hit", which is the question a silent hook
-/// leaves unanswered.
-pub fn natives_for(alias: &str) -> Vec<&'static str> {
-    TOOL_ALIASES
-        .iter()
-        .filter(|(n, aliases)| *n == alias || aliases.contains(&alias))
-        .map(|(n, _)| *n)
-        .collect()
-}
-
 /// Every native tool a matcher selects, out of the names it could see.
 pub fn hits(matcher: Option<&str>, candidates: &[&str]) -> Vec<String> {
     candidates
         .iter()
         .filter(|c| matches(matcher, c))
+        .map(|c| c.to_string())
+        .collect()
+}
+
+/// Every literal trigger a matcher selects, out of the ones the event defines.
+pub fn hits_literal(matcher: Option<&str>, candidates: &[&str]) -> Vec<String> {
+    candidates
+        .iter()
+        .filter(|c| matches_literal(matcher, c))
         .map(|c| c.to_string())
         .collect()
 }
@@ -89,6 +87,13 @@ pub fn hits(matcher: Option<&str>, candidates: &[&str]) -> Vec<String> {
 /// Unanchored is deliberate rather than sloppy: `"Edit"` selecting
 /// `"NotebookEdit"` is Claude Code's own behaviour, and configs are written
 /// expecting it. Case-sensitive for the same reason.
+///
+/// It has a sharp edge, which is inherited rather than introduced: `"Write"`
+/// also selects `"TodoWrite"`, so an edit guard also guards the task list. That
+/// is exactly what the same matcher does in Claude Code, against the same two
+/// tool names, and a config that behaved differently here would be worse than
+/// one that behaves surprisingly in both. Anchor the matcher (`^Write$`) to opt
+/// out.
 pub fn matches(matcher: Option<&str>, native_tool: &str) -> bool {
     let Some(m) = matcher.map(str::trim).filter(|m| !m.is_empty()) else {
         return true;
@@ -140,6 +145,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unanchored_matcher_reaches_substrings_as_it_does_in_claude_code() {
+        // `Write` selecting `TodoWrite` is Claude Code's behaviour against the
+        // same two names. Pinned so nobody "fixes" it into a difference.
+        assert!(matches(Some("Write"), "tasks_set"));
+        assert!(matches(Some("Edit"), "edit_file"));
+        // And anchoring is how a config opts out of the substring reach —
+        // without losing the tool it actually meant.
+        assert!(!matches(Some("^Write$"), "tasks_set"));
+        assert!(matches(Some("^Write$"), "edit_file"));
+        assert!(matches(Some("^Edit$"), "edit_file"));
+    }
+
+    #[test]
     fn a_native_name_matches_itself() {
         assert!(matches(Some("edit_file"), "edit_file"));
         assert!(matches(Some("bash"), "bash"));
@@ -183,10 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn natives_for_answers_what_a_matcher_will_hit() {
-        assert_eq!(natives_for("Write"), vec!["edit_file"]);
-        assert_eq!(natives_for("Bash"), vec!["bash"]);
-        assert!(natives_for("Nonsense").is_empty());
+    fn hits_answers_what_a_matcher_will_select() {
         assert_eq!(
             hits(Some("Edit|Bash"), &["edit_file", "bash", "grep"]),
             vec!["edit_file", "bash"]

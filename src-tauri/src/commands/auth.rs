@@ -233,6 +233,14 @@ pub async fn login_with_claudinio(
 
 #[tauri::command]
 pub async fn logout_claudinio(state: State<'_, AppState>) -> Result<(), String> {
+    // Before the credentials go, not after: a SessionEnd hook that wants to
+    // write something down is the last thing this session gets to do.
+    crate::commands::hooks::fire_session_end_everywhere(
+        &state,
+        crate::agent::hooks::SessionEndReason::Logout,
+        std::time::Duration::from_secs(10),
+    )
+    .await;
     let mut cfg = state.config.lock().await;
     cfg.api_key = String::new();
     cfg.account_login = None;

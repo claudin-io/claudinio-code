@@ -72,6 +72,11 @@ pub struct ToolContext {
     /// Lazy handle to this workspace's dedicated Chromium. `None` in tests and
     /// one-off workflows, which disables the browser tools.
     pub browser: Option<Arc<crate::browser::BrowserHandle>>,
+    /// This workspace's lifecycle hooks, resolved once per run and carried
+    /// across handoffs. `None` where hooks cannot apply — no workspace, tests,
+    /// one-off workflows — so no firing site has to branch on a missing
+    /// workspace itself. See `crate::agent::hooks`.
+    pub hooks: Option<Arc<crate::agent::hooks::HookCtx>>,
 }
 
 /// A bare `ToolContext` for tests: no workspace, no index, no mode handle, so
@@ -82,6 +87,7 @@ pub(crate) mod tests_support {
 
     pub fn ctx() -> ToolContext {
         ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
@@ -1206,6 +1212,7 @@ mod tests {
     /// (so any path is valid).
     fn test_ctx() -> ToolContext {
         ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
@@ -1571,6 +1578,7 @@ mod tests {
     #[test]
     fn test_validate_path_allows_within_workspace() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
@@ -1599,6 +1607,7 @@ mod tests {
     #[test]
     fn test_validate_path_rejects_outside_workspace() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
@@ -1627,6 +1636,7 @@ mod tests {
     #[test]
     fn test_validate_path_allows_when_no_workspace_set() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
@@ -1653,6 +1663,7 @@ mod tests {
     #[test]
     fn test_validate_read_path_allows_user_skill_dirs() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
@@ -1702,6 +1713,7 @@ mod tests {
         std::fs::write(&file_path, "fn main() {}").unwrap();
 
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some(tmp.to_string_lossy().to_string()),
@@ -1738,6 +1750,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some(tmp.to_string_lossy().to_string()),
@@ -1778,6 +1791,7 @@ mod tests {
     #[test]
     fn test_execute_list_dir_rejects_outside_workspace() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
@@ -1807,6 +1821,7 @@ mod tests {
     #[test]
     fn test_execute_read_file_rejects_outside_workspace() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
@@ -1836,6 +1851,7 @@ mod tests {
     #[test]
     fn test_grep_defaults_to_workspace_root() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some("/home/user/project".into()),
@@ -1864,6 +1880,7 @@ mod tests {
     fn test_bash_dispatch_echo() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
@@ -1895,6 +1912,7 @@ mod tests {
     #[test]
     fn test_bash_dispatch_unknown_tool() {
         let ctx = ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: None,
