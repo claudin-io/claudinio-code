@@ -488,7 +488,7 @@ pub async fn stream_message(
                 done = true;
                 break 'outer;
             }
-            process_chunk(
+            if let Err(e) = process_chunk(
                 data,
                 rp,
                 event_tx,
@@ -498,7 +498,24 @@ pub async fn stream_message(
                 &mut tool_acc,
                 &mut stop_reason,
                 &mut usage,
-            )?;
+            ) {
+                // MTPLX closes its OWN early tool-call cancel with a frame that
+                // blames an external cancel. It cancels generation 50 ms after a
+                // complete tool call (STREAM_TOOL_CALL_FINISH_GRACE_S), then
+                // re-enters a 250 ms queue poll that treats the cancel flag it
+                // just set as a foreign cancel — so on a box where decode gaps
+                // run past 250 ms the turn dies with "request cancelled via
+                // POST /v1/mtplx/cancel" although nobody cancelled anything
+                // (mtplx 2.9.1 and 2.9.2). The tool call is already complete in
+                // `tool_acc`, which is precisely why the server stopped; treat
+                // the frame as end-of-stream and let the agent run the tool.
+                if is_self_inflicted_cancel(&e) && (!tool_acc.is_empty() || !text_deltas.is_empty())
+                {
+                    done = true;
+                    break 'outer;
+                }
+                return Err(e);
+            }
             // The first content out of the model: everything before this was
             // the server reading the prompt, which is the silence the user
             // sees.
@@ -553,7 +570,16 @@ pub async fn stream_message(
             &mut tool_acc,
             &mut stop_reason,
             &mut usage,
-        )?;
+        )
+        // Same tolerance as the loop above: a server that cancelled itself
+        // right before closing the socket must not cost us the turn.
+        .or_else(|e| {
+            if is_self_inflicted_cancel(&e) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
     }
 
     if emit_text_deltas && assistant_text.len() != last_sent_len {
@@ -586,6 +612,13 @@ pub async fn stream_message(
         usage,
         interrupted: false,
     })
+}
+
+/// A mid-stream cancel the server inflicted on itself, reported as if a client
+/// had asked for it. Nothing on this side ever POSTs to `/v1/mtplx/cancel`, so
+/// such a frame is never a real cancellation of ours.
+fn is_self_inflicted_cancel(err: &str) -> bool {
+    err.contains("/v1/mtplx/cancel")
 }
 
 /// Process one streamed chat-completion chunk (the JSON after `data: `).
@@ -1021,6 +1054,19 @@ mod tests {
         .unwrap();
         assert_eq!(thinking_text, "hmm, let me check");
         assert!(assistant_text.is_empty());
+    }
+
+    #[test]
+    fn self_inflicted_cancel_is_recognised_only_for_the_mtplx_frame() {
+        assert!(is_self_inflicted_cancel(
+            "API error: request cancelled via POST /v1/mtplx/cancel after 1510 streamed tokens"
+        ));
+        assert!(!is_self_inflicted_cancel(
+            "API error: overloaded_error — Overloaded"
+        ));
+        assert!(!is_self_inflicted_cancel(
+            "API error: model owner made no progress for 120s; request aborted"
+        ));
     }
 
     #[test]

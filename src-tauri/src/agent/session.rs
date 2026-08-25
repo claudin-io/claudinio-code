@@ -1198,6 +1198,14 @@ fn is_retryable_error(msg: &str) -> bool {
     if msg.contains("overloaded") {
         return true;
     }
+    // MTPLX cancels its own stream after a complete tool call and then reports
+    // it as an external cancel (upstream race, 2.9.1/2.9.2 — youssofal/MTPLX#343).
+    // The provider already salvages the turn whenever anything was streamed, so
+    // reaching here means the frame arrived before any output: nothing was
+    // consumed and the next attempt is free.
+    if msg.contains("/v1/mtplx/cancel") {
+        return true;
+    }
     false
 }
 
@@ -4050,6 +4058,9 @@ mod tests {
             "API error: overloaded_error — Overloaded"
         ));
         // non-transient statuses must NOT retry
+        assert!(is_retryable_error(
+            "API error: request cancelled via POST /v1/mtplx/cancel after 12 streamed tokens"
+        ));
         assert!(!is_retryable_error("API error: HTTP 400 Bad Request"));
         assert!(!is_retryable_error("API error: HTTP 404 Not Found"));
         assert!(!is_retryable_error("Unauthorized — check your API key"));
