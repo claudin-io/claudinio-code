@@ -210,6 +210,45 @@ pub enum SessionRecord {
         trigger: String,
         ts: u64,
     },
+    /// One lifecycle hook, run. Written for every outcome including
+    /// `skipped_untrusted`, because "nothing happened" and "we chose not to run
+    /// it" are different answers and only one of them is a bug.
+    #[serde(rename = "hook")]
+    Hook {
+        event: String,
+        matcher: Option<String>,
+        source: String,
+        command: String,
+        /// `ok` | `blocked` | `error` | `timeout` | `skipped_untrusted`
+        status: String,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        stdout: String,
+        stderr: String,
+        decision: Option<String>,
+        ts: u64,
+    },
+    /// Context a hook injected into the conversation.
+    ///
+    /// The authoritative copy lives inside the `Turn` it was appended to, and
+    /// replays from there. This record exists so the timeline can show "the
+    /// brain added five facts to your prompt" as its own row instead of an
+    /// unexplained bulge in the user's message.
+    #[serde(rename = "hook_context")]
+    HookContext {
+        event: String,
+        source: String,
+        text: String,
+        ts: u64,
+    },
+    /// A hook set was found and is waiting to be approved, or was approved.
+    #[serde(rename = "hook_trust")]
+    HookTrust {
+        status: String,
+        hash: String,
+        commands: Vec<String>,
+        ts: u64,
+    },
 }
 
 /// A `QualityRun` record, flattened for the callers that only need the verdict.
@@ -928,6 +967,9 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::BaseCommit { ts, .. }
                 | SessionRecord::PlanFinalized { ts, .. }
                 | SessionRecord::QualityRun { ts, .. }
+                | SessionRecord::Hook { ts, .. }
+                | SessionRecord::HookContext { ts, .. }
+                | SessionRecord::HookTrust { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }

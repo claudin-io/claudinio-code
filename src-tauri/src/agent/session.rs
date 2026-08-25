@@ -867,6 +867,47 @@ pub enum AgentEvent {
         #[serde(rename = "compactThreshold")]
         compact_threshold: u64,
     },
+    /// A lifecycle hook started. Carries `statusMessage` because that is the
+    /// spinner label the config author wrote, and a finished-only event would
+    /// throw it away at exactly the moment it is useful.
+    #[serde(rename = "HookStarted")]
+    HookStarted {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "hookId")]
+        hook_id: String,
+        event: String,
+        command: String,
+        source: String,
+        #[serde(rename = "statusMessage")]
+        status_message: Option<String>,
+    },
+    #[serde(rename = "HookFinished")]
+    HookFinished {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "hookId")]
+        hook_id: String,
+        event: String,
+        status: String,
+        #[serde(rename = "exitCode")]
+        exit_code: Option<i32>,
+        #[serde(rename = "durationMs")]
+        duration_ms: u64,
+        output: String,
+        error: Option<String>,
+        decision: Option<String>,
+        #[serde(rename = "systemMessage")]
+        system_message: Option<String>,
+    },
+    /// This workspace declares hooks that have never been approved. Nothing ran.
+    #[serde(rename = "HooksAwaitingApproval")]
+    HooksAwaitingApproval {
+        workspace: String,
+        hash: String,
+        count: usize,
+        commands: Vec<String>,
+    },
 }
 
 /// One row of the quality panel: which layer, on which stack, and how it went.
