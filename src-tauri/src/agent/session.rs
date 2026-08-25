@@ -2789,6 +2789,13 @@ pub async fn run_workflow_with_profile(
                 None => crate::agent::hooks::BatchOutcome::default(),
             };
             let hook_verdict = hook_pre.verdict.clone();
+            // `continue: false` can arrive from either side of a tool call.
+            // Honoured after the current batch, not mid-loop, so the model
+            // still gets a result for every tool_use it asked for — an
+            // unanswered tool_use is a malformed conversation.
+            if let Some(reason) = hook_pre.stop.clone() {
+                hook_stop_request = Some(reason);
+            }
 
             let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
             // A denial short-circuits everything downstream, including the mode
