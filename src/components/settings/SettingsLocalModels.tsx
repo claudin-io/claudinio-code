@@ -41,6 +41,7 @@ import {
   type RepoQuants,
   type SuggestedModel,
 } from "../../lib/ipc";
+import { ENGINE_LABEL } from "../../lib/localEngines";
 import { Icon } from "../Icon";
 
 const DEFAULT_PREFS: LocalPrefs = {
@@ -122,11 +123,11 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
   const [curated] = createResource(localCuratedModels);
   const [installed, { refetch: refetchInstalled }] = createResource(localListModels);
   const [usage, { refetch: refetchUsage }] = createResource(localDiskUsage);
-  // Keyed on the install flag: with no runtime there is nothing to suggest for,
-  // and the Hub should not be asked on behalf of a user who never turned this
-  // on. Re-runs by itself the moment the install finishes.
+  // Keyed on the install flag alone: installing the runtime is the whole
+  // opt-in now, and with no runtime there is nothing to suggest for. Re-runs
+  // by itself the moment the install finishes.
   const [mtplxModels] = createResource(
-    () => (prefs().mtpEnabled && status()?.mtplxInstalled) || undefined,
+    () => status()?.mtplxInstalled || undefined,
     () => localMtplxModels(6),
   );
 
@@ -338,9 +339,11 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
       <div>
         <h3 class="text-sm font-medium text-ink">Local models</h3>
         <p class="mt-1 text-xs text-ink-faint">
-          Runs models on this machine with llama.cpp. Nothing leaves the computer and nothing
-          is billed — in exchange, a local model is slower and less capable than a hosted one.
-          Downloaded models appear in the Brain and Builder pickers under “Local”.
+          Runs models on this machine. Nothing leaves the computer and nothing is billed —
+          in exchange, a local model is slower and less capable than a hosted one. Which engine
+          serves a model is decided per model: GGUF on llama.cpp, MLX on MLX, and MLX
+          checkpoints carrying an MTP head on MTPLX. Downloaded models appear in the Brain and
+          Builder pickers under “Local”.
         </p>
       </div>
 
@@ -368,11 +371,12 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
         <div class="rounded-md border border-border-subtle bg-surface-1 p-3">
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
-              <div class="text-sm text-ink">Engine</div>
+              <div class="text-sm text-ink">Models to browse</div>
               <div class="text-[11px] text-ink-faint">
-                MLX is Apple's framework for this hardware and generates faster on the same
-                weights; llama.cpp reads GGUF and runs everywhere. They take different model
-                formats, so each engine has its own downloads.
+                Which format the suggestions and search below list. MLX is Apple's framework for
+                this hardware and generates faster on the same weights; llama.cpp reads GGUF and
+                runs everywhere. It does not decide what runs — a downloaded model is served by
+                whichever engine can load it.
               </div>
             </div>
             <select
@@ -385,43 +389,41 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
             </select>
           </div>
 
-          <Show when={prefs().engine === "mlx"}>
-            <div class="mt-3 flex items-center justify-between gap-3">
-              <div class="min-w-0">
-                <div class="text-sm text-ink">
-                  MLX runtime {status()?.mlxVersion}{" "}
-                  <span class="text-ink-faint">
-                    — {status()?.mlxInstalled ? "installed" : "not installed"}
-                  </span>
-                </div>
-                <Show when={!status()?.mlxInstalled}>
-                  <div class="text-[11px] text-ink-faint">
-                    One-time download of {mb(status()?.mlxDownloadSize ?? 0)}.
-                  </div>
-                </Show>
+          <div class="mt-3 flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm text-ink">
+                MLX runtime {status()?.mlxVersion}{" "}
+                <span class="text-ink-faint">
+                  — {status()?.mlxInstalled ? "installed" : "not installed"}
+                </span>
               </div>
-              <Show
-                when={status()?.mlxInstalled}
-                fallback={
-                  <button
-                    disabled={busy()}
-                    onClick={installMlx}
-                    class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
-                  >
-                    Download
-                  </button>
-                }
-              >
-                <button
-                  disabled={busy()}
-                  onClick={removeMlx}
-                  class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
-                >
-                  Remove MLX
-                </button>
+              <Show when={!status()?.mlxInstalled}>
+                <div class="text-[11px] text-ink-faint">
+                  One-time download of {mb(status()?.mlxDownloadSize ?? 0)}.
+                </div>
               </Show>
             </div>
-          </Show>
+            <Show
+              when={status()?.mlxInstalled}
+              fallback={
+                <button
+                  disabled={busy()}
+                  onClick={installMlx}
+                  class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
+                >
+                  Download
+                </button>
+              }
+            >
+              <button
+                disabled={busy()}
+                onClick={removeMlx}
+                class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
+              >
+                Remove MLX
+              </button>
+            </Show>
+          </div>
         </div>
       </Show>
 
@@ -530,115 +532,6 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
             <span class="text-xs text-ink-faint">seconds idle (0 = never)</span>
           </div>
 
-          <label class="mt-3 flex items-center gap-2 text-sm text-ink">
-            <input
-              type="checkbox"
-              checked={prefs().mtpEnabled}
-              onChange={(e) => save({ mtpEnabled: e.currentTarget.checked })}
-            />
-            Speculative decoding (MTP)
-            <span class="text-xs text-ink-faint">
-              faster replies on models that have a drafter
-            </span>
-          </label>
-
-          <Show when={prefs().mtpEnabled && status()?.mtplxSupported}>
-            <div class="mt-3 rounded-md border border-border-subtle bg-surface-1 p-3">
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <div class="text-sm text-ink">
-                    MTPLX runtime{" "}
-                    <span class="text-xs text-ink-faint">{status()?.mtplxVersion}</span>
-                  </div>
-                  <p class="mt-1 text-xs text-ink-faint">
-                    Some MLX models carry their own MTP head. MTPLX runs it directly — no second
-                    model in memory — and was 2.24x faster than plain decoding on an M2 Max.
-                  </p>
-                  <Show when={!status()?.mtplxInstalled}>
-                    <div class="mt-1 text-[11px] text-ink-faint">
-                      One-time setup: {mb(status()?.mtplxDownloadSize ?? 0)} for its own Python, plus
-                      the packages it then installs. Nothing needs to be on your machine first.
-                    </div>
-                  </Show>
-                </div>
-                <Show
-                  when={status()?.mtplxInstalled}
-                  fallback={
-                    <button
-                      disabled={busy()}
-                      onClick={installMtplx}
-                      class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
-                    >
-                      Set up
-                    </button>
-                  }
-                >
-                  <button
-                    disabled={busy()}
-                    onClick={removeMtplx}
-                    class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
-                  >
-                    Remove MTPLX
-                  </button>
-                </Show>
-              </div>
-
-              <Show when={status()?.mtplxInstalled}>
-                <div class="mt-3 border-t border-border-subtle pt-3">
-                  <div class="text-xs text-ink">Models that fit this Mac</div>
-                  <Show
-                    when={(mtplxModels() ?? []).length > 0}
-                    fallback={
-                      <p class="mt-1 text-xs text-ink-faint">
-                        {mtplxModels() === undefined
-                          ? "Looking…"
-                          : "No MTPLX model is small enough for this machine's memory yet."}
-                      </p>
-                    }
-                  >
-                    <div class="mt-2 flex flex-col gap-1">
-                      <For each={mtplxModels()}>
-                        {(m) => (
-                          <div class="flex items-center justify-between gap-3 text-xs">
-                            <span class="min-w-0 truncate text-ink" title={m.repo}>
-                              {m.repo}
-                            </span>
-                            <span class="shrink-0 text-ink-faint">
-                              {mb(m.totalBytes)}
-                              {m.fit === "tight" ? " · tight" : ""}
-                            </span>
-                            <button
-                              disabled={busy()}
-                              onClick={() =>
-                                run(async () => {
-                                  await localInstallModel(m.repo, "mlx");
-                                  await Promise.all([refetchInstalled(), refetchUsage()]);
-                                  props.onChanged?.();
-                                  return "Installed.";
-                                })
-                              }
-                              class="shrink-0 rounded border border-border-subtle bg-surface-2 px-2 py-0.5 text-ink hover:bg-surface-3 disabled:opacity-50"
-                            >
-                              Get
-                            </button>
-                          </div>
-                        )}
-                      </For>
-                    </div>
-                  </Show>
-                </div>
-              </Show>
-            </div>
-          </Show>
-
-          <p class="mt-1 text-xs text-ink-faint">
-            A drafter proposes several tokens at once and the model checks them in a single pass,
-            throwing away the guesses it rejects. Replies come out faster without getting worse —
-            though not word-for-word what the same prompt would have produced with this off, since
-            checking a batch shifts the arithmetic slightly. It costs about a gigabyte of memory
-            while the model is loaded, and only some models have a drafter.
-          </p>
-
           <p class="mt-1 text-xs text-ink-faint">
             A model often advertises far more context than a session ever reaches — and every
             unused token still costs memory the moment it loads. Left at 0, the window is sized
@@ -667,6 +560,126 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
           </div>
         </Show>
       </div>
+      </Show>
+
+      {/* Speculation — two different things, and only one of them is a
+          choice. A checkpoint carrying its own head costs nothing extra to
+          run, so MTPLX is gated on being installed rather than on a switch.
+          Neither belongs inside the llama.cpp card, which is where they used
+          to live: with the engine set to MLX this section was unreachable,
+          though MTPLX only ever runs MLX checkpoints. */}
+      <Show when={status()?.mtplxSupported}>
+        <div class="rounded-md border border-border-subtle bg-surface-1 p-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm text-ink">
+                MTPLX runtime{" "}
+                <span class="text-xs text-ink-faint">{status()?.mtplxVersion}</span>
+              </div>
+              <p class="mt-1 text-xs text-ink-faint">
+                MLX checkpoints carrying their own MTP head run on MTPLX automatically once
+                it is set up — there is no switch. It runs the head directly, with no second
+                model in memory, and was 2.24x faster than plain decoding on an M2 Max.
+              </p>
+              <Show when={!status()?.mtplxInstalled}>
+                <div class="mt-1 text-[11px] text-ink-faint">
+                  One-time setup: {mb(status()?.mtplxDownloadSize ?? 0)} for its own Python, plus
+                  the packages it then installs. Nothing needs to be on your machine first.
+                </div>
+              </Show>
+            </div>
+            <Show
+              when={status()?.mtplxInstalled}
+              fallback={
+                <button
+                  disabled={busy()}
+                  onClick={installMtplx}
+                  class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
+                >
+                  Set up
+                </button>
+              }
+            >
+              <button
+                disabled={busy()}
+                onClick={removeMtplx}
+                class="shrink-0 rounded-md border border-border-subtle bg-surface-2 px-3 py-1.5 text-sm text-ink hover:bg-surface-3 disabled:opacity-50"
+              >
+                Remove MTPLX
+              </button>
+            </Show>
+          </div>
+
+          <Show when={status()?.mtplxInstalled}>
+            <div class="mt-3 border-t border-border-subtle pt-3">
+              <div class="text-xs text-ink">Models that fit this Mac</div>
+              <Show
+                when={(mtplxModels() ?? []).length > 0}
+                fallback={
+                  <p class="mt-1 text-xs text-ink-faint">
+                    {mtplxModels() === undefined
+                      ? "Looking…"
+                      : "No MTPLX model is small enough for this machine's memory yet."}
+                  </p>
+                }
+              >
+                <div class="mt-2 flex flex-col gap-1">
+                  <For each={mtplxModels()}>
+                    {(m) => (
+                      <div class="flex items-center justify-between gap-3 text-xs">
+                        <span class="min-w-0 truncate text-ink" title={m.repo}>
+                          {m.repo}
+                        </span>
+                        <span class="shrink-0 text-ink-faint">
+                          {mb(m.totalBytes)}
+                          {m.fit === "tight" ? " · tight" : ""}
+                        </span>
+                        <button
+                          disabled={busy()}
+                          onClick={() =>
+                            run(async () => {
+                              await localInstallModel(m.repo, "mlx");
+                              await Promise.all([refetchInstalled(), refetchUsage()]);
+                              props.onChanged?.();
+                              return "Installed.";
+                            })
+                          }
+                          class="shrink-0 rounded border border-border-subtle bg-surface-2 px-2 py-0.5 text-ink hover:bg-surface-3 disabled:opacity-50"
+                        >
+                          Get
+                        </button>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </Show>
+        </div>
+      </Show>
+
+      <Show when={status()?.supported || status()?.mlxSupported}>
+        <div class="rounded-md border border-border-subtle bg-surface-1 p-3">
+          <label class="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={prefs().mtpEnabled}
+              onChange={(e) => save({ mtpEnabled: e.currentTarget.checked })}
+            />
+            Speculative decoding with a separate drafter model
+            <span class="text-xs text-ink-faint">
+              for the models that have one published beside them
+            </span>
+          </label>
+
+          <p class="mt-2 text-xs text-ink-faint">
+            A drafter proposes several tokens at once and the model checks them in a single pass,
+            throwing away the guesses it rejects. Replies come out faster without getting worse —
+            though not word-for-word what the same prompt would have produced with this off, since
+            checking a batch shifts the arithmetic slightly. It costs about a gigabyte of memory
+            while the model is loaded. Checkpoints with a built-in MTP head do not need it.
+          </p>
+        </div>
       </Show>
 
       {/* Installed models */}
@@ -700,13 +713,27 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
                       </Show>
                     </div>
                     <div class="truncate text-[11px] text-ink-faint">
-                      {m.repo} · {mb(m.totalBytes)}
+                      {m.repo} · {mb(m.totalBytes)} · {ENGINE_LABEL[m.engine]}
                       <Show when={m.contextLength}> · up to {m.contextLength} ctx</Show>
                       <Show when={!m.hasChatTemplate}>
                         {" "}
                         · <span class="text-danger">no chat template — tool calls will not work</span>
                       </Show>
                     </div>
+                    {/* Two different sentences share this line: "this cannot
+                        run, install X" and "this runs, but MTPLX would run it
+                        faster". Both are the only place the user learns it. */}
+                    <Show when={m.engineNote}>
+                      <div
+                        class={
+                          m.engineReady
+                            ? "text-[11px] text-ink-faint"
+                            : "text-[11px] text-danger"
+                        }
+                      >
+                        {m.engineNote}
+                      </div>
+                    </Show>
                     {/* Measured here, on this machine: published numbers
                         describe someone else's hardware. */}
                     <Show when={m.benchmark && m.benchmark.generationSamples > 0}>

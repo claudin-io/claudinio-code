@@ -67,6 +67,17 @@ pub struct LocalModelView {
     pub benchmark: Option<crate::llama::bench::ModelBenchmark>,
     /// Whether this model can speculate, and whether it can right now.
     pub mtp: MtpSupport,
+    /// The engine that will run this model here — or, when none can, the one
+    /// it wants. `model.format` cannot answer it: MLX and MTPLX share a
+    /// format, and which applies is a fact about the checkpoint.
+    pub engine: crate::llama::Engine,
+    /// False when no runtime on this machine can load it. `engine_note` then
+    /// says which one to install.
+    pub engine_ready: bool,
+    /// Why this model cannot run, or what would make it faster. Absent when
+    /// there is nothing to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_note: Option<String>,
 }
 
 /// What the MTP toggle can and cannot do for one model.
@@ -232,8 +243,10 @@ pub async fn local_curated_models(
     let engine = { state.config.lock().await.local.effective_engine() };
 
     // MLX models are whole repositories, so trending is less useful here than
-    // a tiered short list that fits the machine's memory.
-    if engine == crate::llama::Engine::Mlx {
+    // a tiered short list that fits the machine's memory. Keyed on the format
+    // rather than the engine: MTPLX reads the same repositories, and asking
+    // the Hub for `filter=mtplx` instead would return almost nothing.
+    if engine.model_format() == "mlx" {
         let hw = hardware::detect();
         let current_idx = crate::llama::mlx_tiers::current_tier_index(&hw);
         let tiers = crate::llama::mlx_tiers::for_machine(&hw);
@@ -588,10 +601,16 @@ pub async fn local_cancel_install(state: State<'_, AppState>, key: String) -> Re
 }
 
 #[tauri::command]
-pub async fn local_list_models() -> Result<Vec<LocalModelView>, String> {
+pub async fn local_list_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<LocalModelView>, String> {
     let hw = hardware::detect();
     let benchmarks = crate::llama::bench::load();
     let entries = catalog::load()?.entries;
+    // Resolved once for the whole list: it stats up to three binaries, and the
+    // answer is the same for every row.
+    let prefs = { state.config.lock().await.local.clone() };
+    let installed = supervisor::installed_engines(&prefs);
     // A drafter has no tokenizer and answers nothing; it is a component of the
     // model it was installed for, not a model. Listing it would offer the user
     // a chat model that loads and then says nothing.
@@ -610,6 +629,24 @@ pub async fn local_list_models() -> Result<Vec<LocalModelView>, String> {
         // drafter is a separate repo that has to be downloaded on its own.
         let gguf_drafter = catalog::drafter_gguf(model).is_some();
         let drafter_repo = mlx_mtp::drafter_for(&model.repo);
+        let wanted = crate::llama::Engine::for_model(model);
+        // Degrading to MLX is the right call when MTPLX is missing, but it is
+        // also invisible — so the row says what installing MTPLX would buy,
+        // which is the nudge the silent fallback would otherwise cost.
+        let (engine, engine_ready, engine_note) =
+            match crate::llama::engine_for_model(model, installed) {
+                Ok(engine) => {
+                    let note = (wanted == crate::llama::Engine::Mtplx
+                        && engine == crate::llama::Engine::Mlx)
+                        .then(|| {
+                            "MTPLX would run this checkpoint's MTP head about 2x faster \
+                             — set it up above."
+                                .to_string()
+                        });
+                    (engine, true, note)
+                }
+                Err(why) => (wanted, false, Some(why)),
+            };
         out.push(LocalModelView {
             running: supervisor::is_running(&model.key).await,
             complete: catalog::is_complete(model),
@@ -623,6 +660,9 @@ pub async fn local_list_models() -> Result<Vec<LocalModelView>, String> {
                         installed_drafters.iter().any(|i| i.eq_ignore_ascii_case(d))
                     }),
             },
+            engine,
+            engine_ready,
+            engine_note,
             model: model.clone(),
         });
     }
@@ -770,6 +810,9 @@ mod tests {
             fit: Fit::Comfortable,
             benchmark: None,
             mtp: MtpSupport::default(),
+            engine: crate::llama::Engine::Llamacpp,
+            engine_ready: true,
+            engine_note: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"displayName\":\"m\""), "{json}");
@@ -777,5 +820,47 @@ mod tests {
         assert!(json.contains("\"fit\":\"comfortable\""), "{json}");
         assert!(json.contains("\"supported\":false"), "{json}");
         assert!(json.contains("\"drafterInstalled\":false"), "{json}");
+    }
+
+    /// `format` alone cannot answer "what will run this": MLX and MTPLX share
+    /// one. The row has to carry the resolved engine, and stay quiet when
+    /// there is nothing to say about it.
+    #[test]
+    fn the_model_view_names_the_engine_that_will_run_it() {
+        let base = LocalModel {
+            key: "k".into(),
+            display_name: "m".into(),
+            repo: "r/m".into(),
+            quant: "4BIT".into(),
+            files: vec![],
+            total_bytes: 1,
+            context_length: None,
+            has_chat_template: true,
+            architecture: None,
+            format: "mlx".into(),
+            installed_at: "2026-08-19T00:00:00Z".into(),
+        };
+        let view = LocalModelView {
+            model: base,
+            running: false,
+            complete: true,
+            fit: Fit::Comfortable,
+            benchmark: None,
+            mtp: MtpSupport::default(),
+            engine: crate::llama::Engine::Mtplx,
+            engine_ready: false,
+            engine_note: Some("install the MLX runtime".into()),
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"engine\":\"mtplx\""), "{json}");
+        assert!(json.contains("\"engineReady\":false"), "{json}");
+        assert!(json.contains("\"engineNote\":"), "{json}");
+
+        let quiet = LocalModelView {
+            engine_note: None,
+            ..view
+        };
+        let json = serde_json::to_string(&quiet).unwrap();
+        assert!(!json.contains("engineNote"), "{json}");
     }
 }

@@ -33,7 +33,7 @@ const GROUPS: ModelGroup[] = [
   },
   {
     providerId: "local",
-    providerName: "Local (llama.cpp)",
+    providerName: "Local",
     models: ["local/b55d3d9e4269fdb3"],
     labels: { "local/b55d3d9e4269fdb3": "Qwen3.8-27B-GGUF (IQ3_S)" },
   },
@@ -77,7 +77,7 @@ describe("ModelSelect", () => {
       (s) => s.textContent === "Experimental",
     );
     expect(badges.length).toBe(1);
-    expect(text).toContain("Local (llama.cpp)");
+    expect(text).toContain("Local");
     // external models display without their provider prefix
     expect(text).toContain("openai/gpt-4o-mini");
     expect(text).not.toContain("openrouter/openai/gpt-4o-mini");
