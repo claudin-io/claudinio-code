@@ -191,18 +191,11 @@ async fn run(
     // approving mid-run must take effect on the very next event, without a
     // restart. That is the difference between opt-in and opt-in eventually.
     if !ctx.trust_status().may_run() {
+        // Recorded once for the whole session, not once per event. A PreToolUse
+        // hook in an unapproved workspace would otherwise write a line per tool
+        // call into a file that is re-read on every message — the audit trail
+        // would be the cost of not running anything.
         announce_awaiting(ctx, event_tx);
-        for h in &selected {
-            ctx.record(&hook_record(
-                h,
-                HookStatus::SkippedUntrusted,
-                None,
-                "",
-                "",
-                0,
-                None,
-            ));
-        }
         return BatchOutcome::default();
     }
 
@@ -327,6 +320,19 @@ fn announce_awaiting(ctx: &HookCtx, event_tx: Option<&Channel<AgentEvent>>) {
         commands: ctx.set.hooks.iter().map(|h| h.display_command()).collect(),
         ts: now_ms(),
     });
+    // One line per declared hook, once: "we chose not to run this" is a
+    // different answer from "nothing happened", and only one of them is a bug.
+    for h in &ctx.set.hooks {
+        ctx.record(&hook_record(
+            h,
+            HookStatus::SkippedUntrusted,
+            None,
+            "",
+            "",
+            0,
+            None,
+        ));
+    }
     if let Some(tx) = event_tx {
         let _ = tx.send(AgentEvent::HooksAwaitingApproval {
             workspace: ctx.set.workspace.clone().unwrap_or_default(),
@@ -597,6 +603,12 @@ mod tests {
         assert_eq!(ctx.trust_status(), TrustStatus::Pending);
         let blocked = fire_user_prompt_submit(&ctx, "what is the port", None).await;
         assert!(blocked.context().is_none());
+        // Recorded once for the session, not once per event: firing again must
+        // not add a second round of skip lines to a file re-read every message.
+        let before = std::fs::read_to_string(&store.path).unwrap();
+        fire_pre_tool_use(&ctx, "bash", &serde_json::json!({}), None).await;
+        assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
+        assert_eq!(before.matches("skipped_untrusted").count(), 3);
 
         // 3. Approved, the whole envelope round-trips — proving `args` reached
         //    argv rather than being dropped into a shell string.
