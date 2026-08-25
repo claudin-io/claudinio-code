@@ -110,24 +110,124 @@ impl Engine {
         }
     }
 
-    /// The engine to actually run `model` under.
+    /// The engine a checkpoint is meant for, ignoring what is installed.
     ///
-    /// `for_format` cannot answer this alone any more: `Mlx` and `Mtplx` read
-    /// the same format, and which one applies is a fact about the checkpoint —
-    /// whether it carries an MTP head and the contract describing it. A model
-    /// without one served through MTPLX is MTPLX doing MLX's job with a Python
+    /// `for_format` cannot answer this alone: `Mlx` and `Mtplx` read the same
+    /// format, and which one applies is a fact about the checkpoint — whether
+    /// it carries an MTP head and the contract describing it. A model without
+    /// one served through MTPLX is MTPLX doing MLX's job with a Python
     /// interpreter attached, so the fallback is always plain `Mlx`.
-    pub fn for_model(model: &catalog::LocalModel, prefs: &LocalPrefs) -> Engine {
-        let base = Engine::for_format(&model.format);
-        if base == Engine::Mlx
-            && prefs.mtp_enabled
-            && Engine::Mtplx.is_available()
-            && catalog::is_mtplx_model(model)
-        {
+    ///
+    /// Deliberately ignores `has_mtp_head` for GGUF. llama.cpp can run an MTP
+    /// head that lives inside the weights, but nothing here reads GGUF
+    /// metadata to know one is there, and guessing from a repo name is how you
+    /// hand `--spec-type draft-mtp` to a model that has no head.
+    pub fn for_checkpoint(format: &str, has_mtp_head: bool) -> Engine {
+        let base = Engine::for_format(format);
+        if base == Engine::Mlx && has_mtp_head && Engine::Mtplx.is_available() {
             return Engine::Mtplx;
         }
         base
     }
+
+    /// The engine `model` is meant for. Reads the checkpoint on disk.
+    ///
+    /// No preference is consulted, and that is the point: installing the MTPLX
+    /// runtime is the opt-in. It costs a Python environment the user has to
+    /// ask for by name, and once it is there, running an MTP checkpoint
+    /// through plain MLX instead is slower for no reason — no second model in
+    /// memory, no drafter to download, nothing to weigh.
+    pub fn for_model(model: &catalog::LocalModel) -> Engine {
+        Engine::for_checkpoint(&model.format, catalog::is_mtplx_model(model))
+    }
+}
+
+/// Which engines have a runtime on this machine right now.
+///
+/// A snapshot rather than a live lookup, so `resolve_engine` stays a pure
+/// function of (checkpoint, machine) and the whole routing table can be tested
+/// without installing anything. Built by `supervisor::installed_engines`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InstalledEngines {
+    pub llamacpp: bool,
+    pub mlx: bool,
+    pub mtplx: bool,
+}
+
+impl InstalledEngines {
+    pub fn has(self, engine: Engine) -> bool {
+        match engine {
+            Engine::Llamacpp => self.llamacpp,
+            Engine::Mlx => self.mlx,
+            Engine::Mtplx => self.mtplx,
+        }
+    }
+}
+
+/// The engine that can actually run this checkpoint here, or a sentence naming
+/// what to install and why.
+///
+/// Pure: every fact about the machine arrives as an argument. The one degrade
+/// it allows is MTPLX to MLX — the head is inside the checkpoint and MLX
+/// simply ignores it, so the result is slower and never wrong. The reverse is
+/// not a degrade: no setting makes MLX read a GGUF, and refusing loudly beats
+/// starting an engine that aborts inside its model factory.
+pub fn resolve_engine(
+    display_name: &str,
+    format: &str,
+    has_mtp_head: bool,
+    installed: InstalledEngines,
+) -> Result<Engine, String> {
+    let want = Engine::for_checkpoint(format, has_mtp_head);
+    if installed.has(want) {
+        return Ok(want);
+    }
+    if want == Engine::Mtplx && installed.mlx {
+        return Ok(Engine::Mlx);
+    }
+    if want == Engine::Llamacpp {
+        return Err(format!(
+            "{display_name} is a GGUF model and the llama.cpp runtime is not \
+             installed — install it in Settings → Local models"
+        ));
+    }
+    // Everything below is an MLX-format checkpoint.
+    if !Engine::Mlx.is_available() {
+        return Err(format!(
+            "{display_name} is an MLX model, and MLX runs only on Apple Silicon"
+        ));
+    }
+    if has_mtp_head {
+        return Err(format!(
+            "{display_name} carries an MTP head. Install the MLX runtime to run it, \
+             or MTPLX to run the head as well (about 2x faster) — Settings → Local models"
+        ));
+    }
+    // The dead end worth spelling out: MTPLX is installed, so the user has
+    // every reason to think a local model should start, and it will not.
+    let aside = if installed.mtplx {
+        " MTPLX is installed, but it only runs checkpoints that carry an MTP head."
+    } else {
+        ""
+    };
+    Err(format!(
+        "{display_name} is an MLX model and the MLX runtime is not installed — \
+         install it in Settings → Local models.{aside}"
+    ))
+}
+
+/// `resolve_engine` for an installed model, reading its checkpoint for the
+/// head.
+pub fn engine_for_model(
+    model: &catalog::LocalModel,
+    installed: InstalledEngines,
+) -> Result<Engine, String> {
+    resolve_engine(
+        &model.display_name,
+        &model.format,
+        catalog::is_mtplx_model(model),
+        installed,
+    )
 }
 
 /// User-facing knobs for local inference, persisted inside `AgentConfig`.
@@ -162,12 +262,18 @@ pub struct LocalPrefs {
     /// local, but a pair of 7Bs is already ~9 GB, so the default is one.
     #[serde(default = "default_max_loaded")]
     pub max_loaded_models: u32,
-    /// Turn on MTP speculative decoding for models that have a drafter.
+    /// Speculate using a *separate drafter model*, for the checkpoints that
+    /// have one published beside them.
     ///
     /// Off by default, and deliberately a preference rather than something
     /// inferred from the model: the drafter is another gigabyte resident and
     /// the speed-up depends on how predictable *this user's* prompts are, so
     /// it is theirs to switch off when it does not pay.
+    ///
+    /// It does **not** gate MTPLX. A checkpoint carrying its own MTP head
+    /// costs nothing extra to speculate with — no second model, nothing to
+    /// download — so there is no trade for the user to make and installing the
+    /// MTPLX runtime is the whole opt-in. See `Engine::for_model`.
     #[serde(default)]
     pub mtp_enabled: bool,
     /// Tokens proposed per speculation round. 4 is upstream's default; below 2
@@ -428,6 +534,106 @@ mod tests {
         // An unknown format is GGUF: that is what every catalog entry written
         // before formats existed was.
         assert_eq!(Engine::for_format(""), Engine::Llamacpp);
+    }
+
+    /// On Apple Silicon only — everywhere else MTPLX does not exist and the
+    /// head is just weights nothing reads.
+    #[test]
+    fn a_checkpoint_with_an_mtp_head_picks_mtplx() {
+        let want = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Engine::Mtplx
+        } else {
+            Engine::Mlx
+        };
+        assert_eq!(Engine::for_checkpoint("mlx", true), want);
+    }
+
+    #[test]
+    fn an_mlx_checkpoint_without_a_head_is_never_promoted_to_mtplx() {
+        assert_eq!(Engine::for_checkpoint("mlx", false), Engine::Mlx);
+    }
+
+    /// llama.cpp can speculate on a head living inside the GGUF, but nothing
+    /// here reads GGUF metadata to know whether one is there. Until something
+    /// does, the flag must not leak across formats.
+    #[test]
+    fn a_gguf_checkpoint_ignores_the_mtp_head_flag() {
+        assert_eq!(Engine::for_checkpoint("gguf", true), Engine::Llamacpp);
+    }
+
+    /// The whole point of the change: no preference is consulted, so there is
+    /// no `LocalPrefs` in this call at all.
+    #[test]
+    fn installing_the_runtime_is_the_only_switch_mtplx_needs() {
+        if !Engine::Mtplx.is_available() {
+            return;
+        }
+        let both = InstalledEngines {
+            mlx: true,
+            mtplx: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_engine("m", "mlx", true, both).unwrap(),
+            Engine::Mtplx
+        );
+    }
+
+    /// The head is inside the checkpoint and MLX ignores it. Slower, never
+    /// broken — so a missing MTPLX is not a reason to refuse the model.
+    #[test]
+    fn a_missing_mtplx_falls_back_to_mlx_instead_of_failing() {
+        let mlx_only = InstalledEngines {
+            mlx: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_engine("m", "mlx", true, mlx_only).unwrap(),
+            Engine::Mlx
+        );
+    }
+
+    /// The dead end this change exists to fix: MTPLX installed, MLX removed,
+    /// and an ordinary MLX model that cannot start. The error has to say why.
+    #[test]
+    fn an_mlx_model_with_only_mtplx_installed_says_why_it_cannot_run() {
+        if !Engine::Mlx.is_available() {
+            return;
+        }
+        let mtplx_only = InstalledEngines {
+            mtplx: true,
+            ..Default::default()
+        };
+        let err = resolve_engine("Qwen3.5-9B", "mlx", false, mtplx_only).unwrap_err();
+        assert!(err.contains("MLX runtime"), "{err}");
+        assert!(err.contains("MTP head"), "{err}");
+    }
+
+    /// Every refusal has to name the thing to install, since nothing on the
+    /// request path may download it for the user.
+    #[test]
+    fn nothing_installed_names_the_runtime_to_install() {
+        let none = InstalledEngines::default();
+        for (format, head) in [("gguf", false), ("mlx", false), ("mlx", true)] {
+            let err = resolve_engine("m", format, head, none).unwrap_err();
+            // MLX off Apple Silicon is refused for a different reason, and
+            // that one is not fixable by installing anything.
+            if format == "mlx" && !Engine::Mlx.is_available() {
+                assert!(err.contains("Apple Silicon"), "{err}");
+                continue;
+            }
+            assert!(err.contains("Settings → Local models"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_gguf_model_with_only_mlx_installed_asks_for_llama_cpp() {
+        let mlx_only = InstalledEngines {
+            mlx: true,
+            ..Default::default()
+        };
+        let err = resolve_engine("m", "gguf", false, mlx_only).unwrap_err();
+        assert!(err.contains("llama.cpp"), "{err}");
     }
 
     #[test]

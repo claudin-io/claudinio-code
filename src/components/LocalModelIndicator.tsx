@@ -1,5 +1,6 @@
 import { createSignal, onCleanup, onMount, Show, For, type Component } from "solid-js";
 import { localRuntimeStats, type LocalModelStats, type LocalPhase } from "../lib/ipc";
+import { ENGINE_LABEL } from "../lib/localEngines";
 import { Icon } from "./Icon";
 
 /** Slow on purpose: this is a status line, not telemetry. Each poll is three
@@ -78,7 +79,7 @@ export const LocalModelIndicator: Component<{ visible?: () => boolean }> = (prop
               <div class="space-y-1">
                 <div class="truncate text-sm text-ink">{s.displayName}</div>
                 <div class="text-[11px] text-ink-faint">
-                  {s.engine === "mlx" ? "MLX" : "llama.cpp"} · {PHASE_LABEL[s.phase]}
+                  {ENGINE_LABEL[s.engine]} · {PHASE_LABEL[s.phase]}
                 </div>
                 <dl class="mt-1 space-y-0.5 text-[11px]">
                   <div class="flex justify-between">

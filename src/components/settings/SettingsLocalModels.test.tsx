@@ -15,6 +15,7 @@ import {
   localStatus,
   type SuggestedModel,
   type LocalModelView,
+  type LocalPrefs,
   type LocalStatus,
   type ModelDownloadProgress,
 } from "../../lib/ipc";
@@ -99,6 +100,8 @@ const model = (over: Partial<LocalModelView> = {}): LocalModelView => ({
   complete: true,
   mtp: { supported: false, drafterInstalled: false },
   fit: "comfortable",
+  engine: "llamacpp",
+  engineReady: true,
   ...over,
 });
 
@@ -116,10 +119,11 @@ async function mount(
     models?: LocalModelView[];
     enabled?: boolean;
     curated?: SuggestedModel[];
+    prefs?: Partial<LocalPrefs>;
   } = {},
 ) {
   vi.mocked(getConfig).mockResolvedValue({
-    local: { enabled: over.enabled ?? true, engine: "llamacpp" },
+    local: { enabled: over.enabled ?? true, engine: "llamacpp", ...over.prefs },
   } as never);
   vi.mocked(localStatus).mockResolvedValue(over.status ?? status());
   vi.mocked(localHardware).mockResolvedValue({
@@ -423,5 +427,55 @@ describe("SettingsLocalModels", () => {
     emitProgress(progress({ phase: "done" }));
     await Promise.resolve();
     expect(el.textContent).not.toContain("Cancel");
+  });
+
+  /// `format` cannot answer this — MLX and MTPLX share one — and until the row
+  /// said it, the only way to learn which engine served a model was to run it.
+  it("names the engine that will run each installed model", async () => {
+    const el = await mount({
+      models: [
+        model({ key: "a", displayName: "Qwen3-8B", engine: "llamacpp" }),
+        model({ key: "b", displayName: "Qwen3.8-27B", format: "mlx", engine: "mtplx" }),
+      ],
+    });
+    expect(el.textContent).toContain("llama.cpp");
+    expect(el.textContent).toContain("MTPLX");
+  });
+
+  /// Removing one runtime used to leave every model of that format failing
+  /// with a message that only appeared once you tried to chat.
+  it("says which runtime to install when a model cannot run", async () => {
+    const el = await mount({
+      models: [
+        model({
+          format: "mlx",
+          engine: "mlx",
+          engineReady: false,
+          engineNote: "the MLX runtime is not installed — install it in Settings",
+        }),
+      ],
+    });
+    expect(el.textContent).toContain("the MLX runtime is not installed");
+  });
+
+  /// Regression. MTPLX only ever runs MLX checkpoints, and its setup lived
+  /// inside the llama.cpp card — so choosing MLX hid the one engine that
+  /// could speed those checkpoints up.
+  it("offers MTPLX setup while the MLX engine is selected", async () => {
+    const el = await mount({
+      status: status({ mlxSupported: true, mtplxSupported: true, engine: "mlx" }),
+      prefs: { engine: "mlx", mtpEnabled: false },
+    });
+    expect(el.textContent).toContain("MTPLX runtime");
+  });
+
+  /// The mirror image: the MLX download button was hidden behind the browse
+  /// filter being set to MLX.
+  it("offers the MLX runtime while llama.cpp is the browse filter", async () => {
+    const el = await mount({
+      status: status({ mlxSupported: true, engine: "llamacpp" }),
+      prefs: { engine: "llamacpp" },
+    });
+    expect(el.textContent).toContain("MLX runtime");
   });
 });

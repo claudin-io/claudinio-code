@@ -1,3 +1,4 @@
+import type { LocalEngine } from "./localEngines";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
@@ -622,11 +623,13 @@ export function browserClose(): Promise<void> {
   return invoke<void>("browser_close");
 }
 
-// --- Local models (llama.cpp) ---
+// --- Local models (llama.cpp, MLX, MTPLX) ---
+
 
 export type LlamaBackend = "auto" | "cpu" | "vulkan";
-/** llama.cpp runs everywhere; MLX is Apple Silicon only and faster there. */
-export type LocalEngine = "llamacpp" | "mlx" | "mtplx";
+/** Re-exported for the callers that already read their local types from here.
+ *  The value side lives in `localEngines` — see the note there. */
+export type { LocalEngine };
 export type Fit = "comfortable" | "tight" | "wontFit";
 
 export interface LocalPrefs {
@@ -747,6 +750,14 @@ export interface LocalModelView extends LocalModel {
   fit: Fit;
   benchmark?: ModelBenchmark | null;
   mtp: MtpSupport;
+  /** The engine that will run this model here — or, when none can, the one it
+   *  wants. `format` cannot answer it: MLX and MTPLX share one. */
+  engine: LocalEngine;
+  /** False when no installed runtime can load it; `engineNote` says which to
+   *  install. */
+  engineReady: boolean;
+  /** Why it cannot run, or what would make it faster. */
+  engineNote?: string | null;
 }
 
 /** Whether one model can speculate, and whether it can right now. `supported`

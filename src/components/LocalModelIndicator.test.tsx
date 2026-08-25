@@ -97,6 +97,17 @@ describe("LocalModelIndicator", () => {
     expect(el.textContent).toContain("llama.cpp");
   });
 
+  /// Regression: a two-way ternary over a three-value engine read MTPLX —
+  /// the fastest of the three — as "llama.cpp".
+  it("names MTPLX when that is the engine", async () => {
+    const el = await mount([stats({ engine: "mtplx" })]);
+    el.querySelector("button")!.click();
+    await Promise.resolve();
+    const text = el.textContent ?? "";
+    expect(text).toContain("MTPLX");
+    expect(text).not.toContain("llama.cpp");
+  });
+
   /// Polling a hidden window burns battery for pixels nobody is looking at.
   it("does not poll while the workspace is not visible", async () => {
     await mount([stats()], false);

@@ -175,29 +175,66 @@ pub fn primary_gguf(model: &LocalModel) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Whether this MLX checkpoint carries an MTP head MTPLX can run.
+/// Where the MTP head lives when the contract does not spell it out. Mirrors
+/// `MTP_SIDECAR_FALLBACKS` in MTPLX's own `hf_loader.py`, in its order.
+const MTP_SIDECARS: &[&str] = &[
+    "mtp.safetensors",
+    "mtp/weights.safetensors",
+    "model-mtp.safetensors",
+];
+
+/// Whether the checkpoint in `dir` carries an MTP head MTPLX can run.
 ///
-/// Decided by `mtplx_mtp_contract` in the checkpoint's own `config.json`, which
-/// is where the converter records how the head attaches — hidden variant,
-/// concat order, position mode. Its presence is the only honest signal: MTPLX
-/// refuses to bolt a head onto a trunk it cannot prove it was trained against,
-/// and a repo merely *named* MTP proves nothing. `Qwen3.8-27B-MTP-Q4_K_M.gguf`
-/// and `mlx-community/Qwen3.8-27B-MTP-4bit` are both called MTP and neither is
-/// this.
-pub fn is_mtplx_model(model: &LocalModel) -> bool {
-    if model.format != "mlx" {
-        return false;
+/// Two layouts, because the converter changed how it records the contract and
+/// both are published on the Hub today:
+///
+/// 1. `mtplx_mtp_contract` inside `config.json` — how the head attaches, in
+///    hidden variant / concat order / position mode. The older shape, e.g.
+///    `Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed`.
+/// 2. A separate `mtplx_runtime.json` beside a sidecar holding the head, which
+///    is what forge 0.3.x onwards writes (`Qwen3.6-35B-A3B-MTPLX-Optimized-Speed`
+///    carries no contract key in `config.json` at all). Both halves are
+///    required: a runtime file whose head never downloaded is not runnable.
+///
+/// This is the same pair MTPLX's `validate_mtplx_model_files` checks, and the
+/// only honest signal there is — MTPLX refuses to bolt a head onto a trunk it
+/// cannot prove it was trained against, and a repo merely *named* MTP proves
+/// nothing. `Qwen3.8-27B-MTP-Q4_K_M.gguf` and `mlx-community/Qwen3.8-27B-MTP-4bit`
+/// are both called MTP and neither is this.
+///
+/// Takes a directory rather than a `LocalModel` so the rule can be tested
+/// against a temp directory instead of a real install.
+///
+/// Known limit: a checkpoint naming its sidecar something outside
+/// `MTP_SIDECARS` (the contract can point elsewhere) reads as plain MLX. That
+/// costs speed, never correctness — which is the trade this whole predicate is
+/// built around, since the failure in the other direction is a server that
+/// loads and then dies.
+pub fn is_mtplx_dir(dir: &Path) -> bool {
+    if read_json(&dir.join("config.json"))
+        .is_some_and(|config| config.get("mtplx_mtp_contract").is_some())
+    {
+        return true;
     }
-    let Ok(dir) = model_dir(&model.key) else {
-        return false;
-    };
-    let Ok(data) = std::fs::read_to_string(dir.join("config.json")) else {
-        return false;
-    };
-    let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) else {
-        return false;
-    };
-    config.get("mtplx_mtp_contract").is_some()
+    read_json(&dir.join("mtplx_runtime.json")).is_some_and(|c| c.is_object())
+        && MTP_SIDECARS.iter().any(|name| dir.join(name).is_file())
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Whether this installed MLX checkpoint carries an MTP head MTPLX can run.
+///
+/// Re-derived from disk on every call rather than recorded at install time:
+/// `install` never opens the checkpoint, so a persisted flag would read
+/// `false` for every model already on this machine until something backfilled
+/// it — and it would go stale the moment a repo is reinstalled. The cost is
+/// two `is_file` calls and one small parse, on cold start and on the settings
+/// list.
+pub fn is_mtplx_model(model: &LocalModel) -> bool {
+    model.format == "mlx" && model_dir(&model.key).is_ok_and(|dir| is_mtplx_dir(&dir))
 }
 
 /// Whether this installed MLX checkpoint is a drafter rather than a model.
@@ -717,6 +754,74 @@ mod tests {
         let mut m = model();
         m.format = "gguf".into();
         assert!(!is_mlx_drafter(&m));
+    }
+
+    /// The layout forge 0.3.x publishes: no contract key in `config.json` at
+    /// all, a `mtplx_runtime.json` beside the head. Read as plain MLX this
+    /// silently costs the ~2x the head exists to provide.
+    #[test]
+    fn the_newer_checkpoint_layout_is_recognised_from_its_runtime_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type":"qwen3_5_moe"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("mtplx_runtime.json"),
+            r#"{"arch_id":"qwen3-next-mtp","mtp_sidecar":"native MTP sidecar"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("mtp.safetensors"), b"head").unwrap();
+
+        assert!(is_mtplx_dir(dir.path()));
+    }
+
+    /// The older shape has to keep working: it is what the checkpoints already
+    /// installed on people's machines carry.
+    #[test]
+    fn the_older_inline_contract_still_counts_as_mtplx() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type":"qwen3_5_moe","mtplx_mtp_contract":{"concat_order":"embedding_hidden"}}"#,
+        )
+        .unwrap();
+
+        // No runtime file, no sidecar — the contract alone is the signal.
+        assert!(is_mtplx_dir(dir.path()));
+    }
+
+    /// A download killed before the head arrived declares a contract it cannot
+    /// honour. Serving that through MTPLX is a load error, not a slow reply.
+    #[test]
+    fn a_runtime_file_without_its_head_is_not_mtplx() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mtplx_runtime.json"), r#"{"arch_id":"x"}"#).unwrap();
+
+        assert!(!is_mtplx_dir(dir.path()));
+    }
+
+    #[test]
+    fn an_ordinary_mlx_checkpoint_is_not_mtplx() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type":"qwen3_5_moe"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("model.safetensors"), b"weights").unwrap();
+
+        assert!(!is_mtplx_dir(dir.path()));
+    }
+
+    /// MTPLX reads MLX repositories; a GGUF entry never reaches the directory
+    /// check at all.
+    #[test]
+    fn a_gguf_entry_is_never_mtplx() {
+        let mut m = model();
+        m.format = "gguf".into();
+        assert!(!is_mtplx_model(&m));
     }
 
     #[test]

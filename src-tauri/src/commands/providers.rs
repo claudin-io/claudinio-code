@@ -417,6 +417,13 @@ pub async fn list_all_models(state: State<'_, AppState>) -> Result<Vec<ModelGrou
                 c.entries
                     .into_iter()
                     .filter(crate::llama::catalog::is_complete)
+                    // A drafter has no tokenizer and answers nothing — the
+                    // same reason the settings list hides them. Offered here
+                    // it is a chat model that loads and then says nothing.
+                    .filter(|m| {
+                        !crate::llama::mlx_mtp::is_drafter(&m.repo)
+                            && !crate::llama::catalog::is_mlx_drafter(m)
+                    })
                     .map(|m| {
                         (
                             format!("{}/{}", crate::llama::LOCAL_PROVIDER_ID, m.key),
@@ -430,7 +437,9 @@ pub async fn list_all_models(state: State<'_, AppState>) -> Result<Vec<ModelGrou
     if !local.is_empty() {
         groups.push(ModelGroup {
             provider_id: crate::llama::LOCAL_PROVIDER_ID.into(),
-            provider_name: "Local (llama.cpp)".into(),
+            // Not "Local (llama.cpp)": which engine serves these is decided
+            // per model, and for an MLX or MTPLX user that label was a lie.
+            provider_name: "Local".into(),
             models: local.iter().map(|(id, _)| id.clone()).collect(),
             labels: local.into_iter().collect(),
         });

@@ -393,9 +393,25 @@ fn drafter_path(
     dir.is_dir().then_some(dir)
 }
 
+/// What can actually start on this machine right now.
+///
+/// Answered by the same function that resolves the binary at spawn time, so
+/// routing and spawning cannot disagree about what "installed" means — and so
+/// a `server_path` or `mtplx_path` the user pointed at counts, for free.
+pub fn installed_engines(prefs: &LocalPrefs) -> crate::llama::InstalledEngines {
+    crate::llama::InstalledEngines {
+        llamacpp: resolve_exe(prefs, Engine::Llamacpp).is_ok(),
+        mlx: resolve_exe(prefs, Engine::Mlx).is_ok(),
+        mtplx: resolve_exe(prefs, Engine::Mtplx).is_ok(),
+    }
+}
+
 /// The `llama-server` to run: the user's own if they pointed at one, otherwise
 /// the managed install (which must already be provisioned — this is a request
 /// path and may not spend the user's bandwidth on its own).
+///
+/// Still the last word at spawn time even though `installed_engines` asked it
+/// first: the file can vanish between the two.
 fn resolve_exe(prefs: &LocalPrefs, engine: Engine) -> Result<PathBuf, String> {
     if engine == Engine::Mtplx {
         // An `mtplx` the user installed themselves wins, the way `server_path`
@@ -644,18 +660,11 @@ pub async fn ensure_serving(
         }
     }
 
-    // The engine is decided by the model, not by the preference: handing a
-    // GGUF to MLX aborts inside its model factory, and the user's preference
-    // cannot change what the weights are.
-    let engine = Engine::for_model(&model, prefs);
-    if !engine.is_available() {
-        return Err(format!(
-            "{} is a {} model, and the {} engine is not available on this machine",
-            model.display_name,
-            model.format.to_uppercase(),
-            engine.label()
-        ));
-    }
+    // The engine is decided by the model and by what is installed, not by the
+    // preference: handing a GGUF to MLX aborts inside its model factory, and
+    // the user's preference cannot change what the weights are. When nothing
+    // here can load it, the error names the runtime to install.
+    let engine = crate::llama::engine_for_model(&model, installed_engines(prefs))?;
     // llama.cpp is handed a file, MLX a directory; the catalog knows which
     // because it recorded the format when the model was installed.
     let model_path = catalog::model_path(&model)?;
@@ -1065,8 +1074,14 @@ pub async fn stats() -> Vec<LocalModelStats> {
                     display_name: catalog::find(key)
                         .map(|m| m.display_name)
                         .unwrap_or_else(|_| key.clone()),
+                    // Reads the checkpoint, so MTPLX is named while it loads
+                    // rather than only once it is up. Residual: a model that
+                    // degraded to MLX because MTPLX is not installed still
+                    // reads as MTPLX for these few seconds — carrying the
+                    // resolved engine through `phases()` is not worth the
+                    // churn for a label that is about to be replaced.
                     engine: catalog::find(key)
-                        .map(|m| Engine::for_format(&m.format))
+                        .map(|m| Engine::for_model(&m))
                         .unwrap_or_default(),
                     phase: Phase::Loading,
                     ..Default::default()
@@ -1291,6 +1306,45 @@ mod tests {
     fn mtplx_never_resolves_an_external_drafter() {
         let m = model("mlx", "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed");
         assert!(drafter_path(&prefs(true), Engine::Mtplx, &m).is_none());
+    }
+
+    /// Routing asks this what is installed and the spawn path asks
+    /// `resolve_exe` for the binary. If they ever disagreed, routing would
+    /// pick an engine that then fails to start.
+    #[test]
+    fn installed_engines_agrees_with_the_binary_that_would_be_spawned() {
+        let p = prefs(false);
+        let installed = installed_engines(&p);
+        for engine in [Engine::Llamacpp, Engine::Mlx, Engine::Mtplx] {
+            assert_eq!(
+                installed.has(engine),
+                resolve_exe(&p, engine).is_ok(),
+                "{}",
+                engine.label()
+            );
+        }
+    }
+
+    /// Someone who already has MTPLX on their machine points at it instead of
+    /// paying for a second copy — and routing has to count that as installed,
+    /// not just the spawn.
+    #[test]
+    fn a_user_supplied_mtplx_counts_as_installed() {
+        if !Engine::Mtplx.is_available() {
+            return;
+        }
+        let real = std::env::current_exe().unwrap();
+        let p = LocalPrefs {
+            mtplx_path: Some(real.display().to_string()),
+            ..LocalPrefs::default()
+        };
+        assert!(installed_engines(&p).mtplx);
+
+        let p = LocalPrefs {
+            mtplx_path: Some("/definitely/not/here/mtplx".into()),
+            ..LocalPrefs::default()
+        };
+        assert!(!installed_engines(&p).mtplx);
     }
 
     #[test]
