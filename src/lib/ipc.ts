@@ -244,6 +244,37 @@ export interface SessionLinkedData {
   firstMessage: string;
 }
 
+export interface HookStartedData {
+  sessionId: string;
+  hookId: string;
+  event: string;
+  command: string;
+  source: string;
+  statusMessage: string | null;
+}
+
+export interface HookFinishedData {
+  sessionId: string;
+  hookId: string;
+  event: string;
+  /** ok | blocked | error | timeout | skipped_untrusted */
+  status: string;
+  exitCode: number | null;
+  durationMs: number;
+  output: string;
+  error: string | null;
+  decision: string | null;
+  systemMessage: string | null;
+}
+
+/** This workspace declares hooks nobody has approved. Nothing ran. */
+export interface HooksAwaitingApprovalData {
+  workspace: string;
+  hash: string;
+  count: number;
+  commands: string[];
+}
+
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
   | { event: "TextDelta"; data: { text: string } }
@@ -263,6 +294,9 @@ export type AgentEvent =
   | { event: "SubagentStarted"; data: SubagentStartedData }
   | { event: "SubagentDone"; data: SubagentDoneData }
   | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } }
+  | { event: "HookStarted"; data: HookStartedData }
+  | { event: "HookFinished"; data: HookFinishedData }
+  | { event: "HooksAwaitingApproval"; data: HooksAwaitingApprovalData }
   | {
       event: "SessionStats";
       data: {
@@ -474,7 +508,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust";
   [key: string]: unknown;
 };
 
@@ -973,6 +1007,90 @@ export function setQualityConfig(
   settings: QualitySettings,
 ): Promise<void> {
   return invoke<void>("set_quality_config", { workspaceRoot, settings });
+}
+
+// ─── Lifecycle hooks ─────────────────────────────────────────────────────────
+
+export type HookSourceKind =
+  | "userSettings"
+  | "appConfig"
+  | "plugin"
+  | "workspaceConfig"
+  | "projectSettings"
+  | "localSettings";
+
+/** Whether this workspace's hooks may run. Only "trusted" means yes. */
+export type HookTrustStatus = "noHooks" | "pending" | "trusted" | "changed";
+
+export interface HookInfo {
+  event: string;
+  matcher: string | null;
+  /** Already expanded: what will actually be executed. */
+  command: string;
+  args: string[];
+  display: string;
+  timeoutSecs: number;
+  statusMessage: string | null;
+  source: string;
+  sourceKind: HookSourceKind;
+  /** Other files declaring the identical command. It runs once. */
+  alsoFrom: string[];
+  /** Which tools or triggers this matcher selects. Empty means it fires never. */
+  hits: string[];
+  matcherValid: boolean;
+}
+
+export interface HookDiagnostic {
+  source: string;
+  message: string;
+}
+
+export interface HooksInfo {
+  enabled: boolean;
+  workspace: string | null;
+  trust: HookTrustStatus;
+  fingerprint: string;
+  approvedCommands: string[];
+  hooks: HookInfo[];
+  diagnostics: HookDiagnostic[];
+}
+
+export interface HookRunView {
+  status: string;
+  exitCode: number | null;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  decision: string | null;
+  additionalContext: string | null;
+  error: string | null;
+}
+
+export function listHooks(workspace?: string | null): Promise<HooksInfo> {
+  return invoke<HooksInfo>("hooks_list", { workspace: workspace ?? null });
+}
+
+/** Approve the set the user was shown. The hash guards against it changing. */
+export function approveHooks(workspace: string, hash: string): Promise<HooksInfo> {
+  return invoke<HooksInfo>("hooks_approve", { workspace, hash });
+}
+
+export function revokeHooks(workspace: string): Promise<HooksInfo> {
+  return invoke<HooksInfo>("hooks_revoke", { workspace });
+}
+
+export function setHooksEnabled(enabled: boolean, workspace?: string | null): Promise<HooksInfo> {
+  return invoke<HooksInfo>("hooks_set_enabled", { enabled, workspace: workspace ?? null });
+}
+
+/** Drop the run snapshot so the next message re-reads the config from disk. */
+export function reloadHooks(workspace: string): Promise<HooksInfo> {
+  return invoke<HooksInfo>("hooks_reload", { workspace });
+}
+
+/** Run one hook against a synthetic payload and report what it did. */
+export function testHook(workspace: string, index: number): Promise<HookRunView> {
+  return invoke<HookRunView>("hooks_test", { workspace, index });
 }
 
 export function setKeepAwake(active: boolean): Promise<void> {

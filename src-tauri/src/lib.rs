@@ -144,6 +144,12 @@ pub fn run() {
             commands::ide::detect_ides,
             commands::ide::open_in_ide,
             askpass::answer_askpass,
+            commands::hooks::hooks_list,
+            commands::hooks::hooks_approve,
+            commands::hooks::hooks_revoke,
+            commands::hooks::hooks_set_enabled,
+            commands::hooks::hooks_reload,
+            commands::hooks::hooks_test,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -152,6 +158,18 @@ pub fn run() {
             // registry is a static and is never dropped, so without this a
             // quit leaves llama-server holding the model's worth of RAM.
             if matches!(event, tauri::RunEvent::Exit) {
+                // A flush hook's whole purpose is to run before the context it
+                // would flush stops existing, and quitting is the hardest
+                // version of that. Hard-capped: a hung hook must never be able
+                // to hold the window open.
+                use tauri::Manager;
+                if let Some(state) = _app.try_state::<state::AppState>() {
+                    tauri::async_runtime::block_on(commands::hooks::fire_session_end_everywhere(
+                        &state,
+                        agent::hooks::SessionEndReason::Other,
+                        std::time::Duration::from_secs(5),
+                    ));
+                }
                 tauri::async_runtime::block_on(llama::supervisor::stop_all());
             }
         });

@@ -1650,3 +1650,71 @@ describe("enhancePrompt", () => {
     expect(result).toBe("enhanced prompt text");
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// Lifecycle hooks
+// ─────────────────────────────────────────────────────────────
+
+describe("hooks wrappers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const info: import("./ipc").HooksInfo = {
+    enabled: true,
+    workspace: "/ws",
+    trust: "pending",
+    fingerprint: "sha256:abc",
+    approvedCommands: [],
+    hooks: [],
+    diagnostics: [],
+  };
+
+  it("listHooks passes null rather than undefined for no workspace", async () => {
+    mockInvokeFor(info);
+    const { listHooks } = await import("./ipc");
+    await listHooks();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("hooks_list", { workspace: null });
+  });
+
+  it("listHooks passes the workspace when given one", async () => {
+    mockInvokeFor(info);
+    const { listHooks } = await import("./ipc");
+    const result = await listHooks("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("hooks_list", { workspace: "/ws" });
+    expect(result).toBe(info);
+  });
+
+  it("approveHooks sends back the hash it was shown", async () => {
+    // The hash is what stops a set that changed between rendering and clicking
+    // from being approved blind.
+    mockInvokeFor(info);
+    const { approveHooks } = await import("./ipc");
+    await approveHooks("/ws", "sha256:abc");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("hooks_approve", {
+      workspace: "/ws",
+      hash: "sha256:abc",
+    });
+  });
+
+  it("revokeHooks, reloadHooks and testHook pass their arguments through", async () => {
+    mockInvokeFor(info);
+    const { revokeHooks, reloadHooks, testHook } = await import("./ipc");
+    await revokeHooks("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("hooks_revoke", { workspace: "/ws" });
+    await reloadHooks("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("hooks_reload", { workspace: "/ws" });
+    await testHook("/ws", 2);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("hooks_test", { workspace: "/ws", index: 2 });
+  });
+
+  it("setHooksEnabled carries the switch and the workspace to refresh", async () => {
+    mockInvokeFor(info);
+    const { setHooksEnabled } = await import("./ipc");
+    await setHooksEnabled(false, "/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("hooks_set_enabled", {
+      enabled: false,
+      workspace: "/ws",
+    });
+  });
+});

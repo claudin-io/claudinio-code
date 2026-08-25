@@ -296,6 +296,7 @@ mod tests {
                 timeout_seconds: None,
             },
             &ToolContext {
+                hooks: None,
                 db_path: None,
                 browser: None,
                 lsp_manager: None,
@@ -330,6 +331,7 @@ mod tests {
     fn echo_with_stdin() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = crate::agent::tools::ToolContext {
+            hooks: None,
             db_path: None,
             browser: None,
             lsp_manager: None,
@@ -376,6 +378,7 @@ mod tests {
         let tmp = std::env::temp_dir();
         let canonical_tmp = std::fs::canonicalize(&tmp).unwrap_or(tmp.clone());
         let ctx = crate::agent::tools::ToolContext {
+            hooks: None,
             db_path: None,
             browser: None,
             lsp_manager: None,
@@ -421,6 +424,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let start = Instant::now();
         let ctx = crate::agent::tools::ToolContext {
+            hooks: None,
             db_path: None,
             browser: None,
             lsp_manager: None,

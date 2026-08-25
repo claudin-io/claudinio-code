@@ -230,11 +230,30 @@ pub fn compose_context_handoff_message(handoff_text: &str, plan_file: Option<&st
 /// new session's store path.
 pub fn rebuild_tool_context(
     old_ctx: &crate::agent::tools::ToolContext,
+    new_session_id: &str,
     new_store_path: &std::path::Path,
     new_mode_ctl: Arc<ModeCtl>,
     config: provider::AgentConfig,
 ) -> crate::agent::tools::ToolContext {
     crate::agent::tools::ToolContext {
+        // The successor inherits the same resolved set and the same approval —
+        // a handoff is one run continuing under a new id, not a new run — but
+        // re-points at the successor's transcript and is told to report a
+        // SessionStart. Its source is `compact`: the successor starts with an
+        // empty history and a handoff document, which is a compacted context,
+        // not a user opening the app (`startup`) and not a human action
+        // (`resume`).
+        hooks: old_ctx.hooks.as_ref().map(|h| {
+            let next = h
+                .for_session(new_session_id, new_store_path.to_path_buf())
+                .with_store(crate::agent::persist::SessionStore {
+                    path: new_store_path.to_path_buf(),
+                });
+            if let Ok(mut pending) = next.pending_session_start.lock() {
+                *pending = Some(crate::agent::hooks::SessionStartSource::Compact);
+            }
+            Arc::new(next)
+        }),
         db_path: old_ctx.db_path.clone(),
         lsp_manager: old_ctx.lsp_manager.clone(),
         workspace_root: old_ctx.workspace_root.clone(),

@@ -308,6 +308,7 @@ mod tests {
 
     fn ctx_for(root: &str, plan_save_path: Option<&str>) -> ToolContext {
         ToolContext {
+            hooks: None,
             db_path: None,
             lsp_manager: None,
             workspace_root: Some(root.to_string()),

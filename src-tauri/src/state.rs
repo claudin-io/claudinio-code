@@ -73,9 +73,42 @@ pub struct WorkspaceState {
     /// the same reason as `mcp`: a page keeps its login and route across chat
     /// turns instead of being relaunched every message.
     pub browser: Arc<crate::browser::BrowserHandle>,
+    /// This workspace's resolved hooks, snapshotted per run.
+    ///
+    /// Fixed for the duration of a run — including across every handoff into a
+    /// linked session — and re-resolved on the next user message. Swapping the
+    /// program that guards a tool call halfway through a turn is a footgun, and
+    /// a stable set is what makes the trust hash mean anything: you approved
+    /// *this* set, and it is the set that ran. Per-run rather than per-app so
+    /// that authoring a hook does not require restarting the app.
+    pub hooks: Mutex<Option<Arc<crate::agent::hooks::HookSet>>>,
+    /// Fingerprint of the config the current `hooks` snapshot came from.
+    pub hooks_fingerprint: Mutex<Option<String>>,
+    /// Set when the user starts a new conversation, so the next run reports
+    /// `SessionStart` with source `clear` rather than `startup`.
+    pub cleared: std::sync::atomic::AtomicBool,
 }
 
 impl WorkspaceState {
+    /// Resolve this workspace's hooks for a run, reusing the last snapshot when
+    /// nothing on disk or in the config changed.
+    pub async fn resolve_hooks(&self, config: &AgentConfig) -> Arc<crate::agent::hooks::HookSet> {
+        let set = Arc::new(crate::agent::hooks::resolve(Some(&self.root), config));
+        let fp = format!("{}|{}", set.fingerprint, set.hooks.len());
+        {
+            let current = self.hooks.lock().await;
+            let current_fp = self.hooks_fingerprint.lock().await;
+            if let (Some(existing), Some(existing_fp)) = (current.as_ref(), current_fp.as_ref())
+                && *existing_fp == fp
+            {
+                return existing.clone();
+            }
+        }
+        *self.hooks.lock().await = Some(set.clone());
+        *self.hooks_fingerprint.lock().await = Some(fp);
+        set
+    }
+
     /// Connect to configured MCP servers if not already connected with the
     /// current config, and return the (possibly cached) manager. Reconnects
     /// whenever `mcp_servers` changed since the last connection.
@@ -135,6 +168,14 @@ pub struct AppState {
     pub local_downloads: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub embedding_model: Arc<Mutex<Option<SharedEmbedder>>>,
     pub records_cache: crate::agent::persist::RecordsCache,
+    /// Which hook sets the user has approved. Machine-local, never in a
+    /// repository — a repo-local approval file would arrive pre-approved in a
+    /// pull request, which defeats the gate entirely.
+    pub hook_trust: Arc<crate::agent::hooks::TrustStore>,
+    /// Session ids this process has already started a run for, so the second
+    /// message of a conversation does not report `SessionStart` again and the
+    /// first message after a restart reports `resume`.
+    pub session_started: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
@@ -152,6 +193,8 @@ impl AppState {
             records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(
                 NonZeroUsize::new(64).unwrap(),
             ))),
+            hook_trust: Arc::new(crate::agent::hooks::TrustStore::new()),
+            session_started: Mutex::new(std::collections::HashSet::new()),
         }
     }
 

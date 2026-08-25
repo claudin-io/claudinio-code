@@ -201,6 +201,16 @@ pub struct AgentConfig {
     /// name. A discovered plugin with no entry here is enabled.
     #[serde(default)]
     pub plugins: std::collections::HashMap<String, PluginPrefs>,
+    /// Lifecycle hooks, in Claude Code's `hooks` schema. Global here; a
+    /// workspace's `.claudinio.json`, its `.claude/settings*.json` and any
+    /// enabled plugin contribute their own — every source is a union, never an
+    /// override. See `crate::agent::hooks`.
+    #[serde(default)]
+    pub hooks: Option<serde_json::Value>,
+    /// The kill switch. False means no discovery and no spawn, anywhere,
+    /// whatever any settings file on disk says.
+    #[serde(default = "default_true")]
+    pub hooks_enabled: bool,
     /// Browser tool settings — see `crate::browser`.
     #[serde(default)]
     pub browser: crate::browser::BrowserPrefs,
@@ -408,6 +418,8 @@ impl Default for AgentConfig {
             base_url: "https://api.claudin.io".into(),
             api_key: String::new(),
             browser: Default::default(),
+            hooks: None,
+            hooks_enabled: true,
             model: "claudinio".into(),
             brain_model: "claudius".into(),
             builder_model: "claudinio".into(),
@@ -708,6 +720,11 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
     if let Some(v) = obj.get("handoff_context_tokens") {
         cfg.handoff_context_tokens = v.as_u64();
     }
+    // `hooks` is deliberately NOT merged here. Hook discovery reads
+    // `.claudinio.json` directly as one of its six sources, and folding it into
+    // `cfg.hooks` as well would make one declaration look like two — the
+    // dedup would still run it once, but the settings panel would name the
+    // wrong file as its origin. See `crate::agent::hooks::discovery`.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

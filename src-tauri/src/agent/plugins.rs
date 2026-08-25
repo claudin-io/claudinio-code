@@ -100,6 +100,13 @@ pub struct PluginManifest {
     /// Client extension data keyed by reverse-domain namespace (§8.1).
     #[serde(default)]
     pub extensions: serde_json::Map<String, serde_json::Value>,
+    /// Lifecycle hooks: an inline `hooks` object, a path to a hooks file, or a
+    /// list of such paths, all relative to the plugin root. A plugin that omits
+    /// this is still searched for the conventional `hooks/hooks.json` — most
+    /// published plugins declare nothing and rely on that convention. See
+    /// `crate::agent::hooks::discovery`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<serde_json::Value>,
 }
 
 impl PluginManifest {
@@ -374,6 +381,11 @@ const MANIFEST_FIELDS: &[&str] = &[
     "license",
     "keywords",
     "extensions",
+    // Not in the Agent Plugins 1.0.0 schema. Recognised anyway because the
+    // ecosystem this client has to interoperate with declares lifecycle hooks
+    // here, and reporting a real, load-bearing field as "unknown" would be
+    // telling the truth about the spec and a lie about the plugin.
+    "hooks",
 ];
 
 /// §5.5 plugin name constraints.
@@ -523,6 +535,7 @@ pub fn parse_manifest(text: &str) -> Result<(PluginManifest, Vec<PluginDiagnosti
             license,
             keywords,
             extensions,
+            hooks: obj.get("hooks").cloned(),
         },
         diagnostics,
     ))
@@ -1144,10 +1157,20 @@ mod tests {
 
     #[test]
     fn reports_and_ignores_unknown_fields() {
-        let (manifest, diags) = parse_manifest(&manifest_json(",\"hooks\":{}")).unwrap();
+        let (manifest, diags) = parse_manifest(&manifest_json(",\"sparkles\":{}")).unwrap();
         assert_eq!(manifest.name, "demo");
         assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("hooks"));
+        assert!(diags[0].message.contains("sparkles"));
+    }
+
+    #[test]
+    fn hooks_is_a_recognised_field_and_is_kept() {
+        // It used to be reported as unknown. It is load-bearing now: see
+        // MANIFEST_FIELDS and `crate::agent::hooks::discovery`.
+        let (manifest, diags) =
+            parse_manifest(&manifest_json(",\"hooks\":\"./hooks/hooks.json\"")).unwrap();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(manifest.hooks.unwrap(), "./hooks/hooks.json");
     }
 
     #[test]

@@ -10,6 +10,7 @@ import { SettingsPlugins } from "./settings/SettingsPlugins";
 import { SettingsBrowser } from "./settings/SettingsBrowser";
 import { SettingsLocalModels } from "./settings/SettingsLocalModels";
 import { SettingsQuality } from "./settings/SettingsQuality";
+import { SettingsHooks } from "./settings/SettingsHooks";
 
 interface SettingsPanelProps {
   showConfig: Accessor<boolean>;
@@ -86,7 +87,7 @@ interface SettingsPanelProps {
   openSupportUrl: () => void;
 }
 
-type CategoryId = 'general' | 'models' | 'local' | 'account' | 'agent' | 'quality' | 'mcp' | 'browser' | 'plugins';
+type CategoryId = 'general' | 'models' | 'local' | 'account' | 'agent' | 'quality' | 'mcp' | 'browser' | 'plugins' | 'hooks';
 
 interface Category {
   id: CategoryId;
@@ -103,6 +104,7 @@ const CATEGORIES: Category[] = [
   { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
   { id: 'browser', icon: 'globe', searchTerms: ["Browser","Chromium","Screenshot","Console","Network","Headless","Viewport","Download","Install a browser"] },
+  { id: 'hooks', icon: 'git-commit', searchTerms: ["Hooks","Lifecycle hooks","PreToolUse","PostToolUse","UserPromptSubmit","SessionStart","SessionEnd","PreCompact","SubagentStop","Stop","Notification","settings.json","hooks.json","Allow these hooks","Revoke","Run now","Claude Code"] },
   { id: 'plugins', icon: 'package', searchTerms: ["Plugins","Agent Plugins","Install from folder","Install from URL","Create plugin","plugin.json","mcp.json","Uninstall"] },
 ];
 
@@ -116,6 +118,7 @@ function getCategoryLabel(id: CategoryId): string {
     quality: 'Quality',
     mcp: 'MCP',
     plugins: 'Plugins',
+    hooks: 'Hooks',
     browser: 'Browser',
   };
   return labels[id];
@@ -335,6 +338,10 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   workspaceRoot={props.activeWorkspace}
                   onClose={() => props.setShowConfig(false)}
                 />
+              </Show>
+
+              <Show when={searchQuery() ? true : activeCategory() === 'hooks'}>
+                <SettingsHooks workspaceRoot={props.activeWorkspace} />
               </Show>
 
               <Show when={searchQuery() ? true : activeCategory() === 'mcp'}>

@@ -7,6 +7,7 @@ pub mod context;
 pub mod enhance;
 pub mod fs;
 pub mod git;
+pub mod hooks;
 pub mod ide;
 pub mod local_llm;
 pub mod lsp;
