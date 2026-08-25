@@ -202,6 +202,27 @@ tuned in English, and the agent asks you to write in English too — a localized
 shell around an English-speaking agent was worse than being straightforward
 about it.
 
+### It runs your hooks
+
+Claudinio implements **Claude Code's hook protocol** — all nine events,
+field for field — so a `hooks` block you already wrote works here unedited.
+It reads `~/.claude/settings.json`, the project's `.claude/settings.json` and
+`settings.local.json`, a `hooks` key in `.claudinio.json`, and any installed
+plugin's `hooks/hooks.json`. Every source contributes; none overrides another.
+
+`PreToolUse` can allow, ask or deny a tool call. `UserPromptSubmit` and
+`SessionStart` can inject context. `PreCompact` fires before a compaction *and*
+before a context handoff, which is the moment a memory hook actually needs.
+Matchers written against Claude Code's tool names (`Edit|Write`, `Bash`, `Task`)
+select the right Claudinio tools through an alias table.
+
+Because a hook is arbitrary code a repository can ship, nothing runs until you
+approve that exact set of commands once — the approval is a hash, so editing a
+command revokes it. A hook may relax an approval prompt; it can never relax a
+policy: an `allow` on a denylisted shell command is still denied.
+
+Full reference in [docs/HOOKS.md](docs/HOOKS.md).
+
 ### It can run the model on your machine
 
 Settings → **Local models** downloads llama.cpp and a GGUF model from Hugging

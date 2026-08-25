@@ -19,7 +19,7 @@ covers the build and the checks.
 │         │                                                    │
 │         ▼                                                    │
 │    agent/        loop, providers, tools, subagents,          │
-│                  permissions, skills, MCP, persistence       │
+│                  permissions, skills, MCP, hooks, persistence│
 │    code_intel/   tree-sitter → SQLite FTS5 + ONNX vectors    │
 │    lsp/          language-server client                      │
 │    workspace_path.rs, procutil.rs, http.rs, askpass.rs       │
@@ -104,6 +104,16 @@ data and neutralizes a forged closing tag; the system prompt tells the model to
 treat it as evidence, never instructions. That is mitigation, not a guarantee —
 the load-bearing part is that the browser tools cannot execute anything, and
 that `bash` and `edit_file` still require approval.
+
+**5. What a hook may do.** Lifecycle hooks (`agent/hooks/`) run programs named by
+a config file, and a config file can arrive in a `git clone`. Two rules bound
+them. Nothing spawns until the user has approved that exact set of resolved
+commands, hashed in `~/.claudinio/hook-trust.json` — never in the repository,
+where an approval could arrive pre-approved in a pull request. And a hook's
+`PreToolUse` verdict feeds `session.rs::effective_permission`, which treats an
+`allow` exactly as it treats YOLO mode: it skips the approval prompt and still
+runs the bash denylist and the browser scheme check. A hook may relax a prompt;
+it may never relax a policy.
 
 `SECURITY.md` states what each boundary guarantees and what is explicitly out of
 scope.

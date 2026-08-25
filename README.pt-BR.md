@@ -203,6 +203,30 @@ casca localizada em volta de um agente que só fala inglês era pior do que ser
 direto sobre isso. (Este README é uma cortesia de documentação, não uma
 tradução da UI.)
 
+### Ele roda os seus hooks
+
+O Claudinio implementa o **protocolo de hooks do Claude Code** — os nove
+eventos, campo por campo — então um bloco `hooks` que você já escreveu funciona
+aqui sem edição. Ele lê `~/.claude/settings.json`, o `.claude/settings.json` e o
+`settings.local.json` do projeto, uma chave `hooks` no `.claudinio.json` e o
+`hooks/hooks.json` de qualquer plugin instalado. Toda fonte contribui; nenhuma
+sobrepõe a outra.
+
+`PreToolUse` pode permitir, perguntar ou negar uma chamada de ferramenta.
+`UserPromptSubmit` e `SessionStart` podem injetar contexto. `PreCompact` dispara
+antes de uma compactação *e* antes de um handoff de contexto, que é o momento de
+que um hook de memória realmente precisa. Matchers escritos com os nomes de
+ferramenta do Claude Code (`Edit|Write`, `Bash`, `Task`) selecionam as
+ferramentas certas do Claudinio por uma tabela de aliases.
+
+Como um hook é código arbitrário que um repositório pode trazer junto, nada roda
+até você aprovar aquele conjunto exato de comandos uma vez — a aprovação é um
+hash, então editar um comando a revoga. Um hook pode dispensar um pedido de
+aprovação; nunca pode dispensar uma política: um `allow` sobre um comando de
+shell na denylist continua negado.
+
+Referência completa em [docs/HOOKS.md](docs/HOOKS.md).
+
 ### Ele pode rodar o modelo na sua máquina
 
 Ajustes → **Local models** baixa o llama.cpp e um modelo GGUF do Hugging Face, e
