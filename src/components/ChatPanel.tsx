@@ -1924,8 +1924,14 @@ export const ChatPanel: Component<{
 
       <Show when={retryableError() !== null && !isBudgetError()}>
         <div class="border-t border-danger/30 bg-danger/5 px-4 py-3">
-          <div class="flex items-center justify-between gap-4">
-            <p class="text-[13px] text-danger shrink-0">{"Error"}: {retryableError()}</p>
+          <div class="flex items-start justify-between gap-4">
+            {/* The message is whatever the provider sent — it can be a single
+                unbroken line thousands of characters long. Wrap it and cap its
+                height so the Dismiss/Continue buttons stay on screen instead of
+                being pushed past the right edge. */}
+            <p class="min-w-0 flex-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[13px] text-danger">
+              {"Error"}: {retryableError()}
+            </p>
             <div class="flex gap-2 shrink-0">
               <button
                 onClick={() => setRetryableError(null)}
