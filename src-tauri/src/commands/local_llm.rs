@@ -601,9 +601,7 @@ pub async fn local_cancel_install(state: State<'_, AppState>, key: String) -> Re
 }
 
 #[tauri::command]
-pub async fn local_list_models(
-    state: State<'_, AppState>,
-) -> Result<Vec<LocalModelView>, String> {
+pub async fn local_list_models(state: State<'_, AppState>) -> Result<Vec<LocalModelView>, String> {
     let hw = hardware::detect();
     let benchmarks = crate::llama::bench::load();
     let entries = catalog::load()?.entries;

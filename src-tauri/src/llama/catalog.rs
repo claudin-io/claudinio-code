@@ -762,7 +762,11 @@ mod tests {
     #[test]
     fn the_newer_checkpoint_layout_is_recognised_from_its_runtime_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.json"), r#"{"model_type":"qwen3_5_moe"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type":"qwen3_5_moe"}"#,
+        )
+        .unwrap();
         std::fs::write(
             dir.path().join("mtplx_runtime.json"),
             r#"{"arch_id":"qwen3-next-mtp","mtp_sidecar":"native MTP sidecar"}"#,
@@ -801,7 +805,11 @@ mod tests {
     #[test]
     fn an_ordinary_mlx_checkpoint_is_not_mtplx() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.json"), r#"{"model_type":"qwen3_5_moe"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type":"qwen3_5_moe"}"#,
+        )
+        .unwrap();
         std::fs::write(dir.path().join("model.safetensors"), b"weights").unwrap();
 
         assert!(!is_mtplx_dir(dir.path()));
