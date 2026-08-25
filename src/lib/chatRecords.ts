@@ -49,7 +49,7 @@ export interface SubagentTimelineState {
 }
 
 export interface TimelineItem {
-  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode" | "golden" | "quality" | "linked";
+  type: "thinking" | "tool" | "phase" | "phase_result" | "text" | "steering" | "subagent" | "compaction" | "mode" | "golden" | "quality" | "linked" | "hook";
   thinking?: { text: string; startedAt: number; endedAt?: number };
   tool?: {
     call: ToolCallData;
@@ -69,6 +69,25 @@ export interface TimelineItem {
   golden?: GoldenLoopData;
   /// A quality-harness verdict: the project's own checks ran and were scored.
   quality?: QualityVerdictData;
+  /// A lifecycle hook ran. `status: "running"` until its HookFinished lands —
+  /// a hook that hangs has to be visible as a hook that is hanging, not as an
+  /// unexplained pause.
+  hook?: {
+    hookId: string;
+    event: string;
+    command: string;
+    source: string;
+    statusMessage?: string | null;
+    status: "running" | string;
+    exitCode?: number | null;
+    durationMs?: number;
+    output?: string;
+    error?: string | null;
+    decision?: string | null;
+    systemMessage?: string | null;
+    /// Context the hook added to the conversation, from a `hook_context` record.
+    context?: string;
+  };
   /// Chain divider: this conversation continued in a new linked session.
   /// `firstMessage` (when present) is the successor's kickoff prompt / handoff
   /// document, rendered collapsed. `docOnly` marks the predecessor-side
@@ -400,6 +419,37 @@ export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
         modeChange: {
           mode: normalizeSessionMode(rec.mode),
           origin: rec.origin as ModeChangedData["origin"],
+        },
+      });
+    } else if (kind === "hook") {
+      // Reload path: a run that already happened. `skipped_untrusted` rows are
+      // kept deliberately — "we chose not to run it" is a different answer from
+      // "nothing happened", and only one of them is a bug.
+      steps.push({
+        type: "hook",
+        hook: {
+          hookId: `${String(rec.event ?? "")}:${String(rec.command ?? "")}`,
+          event: String(rec.event ?? ""),
+          command: String(rec.command ?? ""),
+          source: String(rec.source ?? ""),
+          status: String(rec.status ?? "ok"),
+          exitCode: (rec.exit_code as number | null) ?? null,
+          durationMs: Number(rec.duration_ms ?? 0),
+          output: String(rec.stdout ?? ""),
+          error: (rec.stderr as string) || null,
+          decision: (rec.decision as string | null) ?? null,
+        },
+      });
+    } else if (kind === "hook_context") {
+      steps.push({
+        type: "hook",
+        hook: {
+          hookId: `context:${String(rec.event ?? "")}`,
+          event: String(rec.event ?? ""),
+          command: "",
+          source: String(rec.source ?? "hooks"),
+          status: "ok",
+          context: String(rec.text ?? ""),
         },
       });
     } else if (kind === "golden_cycle") {

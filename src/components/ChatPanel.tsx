@@ -32,6 +32,9 @@ import {
   type ThinkingEffort,
   type ModeChangedData,
   type GoldenLoopData,
+  type HookStartedData,
+  type HookFinishedData,
+  type HooksAwaitingApprovalData,
   type QualityVerdictData,
   type SessionLinkedData,
   type AgentEvent,
@@ -59,6 +62,7 @@ import { FileMentionPopover } from "./FileMentionPopover";
 import { TagMentionPopover } from "./TagMentionPopover";
 import { SkillMentionPopover } from "./SkillMentionPopover";
 import ContextWarning from "./ContextWarning";
+import HookApprovalBanner from "./HookApprovalBanner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setWorkspaceStatus, isBusy } from "../lib/workspaceStatus";
 import { ToastPill } from "./ToastPill";
@@ -129,6 +133,11 @@ export const ChatPanel: Component<{
   const [pendingApprovals, setPendingApprovals] = createSignal<(ToolCallData & { subagentName?: string })[]>([]);
   const [currentAskUser, setCurrentAskUser] = createSignal<AskUserData | null>(null);
   const [currentSteps, setCurrentSteps] = createSignal<TimelineItem[]>([]);
+  /// This workspace declares hooks nobody has approved, so none of them ran.
+  /// Surfaced in the thread rather than only in Settings: the moment it matters
+  /// is the moment the user notices their hook did nothing.
+  const [hooksAwaitingApproval, setHooksAwaitingApproval] =
+    createSignal<HooksAwaitingApprovalData | null>(null);
   // Live typewriter preview: `liveText` is the latest TextDelta/Done snapshot,
   // smoothed word-by-word by `smoothLiveText`. `pendingDone` holds the Done
   // payload while the preview finishes draining, so promotion into
@@ -874,6 +883,49 @@ export const ChatPanel: Component<{
         ...prev,
         { type: "golden" as const, golden: data } as TimelineItem,
       ]);
+      scrollToBottom();
+    } else if (event.event === "HookStarted") {
+      const data = event.data as HookStartedData;
+      setCurrentSteps((prev) => [
+        ...prev,
+        {
+          type: "hook" as const,
+          hook: {
+            hookId: data.hookId,
+            event: data.event,
+            command: data.command,
+            source: data.source,
+            statusMessage: data.statusMessage,
+            status: "running",
+          },
+        } as TimelineItem,
+      ]);
+      scrollToBottom();
+    } else if (event.event === "HookFinished") {
+      const data = event.data as HookFinishedData;
+      setCurrentSteps((prev) => {
+        // Update the row its HookStarted created, rather than appending a
+        // second one: a hook is one thing that happened, not two.
+        const idx = prev.findIndex(
+          (s) => s.type === "hook" && s.hook?.hookId === data.hookId && s.hook.status === "running",
+        );
+        const finished = {
+          status: data.status,
+          exitCode: data.exitCode,
+          durationMs: data.durationMs,
+          output: data.output,
+          error: data.error,
+          decision: data.decision,
+          systemMessage: data.systemMessage,
+        };
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next[idx] = { ...next[idx], hook: { ...next[idx].hook!, ...finished } };
+        return next;
+      });
+      scrollToBottom();
+    } else if (event.event === "HooksAwaitingApproval") {
+      setHooksAwaitingApproval(event.data as HooksAwaitingApprovalData);
       scrollToBottom();
     } else if (event.event === "QualityVerdict") {
       const data = event.data as QualityVerdictData;
@@ -1788,6 +1840,16 @@ export const ChatPanel: Component<{
             <div class="mb-6">
               <QuestionCard ask={currentAskUser()!} onSubmit={handleAnswers} />
             </div>
+          </Show>
+
+          <Show when={hooksAwaitingApproval()}>
+            {(data) => (
+              <HookApprovalBanner
+                data={data()}
+                onApproved={() => setHooksAwaitingApproval(null)}
+                onDismiss={() => setHooksAwaitingApproval(null)}
+              />
+            )}
           </Show>
 
           <div ref={messagesEndRef} />

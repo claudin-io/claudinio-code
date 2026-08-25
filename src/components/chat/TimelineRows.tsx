@@ -361,12 +361,105 @@ export const TimelineSteps: Component<{
           <Show when={step.type === "quality" && step.quality}>
             <QualityRow quality={step.quality!} />
           </Show>
+          <Show when={step.type === "hook" && step.hook}>
+            <HookRow hook={step.hook!} />
+          </Show>
           <Show when={step.type === "linked" && step.linked}>
             <LinkedRow linked={step.linked!} />
           </Show>
         </>
       )}
     </For>
+  );
+};
+
+/// One lifecycle hook, or one piece of context a hook injected.
+///
+/// Two things have to be visible here that are invisible everywhere else. A
+/// hook that failed must look like a failure and not like silence, because the
+/// characteristic hook bug is a config that runs every prompt and does nothing.
+/// And context a hook added to the conversation must be attributable: "the
+/// brain added five facts to your prompt" is a row, not an unexplained bulge in
+/// the user's message.
+export const HookRow: Component<{
+  hook: NonNullable<TimelineItem["hook"]>;
+}> = (props) => {
+  const tone = () => {
+    switch (props.hook.status) {
+      case "ok":
+        return "border-neutral-500/40 text-neutral-500";
+      case "blocked":
+        return "border-amber-500/40 text-amber-500";
+      case "skipped_untrusted":
+        return "border-amber-500/40 text-amber-500";
+      case "running":
+        return "border-accent/40 text-accent";
+      default:
+        return "border-red-500/40 text-red-500";
+    }
+  };
+  const icon = () => {
+    switch (props.hook.status) {
+      case "ok":
+        return "check-circle";
+      case "running":
+        return "git-commit";
+      default:
+        return "alert-triangle";
+    }
+  };
+  const headline = () => {
+    if (props.hook.context) return `${props.hook.event} hook added context`;
+    if (props.hook.status === "running") {
+      return props.hook.statusMessage ?? `${props.hook.event} hook`;
+    }
+    if (props.hook.status === "skipped_untrusted") {
+      return `${props.hook.event} hook not run — waiting for your approval`;
+    }
+    if (props.hook.status === "timeout") {
+      return `${props.hook.event} hook timed out`;
+    }
+    if (props.hook.status === "blocked") {
+      return `${props.hook.event} hook blocked this`;
+    }
+    if (props.hook.status === "error") {
+      return `${props.hook.event} hook failed`;
+    }
+    return `${props.hook.event} hook`;
+  };
+  const detail = () => {
+    const bits: string[] = [];
+    if (props.hook.exitCode !== null && props.hook.exitCode !== undefined) {
+      bits.push(`exit ${String(props.hook.exitCode)}`);
+    }
+    if (props.hook.durationMs) bits.push(`${String(props.hook.durationMs)}ms`);
+    return bits.join(" · ");
+  };
+
+  return (
+    <div class="my-1 ml-6 flex flex-col gap-0.5">
+      <span
+        class={`inline-flex w-fit items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${tone()}`}
+        title={props.hook.command || props.hook.source}
+      >
+        <Icon name={icon()} class="h-3 w-3" />
+        {headline()}
+        <Show when={detail()}>
+          <span class="opacity-60">{`· ${detail()}`}</span>
+        </Show>
+      </span>
+      <Show when={props.hook.context}>
+        <pre class="ml-1 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] text-neutral-500">
+          {props.hook.context}
+        </pre>
+      </Show>
+      <Show when={props.hook.error}>
+        <span class="ml-1 font-mono text-[10px] text-red-500">{props.hook.error}</span>
+      </Show>
+      <Show when={props.hook.systemMessage}>
+        <span class="ml-1 font-mono text-[10px] text-amber-500">{props.hook.systemMessage}</span>
+      </Show>
+    </div>
   );
 };
 
