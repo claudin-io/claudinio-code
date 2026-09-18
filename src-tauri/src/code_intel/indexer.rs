@@ -651,6 +651,22 @@ pub fn scan_workspace(
             Err(_) => continue,
         };
 
+        // Same unchanged-content skip as the code pass. Without it every
+        // rescan re-inserted the doc's symbols, and the cascade deleted their
+        // embeddings while `embed_hash` still said the file was embedded — so
+        // a workspace lost all of its doc embeddings on the second open.
+        let new_hash = compute_hash(&content);
+        if let Ok(Some(existing)) = db.file_by_path(path_str)
+            && existing.hash.as_deref() == Some(new_hash.as_str())
+        {
+            total_files += 1;
+            total_symbols += db
+                .symbols_in_file(path_str)
+                .map(|s| s.len() as i64)
+                .unwrap_or(0);
+            continue;
+        }
+
         match index_doc_file(db, path_str, &content, embedder.as_deref_mut(), i18n) {
             Ok(num_symbols) => {
                 total_files += 1;
@@ -985,5 +1001,62 @@ mod should_embed_symbol_tests {
             "authenticate_user",
             text
         ));
+    }
+}
+
+#[cfg(test)]
+mod rescan_keeps_doc_embeddings {
+    use super::*;
+
+    /// A doc file that has not changed since the last scan must keep its
+    /// embeddings across a rescan — exactly as a code file does. Deleting the
+    /// symbols (which cascades to the embeddings) while `embed_hash` still
+    /// matches `hash` loses them for good: the embedding pass believes the
+    /// file is done and never comes back to it.
+    #[test]
+    fn unchanged_doc_file_keeps_its_embeddings_across_a_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        std::fs::write(
+            dir.path().join("GUIDE.md"),
+            "# Deploying the service\n\nRun the deploy script after merging to main. \
+             The script performs a blue-green swap and waits for the health check \
+             before switching traffic, so a broken build never reaches users.\n",
+        )
+        .unwrap();
+        let db_file = dir.path().join("index.db");
+        let db = IndexDb::open(&db_file).unwrap();
+
+        scan_workspace(&db, &root, None, None, None, None).unwrap();
+        let file = db
+            .file_by_path(&dir.path().join("GUIDE.md").to_string_lossy())
+            .unwrap()
+            .expect("doc file indexed");
+        let chunks = db.chunks_for_file(file.id).unwrap();
+        assert!(!chunks.is_empty(), "the doc produced embeddable chunks");
+        // Stand in for the embedding pass: vectors stored, file marked done.
+        for c in &chunks {
+            db.upsert_embedding(
+                c.symbol_id,
+                c.chunk_index,
+                c.start_line,
+                c.end_line,
+                &[1.0; 384],
+            )
+            .unwrap();
+        }
+        db.set_embed_hash(file.id, file.hash.as_deref().unwrap())
+            .unwrap();
+        let (_, _, before) = db.index_stats().unwrap();
+        assert_eq!(before as usize, chunks.len());
+
+        scan_workspace(&db, &root, None, None, None, None).unwrap();
+
+        let (_, _, after) = db.index_stats().unwrap();
+        assert_eq!(
+            after, before,
+            "a rescan of an unchanged doc must not drop its embeddings"
+        );
+        assert_eq!(db.embedding_pending_files().unwrap(), 0);
     }
 }
