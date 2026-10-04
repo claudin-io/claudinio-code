@@ -52,12 +52,4 @@ describe("bootstrapTestsPrompt", () => {
     expect(prompt).toContain("no test runner at all");
     expect(prompt).toContain("dev dependency");
   });
-
-  it("is ASCII, because the backend rejects non-English input before the run starts", () => {
-    for (const detected of [[], ["rust"]]) {
-      const prompt = bootstrapTestsPrompt(detected);
-      // eslint-disable-next-line no-control-regex
-      expect(/^[\x00-\x7F]*$/.test(prompt)).toBe(true);
-    }
-  });
 });

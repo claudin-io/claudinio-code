@@ -304,6 +304,16 @@ pub async fn run_spawn_agents(
     )
 }
 
+/// The system prompt every subagent runs with.
+fn subagent_system_prompt(workspace_root: Option<&str>, skills_hint: &str) -> String {
+    format!(
+        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}\
+         \n\nLANGUAGE: any language is valid. Write your final report in the language of your goal.",
+        workspace_root.unwrap_or("(none)"),
+        skills_hint,
+    )
+}
+
 /// Run a single subagent: a simplified enxuto version of `run_workflow`.
 /// No steering injection, no persistence, no `AgentEvent::Done`.
 #[allow(clippy::too_many_arguments)]
@@ -332,12 +342,7 @@ pub async fn run_subagent(
         Some(s) => format!("\n{s}"),
         None => String::new(),
     };
-    let system = format!(
-        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}\
-         \n\nLANGUAGE: Think, call tools, and write your final report in English ONLY.",
-        ctx.workspace_root.as_deref().unwrap_or("(none)"),
-        skills_hint,
-    );
+    let system = subagent_system_prompt(ctx.workspace_root.as_deref(), &skills_hint);
 
     let mut history = vec![Message {
         role: "user".into(),
@@ -634,6 +639,38 @@ pub async fn run_subagent(
     }
 }
 
+/// The goal handed to the summarizer that writes a context handoff.
+fn summary_goal(jsonl_path: &str, tail_note: &str) -> String {
+    format!(
+        "Read the conversation session file at `{}` and produce a structured handoff summary \
+         so the agent can seamlessly CONTINUE the work with your summary as its only memory \
+         of the earlier conversation. \
+         Use `read_file` to read it. The file is in JSONL format: one JSON object per line, each with a \
+         `kind` field. Lines with kind=\"user\" contain the user's input in the `text` field. \
+         Lines with kind=\"turn\" contain messages sent to/received from the AI — look for role=\"user\" \
+         and role=\"assistant\" messages in the `message.content` field. \
+         Lines with kind=\"steering\" contain mid-conversation guidance. \
+         Lines with kind=\"compacted\" contain previous compactions (summaries of older conversation) — \
+         fold their content into yours so nothing is lost. \
+         Ignore kind=\"done\" and kind=\"status\" lines (token bookkeeping).\n{}\
+         \n\
+         Structure the summary with exactly these sections:\n\
+         1. Task & intent — what the user is trying to achieve overall.\n\
+         2. Current state — what is done and what is in progress right now.\n\
+         3. Pending / next steps — an explicit TODO list to continue seamlessly.\n\
+         4. Files & symbols touched — file paths, key functions/structs, and what changed in each.\n\
+         5. Decisions & constraints — choices made, approaches rejected, user preferences.\n\
+         6. Learnings — errors hit, environment quirks, commands that work.\n\
+         \n\
+         Weight recent messages most heavily — they describe the live state. \
+         Write in the language the conversation is in. Be specific and factual — exact file paths, function names, values. \
+         Keep it under 600 words. \
+         Do NOT mention that you read a JSONL file or that you are a subagent — \
+         just write the handoff as a direct description of the work.",
+        jsonl_path, tail_note
+    )
+}
+
 /// Spawn a summary subagent that reads the session JSONL file and produces a
 /// concise summary of the conversation. The subagent has a completely fresh
 /// context — zero knowledge of the current conversation.
@@ -660,34 +697,7 @@ pub async fn run_summary_agent(
     };
     let spec = SubagentSpec {
         name: "summarizer".into(),
-        goal: format!(
-            "Read the conversation session file at `{}` and produce a structured handoff summary \
-             so the agent can seamlessly CONTINUE the work with your summary as its only memory \
-             of the earlier conversation. \
-             Use `read_file` to read it. The file is in JSONL format: one JSON object per line, each with a \
-             `kind` field. Lines with kind=\"user\" contain the user's input in the `text` field. \
-             Lines with kind=\"turn\" contain messages sent to/received from the AI — look for role=\"user\" \
-             and role=\"assistant\" messages in the `message.content` field. \
-             Lines with kind=\"steering\" contain mid-conversation guidance. \
-             Lines with kind=\"compacted\" contain previous compactions (summaries of older conversation) — \
-             fold their content into yours so nothing is lost. \
-             Ignore kind=\"done\" and kind=\"status\" lines (token bookkeeping).\n{}\
-             \n\
-             Structure the summary with exactly these sections:\n\
-             1. Task & intent — what the user is trying to achieve overall.\n\
-             2. Current state — what is done and what is in progress right now.\n\
-             3. Pending / next steps — an explicit TODO list to continue seamlessly.\n\
-             4. Files & symbols touched — file paths, key functions/structs, and what changed in each.\n\
-             5. Decisions & constraints — choices made, approaches rejected, user preferences.\n\
-             6. Learnings — errors hit, environment quirks, commands that work.\n\
-             \n\
-             Weight recent messages most heavily — they describe the live state. \
-             Write in English. Be specific and factual — exact file paths, function names, values. \
-             Keep it under 600 words. \
-             Do NOT mention that you read a JSONL file or that you are a subagent — \
-             just write the handoff as a direct description of the work.",
-            jsonl_path, tail_note
-        ),
+        goal: summary_goal(jsonl_path, &tail_note),
         mode: SubagentMode::Explore,
         expected_output: Some(
             "A structured handoff summary (sections: task & intent, current state, pending/next \
@@ -715,6 +725,18 @@ pub async fn run_summary_agent(
 mod tests {
     use super::*;
     use crate::agent::provider::AgentConfig;
+
+    // Any language is valid for the model's input and output. A subagent must
+    // never be told to think, call tools or report in one language only.
+    #[test]
+    fn subagent_prompts_do_not_impose_a_language() {
+        let system = subagent_system_prompt(Some("/ws"), "");
+        let goal = summary_goal("/ws/s.jsonl", "");
+        for text in [&system, &goal] {
+            assert!(!text.contains("English ONLY"), "got: {text}");
+            assert!(!text.contains("Write in English"), "got: {text}");
+        }
+    }
 
     #[test]
     fn test_subagent_defs_explore_excludes_spawn_and_ask() {

@@ -40,8 +40,8 @@ pub enum SessionRecord {
     },
     /// A user turn (the raw input the user typed).
     User { text: String, ts: u64 },
-    /// The user's raw input was rejected before the workflow started (e.g. the
-    /// English-only guard). Kept for audit: the user's message should never
+    /// The user's raw input was rejected before the workflow started (e.g. a
+    /// UserPromptSubmit hook blocked it). Kept for audit: the user's message should never
     /// silently vanish from the JSONL.
     #[serde(rename = "rejected")]
     Rejected {
@@ -1544,14 +1544,12 @@ mod tests {
 
     #[test]
     fn rejected_record_serialization() {
-        // A message rejected by a pre-workflow guard (e.g. the English-only
-        // check) must still land in the JSONL for audit — the user's text must
+        // A message rejected before the workflow starts (e.g. by a
+        // UserPromptSubmit hook) must still land in the JSONL for audit — the user's text must
         // never silently vanish.
         let rec = SessionRecord::Rejected {
             text: "Então...".into(),
-            reason: "Only English is supported. Please write your message in English. \
-                     (Detected non-English characters: ã)"
-                .into(),
+            reason: "Blocked by hook: prompt mentions a secret".into(),
             ts: 42,
         };
         let json = serde_json::to_string(&rec).unwrap();
@@ -1563,7 +1561,7 @@ mod tests {
         match back {
             SessionRecord::Rejected { text, reason, ts } => {
                 assert_eq!(text, "Então...");
-                assert!(reason.contains("Only English is supported"));
+                assert!(reason.contains("Blocked by hook"));
                 assert_eq!(ts, 42);
             }
             _ => panic!("expected Rejected, got {:?}", back),

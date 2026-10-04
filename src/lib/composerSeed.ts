@@ -34,9 +34,6 @@ export { seed as pendingComposerSeed };
 /// Written as a `<goal>` so it becomes a golden task: the harness then refuses
 /// to let the run finish until the suite actually passes, rather than taking
 /// the agent's word that it wrote some tests.
-///
-/// It must be ASCII — the backend rejects non-English user input before the
-/// workflow starts.
 export function bootstrapTestsPrompt(detected: string[]): string {
   const stacks =
     detected.length > 0
