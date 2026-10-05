@@ -237,3 +237,42 @@ Cada um destes já foi medido como negativo ou parte a cache:
 3. **F3.**
 4. **Medição do F4**, que diz se F4 e F5 valem a pena de todo.
 5. **F6:** quando houver procura.
+
+## 8. Implementado (2026-10-05, branch `feat/jev-harness`, TDD)
+
+O que foi pedido: "tudo o que der e trouxer benefício". O utilizador usa a
+própria chave TypeSafe ou o OpenRouter, e a conta claudin.io também dá acesso,
+incluído no plano.
+
+**Backends, por ordem** (`agent/jev.rs`):
+
+1. a chave TypeSafe do utilizador;
+2. o plano claudin.io, em `/api/app/decisions` (claudinio-litellm
+   `dashboard/app_decisions.py`), assinado como o `web_search` e sem chave
+   externa;
+3. o OpenRouter ligado.
+
+Um 401/403 do plano fica memorizado durante 1 h e o pedido passa ao backend
+seguinte. Tudo é fail-open.
+
+**As três fases que mostraram benefício, com os limiares tirados de sondas ao
+vivo a 2026-10-05:**
+
+| fase | o que faz | sonda |
+|---|---|---|
+| F1 | o juiz de conclusão pergunta primeiro ao Jev (`unfinished`, `asks_user`). Com ≥0,7 continua, com ambos ≤0,3 termina, e o resto vai para o juiz LLM | 16/16 corretos; finais concluídos dão 0,03–0,05 e os outros 0,61–0,99. ~0,2 s, $2,1e-5 |
+| F2 | `loop_watch` na sessão e nos subagentes. A porta exata dispara com (tool, args, resultado) ×3 ou (tool, args) ×3; o Jev julga com `stuck` ≥0,85; dois avisos e depois `tool_loop` | 4 ciclos dão 0,89–0,96; trabalho saudável 0,03–0,05; polling de CI 0,72 |
+| F3 | `output_trim` no bash: acima de 20k chars ficam a cabeça e o fim, o Jev ordena os blocos do meio, e o output completo vai para um ficheiro temporário | sinal 0,87–0,99, ruído 0,04–0,12 |
+
+**Um bug à parte, encontrado pelo teste do F3:** o bash lia o stdout só depois
+de o processo terminar. Com um output acima de ~64 KB, o pipe enchia, o
+processo filho bloqueava e o comando acabava em timeout de 30 s. Foi corrigido
+e tem teste de regressão.
+
+**O que ficou de fora, e porquê:** o F4 e o F5 (effort por passo) estão parados
+até haver medição (o brain tem um negativo medido no DeepSeek). O F6
+(auto-aprovação) é produto, não custo, e precisa de sombra antes.
+
+**Para medir:** o custo vai para o `CostLedger` (`jev_cost`). O
+`ContinuationJudge` grava `judge: jev|llm`. No servidor, o hash
+`claudinio:jev:app:stats:<dia>` tem as chamadas e o custo diário do plano.
