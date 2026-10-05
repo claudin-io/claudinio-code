@@ -90,6 +90,15 @@ pub enum SessionRecord {
         tail_turns: usize,
         ts: u64,
     },
+    /// A verbatim compaction (`agent::prune`): tool calls dropped with their
+    /// results, and results cut to a head. Re-applied on every load.
+    Pruned {
+        drop_calls: Vec<String>,
+        truncate_results: Vec<String>,
+        #[serde(default)]
+        head_chars: usize,
+        ts: u64,
+    },
     /// Tasks snapshot written by the agent (tool-level tasks_get/tasks_set).
     #[serde(rename = "tasks")]
     Tasks {
@@ -654,7 +663,35 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
         }
         None => fold_into_history(&mut out, records.iter()),
     }
-    out
+    apply_prunes(out, records)
+}
+
+/// Re-apply every verbatim compaction the session recorded. Ids that are no
+/// longer in the history (summarized away by a later `Compacted`) are no-ops.
+fn apply_prunes(history: Vec<Message>, records: &[SessionRecord]) -> Vec<Message> {
+    let mut decision = crate::agent::prune::Decision::default();
+    let mut head_chars = crate::agent::prune::TRUNCATE_HEAD_CHARS;
+    for r in records {
+        if let SessionRecord::Pruned {
+            drop_calls,
+            truncate_results,
+            head_chars: h,
+            ..
+        } = r
+        {
+            decision.drop_calls.extend(drop_calls.iter().cloned());
+            decision
+                .truncate_results
+                .extend(truncate_results.iter().cloned());
+            if *h > 0 {
+                head_chars = *h;
+            }
+        }
+    }
+    if decision == crate::agent::prune::Decision::default() {
+        return history;
+    }
+    crate::agent::prune::apply(&history, &decision, head_chars)
 }
 
 /// Fold Turn/Steering records into a message history, merging steering text
@@ -962,6 +999,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Error { ts, .. }
                 | SessionRecord::Steering { ts, .. }
                 | SessionRecord::Compacted { ts, .. }
+                | SessionRecord::Pruned { ts, .. }
                 | SessionRecord::Tasks { ts, .. }
                 | SessionRecord::Mode { ts, .. }
                 | SessionRecord::Status { ts, .. }
@@ -2488,5 +2526,81 @@ mod media_tests {
         };
         assert_eq!(message.content[0].get_text(), Some("just text"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod pruned_tests {
+    use super::*;
+    use crate::agent::provider::{ContentBlock, Message};
+    use serde_json::json;
+
+    fn turn(role: &str, content: Vec<ContentBlock>) -> SessionRecord {
+        SessionRecord::Turn {
+            message: Message {
+                role: role.into(),
+                content,
+            },
+            ts: 1,
+        }
+    }
+
+    fn records() -> Vec<SessionRecord> {
+        vec![
+            turn("user", vec![ContentBlock::text("fix it")]),
+            turn("assistant", vec![ContentBlock::tool_use("toolu_a", "read_file", json!({"path": "a"}))]),
+            turn("user", vec![ContentBlock::tool_result("toolu_a", "AAAA")]),
+            turn("assistant", vec![ContentBlock::tool_use("toolu_b", "read_file", json!({"path": "b"}))]),
+            turn("user", vec![ContentBlock::tool_result("toolu_b", "B".repeat(2000))]),
+            turn("assistant", vec![ContentBlock::text("done")]),
+        ]
+    }
+
+    #[test]
+    fn a_pruned_record_round_trips() {
+        let rec = SessionRecord::Pruned {
+            drop_calls: vec!["toolu_a".into()],
+            truncate_results: vec!["toolu_b".into()],
+            head_chars: 300,
+            ts: 7,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"kind\":\"pruned\""), "{json}");
+        assert!(matches!(
+            serde_json::from_str::<SessionRecord>(&json).unwrap(),
+            SessionRecord::Pruned { head_chars: 300, .. }
+        ));
+    }
+
+    #[test]
+    fn a_reloaded_session_keeps_what_was_pruned_out() {
+        let mut recs = records();
+        recs.push(SessionRecord::Pruned {
+            drop_calls: vec!["toolu_a".into()],
+            truncate_results: vec!["toolu_b".into()],
+            head_chars: 300,
+            ts: 2,
+        });
+        let h = history_from_records(&recs);
+        let text = serde_json::to_string(&h).unwrap();
+        assert!(!text.contains("toolu_a"), "the dropped call and its result are gone");
+        assert!(text.contains("toolu_b"));
+        assert!(!text.contains(&"B".repeat(400)), "the truncated result is cut");
+        assert!(text.contains("fix it") && text.contains("done"));
+        assert!(h.windows(2).all(|w| w[0].role != w[1].role));
+    }
+
+    #[test]
+    fn turns_after_a_prune_are_untouched() {
+        let mut recs = records();
+        recs.push(SessionRecord::Pruned {
+            drop_calls: vec!["toolu_a".into()],
+            truncate_results: vec![],
+            head_chars: 300,
+            ts: 2,
+        });
+        recs.push(turn("user", vec![ContentBlock::text("and now?")]));
+        let h = history_from_records(&recs);
+        assert_eq!(h.last().unwrap().content[0].get_text(), Some("and now?"));
     }
 }

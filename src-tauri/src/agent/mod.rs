@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod output_trim;
 pub mod permissions;
 pub mod persist;
+pub mod prune;
 pub mod plugins;
 pub mod provider;
 pub mod run_state;
