@@ -717,6 +717,17 @@ pub enum AgentEvent {
     /// Superseded by the next `TextStep`/`Done` for the same block; never persisted.
     #[serde(rename = "TextDelta")]
     TextDelta { text: String },
+    /// The model's turn ended on this text with no tool call: an answer.
+    ///
+    /// Usually `Done` follows and carries the same text. But the run can go on
+    /// past an answer — the judge nudges, the gate comes back red, a Stop hook
+    /// objects, the user steers — and the next round's `TextDelta` then
+    /// overwrote it on screen, so the answer the user had just read vanished
+    /// (it was never a `TextStep`: those are text *alongside* tool calls). The
+    /// client keeps this one, and when more model activity follows it closes
+    /// the message there instead of folding everything into the last answer.
+    #[serde(rename = "FinalText")]
+    FinalText { text: String },
     #[serde(rename = "Thinking")]
     Thinking(String),
     #[serde(rename = "ToolCall")]
@@ -2456,6 +2467,9 @@ pub async fn run_workflow_with_profile(
                         content: vec![ContentBlock::text(&text_output)],
                     },
                 );
+                let _ = event_tx.send(AgentEvent::FinalText {
+                    text: text_output.clone(),
+                });
                 last_text = text_output;
             }
             steering.interrupt.store(false, Ordering::SeqCst);
@@ -2502,6 +2516,9 @@ pub async fn run_workflow_with_profile(
                         content: vec![ContentBlock::text(&text_output)],
                     },
                 );
+                let _ = event_tx.send(AgentEvent::FinalText {
+                    text: text_output.clone(),
+                });
                 last_text = text_output;
             }
             if guards.truncation_streak < 3 {
@@ -2587,6 +2604,9 @@ pub async fn run_workflow_with_profile(
                         content: vec![ContentBlock::text(&text_output)],
                     },
                 );
+                let _ = event_tx.send(AgentEvent::FinalText {
+                    text: text_output.clone(),
+                });
                 last_text = text_output;
             }
             // B — Antes de encerrar, verificar steering. Se houver, continuar.
@@ -5112,6 +5132,19 @@ mod tests {
         assert_eq!(json["event"], "TextDelta");
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         assert!(matches!(back, AgentEvent::TextDelta { text } if text == "partial"));
+    }
+
+    #[test]
+    fn agent_event_round_trip_final_text() {
+        // The client matches on the tag to tell an answer from a snapshot.
+        let ev = AgentEvent::FinalText {
+            text: "answer".into(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "FinalText");
+        assert_eq!(json["data"]["text"], "answer");
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::FinalText { text } if text == "answer"));
     }
 
     #[test]

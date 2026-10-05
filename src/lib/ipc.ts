@@ -289,6 +289,10 @@ export interface HooksAwaitingApprovalData {
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
   | { event: "TextDelta"; data: { text: string } }
+  // The turn ended on this text with no tool call: an answer. If more model
+  // activity follows, the run went on past it and the chat closes the message
+  // there (see `commitSegment` in ChatPanel).
+  | { event: "FinalText"; data: { text: string } }
   | { event: "ModeChanged"; data: ModeChangedData }
   | { event: "GoldenLoop"; data: GoldenLoopData }
   | { event: "QualityVerdict"; data: QualityVerdictData }
