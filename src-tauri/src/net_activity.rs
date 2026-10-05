@@ -31,6 +31,7 @@ const BYTES_EMIT_INTERVAL_MS: u128 = 1000;
 pub enum NetSource {
     LlmStream,
     LlmClassify,
+    Jev,
     LlmOneShot,
     ListModels,
     Auth,
@@ -50,6 +51,7 @@ fn source_to_str(source: NetSource) -> &'static str {
     match source {
         NetSource::LlmStream => "llm_stream",
         NetSource::LlmClassify => "llm_classify",
+        NetSource::Jev => "jev",
         NetSource::LlmOneShot => "llm_one_shot",
         NetSource::ListModels => "list_models",
         NetSource::Auth => "auth",

@@ -1,6 +1,9 @@
 pub mod app_sign;
 pub mod hooks;
 pub mod install_id;
+pub mod jev;
+pub mod loop_watch;
+pub mod output_trim;
 pub mod mcp;
 pub mod permissions;
 pub mod persist;
