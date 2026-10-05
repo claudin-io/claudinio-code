@@ -276,3 +276,57 @@ até haver medição (o brain tem um negativo medido no DeepSeek). O F6
 **Para medir:** o custo vai para o `CostLedger` (`jev_cost`). O
 `ContinuationJudge` grava `judge: jev|llm`. No servidor, o hash
 `claudinio:jev:app:stats:<dia>` tem as chamadas e o custo diário do plano.
+
+## 9. Compactação literal (port do `fast-jev-compaction`, 2026-10-05)
+
+Pedido do Victor: trazer para o harness, de raiz, o que o
+[tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction)
+faz.
+
+**O que o repo faz.** Em vez de pedir um resumo a um LLM, o Jev lê a conversa
+inteira (resultados de tools substituídos por uma nota, encaixada por estágios)
+e responde, por cada tool call antiga, duas perguntas: a chamada fica? o output
+fica literal? O que não fica sai: o output é cortado a uma cabeça de 300 chars,
+ou a chamada sai com o resultado. O texto do utilizador e do assistente nunca
+muda.
+
+**O que trouxemos** (`agent/prune.rs`, registo `SessionRecord::Pruned`):
+
+- **Antes do handoff e da compactação**, nos dois pontos do loop, corre a
+  compactação literal. Só é aceite se libertar ≥25% dos chars e deixar o
+  contexto abaixo de 80% do limite. Caso contrário cai no handoff ou no resumo
+  de sempre, exatamente como antes.
+- **Persistida:** o registo `Pruned` é reaplicado em `history_from_records`, por
+  isso uma sessão retomada é a mesma sessão. Os `Turn` nunca são apagados, e a
+  UI continua a mostrar tudo.
+- **Subagentes:** não tinham compactação nenhuma. Agora, acima da linha de
+  handoff, a mesma poda corre em memória.
+- **Limites ajustados aos nossos backends:** estado ≤56k chars e 8 perguntas por
+  pedido (o teto do endpoint do plano), no máximo 160 calls julgadas.
+- **Diagnóstico:** o registo grava pedidos, estágio, redução, custo e as duas
+  probabilidades de cada call.
+
+**Limiares próprios, não os do upstream (0,5), medidos em duas sondas ao vivo:**
+
+| call | P(call) | P(result) | decisão |
+|---|---|---|---|
+| schema de que a tarefa atual depende | 0,50 | 0,41 | fica inteiro |
+| ficheiro do bug, já corrigido | 0,31 | 0,23 | call fica, output cortado |
+| teste que falhou, já tratado | 0,31 | 0,16 | call fica, output cortado |
+| log de build | 0,23 | 0,14 | call fica, output cortado |
+| README / UI não relacionada | 0,11–0,13 | 0,07–0,11 | sai |
+
+Com 0,5, o schema ainda necessário teria sido cortado. Ficou
+`KEEP_RESULT_THRESHOLD = 0,35` e `KEEP_CALL_THRESHOLD = 0,2`. Apagar um output
+necessário custa uma releitura; manter um obsoleto só custa contexto.
+
+**Porque vale aqui, quando no proxy era um anti-caso (§7.1 do estudo do
+proxy):** no proxy, podar contexto quente parte a cache sem necessidade. Aqui a
+poda só corre quando o harness **já ia** reescrever a história (handoff ou
+resumo), por isso o custo de cache é o mesmo. Muda o que sobrevive: as palavras
+exatas em vez de prosa, e ~1 s em vez de um subagente summarizer que relê o
+JSONL inteiro.
+
+**O que não trouxemos:** o gatilho por percentagem (`compactAtPercent=60`),
+porque o nosso já é o limiar de handoff; e o estimador de tokens deles, porque
+os nossos limites são em chars.

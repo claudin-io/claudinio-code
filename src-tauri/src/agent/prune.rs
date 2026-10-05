@@ -22,7 +22,7 @@
 //! endpoint included. Anything going wrong yields `None` and the caller falls
 //! back to the handoff or the summarizing compaction.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
 use crate::agent::provider::{ContentBlock, Message, ToolResultContent};
@@ -100,6 +100,24 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// For the `Pruned` record: what was judged and how, so a session file
+    /// says why each call went.
+    pub fn stats_json(&self) -> Value {
+        json!({
+            "requests": self.requests,
+            "stage": self.stage,
+            "reduction": (self.reduction() * 1000.0).round() / 1000.0,
+            "chars_before": self.chars_before,
+            "chars_after": self.chars_after,
+            "cost": self.cost,
+            "judged": self
+                .judged
+                .iter()
+                .map(|(id, c, r)| json!([id, c, r]))
+                .collect::<Vec<_>>(),
+        })
+    }
+
     pub fn reduction(&self) -> f64 {
         if self.chars_before == 0 {
             0.0
@@ -120,9 +138,17 @@ pub fn collect_tool_calls(history: &[Message]) -> Vec<ToolCall> {
     let mut results = std::collections::HashMap::new();
     for (i, m) in history.iter().enumerate() {
         for b in &m.content {
-            if let ContentBlock::ToolResult { tool_use_id, content, .. } = b {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = b
+            {
                 let text = content.as_text();
-                results.insert(tool_use_id.clone(), (i, text.len(), text.starts_with("Error")));
+                results.insert(
+                    tool_use_id.clone(),
+                    (i, text.len(), text.starts_with("Error")),
+                );
             }
         }
     }
@@ -130,7 +156,10 @@ pub fn collect_tool_calls(history: &[Message]) -> Vec<ToolCall> {
     let mut calls = Vec::new();
     for (i, m) in history.iter().enumerate() {
         for b in &m.content {
-            let ContentBlock::ToolUse { id, name, input, .. } = b else {
+            let ContentBlock::ToolUse {
+                id, name, input, ..
+            } = b
+            else {
                 continue;
             };
             let Some(&(ri, chars, is_error)) = results.get(id) else {
@@ -259,7 +288,14 @@ fn call_entry(c: &ToolCall, input_chars: usize) -> Value {
 
 /// One call as a single line, for when the structured form is too costly.
 fn call_line(c: &ToolCall) -> Value {
-    let input = clip(&c.input.to_string().split_whitespace().collect::<Vec<_>>().join(" "), INPUT_CHARS[2]);
+    let input = clip(
+        &c.input
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        INPUT_CHARS[2],
+    );
     Value::String(format!(
         "{} {} {} → {} {}ch",
         c.id,
@@ -331,7 +367,11 @@ pub fn fit_state(history: &[Message], calls: &[ToolCall]) -> Option<(String, &'s
     };
     let size = |es: &[Entry]| base + es.iter().map(Entry::size).sum::<usize>();
     let render = |es: &[Entry], stage: &'static str| {
-        let h: Vec<Value> = es.iter().filter(|e| !e.left_out).map(Entry::to_json).collect();
+        let h: Vec<Value> = es
+            .iter()
+            .filter(|e| !e.left_out)
+            .map(Entry::to_json)
+            .collect();
         Some((
             json!({"context": STATE_CONTEXT, "goal": goal, "history": h}).to_string(),
             stage,
@@ -342,7 +382,10 @@ pub fn fit_state(history: &[Message], calls: &[ToolCall]) -> Option<(String, &'s
     if size(&es) <= MAX_STATE_CHARS {
         return render(&es, "full");
     }
-    for (limit, stage) in [(INPUT_CHARS[1], "inputs<=200"), (INPUT_CHARS[2], "inputs<=60")] {
+    for (limit, stage) in [
+        (INPUT_CHARS[1], "inputs<=200"),
+        (INPUT_CHARS[2], "inputs<=60"),
+    ] {
         es = build(limit);
         if size(&es) <= MAX_STATE_CHARS {
             return render(&es, stage);
@@ -388,7 +431,11 @@ pub fn fit_state(history: &[Message], calls: &[ToolCall]) -> Option<(String, &'s
         }
         let before = es[k].size();
         let i = es[k].i;
-        es[k].calls = calls.iter().filter(|c| c.call_msg == i).map(call_line).collect();
+        es[k].calls = calls
+            .iter()
+            .filter(|c| c.call_msg == i)
+            .map(call_line)
+            .collect();
         current = current + es[k].size() - before;
         if current <= MAX_STATE_CHARS {
             return render(&es, "old calls compacted");
@@ -412,7 +459,11 @@ pub fn fit_state(history: &[Message], calls: &[ToolCall]) -> Option<(String, &'s
 /// same role so the roles still alternate.
 pub fn apply(history: &[Message], decision: &Decision, head_chars: usize) -> Vec<Message> {
     let drop: HashSet<&str> = decision.drop_calls.iter().map(String::as_str).collect();
-    let cut: HashSet<&str> = decision.truncate_results.iter().map(String::as_str).collect();
+    let cut: HashSet<&str> = decision
+        .truncate_results
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut out: Vec<Message> = Vec::with_capacity(history.len());
     for m in history {
         let content: Vec<ContentBlock> = m
@@ -420,19 +471,29 @@ pub fn apply(history: &[Message], decision: &Decision, head_chars: usize) -> Vec
             .iter()
             .filter(|b| match b {
                 ContentBlock::ToolUse { id, .. } => !drop.contains(id.as_str()),
-                ContentBlock::ToolResult { tool_use_id, .. } => !drop.contains(tool_use_id.as_str()),
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    !drop.contains(tool_use_id.as_str())
+                }
                 _ => true,
             })
             .map(|b| match b {
-                ContentBlock::ToolResult { tool_use_id, content, .. }
-                    if cut.contains(tool_use_id.as_str()) =>
-                {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if cut.contains(tool_use_id.as_str()) => {
                     let text = content.as_text();
-                    if text.len() <= head_chars + 120 && matches!(content, ToolResultContent::Text(_)) {
+                    if text.len() <= head_chars + 120
+                        && matches!(content, ToolResultContent::Text(_))
+                    {
                         return b.clone();
                     }
                     let removed = text.len().saturating_sub(head_chars);
-                    let error = if text.starts_with("Error") { " (error)" } else { "" };
+                    let error = if text.starts_with("Error") {
+                        " (error)"
+                    } else {
+                        ""
+                    };
                     ContentBlock::tool_result(
                         tool_use_id.clone(),
                         format!(
@@ -475,11 +536,7 @@ pub fn history_chars(history: &[Message]) -> usize {
 
 /// Ask Jev about every unpinned call and return what to remove. `None` on any
 /// failure — no backend answer, a state that does not fit, nothing to judge.
-pub async fn plan(
-    history: &[Message],
-    backend: &crate::agent::jev::JevBackend,
-) -> Option<Outcome> {
-    use futures::StreamExt;
+pub async fn plan(history: &[Message], backend: &crate::agent::jev::JevBackend) -> Option<Outcome> {
     let calls = collect_tool_calls(history);
     let candidates: Vec<&ToolCall> = calls
         .iter()
@@ -495,20 +552,25 @@ pub async fn plan(
         .map(<[&ToolCall]>::to_vec)
         .collect();
     let requests = batches.len();
-    let answered: Vec<Option<crate::agent::jev::Decision>> =
-        futures::stream::iter(batches.iter().map(|batch| {
+    let question_sets: Vec<Value> = batches
+        .iter()
+        .map(|batch| {
             let mut q = serde_json::Map::new();
             for c in batch {
                 if let Value::Object(m) = questions_for(c) {
                     q.extend(m);
                 }
             }
-            let state = &state;
-            async move { crate::agent::jev::decide(backend, state, &Value::Object(q)).await }
-        }))
-        .buffer_unordered(CONCURRENCY)
-        .collect()
-        .await;
+            Value::Object(q)
+        })
+        .collect();
+    let mut answered: Vec<Option<crate::agent::jev::Decision>> = Vec::with_capacity(requests);
+    for chunk in question_sets.chunks(CONCURRENCY) {
+        let calls = chunk
+            .iter()
+            .map(|q| crate::agent::jev::decide(backend, &state, q));
+        answered.extend(futures::future::join_all(calls).await);
+    }
     let mut cost = 0.0;
     let mut answers = serde_json::Map::new();
     for d in answered {
@@ -590,7 +652,12 @@ mod tests {
         }
         h.push(assistant("Found it: the bug is in file_3."));
         h.push(user("Great, fix it."));
-        h.push(assistant_call("", "toolu_edit", "edit_file", json!({"path": "src/file_3.rs"})));
+        h.push(assistant_call(
+            "",
+            "toolu_edit",
+            "edit_file",
+            json!({"path": "src/file_3.rs"}),
+        ));
         h.push(result("toolu_edit", "ok"));
         h.push(assistant("Fixed."));
         h.push(user("Thanks"));
@@ -616,8 +683,14 @@ mod tests {
         assert_eq!(calls[0].tool, "read_file");
         assert_eq!(calls[0].result_chars, "fn body() {}\n".repeat(400).len());
         assert!(!calls[0].pinned);
-        let edit = calls.iter().find(|c| c.tool_use_id == "toolu_edit").unwrap();
-        assert!(edit.pinned, "a call in the newest messages is never touched");
+        let edit = calls
+            .iter()
+            .find(|c| c.tool_use_id == "toolu_edit")
+            .unwrap();
+        assert!(
+            edit.pinned,
+            "a call in the newest messages is never touched"
+        );
     }
 
     #[test]
@@ -644,6 +717,24 @@ mod tests {
     }
 
     #[test]
+    fn the_outcome_reports_its_own_diagnosis() {
+        let o = Outcome {
+            chars_before: 100,
+            chars_after: 40,
+            requests: 3,
+            stage: "full",
+            cost: 2e-5,
+            judged: vec![("toolu_1".into(), 0.31, 0.23)],
+            ..Default::default()
+        };
+        let v = o.stats_json();
+        assert_eq!(v["requests"], 3);
+        assert_eq!(v["stage"], "full");
+        assert_eq!(v["reduction"], 0.6);
+        assert_eq!(v["judged"][0], json!(["toolu_1", 0.31, 0.23]));
+    }
+
+    #[test]
     fn decisions_follow_the_two_probabilities() {
         assert_eq!(decide_call(false, 0.9, 0.9), Action::Keep);
         assert_eq!(decide_call(false, 0.9, 0.1), Action::DropResult);
@@ -661,7 +752,10 @@ mod tests {
         assert!(state.contains("\"t1\""));
         assert!(state.contains("src/file_0.rs"));
         assert!(state.contains("chars (omitted)"));
-        assert!(!state.contains("fn body()"), "results must be notes, not contents");
+        assert!(
+            !state.contains("fn body()"),
+            "results must be notes, not contents"
+        );
     }
 
     #[test]
@@ -686,7 +780,10 @@ mod tests {
         let text = serde_json::to_string(&out).unwrap();
         assert!(!text.contains("toolu_1"));
         assert!(text.contains("toolu_0") && text.contains("toolu_2"));
-        assert!(out.windows(2).all(|w| w[0].role != w[1].role), "roles must alternate");
+        assert!(
+            out.windows(2).all(|w| w[0].role != w[1].role),
+            "roles must alternate"
+        );
         assert!(out.iter().all(|m| !m.content.is_empty()));
     }
 
@@ -715,9 +812,11 @@ mod tests {
             .iter()
             .flat_map(|m| m.content.iter())
             .find_map(|b| match b {
-                ContentBlock::ToolResult { tool_use_id, content, .. } if tool_use_id == "toolu_2" => {
-                    Some(content.as_text().into_owned())
-                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "toolu_2" => Some(content.as_text().into_owned()),
                 _ => None,
             })
             .unwrap();
@@ -730,7 +829,12 @@ mod tests {
     fn apply_never_touches_user_or_assistant_text() {
         let h = session(4);
         let d = Decision {
-            drop_calls: vec!["toolu_0".into(), "toolu_1".into(), "toolu_2".into(), "toolu_3".into()],
+            drop_calls: vec![
+                "toolu_0".into(),
+                "toolu_1".into(),
+                "toolu_2".into(),
+                "toolu_3".into(),
+            ],
             truncate_results: vec![],
         };
         let out = apply(&h, &d, TRUNCATE_HEAD_CHARS);
@@ -812,14 +916,34 @@ mod tests {
             ("src/ui/Card.tsx", "export const Card = () => <div/>;\n".repeat(60)),
         ];
         for (i, (path, body)) in reads.iter().enumerate() {
-            h.push(assistant_call("", &format!("toolu_{i}"), "read_file", json!({"path": path})));
+            h.push(assistant_call(
+                "",
+                &format!("toolu_{i}"),
+                "read_file",
+                json!({"path": path}),
+            ));
             h.push(result(&format!("toolu_{i}"), body));
         }
-        h.push(assistant_call("", "toolu_t", "bash", json!({"command": "npm test -- login"})));
-        h.push(result("toolu_t", "FAIL login.test.ts > refreshes token\n  expected valid, got expired\n"));
-        h.push(assistant("The bug is in src/auth/token.ts: exp is seconds, Date.now() is ms."));
+        h.push(assistant_call(
+            "",
+            "toolu_t",
+            "bash",
+            json!({"command": "npm test -- login"}),
+        ));
+        h.push(result(
+            "toolu_t",
+            "FAIL login.test.ts > refreshes token\n  expected valid, got expired\n",
+        ));
+        h.push(assistant(
+            "The bug is in src/auth/token.ts: exp is seconds, Date.now() is ms.",
+        ));
         h.push(user("Go ahead and fix it."));
-        h.push(assistant_call("", "toolu_e", "edit_file", json!({"path": "src/auth/token.ts"})));
+        h.push(assistant_call(
+            "",
+            "toolu_e",
+            "edit_file",
+            json!({"path": "src/auth/token.ts"}),
+        ));
         h.push(result("toolu_e", "ok"));
         h.push(assistant("Fixed; re-running the test."));
         h.push(user("ok"));
@@ -834,7 +958,13 @@ mod tests {
                 "keep"
             };
             let p = out.judged.iter().find(|j| j.0 == c.tool_use_id);
-            eprintln!("{} {} {} -> {action} {:?}", c.id, c.tool, c.input, p.map(|j| (j.1, j.2)));
+            eprintln!(
+                "{} {} {} -> {action} {:?}",
+                c.id,
+                c.tool,
+                c.input,
+                p.map(|j| (j.1, j.2))
+            );
         }
         eprintln!(
             "reduction {:.0}% requests {} stage {} cost ${:.6}",
@@ -857,18 +987,45 @@ mod tests {
             model: crate::agent::jev::OPENROUTER_MODEL.into(),
         };
         let schema = "CREATE TABLE users (id uuid primary key, email text unique not null, plan text not null default 'free', created_at timestamptz);\nCREATE TABLE invoices (id uuid, user_id uuid references users(id), amount_cents int, status text, period_end timestamptz);\n";
-        let mut h = vec![user("Write the SQL migrations and the repository layer for invoices, following our schema exactly.")];
-        h.push(assistant_call("", "toolu_s", "read_file", json!({"path": "db/schema.sql"})));
+        let mut h = vec![user(
+            "Write the SQL migrations and the repository layer for invoices, following our schema exactly.",
+        )];
+        h.push(assistant_call(
+            "",
+            "toolu_s",
+            "read_file",
+            json!({"path": "db/schema.sql"}),
+        ));
         h.push(result("toolu_s", schema));
-        h.push(assistant_call("", "toolu_l", "list_dir", json!({"path": "src"})));
+        h.push(assistant_call(
+            "",
+            "toolu_l",
+            "list_dir",
+            json!({"path": "src"}),
+        ));
         h.push(result("toolu_l", "src/main.rs\nsrc/db/\nsrc/http/\n"));
-        h.push(assistant_call("", "toolu_c", "bash", json!({"command": "cargo build"})));
+        h.push(assistant_call(
+            "",
+            "toolu_c",
+            "bash",
+            json!({"command": "cargo build"}),
+        ));
         h.push(result("toolu_c", &"   Compiling dep v1.0\n".repeat(80)));
-        h.push(assistant_call("", "toolu_r", "read_file", json!({"path": "src/http/routes.rs"})));
+        h.push(assistant_call(
+            "",
+            "toolu_r",
+            "read_file",
+            json!({"path": "src/http/routes.rs"}),
+        ));
         h.push(result("toolu_r", &"fn route() {}\n".repeat(100)));
         h.push(assistant("Migration 001 written. Next: the InvoiceRepository with the exact column names from the schema."));
         h.push(user("Continue."));
-        h.push(assistant_call("", "toolu_w", "edit_file", json!({"path": "src/db/invoices.rs"})));
+        h.push(assistant_call(
+            "",
+            "toolu_w",
+            "edit_file",
+            json!({"path": "src/db/invoices.rs"}),
+        ));
         h.push(result("toolu_w", "ok"));
         h.push(assistant("Writing the queries now."));
         h.push(user("ok"));

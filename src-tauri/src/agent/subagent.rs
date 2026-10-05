@@ -635,6 +635,26 @@ pub async fn run_subagent(
             });
         }
 
+        // Subagents have no handoff and no summary: past the handoff line,
+        // drop their old tool traffic verbatim-style (`agent::prune`), in
+        // memory — a subagent has no session file to record it in.
+        let limit = config.effective_handoff_threshold();
+        if session::estimate_tokens(&history, &system, &tools) >= limit
+            && let Some(b) = crate::agent::jev::backend(config)
+            && let Some(outcome) = crate::agent::prune::plan(&history, &b).await
+        {
+            total_cost += outcome.cost;
+            let pruned = crate::agent::prune::apply(
+                &history,
+                &outcome.decision,
+                crate::agent::prune::TRUNCATE_HEAD_CHARS,
+            );
+            let new_estimate = session::estimate_tokens(&pruned, &system, &tools);
+            if session::accept_prune(&outcome, new_estimate, limit) {
+                history = pruned;
+            }
+        }
+
         let (loop_action, loop_cost) =
             session::loop_verdict(&mut loop_watch, crate::agent::jev::backend(config).as_ref())
                 .await;

@@ -519,7 +519,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust";
   [key: string]: unknown;
 };
 

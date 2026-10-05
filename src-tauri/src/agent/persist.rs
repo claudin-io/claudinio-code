@@ -97,6 +97,9 @@ pub enum SessionRecord {
         truncate_results: Vec<String>,
         #[serde(default)]
         head_chars: usize,
+        /// What Jev was asked and answered (`prune::Outcome::stats_json`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stats: Option<serde_json::Value>,
         ts: u64,
     },
     /// Tasks snapshot written by the agent (tool-level tasks_get/tasks_set).
@@ -2548,10 +2551,27 @@ mod pruned_tests {
     fn records() -> Vec<SessionRecord> {
         vec![
             turn("user", vec![ContentBlock::text("fix it")]),
-            turn("assistant", vec![ContentBlock::tool_use("toolu_a", "read_file", json!({"path": "a"}))]),
+            turn(
+                "assistant",
+                vec![ContentBlock::tool_use(
+                    "toolu_a",
+                    "read_file",
+                    json!({"path": "a"}),
+                )],
+            ),
             turn("user", vec![ContentBlock::tool_result("toolu_a", "AAAA")]),
-            turn("assistant", vec![ContentBlock::tool_use("toolu_b", "read_file", json!({"path": "b"}))]),
-            turn("user", vec![ContentBlock::tool_result("toolu_b", "B".repeat(2000))]),
+            turn(
+                "assistant",
+                vec![ContentBlock::tool_use(
+                    "toolu_b",
+                    "read_file",
+                    json!({"path": "b"}),
+                )],
+            ),
+            turn(
+                "user",
+                vec![ContentBlock::tool_result("toolu_b", "B".repeat(2000))],
+            ),
             turn("assistant", vec![ContentBlock::text("done")]),
         ]
     }
@@ -2562,13 +2582,17 @@ mod pruned_tests {
             drop_calls: vec!["toolu_a".into()],
             truncate_results: vec!["toolu_b".into()],
             head_chars: 300,
+            stats: Some(json!({"requests": 1})),
             ts: 7,
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"kind\":\"pruned\""), "{json}");
         assert!(matches!(
             serde_json::from_str::<SessionRecord>(&json).unwrap(),
-            SessionRecord::Pruned { head_chars: 300, .. }
+            SessionRecord::Pruned {
+                head_chars: 300,
+                ..
+            }
         ));
     }
 
@@ -2579,13 +2603,20 @@ mod pruned_tests {
             drop_calls: vec!["toolu_a".into()],
             truncate_results: vec!["toolu_b".into()],
             head_chars: 300,
+            stats: None,
             ts: 2,
         });
         let h = history_from_records(&recs);
         let text = serde_json::to_string(&h).unwrap();
-        assert!(!text.contains("toolu_a"), "the dropped call and its result are gone");
+        assert!(
+            !text.contains("toolu_a"),
+            "the dropped call and its result are gone"
+        );
         assert!(text.contains("toolu_b"));
-        assert!(!text.contains(&"B".repeat(400)), "the truncated result is cut");
+        assert!(
+            !text.contains(&"B".repeat(400)),
+            "the truncated result is cut"
+        );
         assert!(text.contains("fix it") && text.contains("done"));
         assert!(h.windows(2).all(|w| w[0].role != w[1].role));
     }
@@ -2597,6 +2628,7 @@ mod pruned_tests {
             drop_calls: vec!["toolu_a".into()],
             truncate_results: vec![],
             head_chars: 300,
+            stats: None,
             ts: 2,
         });
         recs.push(turn("user", vec![ContentBlock::text("and now?")]));
