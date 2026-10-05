@@ -18,9 +18,9 @@
 //! `tool_loop` and says why. A false positive costs one extra message, never
 //! silently killed work.
 
-use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
+use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// How many recent tool calls the watch remembers.
@@ -186,7 +186,9 @@ impl LoopWatch {
     /// next intervention needs fresh evidence.
     pub fn act(&mut self, gate: Gate, p_stuck: Option<f64>) -> LoopAction {
         let stuck = match gate {
-            Gate::Certain => true,
+            // Jev's answer, when there is one, outranks even the exact gate:
+            // a CI poll repeats exactly too.
+            Gate::Certain => p_stuck.is_none_or(|p| p >= STUCK_THRESHOLD),
             Gate::Suspect => p_stuck.is_some_and(|p| p >= STUCK_THRESHOLD),
             Gate::Clear => false,
         };
@@ -195,8 +197,15 @@ impl LoopWatch {
         }
         let what = match self.most_repeated() {
             Some(s) => {
-                let n = self.recent.iter().filter(|o| o.call_sig == s.call_sig).count();
-                format!("`{}` with the same arguments ({}) {n} times", s.name, s.args_excerpt)
+                let n = self
+                    .recent
+                    .iter()
+                    .filter(|o| o.call_sig == s.call_sig)
+                    .count();
+                format!(
+                    "`{}` with the same arguments ({}) {n} times",
+                    s.name, s.args_excerpt
+                )
             }
             None => "the same tool call over and over".to_string(),
         };
@@ -330,10 +339,25 @@ mod tests {
     }
 
     #[test]
+    fn a_jev_no_outranks_even_the_certain_gate() {
+        // Five identical polls of a CI run are exactly what the certain gate
+        // sees; Jev scored that shape 0.72 live. Its answer wins when it has one.
+        let mut w = LoopWatch::default();
+        assert_eq!(w.act(Gate::Certain, Some(0.72)), LoopAction::None);
+        assert!(matches!(
+            w.act(Gate::Certain, Some(0.9)),
+            LoopAction::Nudge(_)
+        ));
+    }
+
+    #[test]
     fn jev_above_the_threshold_nudges_and_below_does_nothing() {
         let mut w = LoopWatch::default();
         assert_eq!(w.act(Gate::Suspect, Some(0.72)), LoopAction::None);
-        assert!(matches!(w.act(Gate::Suspect, Some(0.96)), LoopAction::Nudge(_)));
+        assert!(matches!(
+            w.act(Gate::Suspect, Some(0.96)),
+            LoopAction::Nudge(_)
+        ));
     }
 
     #[test]

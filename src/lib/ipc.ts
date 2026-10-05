@@ -116,7 +116,15 @@ export interface AgentConfig {
   browser?: BrowserPrefs;
   local?: LocalPrefs;
   providers?: Record<string, ConnectedProviderInfo>;
+  /** Jev, the cheap decision model — which credential it uses, never the key. */
+  jev?: JevStatus;
   workspaceConfig?: Record<string, unknown> | null;
+}
+
+export interface JevStatus {
+  enabled: boolean;
+  hasApiKey: boolean;
+  backend: "typesafe" | "claudinio" | "openrouter" | null;
 }
 
 /** A connected external provider as reported by get_config — never the key. */
@@ -152,6 +160,9 @@ export interface SetConfigArgs {
   thinkingEffort?: ThinkingEffort;
   browser?: BrowserPrefs;
   local?: LocalPrefs;
+  jevEnabled?: boolean;
+  /** A TypeSafe API key; an empty string removes it. */
+  jevApiKey?: string;
 }
 
 export interface ApproveArgs {

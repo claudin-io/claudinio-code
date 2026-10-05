@@ -7,6 +7,7 @@ export interface NetOp {
   source:
     | "llm_stream"
     | "llm_classify"
+    | "jev"
     | "llm_one_shot"
     | "list_models"
     | "auth"

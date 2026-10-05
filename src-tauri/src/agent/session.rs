@@ -1299,6 +1299,99 @@ async fn judge_terminal_turn(
     }
 }
 
+/// P(yes) on either completion question from which Jev's answer is "keep
+/// working". Measured live (2026-10-05): sixteen real-shaped finals split
+/// 0.03–0.05 (finished) against 0.61–0.99 (unfinished or asking), with nothing
+/// in between — see `jev_harness_tests::PROBE`.
+const JEV_CONTINUE_AT: f64 = 0.7;
+/// Both answers at or below this mean "finished". Anything between the two
+/// thresholds is handed to the LLM judge instead of guessed.
+const JEV_DONE_AT_MOST: f64 = 0.3;
+
+/// The two questions Jev answers about a terminal turn. Together they are
+/// the LLM judge's rubric (`COMPLETION_JUDGE_SYSTEM`), split in two because Jev
+/// reads each question literally.
+fn completion_questions() -> Value {
+    use crate::agent::jev::noul;
+    serde_json::json!({
+        "unfinished": noul(
+            "This is the final message an AI coding agent wrote before ending its turn \
+             without calling any tool. Did the agent announce, promise or begin an immediate \
+             next action of its own (reading a file, running a command, editing code, spawning \
+             subagents, investigating further) that it did not actually perform, or is the \
+             message cut off mid-thought?",
+            "It announced or started a next step and stopped before doing it, or it is cut off",
+            "It does not announce any pending action of its own; the work it describes is \
+             finished or it only reports results",
+        ),
+        "asks_user": noul(
+            "This is the final message an AI coding agent wrote before ending its turn. Does \
+             the message ask the user a question or request a decision or information from \
+             the user?",
+            "It asks the user something or waits for the user's decision/answer",
+            "It asks the user nothing",
+        ),
+    })
+}
+
+/// Map Jev's two probabilities to a verdict, or `None` when the answer is not
+/// clear enough to act on (the LLM judge decides those).
+fn jev_turn_verdict(unfinished: Option<f64>, asks_user: Option<f64>) -> Option<TurnVerdict> {
+    let (u, a) = (unfinished?, asks_user?);
+    if u.max(a) >= JEV_CONTINUE_AT {
+        Some(TurnVerdict::Continue)
+    } else if u <= JEV_DONE_AT_MOST && a <= JEV_DONE_AT_MOST {
+        Some(TurnVerdict::Done)
+    } else {
+        None
+    }
+}
+
+/// Ask Jev whether a terminal turn is finished. Returns the verdict (None =
+/// no clear answer, or Jev unavailable) and what the call cost.
+async fn judge_with_jev(
+    backend: &crate::agent::jev::JevBackend,
+    assistant_text: &str,
+) -> (Option<TurnVerdict>, f64) {
+    let state = format!("Agent's final message of the turn:\n\n{assistant_text}");
+    match crate::agent::jev::decide(backend, &state, &completion_questions()).await {
+        Some(d) => (
+            jev_turn_verdict(d.noul("unfinished"), d.noul("asks_user")),
+            d.cost,
+        ),
+        None => (None, 0.0),
+    }
+}
+
+/// Run the tool-loop watch after a round: ask Jev when the gate is suspicious
+/// (and Jev has not just cleared it), then decide the intervention. Returns the
+/// action and what Jev cost.
+pub(crate) async fn loop_verdict(
+    watch: &mut crate::agent::loop_watch::LoopWatch,
+    backend: Option<&crate::agent::jev::JevBackend>,
+) -> (crate::agent::loop_watch::LoopAction, f64) {
+    use crate::agent::loop_watch::{Gate, LoopAction};
+    let gate = watch.gate();
+    if gate == Gate::Clear || !watch.should_ask() {
+        return (LoopAction::None, 0.0);
+    }
+    let mut cost = 0.0;
+    let mut p_stuck = None;
+    if let Some(b) = backend
+        && let Some(d) =
+            crate::agent::jev::decide(b, &watch.state(), &crate::agent::loop_watch::question())
+                .await
+    {
+        cost = d.cost;
+        p_stuck = d.noul("stuck");
+    }
+    let action = watch.act(gate, p_stuck);
+    if action == LoopAction::None && p_stuck.is_some() {
+        watch.mark_cleared();
+    }
+    (action, cost)
+}
+
 /// Cheap structural backstop for the judge: a terminal message ending in a
 /// question mark or a trailing colon (like "the core design question:") is
 /// extremely unlikely to be a genuine final reply — the harness must not
@@ -2342,7 +2435,22 @@ pub async fn run_workflow_with_profile(
                 // Always judge with the Brain model (planning/reasoning), never
                 // the Builder model, regardless of the session's current mode.
                 let judge_model = config.model_for_mode(SessionMode::Brain.as_str());
-                let verdict = judge_terminal_turn(config, judge_model, &last_text).await;
+                // Jev first when the user has a credential for it: a calibrated
+                // yes/no at ~$0.00002 and ~0.2s instead of a cold call to the
+                // Brain model. Its unclear answers, and any outage, fall through
+                // to the LLM judge exactly as before.
+                let (jev_verdict, jev_cost) = match crate::agent::jev::backend(config) {
+                    Some(b) => judge_with_jev(&b, &last_text).await,
+                    None => (None, 0.0),
+                };
+                ledger.jev_cost += jev_cost;
+                let (verdict, judge) = match jev_verdict {
+                    Some(v) => (v, "jev"),
+                    None => (
+                        judge_terminal_turn(config, judge_model, &last_text).await,
+                        "llm",
+                    ),
+                };
                 // Structural backstop on top of the judge's verdict: a message
                 // ending in a question mark or a trailing colon ("the core
                 // design question:") is a dangling question, not a final reply.
@@ -2357,6 +2465,7 @@ pub async fn run_workflow_with_profile(
                     },
                     nudged: will_nudge,
                     streak: guards.unfinished_streak + if will_nudge { 1 } else { 0 },
+                    judge: Some(judge.into()),
                     ts: now_ms(),
                 });
                 crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -2725,6 +2834,7 @@ pub async fn run_workflow_with_profile(
                 .unwrap_or("")
                 .to_string();
             let tool_input = tool_use.get("input").cloned().unwrap_or(Value::Null);
+            let watched_input = tool_input.clone();
 
             tool_assistant_blocks.push(ContentBlock::tool_use(
                 &tool_use_id,
@@ -2945,6 +3055,11 @@ pub async fn run_workflow_with_profile(
                 }
             }
 
+            if let ContentBlock::ToolResult { content, .. } = &block {
+                guards
+                    .loop_watch
+                    .record(&tool_name, &watched_input, &content.as_text());
+            }
             tool_result_blocks.push(block);
         }
 
@@ -3014,6 +3129,40 @@ pub async fn run_workflow_with_profile(
             // successor session — SessionLinked (emitted by link_session) is
             // what the UI reacts to.
             return Ok(RunOutcome::Handoff(Box::new(handoff)));
+        }
+
+        // Tool-loop watch: the same call with the same result, round after
+        // round, is a cycle the model will not leave on its own. Nudge it
+        // (bounded), then stop the run and say why — never silently.
+        let (loop_action, loop_cost) = loop_verdict(
+            &mut guards.loop_watch,
+            crate::agent::jev::backend(config).as_ref(),
+        )
+        .await;
+        ledger.jev_cost += loop_cost;
+        match loop_action {
+            crate::agent::loop_watch::LoopAction::None => {}
+            crate::agent::loop_watch::LoopAction::Nudge(msg) => {
+                push_user_blocks(history, store, ctx, vec![ContentBlock::text(msg)]);
+            }
+            crate::agent::loop_watch::LoopAction::Stop(msg) => {
+                store.try_append(&SessionRecord::Done {
+                    input_tokens: ledger.total_in,
+                    output_tokens: ledger.total_out,
+                    ts: now_ms(),
+                });
+                crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+                ledger.roll(resolved_model);
+                ledger.write_status(store, ctx, session_id, Some(last_context));
+                emit_final_stats(&ledger, last_context);
+                let _ = event_tx.send(AgentEvent::Done {
+                    stop_reason: "tool_loop".into(),
+                    text_output: msg,
+                    input_tokens: ledger.total_in,
+                    output_tokens: ledger.total_out,
+                });
+                return Ok(RunOutcome::Completed);
+            }
         }
 
         // Brain progress guard: if the agent is in Brain mode and only using
@@ -5936,5 +6085,130 @@ pass to a single 'code' subagent to implement this task.";
             "subagent goal must embed the exact icon reference or instruct the agent to fetch it, \
 not merely say 'similar to'"
         );
+    }
+}
+
+#[cfg(test)]
+mod jev_harness_tests {
+    use super::*;
+    use crate::agent::jev::test_support::{spawn_stub, stub_backend};
+    use crate::agent::loop_watch::{LoopAction, LoopWatch};
+    use serde_json::json;
+
+    /// (P(unfinished), P(asks_user), expected) — the live probe of
+    /// 2026-10-05, sixteen real-shaped finals in English and Portuguese.
+    const PROBE: &[(f64, f64, TurnVerdict)] = &[
+        (0.03, 0.03, TurnVerdict::Done), // "Done. I fixed the off-by-one…"
+        (0.03, 0.03, TurnVerdict::Done), // "Pronto! Corrigi o bug…"
+        (0.04, 0.03, TurnVerdict::Done), // root-cause explanation
+        (0.03, 0.03, TurnVerdict::Done), // "## Summary …"
+        (0.04, 0.03, TurnVerdict::Done), // "Feito. O build passa…"
+        (0.03, 0.04, TurnVerdict::Done), // "I couldn't reproduce the crash…"
+        (0.95, 0.61, TurnVerdict::Continue), // "Primeiro, preciso confirmar algo sobre o tempo:"
+        (0.96, 0.03, TurnVerdict::Continue), // "Now I'll spawn three subagents…"
+        (0.96, 0.04, TurnVerdict::Continue), // "Let me read the config loader next…"
+        (0.94, 0.03, TurnVerdict::Continue), // "Vou agora executar os testes…"
+        (0.04, 0.99, TurnVerdict::Continue), // "The key question is whether…?"
+        (0.05, 0.99, TurnVerdict::Continue), // "I need to ask you: which database…"
+        (0.97, 0.04, TurnVerdict::Continue), // cut off mid-sentence
+        (0.95, 0.04, TurnVerdict::Continue), // "A seguir vou editar o router.ts…"
+        (0.13, 0.99, TurnVerdict::Continue), // "Before I continue, could you tell me…"
+        (0.12, 0.99, TurnVerdict::Continue), // "Done with the parser. Should I also…?"
+    ];
+
+    #[test]
+    fn the_live_probe_maps_to_the_right_verdicts() {
+        for &(u, a, want) in PROBE {
+            assert_eq!(
+                jev_turn_verdict(Some(u), Some(a)),
+                Some(want),
+                "u={u} a={a}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_grey_zone_and_missing_answers_defer_to_the_llm_judge() {
+        assert_eq!(jev_turn_verdict(Some(0.5), Some(0.1)), None);
+        assert_eq!(jev_turn_verdict(Some(0.1), Some(0.45)), None);
+        assert_eq!(jev_turn_verdict(None, Some(0.99)), None);
+    }
+
+    #[tokio::test]
+    async fn jev_judges_a_terminal_turn_and_reports_its_cost() {
+        let (url, h) = spawn_stub(
+            200,
+            r#"{"answers":{"unfinished":{"type":"noul","noul":0.96},"asks_user":{"type":"noul","noul":0.03}},"usage":{"input_tokens":500,"cost":2.1e-5}}"#,
+        );
+        let (v, cost) = judge_with_jev(&stub_backend(&url), "Let me read the config next.").await;
+        assert_eq!(v, Some(TurnVerdict::Continue));
+        assert!((cost - 2.1e-5).abs() < 1e-12);
+        let req = h.join().unwrap();
+        assert!(req.contains("Let me read the config next."));
+        assert!(req.contains(r#""unfinished""#) && req.contains(r#""asks_user""#));
+    }
+
+    #[tokio::test]
+    async fn a_jev_outage_leaves_the_decision_to_the_llm_judge() {
+        let (url, h) = spawn_stub(529, r#"{"error":"overloaded"}"#);
+        let (v, cost) = judge_with_jev(&stub_backend(&url), "Done.").await;
+        assert_eq!(v, None);
+        assert_eq!(cost, 0.0);
+        h.join().unwrap();
+    }
+
+    fn looping() -> LoopWatch {
+        let mut w = LoopWatch::default();
+        for _ in 0..3 {
+            w.record(
+                "bash",
+                &json!({"command": "./gradlew assembleDebug"}),
+                "FAILURE: 25.0.4.1",
+            );
+        }
+        w
+    }
+
+    #[tokio::test]
+    async fn a_suspect_loop_jev_calls_stuck_is_nudged() {
+        let (url, h) = spawn_stub(
+            200,
+            r#"{"answers":{"stuck":{"type":"noul","noul":0.96}},"usage":{"input_tokens":300}}"#,
+        );
+        let mut w = looping();
+        let (action, cost) = loop_verdict(&mut w, Some(&stub_backend(&url))).await;
+        assert!(matches!(action, LoopAction::Nudge(_)), "{action:?}");
+        assert!(cost > 0.0);
+        assert!(h.join().unwrap().contains("gradlew"));
+    }
+
+    #[tokio::test]
+    async fn a_suspect_loop_jev_clears_is_left_alone_and_not_reasked_at_once() {
+        let (url, h) = spawn_stub(
+            200,
+            r#"{"answers":{"stuck":{"type":"noul","noul":0.1}},"usage":{"input_tokens":300}}"#,
+        );
+        let mut w = looping();
+        let (action, _) = loop_verdict(&mut w, Some(&stub_backend(&url))).await;
+        assert_eq!(action, LoopAction::None);
+        h.join().unwrap();
+        assert!(!w.should_ask());
+    }
+
+    #[tokio::test]
+    async fn without_jev_only_the_certain_gate_acts() {
+        let mut w = looping();
+        assert_eq!(loop_verdict(&mut w, None).await.0, LoopAction::None);
+        for _ in 0..2 {
+            w.record(
+                "bash",
+                &json!({"command": "./gradlew assembleDebug"}),
+                "FAILURE: 25.0.4.1",
+            );
+        }
+        assert!(matches!(
+            loop_verdict(&mut w, None).await.0,
+            LoopAction::Nudge(_)
+        ));
     }
 }

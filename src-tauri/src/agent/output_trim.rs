@@ -19,7 +19,7 @@
 //! Only the tail of the conversation changes (the result that just arrived),
 //! so the cached prefix is untouched.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// What the trimmed output may occupy. Below the history cap so the cap's
 /// head cut never fires on top of this.
@@ -110,7 +110,11 @@ pub fn select(blocks: &[Block], scores: Option<&[f64]>, budget: usize) -> Vec<us
     // Then the middle: signal first (when judged), closest to the end first.
     let mut rest: Vec<usize> = (1..n.saturating_sub(1)).collect();
     rest.sort_by(|&a, &b| {
-        let signal = |i: usize| scores.and_then(|s| s.get(i)).is_some_and(|&p| p >= KEEP_THRESHOLD);
+        let signal = |i: usize| {
+            scores
+                .and_then(|s| s.get(i))
+                .is_some_and(|&p| p >= KEEP_THRESHOLD)
+        };
         signal(b).cmp(&signal(a)).then(b.cmp(&a))
     });
     for i in rest {
@@ -122,7 +126,12 @@ pub fn select(blocks: &[Block], scores: Option<&[f64]>, budget: usize) -> Vec<us
 
 /// The kept blocks in order, gaps marked, with a header saying what happened
 /// and where the full output is.
-pub fn render(blocks: &[Block], kept: &[usize], total_chars: usize, full_path: Option<&str>) -> String {
+pub fn render(
+    blocks: &[Block],
+    kept: &[usize],
+    total_chars: usize,
+    full_path: Option<&str>,
+) -> String {
     let total_lines = blocks.last().map_or(0, |b| b.last_line);
     let saved = match full_path {
         Some(p) => format!("Full output saved to {p} — read_file it (with an offset) or grep it if you need the omitted lines."),
@@ -135,7 +144,11 @@ pub fn render(blocks: &[Block], kept: &[usize], total_chars: usize, full_path: O
     for &i in kept {
         let b = &blocks[i];
         if b.first_line > next_line {
-            out.push_str(&format!("[… lines {}–{} omitted …]\n", next_line, b.first_line - 1));
+            out.push_str(&format!(
+                "[… lines {}–{} omitted …]\n",
+                next_line,
+                b.first_line - 1
+            ));
         }
         out.push_str(&b.text);
         out.push('\n');
@@ -237,7 +250,9 @@ mod tests {
     use super::*;
 
     fn cargo_log(passing: usize) -> String {
-        let mut s = String::from("   Compiling app v0.1.0\n    Finished test profile\n     Running unittests\n");
+        let mut s = String::from(
+            "   Compiling app v0.1.0\n    Finished test profile\n     Running unittests\n",
+        );
         for i in 0..passing {
             s.push_str(&format!("test module_{i}::test_case_{i} ... ok\n"));
             if i == passing / 2 {
@@ -294,11 +309,20 @@ mod tests {
         let blocks = split_blocks(&text);
         let scores: Vec<f64> = blocks
             .iter()
-            .map(|b| if b.text.contains("FAILED") || b.text.contains("panicked") { 0.97 } else { 0.08 })
+            .map(|b| {
+                if b.text.contains("FAILED") || b.text.contains("panicked") {
+                    0.97
+                } else {
+                    0.08
+                }
+            })
             .collect();
         let kept = select(&blocks, Some(&scores), BUDGET_CHARS);
         let out = render(&blocks, &kept, text.len(), None);
-        assert!(out.contains("test parser::handles_empty ... FAILED"), "the mid-log failure line must survive");
+        assert!(
+            out.contains("test parser::handles_empty ... FAILED"),
+            "the mid-log failure line must survive"
+        );
         assert!(out.contains("test result: FAILED"));
     }
 
@@ -340,7 +364,13 @@ mod tests {
         let path = out
             .lines()
             .find_map(|l| l.split("saved to ").nth(1))
-            .map(|p| p.split_whitespace().next().unwrap().trim_end_matches(['.', ';', ')']).to_string())
+            .map(|p| {
+                p.split_whitespace()
+                    .next()
+                    .unwrap()
+                    .trim_end_matches(['.', ';', ')'])
+                    .to_string()
+            })
             .expect("the full output path is named");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let _ = std::fs::remove_file(path);
