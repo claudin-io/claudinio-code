@@ -5,6 +5,7 @@
 
 import {
   normalizeSessionMode,
+  type AgentEvent,
   type DoneData,
   type GoldenLoopData,
   type HandoffReason,
@@ -32,6 +33,12 @@ export interface ChatMessage {
   archived?: ArchivedBlock;
   /** Files attached to a user message, shown as pills in the chat bubble */
   attachments?: { name: string; mediaType: string; size: number }[];
+  /** A user message sent while the agent was working, rather than one that
+   *  started a run. Rendered as a user bubble like any other, with a tag. */
+  steering?: boolean;
+  /** Set on the answer the user gave to an `ask_user` question: the question
+   *  it answers, shown above it so the bubble reads on its own. */
+  inReplyTo?: string;
 }
 
 export interface SubagentTimelineState {
@@ -247,27 +254,112 @@ export function promoteSubstantialText(
   };
 }
 
+// Close any thinking step still open at `now`. A thinking step ends when the
+// next thing happens — a tool call, text, another thought — not when the whole
+// run does. Leaving them all open until Done made every one of them last until
+// the end of the run, so "Worked for" summed overlapping intervals: a 13-minute
+// run with two dozen thoughts read as four and a half hours.
+//
+// Returns the same array when nothing is open, so calling it on every event is
+// free (no new reference, no re-render).
+export function closeOpenThinking(steps: TimelineItem[], now: number): TimelineItem[] {
+  if (!steps.some((s) => s.type === "thinking" && s.thinking && s.thinking.endedAt === undefined)) {
+    return steps;
+  }
+  return steps.map((s) =>
+    s.type === "thinking" && s.thinking && s.thinking.endedAt === undefined
+      ? { ...s, thinking: { ...s.thinking, endedAt: now } }
+      : s,
+  );
+}
+
+// One stretch of the agent's work as a message: the steps it took, collapsed,
+// and the text it ended on. `null` when there is nothing to show.
+//
+// A run is not one such stretch. It is one per answer: the agent answers, and
+// then the run may go on — the user steers, replies to a question, or the
+// harness sends the model back to work. Folding all of it into a single message
+// kept only the last answer on screen and buried, or dropped, the ones before.
+export function segmentMessage(
+  steps: TimelineItem[],
+  text: string,
+  done?: DoneData,
+): ChatMessage | null {
+  if (!steps.length && !text && !done) return null;
+  const promoted = promoteSubstantialText([...steps], text);
+  const msg: ChatMessage = { role: "assistant", text: promoted.text, steps: promoted.steps };
+  if (done) msg.done = done;
+  return msg;
+}
+
+// Whether `event` means the model began another round. Only the model produces
+// these, so one of them arriving after an answer (a `FinalText`) means the run
+// went on past that answer. Harness notes after an answer — the quality gate, a
+// Stop hook — are not in the list: they belong to the answer they follow.
+export function startsNewRound(event: AgentEvent): boolean {
+  return (
+    event.event === "TextDelta" ||
+    event.event === "ToolCall" ||
+    event.event === "SubagentStarted" ||
+    (event.event === "Thinking" && !!event.data)
+  );
+}
+
+// The text a run's last message ends on. `Done` carries the run's last answer;
+// when that answer was already closed into a message mid-run (`committed`) and
+// the model said nothing after it (`pending` is null — the run went on with
+// tool calls only), it is not this stretch's answer, and printing it again
+// would repeat it under work it does not describe.
+export function closingText(doneText: string, pending: string | null, committed: string): string {
+  return pending === null && committed !== "" && doneText === committed ? "" : doneText;
+}
+
+// The question/answer pairs in an `ask_user` tool result. Mirrors the format
+// `await_user_answer` writes in session.rs ("Pergunta: …\nResposta: …", pairs
+// separated by a blank line). Anything else — a cancelled prompt, an error —
+// yields no pairs, and the result simply stays a tool row.
+export function parseAskUserAnswers(output: string): { question: string; answer: string }[] {
+  const pairs: { question: string; answer: string }[] = [];
+  for (const chunk of `\n\n${output}`.split("\n\nPergunta: ").slice(1)) {
+    const cut = chunk.indexOf("\nResposta: ");
+    if (cut < 0) return [];
+    pairs.push({
+      question: chunk.slice(0, cut).trim(),
+      answer: chunk.slice(cut + "\nResposta: ".length).trim(),
+    });
+  }
+  return pairs;
+}
+
+// The user bubbles for an answered `ask_user`: one per question, each carrying
+// the question it answers.
+export function askUserAnswerMessages(output: string): ChatMessage[] {
+  return parseAskUserAnswers(output)
+    .filter((p) => p.answer)
+    .map((p) => ({ role: "user" as const, text: p.answer, inReplyTo: p.question }));
+}
+
 export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
   const records = normalizeCompactTails(rawRecords);
   const out: ChatMessage[] = [];
   let steps: TimelineItem[] = [];
   let assistantText = "";
   let done: DoneData | undefined;
+  // The current stretch already ended on an answer (an assistant turn with no
+  // tool call). Whatever the model does next belongs to a new message.
+  let answered = false;
   const toolIndex = new Map<string, number>();
   // Pile of messages accumulated before a Compacted record
   let preCompact: ChatMessage[] = [];
 
   const flush = () => {
-    if (steps.length || assistantText || done) {
-      const promoted = promoteSubstantialText([...steps], assistantText);
-      const msg: ChatMessage = { role: "assistant", text: promoted.text, steps: promoted.steps };
-      if (done) msg.done = done;
-      preCompact.push(msg);
-      steps = [];
-      assistantText = "";
-      done = undefined;
-      toolIndex.clear();
-    }
+    const msg = segmentMessage(steps, assistantText, done);
+    if (msg) preCompact.push(msg);
+    steps = [];
+    assistantText = "";
+    done = undefined;
+    answered = false;
+    toolIndex.clear();
   };
 
   const flushToOut = () => {
@@ -360,6 +452,10 @@ export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
       const role = rec.role as string;
       const content = (rec.content as ContentBlockJson[]) ?? [];
       if (role === "assistant") {
+        // The run went on past an answer (a nudge, a red gate, a Stop hook):
+        // that answer closes its own message instead of being overwritten by
+        // the next one.
+        if (answered) flush();
         const hasToolUse = content.some((b) => b.type === "tool_use");
         for (const block of content) {
           if (block.type === "tool_use") {
@@ -382,10 +478,15 @@ export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
               steps.push({ type: "text", text: block.text });
             } else {
               assistantText = block.text;
+              answered = true;
             }
           }
         }
       } else if (role === "user") {
+        // What the user answered to an `ask_user` in this turn. Collected
+        // first and applied after the loop: flushing mid-way would orphan the
+        // other results of the same turn from their calls.
+        const replies: ChatMessage[] = [];
         for (const block of content) {
           if (block.type === "tool_result" && block.tool_use_id) {
             const idx = toolIndex.get(block.tool_use_id);
@@ -403,15 +504,31 @@ export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
                     },
                   },
                 };
+                if (item.tool.call.toolName === "ask_user") {
+                  replies.push(...askUserAnswerMessages(block.content ?? ""));
+                }
               }
             }
           }
         }
+        // The user spoke: their answer is part of the conversation, not a
+        // detail of a tool call inside a collapsed trajectory.
+        if (replies.length > 0) {
+          flush();
+          preCompact.push(...replies);
+        }
       }
     } else if (kind === "steering") {
-      steps.push({
-        type: "steering",
-        steering: { text: String(rec.text ?? ""), attachments: rec.attachments as Array<{ name: string; mediaType: string; size: number }> | undefined },
+      // A message the user sent mid-run is still the user speaking. It ends
+      // the stretch of work before it and gets a bubble of its own, so the
+      // answer that follows sits under the question it answers.
+      flush();
+      const attachments = rec.attachments as ChatMessage["attachments"];
+      preCompact.push({
+        role: "user",
+        text: String(rec.text ?? ""),
+        steering: true,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       });
     } else if (kind === "mode") {
       steps.push({
@@ -422,6 +539,9 @@ export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
         },
       });
     } else if (kind === "hook") {
+      // A tool hook after an answer is the next stretch of work starting; the
+      // assistant turn it guards is written after it.
+      if (answered && String(rec.event ?? "") === "PreToolUse") flush();
       // Reload path: a run that already happened. `skipped_untrusted` rows are
       // kept deliberately — "we chose not to run it" is a different answer from
       // "nothing happened", and only one of them is a bug.

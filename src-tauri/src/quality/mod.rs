@@ -172,7 +172,22 @@ impl QualityReport {
             ));
         }
         if self.verdict.pass {
-            out.push_str("VERDICT: pass\n");
+            // A check that never ran proves nothing, and a bare "pass" under
+            // it reads as if it had. It still does not block (see
+            // `LayerStatus::Unavailable`), but the line says what it is.
+            let not_run = self
+                .layers
+                .iter()
+                .filter(|r| r.status == LayerStatus::Unavailable)
+                .count();
+            if not_run == 0 {
+                out.push_str("VERDICT: pass\n");
+            } else {
+                out.push_str(&format!(
+                    "VERDICT: pass — but {not_run} check(s) above did not run (n/a) and verify \
+                     nothing\n"
+                ));
+            }
         } else {
             out.push_str("VERDICT: fail\n");
             for f in &self.verdict.failures {
@@ -511,6 +526,28 @@ mod tests {
             &[Layer::Tests],
         );
         assert!(v.pass, "coverage is not enforced here, so it cannot block");
+    }
+
+    #[test]
+    fn a_pass_over_a_check_that_never_ran_says_so() {
+        // "[n/a] tests … timed out" followed by a bare "VERDICT: pass" read as
+        // a green suite. It was a suite nobody had seen finish.
+        let layers = vec![
+            result(Layer::Tests, LayerStatus::Unavailable),
+            result(Layer::Tests, LayerStatus::Pass),
+        ];
+        let verdict = evaluate_gate(&layers, &[Layer::Tests]);
+        assert!(verdict.pass, "still not a failure: nothing was learned");
+        let report = QualityReport {
+            ts: 0,
+            digest: String::new(),
+            base_commit: None,
+            layers,
+            verdict,
+        };
+        let text = report.summary_text();
+        assert!(text.contains("VERDICT: pass"), "{text}");
+        assert!(text.contains("1 check(s) above did not run"), "{text}");
     }
 
     #[test]

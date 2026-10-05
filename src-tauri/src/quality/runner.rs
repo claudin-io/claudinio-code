@@ -67,7 +67,7 @@ pub fn artifact_dir(workspace_root: &Path, label: &str) -> PathBuf {
     dir
 }
 
-/// Run one shell command to completion, streaming its output to a log file.
+/// Run one shell command to completion, capturing its output into a log file.
 pub async fn run_command(
     command: &str,
     cwd: &Path,
@@ -97,6 +97,12 @@ pub async fn run_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Its own process group, so stopping the command stops everything it
+    // started. `sh -c "cargo test"` is at least three processes deep by the
+    // time a test binary runs; killing only the shell leaves the rest alive,
+    // holding our pipes open.
+    #[cfg(unix)]
+    cmd.process_group(0);
     no_window_tokio(&mut cmd);
 
     let mut child = match cmd.spawn() {
@@ -112,9 +118,17 @@ pub async fn run_command(
             };
         }
     };
+    // Armed until the command ends by itself: a timeout, an interrupt, or this
+    // future being dropped mid-run all take the whole tree down.
+    let mut tree = TreeGuard(child.id());
 
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
+    // Drain stdout/stderr while the child runs. Reading them only after
+    // `wait()` deadlocked any suite that printed more than a pipe buffer
+    // (~64 KB): the test binary blocked writing "test … ok", never exited, and
+    // the layer ended as a timeout after the full `test_timeout_secs` — with
+    // every test in it green. Same bug, same fix as the `bash` tool.
+    let (stdout_buf, mut stdout_task) = drain(child.stdout.take());
+    let (stderr_buf, mut stderr_task) = drain(child.stderr.take());
 
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
     tokio::pin!(timeout);
@@ -122,23 +136,41 @@ pub async fn run_command(
     let mut timed_out = false;
     let mut interrupted = false;
     let exit_code = tokio::select! {
-        status = child.wait() => status.ok().and_then(|s| s.code()),
+        status = child.wait() => {
+            tree.disarm();
+            status.ok().and_then(|s| s.code())
+        }
         _ = &mut timeout => {
             timed_out = true;
+            tree.kill();
             let _ = child.kill().await;
             let _ = child.wait().await;
             None
         }
         _ = poll_interrupt(interrupt) => {
             interrupted = true;
+            tree.kill();
             let _ = child.kill().await;
             let _ = child.wait().await;
             None
         }
     };
 
-    let mut output = read_pipe(&mut stdout).await;
-    let err_text = read_pipe(&mut stderr).await;
+    // The pipes reach EOF once every process holding them is gone, which is
+    // normally at once. A stray grandchild (a test that leaves a server
+    // running) would keep them open for ever, so the wait is bounded and what
+    // was captured so far is what the report gets.
+    let drained = async {
+        let _ = (&mut stdout_task).await;
+        let _ = (&mut stderr_task).await;
+    };
+    if tokio::time::timeout(DRAIN_GRACE, drained).await.is_err() {
+        stdout_task.abort();
+        stderr_task.abort();
+    }
+
+    let mut output = take_text(&stdout_buf);
+    let err_text = take_text(&stderr_buf);
     if !err_text.is_empty() {
         if !output.is_empty() {
             output.push('\n');
@@ -163,14 +195,87 @@ pub async fn run_command(
     }
 }
 
-async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> String {
-    use tokio::io::AsyncReadExt;
-    let Some(p) = pipe.as_mut() else {
-        return String::new();
-    };
-    let mut buf = Vec::new();
-    let _ = p.read_to_end(&mut buf).await;
-    String::from_utf8_lossy(&buf).to_string()
+/// How long to keep reading after the command itself is gone. See the call
+/// site: only a process that outlived the command can make this matter.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+type SharedBytes = Arc<std::sync::Mutex<Vec<u8>>>;
+
+/// Read a child pipe to the end on its own task, into a buffer the caller can
+/// still take from if the task has to be abandoned.
+fn drain<R>(pipe: Option<R>) -> (SharedBytes, tokio::task::JoinHandle<()>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let buf: SharedBytes = Arc::default();
+    let sink = buf.clone();
+    let task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let Some(mut pipe) = pipe else { return };
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => sink
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (buf, task)
+}
+
+fn take_text(buf: &SharedBytes) -> String {
+    let bytes = std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner()));
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// Kills a command's whole process tree unless disarmed. A guard rather than
+/// a call at each exit so that dropping `run_command`'s future — the run being
+/// cancelled from above — stops the suite too, instead of leaving `cargo test`
+/// running with nobody reading it.
+struct TreeGuard(Option<u32>);
+
+impl TreeGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+
+    fn kill(&mut self) {
+        if let Some(pid) = self.0.take() {
+            kill_tree(pid);
+        }
+    }
+}
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// `pid` leads its own process group (see `process_group(0)` above), so the
+/// negative pid addresses the command and everything it spawned.
+#[cfg(unix)]
+fn kill_tree(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_tree(pid: u32) {
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::procutil::no_window(&mut cmd);
+    let _ = cmd.status();
 }
 
 async fn poll_interrupt(interrupt: Option<&Arc<AtomicBool>>) {
@@ -672,17 +777,35 @@ fn infrastructure_failure(
         return Some(unavailable(layer, stack, "interrupted by the user"));
     }
     if outcome.timed_out {
-        return Some(unavailable(
+        let mut result = unavailable(
             layer,
             stack,
             &format!(
-                "`{command}` timed out; raise quality.{}_timeout_secs in .claudinio.json if the \
-                 suite legitimately takes longer",
-                layer.as_str()
+                "`{command}` timed out; raise quality.{} in .claudinio.json if the suite \
+                 legitimately takes longer",
+                timeout_key(layer)
             ),
-        ));
+        );
+        // Whatever the command printed before it was stopped is the only clue
+        // to *why* it never finished.
+        result.log_path = outcome
+            .log_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        return Some(result);
     }
     None
+}
+
+/// The `.claudinio.json` key that bounds `layer`'s command. Not derivable from
+/// the layer's name: the tests key is singular, and Gherkin scenarios run as
+/// tests and share it.
+fn timeout_key(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Coverage => "coverage_timeout_secs",
+        Layer::Mutation => "mutation_timeout_secs",
+        Layer::Tests | Layer::Gherkin | Layer::Metrics => "test_timeout_secs",
+    }
 }
 
 fn unavailable(layer: Layer, stack: &StackProfile, why: &str) -> LayerResult {
@@ -760,6 +883,96 @@ mod tests {
         let r = run_tests(&stack(&root, "sleep 30"), &cfg, None).await;
         assert_eq!(r.status, LayerStatus::Unavailable);
         assert!(r.summary.contains("timed out"), "{}", r.summary);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_suite_printing_more_than_a_pipe_buffer_finishes() {
+        // Regression: output was read only after the command exited, so a
+        // suite printing past ~64 KB (a line per test adds up) filled the
+        // pipe, blocked, and was reported as a timeout ten minutes later.
+        let root = tmp("bigout");
+        let cfg = QualityConfig {
+            test_timeout_secs: 20,
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let r = run_tests(
+            &stack(
+                &root,
+                "head -c 300000 /dev/zero | tr '\\0' 'a'; echo; echo the-end",
+            ),
+            &cfg,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Pass, "{}", r.summary);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "took {:?}",
+            started.elapsed()
+        );
+        let log = std::fs::read_to_string(r.log_path.expect("log recorded")).unwrap();
+        assert!(
+            log.len() >= 300_000,
+            "the whole output is kept: {}",
+            log.len()
+        );
+        assert!(log.contains("the-end"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timeout_stops_the_whole_process_tree_and_keeps_the_log() {
+        // The shell is not the process doing the work. Killing only it left
+        // the rest running and holding the pipes, so "timed out" was followed
+        // by waiting for the survivors anyway.
+        let root = tmp("tree");
+        let marker = root.join("survived");
+        let cfg = QualityConfig {
+            test_timeout_secs: 1,
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let r = run_tests(
+            &stack(
+                &root,
+                "echo started-here; (sleep 4; touch survived) & sleep 30; wait",
+            ),
+            &cfg,
+            None,
+        )
+        .await;
+        assert_eq!(r.status, LayerStatus::Unavailable);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "returned only after {:?}",
+            started.elapsed()
+        );
+        let log = std::fs::read_to_string(r.log_path.expect("a timeout keeps its log")).unwrap();
+        assert!(log.contains("started-here"), "{log}");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(!marker.exists(), "a background child outlived the timeout");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn the_timeout_hint_names_a_key_that_exists() {
+        // It used to say `tests_timeout_secs`, which the config ignores.
+        let root = tmp("hint");
+        let cfg = QualityConfig {
+            test_timeout_secs: 1,
+            ..Default::default()
+        };
+        let r = run_tests(&stack(&root, "sleep 30"), &cfg, None).await;
+        assert!(
+            r.summary.contains("quality.test_timeout_secs"),
+            "{}",
+            r.summary
+        );
+        assert_eq!(timeout_key(Layer::Coverage), "coverage_timeout_secs");
+        assert_eq!(timeout_key(Layer::Mutation), "mutation_timeout_secs");
         std::fs::remove_dir_all(&root).ok();
     }
 

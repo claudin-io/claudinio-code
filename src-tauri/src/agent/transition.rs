@@ -68,8 +68,12 @@ pub async fn link_session(
     });
 
     // 4. Copy BaseCommit from old session (anchors the Implementation Log range).
-    if let Some(sha) = persist::earliest_base_commit(&old_records) {
-        new_store.try_append(&SessionRecord::BaseCommit { sha, ts: now_ms() });
+    // The timestamp travels with it: it marks when the work began, and the
+    // quality gate reads commits older than that as not this session's own.
+    // Stamping the handoff time instead would disown everything the run
+    // committed before handing off.
+    if let Some((sha, ts)) = persist::earliest_base_commit_at(&old_records) {
+        new_store.try_append(&SessionRecord::BaseCommit { sha, ts });
     }
 
     // 5. Copy tasks snapshot (golden tasks included).

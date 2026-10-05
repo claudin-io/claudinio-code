@@ -94,8 +94,28 @@ pub fn verification_required(ctx: &ToolContext) -> bool {
     }
     match cfg.enforce_on {
         EnforceOn::Goals => false,
-        EnforceOn::CodeChange => quality::diff::touches_source(&root, ctx.base_commit.as_deref()),
+        EnforceOn::CodeChange => {
+            quality::diff::touches_source(&root, session_base(ctx, &root).as_deref())
+        }
     }
+}
+
+/// Where this session's own changes begin — the run's starting commit, moved
+/// past any commits that already existed and only arrived in the worktree (a
+/// pull, a fast-forward). See [`quality::diff::session_base`].
+///
+/// One answer for both questions the harness asks of a diff — "did this run
+/// touch code?" and "which lines does coverage owe?" — so a release the
+/// session merely fast-forwarded to neither triggers the gate nor gets its
+/// lines charged to the session's coverage.
+fn session_base(ctx: &ToolContext, root: &Path) -> Option<String> {
+    let began_secs = ctx
+        .session_store_path
+        .as_deref()
+        .and_then(|p| crate::agent::persist::load_records(Path::new(p)).ok())
+        .and_then(|records| crate::agent::persist::earliest_base_commit_at(&records))
+        .map(|(_, ts_ms)| ts_ms / 1000);
+    quality::diff::session_base(root, ctx.base_commit.as_deref(), began_secs)
 }
 
 /// The most recent report, parsed — used to quote concrete failures back at
@@ -130,12 +150,21 @@ pub async fn run_and_record(
         &root,
         &cfg,
         layers,
-        ctx.base_commit.as_deref(),
+        session_base(ctx, &root).as_deref(),
         ctx.interrupt.as_ref(),
     )
     .await?;
 
-    if let Some(store) = ctx.session_store_path.as_deref() {
+    // A run that was stopped part-way is not evidence of anything. Recording
+    // it would file "nothing failed" — true only because nothing finished —
+    // against the current worktree, and both the finish line and `tasks_set`
+    // would then accept it as a green check.
+    let cut_short = ctx
+        .interrupt
+        .as_ref()
+        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
+
+    if !cut_short && let Some(store) = ctx.session_store_path.as_deref() {
         let info = crate::agent::persist::QualityRunInfo {
             digest: report.digest.clone(),
             pass: report.verdict.pass,
@@ -401,6 +430,48 @@ mod tests {
     }
 
     #[test]
+    fn commits_that_arrived_by_fast_forward_do_not_demand_a_test_run() {
+        // The session that prompted this was asked to explain a release. It
+        // fast-forwarded `main` to read it, edited nothing, and was then held
+        // at the finish line while the suite ran over the release's files.
+        let (ctx, root, start) = git_workspace("req-ff", "{}");
+        let store = crate::agent::persist::SessionStore {
+            path: ctx.session_store_path.clone().unwrap().into(),
+        };
+        store.try_append(&crate::agent::persist::SessionRecord::BaseCommit {
+            sha: start,
+            ts: crate::agent::persist::now_ms(),
+        });
+        let git = |args: &[&str]| {
+            let mut c = std::process::Command::new("git");
+            c.args(args)
+                .current_dir(&root)
+                // Long before the session began: somebody else's work.
+                .env("GIT_COMMITTER_DATE", "@1000 +0000");
+            crate::procutil::no_window(&mut c);
+            c.output().map(|o| o.status.success()).unwrap_or(false)
+        };
+        assert!(git(&["checkout", "-q", "-b", "upstream"]));
+        std::fs::write(root.join("release.rs"), "fn released() {}\n").unwrap();
+        git(&["add", "-A"]);
+        assert!(git(&["commit", "-q", "-m", "release"]));
+        assert!(git(&["checkout", "-q", "-"]));
+        assert!(git(&["merge", "-q", "--ff-only", "upstream"]));
+
+        assert!(
+            !verification_required(&ctx),
+            "the session wrote none of this; there is nothing of its own to verify"
+        );
+
+        std::fs::write(root.join("mine.rs"), "fn mine() {}\n").unwrap();
+        assert!(
+            verification_required(&ctx),
+            "its own edit on top of the fast-forward still is"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_workspace_enforcing_nothing_demands_nothing_in_either_mode() {
         let (ctx, root, _) = git_workspace("req-off", r#"{"quality":{"enforced_layers":[]}}"#);
         std::fs::write(root.join("code.rs"), "fn a() {}\n").unwrap();
@@ -452,6 +523,20 @@ mod tests {
             current_evidence(&ctx),
             Evidence::Current { pass: true, .. }
         ));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_run_cut_short_is_not_recorded_as_evidence() {
+        // Stopped part-way, no layer failed — because none finished. Filing
+        // that as a green run would let the next finish skip the checks.
+        let (mut ctx, root) = workspace("cut", r#"{"quality":{"test_cmd":"sleep 30"}}"#);
+        ctx.interrupt = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        )));
+        let report = run_enforced(&ctx, "harness").await.unwrap();
+        assert_eq!(report.layers[0].status, quality::LayerStatus::Unavailable);
+        assert!(matches!(current_evidence(&ctx), Evidence::Missing));
         std::fs::remove_dir_all(&root).ok();
     }
 

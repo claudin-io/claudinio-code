@@ -341,6 +341,11 @@ impl SteeringCtl {
         q.push(entry);
     }
 
+    /// Whether a message is waiting to be injected.
+    pub fn has_pending(&self) -> bool {
+        !self.queue.lock().unwrap().is_empty()
+    }
+
     pub fn clear(&self) {
         self.queue.lock().unwrap().clear();
         self.interrupt.store(false, Ordering::SeqCst);
@@ -712,6 +717,17 @@ pub enum AgentEvent {
     /// Superseded by the next `TextStep`/`Done` for the same block; never persisted.
     #[serde(rename = "TextDelta")]
     TextDelta { text: String },
+    /// The model's turn ended on this text with no tool call: an answer.
+    ///
+    /// Usually `Done` follows and carries the same text. But the run can go on
+    /// past an answer — the judge nudges, the gate comes back red, a Stop hook
+    /// objects, the user steers — and the next round's `TextDelta` then
+    /// overwrote it on screen, so the answer the user had just read vanished
+    /// (it was never a `TextStep`: those are text *alongside* tool calls). The
+    /// client keeps this one, and when more model activity follows it closes
+    /// the message there instead of folding everything into the last answer.
+    #[serde(rename = "FinalText")]
+    FinalText { text: String },
     #[serde(rename = "Thinking")]
     Thinking(String),
     #[serde(rename = "ToolCall")]
@@ -1102,6 +1118,44 @@ fn inject_steering(
         });
     }
     true
+}
+
+/// Run the checks the workspace enforces, at the finish line — but give way
+/// the moment the user speaks or pauses.
+///
+/// A suite takes a minute on a good day. Left to run, it holds a message the
+/// user just typed behind it; so a queued steering message (or the pause flag)
+/// stops the checks, and the caller goes on to answer. `None` means exactly
+/// that: cut short, nothing verified, nothing recorded as evidence (see
+/// `run_and_record`), so the next finish runs them again.
+async fn run_finish_line_checks(
+    ctx: &ToolContext,
+    steering: &Arc<SteeringCtl>,
+) -> Option<Result<crate::quality::QualityReport, String>> {
+    let stop = Arc::new(AtomicBool::new(false));
+    // The runner only knows one way to be stopped, the context's interrupt
+    // flag — so it gets one that also trips on a queued message.
+    let mut gate_ctx = ctx.clone();
+    gate_ctx.interrupt = Some(stop.clone());
+    let watcher = {
+        let (steering, stop) = (steering.clone(), stop.clone());
+        tokio::spawn(async move {
+            loop {
+                if steering.interrupt.load(Ordering::SeqCst) || steering.has_pending() {
+                    stop.store(true, Ordering::SeqCst);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        })
+    };
+    let result = crate::agent::tools::quality::run_enforced(&gate_ctx, "harness").await;
+    watcher.abort();
+    if stop.load(Ordering::SeqCst) {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Write a Status record with cumulative token/cost stats and the size of
@@ -2413,6 +2467,9 @@ pub async fn run_workflow_with_profile(
                         content: vec![ContentBlock::text(&text_output)],
                     },
                 );
+                let _ = event_tx.send(AgentEvent::FinalText {
+                    text: text_output.clone(),
+                });
                 last_text = text_output;
             }
             steering.interrupt.store(false, Ordering::SeqCst);
@@ -2459,6 +2516,9 @@ pub async fn run_workflow_with_profile(
                         content: vec![ContentBlock::text(&text_output)],
                     },
                 );
+                let _ = event_tx.send(AgentEvent::FinalText {
+                    text: text_output.clone(),
+                });
                 last_text = text_output;
             }
             if guards.truncation_streak < 3 {
@@ -2544,6 +2604,9 @@ pub async fn run_workflow_with_profile(
                         content: vec![ContentBlock::text(&text_output)],
                     },
                 );
+                let _ = event_tx.send(AgentEvent::FinalText {
+                    text: text_output.clone(),
+                });
                 last_text = text_output;
             }
             // B — Antes de encerrar, verificar steering. Se houver, continuar.
@@ -2739,8 +2802,18 @@ pub async fn run_workflow_with_profile(
                         let _ = event_tx.send(AgentEvent::TextStep {
                             text: "🧪 Verifying the goal: running the project's checks…".into(),
                         });
-                        match qtool::run_enforced(ctx, "harness").await {
-                            Ok(r) => {
+                        match run_finish_line_checks(ctx, steering).await {
+                            // The user spoke or paused while the suite ran.
+                            // Nothing was verified and nothing was recorded,
+                            // so the next finish checks again from scratch.
+                            None => {
+                                let _ = event_tx.send(AgentEvent::TextStep {
+                                    text: "⏸ Checks stopped before they finished — nothing was \
+                                           verified."
+                                        .into(),
+                                });
+                            }
+                            Some(Ok(r)) => {
                                 let _ = event_tx.send(AgentEvent::QualityVerdict {
                                     pass: r.verdict.pass,
                                     summary: r.summary_text(),
@@ -2749,7 +2822,7 @@ pub async fn run_workflow_with_profile(
                                 });
                                 report = Some(r);
                             }
-                            Err(e) => {
+                            Some(Err(e)) => {
                                 // The harness itself could not run (no
                                 // recognizable project, workspace gone). Fail
                                 // open and say so: blocking a finish on OUR
@@ -2840,6 +2913,17 @@ pub async fn run_workflow_with_profile(
                 }
             }
 
+            // The checks above can run for minutes, and a message the user
+            // sends meanwhile is only queued. The check at the top of this
+            // branch ran before them, so without this one the run would end
+            // with the message still in the queue — and the queue is dropped
+            // when a run ends. Answer it instead. The user's message outranks
+            // an earlier pause, as it does when a stream is interrupted.
+            if inject_steering(history, store, ctx, steering, event_tx) {
+                steering.interrupt.store(false, Ordering::SeqCst);
+                continue;
+            }
+
             // ── Hooks: Stop ──────────────────────────────────────────────
             //
             // The last possible moment: after the continuation judge, after the
@@ -2870,6 +2954,15 @@ pub async fn run_workflow_with_profile(
                     last_text = reason;
                     stop_reason = "hook_stop";
                 }
+            }
+
+            // A Stop hook is a user script and can be slow too: same rule as
+            // above, unless the hook itself asked for the run to end.
+            if stop_reason != "hook_stop"
+                && inject_steering(history, store, ctx, steering, event_tx)
+            {
+                steering.interrupt.store(false, Ordering::SeqCst);
+                continue;
             }
 
             // If the model didn't produce a final text response, provide a
@@ -5042,6 +5135,19 @@ mod tests {
     }
 
     #[test]
+    fn agent_event_round_trip_final_text() {
+        // The client matches on the tag to tell an answer from a snapshot.
+        let ev = AgentEvent::FinalText {
+            text: "answer".into(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "FinalText");
+        assert_eq!(json["data"]["text"], "answer");
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, AgentEvent::FinalText { text } if text == "answer"));
+    }
+
+    #[test]
     fn agent_event_round_trip_thinking() {
         let ev = AgentEvent::Thinking("thinking text".into());
         let json = serde_json::to_value(&ev).unwrap();
@@ -6381,5 +6487,90 @@ mod verbatim_compaction_tests {
             context_limit(&cfg, PromptProfile::GitSync),
             effective_compact_threshold(&cfg, PromptProfile::GitSync)
         );
+    }
+}
+
+#[cfg(test)]
+mod finish_line_tests {
+    use super::*;
+
+    /// A workspace whose "test suite" is `test_cmd`, with a session store for
+    /// the evidence to land in.
+    fn workspace(name: &str, test_cmd: &str) -> (ToolContext, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("cq-finish-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join(".claudinio/sessions")).unwrap();
+        std::fs::write(
+            root.join(".claudinio.json"),
+            serde_json::json!({ "quality": { "test_cmd": test_cmd } }).to_string(),
+        )
+        .unwrap();
+        let store = root.join(".claudinio/sessions/s.jsonl");
+        std::fs::write(&store, "").unwrap();
+        let mut ctx = crate::agent::tools::tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+        ctx.session_store_path = Some(store.to_string_lossy().to_string());
+        (ctx, root)
+    }
+
+    fn recorded_runs(ctx: &ToolContext) -> usize {
+        let store = ctx.session_store_path.as_deref().unwrap();
+        crate::agent::persist::load_records(std::path::Path::new(store))
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r, SessionRecord::QualityRun { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_while_the_checks_run_stops_them() {
+        // The checks used to hold the user's message behind them for as long
+        // as the suite took, then the run ended and the queue was dropped.
+        let (ctx, root) = workspace("steer", "sleep 30");
+        let steering = Arc::new(SteeringCtl::new());
+        steering.push(SteeringEntry {
+            text: "is main clean?".into(),
+            attachments: Vec::new(),
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = run_finish_line_checks(&ctx, &steering).await;
+        assert!(outcome.is_none(), "cut short, not a verdict");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            steering.has_pending(),
+            "the message is still there to answer"
+        );
+        assert_eq!(recorded_runs(&ctx), 0, "an unfinished run is not evidence");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_pause_stops_the_checks_too() {
+        let (ctx, root) = workspace("pause", "sleep 30");
+        let steering = Arc::new(SteeringCtl::new());
+        steering.interrupt.store(true, Ordering::SeqCst);
+
+        assert!(run_finish_line_checks(&ctx, &steering).await.is_none());
+        assert_eq!(recorded_runs(&ctx), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn undisturbed_checks_run_to_a_verdict_and_are_recorded() {
+        let (ctx, root) = workspace("quiet", "exit 0");
+        let steering = Arc::new(SteeringCtl::new());
+
+        let report = run_finish_line_checks(&ctx, &steering)
+            .await
+            .expect("not cut short")
+            .expect("the harness ran");
+        assert!(report.verdict.pass);
+        assert_eq!(recorded_runs(&ctx), 1);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

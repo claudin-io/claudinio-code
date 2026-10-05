@@ -79,9 +79,14 @@ import { NewSessionPopover } from "./NewSessionPopover";
 import QuestionCard from "./QuestionCard";
 
 import {
+  askUserAnswerMessages,
+  closeOpenThinking,
+  closingText,
   ellipsize,
   promoteSubstantialText,
   recordsToMessages,
+  segmentMessage,
+  startsNewRound,
   type ChatMessage,
   type QueuedSteeringEntry,
   type Status,
@@ -146,6 +151,14 @@ export const ChatPanel: Component<{
   const [liveFinished, setLiveFinished] = createSignal(false);
   const [pendingDone, setPendingDone] = createSignal<{ data: DoneData; final: TimelineItem[] } | null>(null);
   const smoothLiveText = createSmoothText(liveText, liveFinished);
+  // The answer the current turn ended on (a FinalText event), until either
+  // Done arrives — the usual case — or the run goes on past it, in which case
+  // `commitSegment` closes the message there. `null` when no answer is open.
+  const [answerPending, setAnswerPending] = createSignal<string | null>(null);
+  // The last answer already moved into `messages` mid-run. Done repeats the
+  // run's last answer; when nothing new was said since, showing it again
+  // would print the same answer twice.
+  let committedAnswer = "";
   // Same typewriter treatment for the live "Thoughts" block. No defer-until-
   // drained logic is needed here (unlike Done/pendingDone above): once a
   // thinking step stops being the timeline's last item, ThinkingRow just
@@ -745,7 +758,7 @@ export const ChatPanel: Component<{
     let approval: (ToolCallData & { subagentName?: string }) | undefined;
 
     if (event.event === "TextStep") {
-      steps = [...steps, { type: "text", text: event.data.text }];
+      steps = [...closeOpenThinking(steps, Date.now()), { type: "text", text: event.data.text }];
     } else if (event.event === "Thinking") {
       const now = Date.now();
       const last = steps[steps.length - 1];
@@ -756,11 +769,14 @@ export const ChatPanel: Component<{
             : s,
         );
       } else {
-        steps = [...steps, { type: "thinking" as const, thinking: { text: event.data, startedAt: now } }];
+        steps = [
+          ...closeOpenThinking(steps, now),
+          { type: "thinking" as const, thinking: { text: event.data, startedAt: now } },
+        ];
       }
     } else if (event.event === "ToolCall") {
       const data = event.data as ToolCallData;
-      steps = addOrUpdateToolIn(steps, {
+      steps = addOrUpdateToolIn(closeOpenThinking(steps, Date.now()), {
         type: "tool",
         tool: { call: data, status: "running" },
       });
@@ -779,19 +795,55 @@ export const ChatPanel: Component<{
     };
   };
 
+  // Close the stretch of work shown live and move it into `messages`, ending
+  // on `text`. A run is one message per answer, not one message in all: when
+  // the user steers, answers a question, or the run goes on past an answer,
+  // what came before is finished and what comes next starts clean — otherwise
+  // every answer but the last is overwritten on screen and each question ends
+  // up nowhere near its answer.
+  const commitSegment = (text: string) => {
+    const steps = closeOpenThinking(
+      syncSubagentTimelineItems(currentSteps(), subagentState()),
+      Date.now(),
+    );
+    const msg = segmentMessage(steps, text);
+    if (msg) setMessages((prev) => [...prev, msg]);
+    if (text) committedAnswer = text;
+    setAnswerPending(null);
+    setSubagentState({});
+    setCurrentSteps([]);
+    setLiveExpandedStep(null);
+    setLiveText("");
+    setLiveFinished(false);
+    smoothLiveText.reset();
+    setLiveThinkingText("");
+    smoothThinking.reset();
+  };
+
   const handleEvent = (event: AgentEvent) => {
     // Any event other than Retrying means the connection is alive again —
     // drop the reconnecting banner.
     if (event.event !== "Retrying" && retryingInfo() !== null) {
       setRetryingInfo(null);
     }
+    // The run went on past an answer (a nudge, a red gate, a Stop hook that
+    // objected): that answer is a message of its own.
+    const answer = answerPending();
+    if (answer !== null && startsNewRound(event)) commitSegment(answer);
+
     if (event.event === "TextDelta") {
       const text = event.data.text;
       // Compaction markers only ever arrive as a complete TextStep; this is
       // defensive in case a marker is ever mid-flight in a delta snapshot.
       if (text.startsWith("__compact") || text.startsWith("__handoff")) return;
+      setCurrentSteps((prev) => closeOpenThinking(prev, Date.now()));
       setLiveText(text);
       setRetryableError(null);
+    } else if (event.event === "FinalText") {
+      // Usually already on screen from the deltas; set it anyway for a
+      // provider that does not stream them.
+      setAnswerPending(event.data.text);
+      setLiveText(event.data.text);
     } else if (event.event === "TextStep") {
       // Check for compaction markers
       const text = event.data.text;
@@ -814,8 +866,10 @@ export const ChatPanel: Component<{
         const args = [text.slice("__handoff_fail__:".length)];
         setCurrentSteps((prev) => [...prev, { type: "compaction", compaction: { kind: "handoff_fail", args } }]);
       } else {
-        setCurrentSteps((prev) => [...prev, { type: "text", text }]);
-        setLiveText("");
+        setCurrentSteps((prev) => [...closeOpenThinking(prev, Date.now()), { type: "text", text }]);
+        // A harness note after an answer ("Verifying the goal…") must not
+        // wipe the answer off the screen while the checks run.
+        if (answerPending() === null) setLiveText("");
       }
       setRetryableError(null);
       scrollToBottom();
@@ -833,7 +887,7 @@ export const ChatPanel: Component<{
           );
         }
         return [
-          ...prev,
+          ...closeOpenThinking(prev, now),
           { type: "thinking" as const, thinking: { text: event.data, startedAt: now } } as TimelineItem,
         ];
       });
@@ -841,7 +895,7 @@ export const ChatPanel: Component<{
       scrollToBottom();
     } else if (event.event === "ToolCall") {
       const data = event.data as ToolCallData;
-      setCurrentSteps((prev) => addOrUpdateToolIn(prev, {
+      setCurrentSteps((prev) => addOrUpdateToolIn(closeOpenThinking(prev, Date.now()), {
         type: "tool",
         tool: { call: data, status: "running" },
       }));
@@ -857,6 +911,13 @@ export const ChatPanel: Component<{
       if (data.toolName === "ask_user") {
         setCurrentAskUser(null);
         setStatus("thinking");
+        // The user spoke: their answer goes in the conversation as a bubble,
+        // and the work that follows it starts a message of its own.
+        const replies = askUserAnswerMessages(data.output ?? "");
+        if (replies.length > 0) {
+          commitSegment("");
+          setMessages((prev) => [...prev, ...replies]);
+        }
       }
       scrollToBottom();
     } else if (event.event === "ToolResultImages") {
@@ -943,9 +1004,8 @@ export const ChatPanel: Component<{
       const data = event.data as SessionLinkedData;
       flushPendingDone();
       const steps = syncSubagentTimelineItems(currentSteps(), subagentState());
-      const final = steps.map((s) =>
-        s.type === "thinking" ? { ...s, thinking: { ...s.thinking!, endedAt: Date.now() } } : s,
-      );
+      const final = closeOpenThinking(steps, Date.now());
+      setAnswerPending(null);
       if (final.length > 0 || liveText()) {
         const promoted = promoteSubstantialText(final, liveText());
         setMessages((prev) => [
@@ -974,9 +1034,19 @@ export const ChatPanel: Component<{
       scrollToBottom();
     } else if (event.event === "SteeringInjected") {
       setQueuedSteering((prev) => prev.filter((s) => s.text !== event.data.text));
-      setCurrentSteps((prev) => [
+      // The user's message ends whatever came before it — on the answer the
+      // turn had reached, or on the text an interrupt cut short — and gets a
+      // bubble of its own, so the next answer sits under its question.
+      commitSegment(answerPending() ?? liveText());
+      const attachments = event.data.attachments;
+      setMessages((prev) => [
         ...prev,
-        { type: "steering" as const, steering: { text: event.data.text, attachments: event.data.attachments } } as TimelineItem,
+        {
+          role: "user" as const,
+          text: event.data.text,
+          steering: true,
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        },
       ]);
       scrollToBottom();
     } else if (event.event === "SubagentStarted") {
@@ -1028,19 +1098,21 @@ export const ChatPanel: Component<{
       }
       scrollToBottom();
     } else if (event.event === "Done") {
-      const data = event.data as DoneData;
+      const raw = event.data as DoneData;
       // Sync subagent snapshots into the timeline before promoting into
       // `messages`: the inline items are no longer resynced on every
       // streaming event (see the Subagent handler above), so a run that
       // ends without a SubagentDone (e.g. an interrupt mid-subagent) would
       // otherwise promote a stale snapshot.
       const steps = syncSubagentTimelineItems(currentSteps(), subagentState());
-      const final = steps.map((s) => {
-        if (s.type === "thinking") {
-          return { ...s, thinking: { ...s.thinking!, endedAt: Date.now() } };
-        }
-        return s;
-      });
+      const final = closeOpenThinking(steps, Date.now());
+      // Not always `raw.textOutput`: see `closingText`.
+      const data: DoneData = {
+        ...raw,
+        textOutput: closingText(raw.textOutput, answerPending(), committedAnswer),
+      };
+      committedAnswer = "";
+      setAnswerPending(null);
       // Unlock input right away, but defer promoting into `messages` until
       // the typewriter preview has caught up to the authoritative text —
       // see the drain effect below. `liveText`/`liveFinished` keep the
@@ -1083,6 +1155,8 @@ export const ChatPanel: Component<{
       setThinkingStart(0);
       setSubagentState({});
       setStatus("error");
+      setAnswerPending(null);
+      committedAnswer = "";
       setLiveText("");
       setLiveFinished(false);
       setPendingDone(null);
@@ -1683,6 +1757,9 @@ export const ChatPanel: Component<{
                     <span class="text-[11px] font-semibold uppercase tracking-wider text-accent">
                       {"You"}
                     </span>
+                    <Show when={msg.steering}>
+                      <span class="ml-1.5 text-[10px] text-ink-faint">{"steering"}</span>
+                    </Show>
                   </div>
                   <Show when={msg.text === "__auth_card__"}>
                     <div class="rounded-lg border border-border-subtle bg-surface-1 p-4">
@@ -1699,6 +1776,11 @@ export const ChatPanel: Component<{
                   </Show>
                   <Show when={msg.text !== "__auth_card__"}>
                   <div class="border-l-2 border-accent/60 pl-3">
+                    <Show when={msg.inReplyTo}>
+                      <p class="mb-0.5 whitespace-pre-wrap break-words text-left text-[11px] leading-[1.5] text-ink-faint">
+                        {msg.inReplyTo}
+                      </p>
+                    </Show>
                     <p class="whitespace-pre-wrap break-words text-left text-[13px] leading-[1.65] text-ink">
                       {msg.text}
                     </p>

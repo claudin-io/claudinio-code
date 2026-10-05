@@ -201,7 +201,11 @@ export const Trajectory: Component<{
 
   const summary = () => {
     const { ms, count } = stats();
-    const parts = [`Worked for ${formatDuration(ms)}`, `${String(count)} step${count === 1 ? "" : "s"}`];
+    const parts = [`${String(count)} step${count === 1 ? "" : "s"}`];
+    // Thinking time is only known for a run watched live; a reopened session
+    // has none recorded, and "Worked for 0ms" over forty steps says less than
+    // saying nothing.
+    if (ms > 0) parts.unshift(`Worked for ${formatDuration(ms)}`);
     if (props.tokens) parts.push(tokensLabel());
     return parts.join(" · ");
   };
