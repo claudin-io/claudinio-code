@@ -278,9 +278,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builder_kickoff_is_ascii_and_mentions_contract() {
+    fn builder_kickoff_mentions_contract() {
         let msg = compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X"));
-        assert!(msg.is_ascii(), "kickoff must pass reject_non_english");
         assert!(msg.contains("tasks_get"));
         assert!(msg.contains("/tmp/plan.md"));
         assert!(msg.contains("--- PLAN START ---"));
@@ -290,14 +289,12 @@ mod tests {
     #[test]
     fn builder_kickoff_without_plan_falls_back_to_tasks() {
         let msg = compose_builder_kickoff(None, None);
-        assert!(msg.is_ascii());
         assert!(msg.contains("No plan file was found"));
     }
 
     #[test]
     fn context_handoff_message_wraps_document() {
         let msg = compose_context_handoff_message("## Purpose\nfinish it", Some("/p/plan.md"));
-        assert!(msg.is_ascii());
         assert!(msg.contains("--- HANDOFF DOCUMENT START ---"));
         assert!(msg.contains("finish it"));
         assert!(msg.contains("/p/plan.md"));

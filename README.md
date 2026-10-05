@@ -197,10 +197,8 @@ Failures are contained the way the spec requires: an invalid manifest rejects
 that plugin alone, while a bad skill or a bad server entry only skips that entry.
 The explorer shows exactly what was skipped and why.
 
-The interface and the agent are English-only. The system prompts are written and
-tuned in English, and the agent asks you to write in English too — a localized
-shell around an English-speaking agent was worse than being straightforward
-about it.
+The interface is in English. The agent is not: write to it in any language and
+it answers in the language of your latest message.
 
 ### It runs your hooks
 

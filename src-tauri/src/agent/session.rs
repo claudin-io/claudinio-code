@@ -455,8 +455,7 @@ Landing page: [Claudinio Code](https://claudin.io)
 Use relative paths from the workspace root (no leading `/`). The file icon next to linked items is automatic — you just write the Markdown link.
 
 # LANGUAGE POLICY
-- User-facing replies: write in the language of the user's latest message. If it is unclear or mixed, default to English.
-- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English."#;
+- Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message."#;
 
 /// Appended to the system prompt in BOTH modes: golden tasks are mandatory
 /// goals the session must reach before it is allowed to finish for real.
@@ -487,8 +486,7 @@ const GIT_SYNC_PROMPT: &str = r#"Role: Claudinio git operator. Single goal: get 
 - Finish with one short summary: branch, commit subject, and whether the push succeeded.
 
 # LANGUAGE POLICY
-- Final user-facing summary: language of the user's most recent message if known, else English.
-- Reasoning and commands MUST be in English."#;
+- Any language is valid. Write the final summary in the language of the user's most recent message."#;
 
 /// The scenario index for the planning prompt, if the project has specs.
 ///
@@ -653,8 +651,7 @@ File tools take absolute paths inside this root."
                 "or any other Mermaid diagram type that fits. Keep each diagram focused; text-only is fine for trivial requests. ",
                 "This is encouraged, not a required deliverable. Diagram labels follow the LANGUAGE POLICY below.\n",
                 "\n# LANGUAGE POLICY\n",
-                "- User-facing replies: write in the language of the user's latest message. If unclear or mixed, default to English.\n",
-                "- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English.\n"
+                "- Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message.\n"
             );
             let brain_prompt = brain_text.replace("{plans_subdir}", &plans_subdir);
             format!("{base}{GOLDEN_PROMPT}{brain_prompt}")
@@ -698,8 +695,7 @@ File tools take absolute paths inside this root."
                 "`file_outline` before reading - and leave `grep`/bash searching as the last resort. ",
                 "For current/external information not in the codebase or training data, use `web_search` if available. Tell your subagents to do the same.\n",
                 "\n# LANGUAGE POLICY\n",
-                "- User-facing replies: write in the language of the user's latest message. If unclear or mixed, default to English.\n",
-                "- Your reasoning/thinking and ALL tool inputs (search queries, subagent goals, file paths, command args, plan & task text) MUST be in English.\n"
+                "- Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message.\n"
             );
             let builder_prompt = builder_text.replace("{plans_subdir}", &plans_subdir);
             format!("{base}{GOLDEN_PROMPT}{builder_prompt}")
@@ -1106,25 +1102,6 @@ fn inject_steering(
         });
     }
     true
-}
-
-/// Reject messages that are not written in English.
-fn reject_non_english(msg: &str) -> Result<(), String> {
-    let non_ascii: Vec<char> = msg.chars().filter(|&c| c > '\u{7E}').collect();
-    if non_ascii.is_empty() {
-        return Ok(());
-    }
-    let total = msg.chars().count() as f64;
-    let ratio = non_ascii.len() as f64 / total;
-    if ratio > 0.10 {
-        let sample: String = non_ascii.iter().take(5).collect();
-        return Err(format!(
-            "Only English is supported. Please write your message in English. \
-             (Detected non-English characters: {})",
-            sample
-        ));
-    }
-    Ok(())
 }
 
 /// Write a Status record with cumulative token/cost stats and the size of
@@ -1689,19 +1666,6 @@ pub async fn run_workflow_with_profile(
     mode_ctl: &Arc<ModeCtl>,
     profile: PromptProfile,
 ) -> Result<RunOutcome, String> {
-    // A rejected input is still a user message: persist it for audit before
-    // returning the error, so the user's text never silently vanishes from the
-    // JSONL (it used to, because the guard ran before the User append).
-    if let Err(reason) = reject_non_english(&user_message) {
-        store.try_append(&SessionRecord::Rejected {
-            text: user_message.clone(),
-            reason: reason.clone(),
-            ts: now_ms(),
-        });
-        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-        return Err(reason);
-    }
-
     // ── Hooks: SessionStart, then UserPromptSubmit ───────────────────────────
     //
     // Both fire here, before the user's text becomes a turn, because both may
@@ -5580,6 +5544,48 @@ o texto que está na text area e abre um editor de texto numa modal com multipla
 essa modal este texto volte para a text area, e assim posso enviar o texto editado.";
 
     // ---- Deterministic prompt-invariant tests (no network) ----
+
+    // Any language is valid for the model's input and output: no prompt may
+    // require the model to reason, call tools or reply in one language.
+    #[test]
+    fn no_system_prompt_imposes_a_language() {
+        for profile in [PromptProfile::Standard, PromptProfile::GitSync] {
+            for mode in [SessionMode::Brain, SessionMode::Builder] {
+                let sys = system_prompt(
+                    Some(ROOT),
+                    None,
+                    None,
+                    None,
+                    mode,
+                    profile,
+                    subagent::MAX_PARALLEL_AGENTS,
+                );
+                assert!(!sys.contains("MUST be in English"), "{profile:?}/{mode:?}");
+                assert!(!sys.contains("default to English"), "{profile:?}/{mode:?}");
+                assert!(!sys.contains("else English"), "{profile:?}/{mode:?}");
+            }
+        }
+    }
+
+    // A user message in any language must reach the model. The run used to
+    // refuse any message with >10% non-ASCII characters before it started,
+    // which locked out Portuguese, Chinese, Farsi... users. Pinned on the
+    // source because the gate sat at the top of the run, before any seam a
+    // unit test can reach.
+    #[test]
+    fn a_message_in_any_language_is_never_refused() {
+        let src = include_str!("session.rs");
+        let gate = ["reject_non", "_english("].concat();
+        let refusal = ["Only English", " is supported"].concat();
+        assert!(
+            !src.contains(&gate),
+            "the language gate is back in session.rs"
+        );
+        assert!(
+            !src.contains(&refusal),
+            "an English-only refusal is back in session.rs"
+        );
+    }
 
     #[test]
     fn brain_prompt_mandates_size_and_verbatim_assets() {

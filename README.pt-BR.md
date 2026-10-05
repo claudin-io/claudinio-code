@@ -197,11 +197,9 @@ Falhas são contidas como a spec exige: um manifesto inválido rejeita só aquel
 plugin, enquanto uma skill ou um servidor inválido pula apenas aquela entrada. O
 explorador mostra exatamente o que foi pulado e por quê.
 
-A interface e o agente são apenas em inglês. Os system prompts são escritos e
-ajustados em inglês, e o agente pede que você também escreva em inglês — uma
-casca localizada em volta de um agente que só fala inglês era pior do que ser
-direto sobre isso. (Este README é uma cortesia de documentação, não uma
-tradução da UI.)
+A interface é em inglês. O agente não: escreva para ele em qualquer idioma e ele
+responde no idioma da sua última mensagem. (Este README é uma cortesia de
+documentação, não uma tradução da UI.)
 
 ### Ele roda os seus hooks
 
