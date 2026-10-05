@@ -120,6 +120,73 @@ pub fn total_lines(changed: &ChangedLines) -> usize {
     changed.values().map(|s| s.len()).sum()
 }
 
+/// The commit this run's *own* changes are measured from.
+///
+/// `base_commit` is where HEAD stood when the run began. That is the right
+/// base only while HEAD moves by commits the run itself makes. A fast-forward,
+/// a pull or a branch switch moves HEAD across commits nobody in this session
+/// wrote, and diffing against the old base then reads somebody else's release
+/// as "code this session touched": a session asked to explain a version, which
+/// fast-forwarded `main` to read it, was held at the finish line while the
+/// whole suite ran over thirty files it had never edited.
+///
+/// So the base moves forward past commits that already existed. A commit on
+/// HEAD's first-parent chain is pre-existing when it is reachable from
+/// `base_commit`, or when it was committed before `since_secs` (when the
+/// session's work began — nothing the session commits can be older than that).
+/// The newest such commit is the base. Everything after it, plus the working
+/// tree, is the session's.
+///
+/// Errs toward verifying: without `since_secs`, or whenever git cannot answer,
+/// this is `base_commit` unchanged. A commit somebody else made *during* the
+/// session and pulled in counts as the session's — an extra test run, never a
+/// missed one.
+pub fn session_base(
+    root: &Path,
+    base_commit: Option<&str>,
+    since_secs: Option<u64>,
+) -> Option<String> {
+    let base = base_commit?;
+    let Some(head) = git(root, &["rev-parse", "HEAD"]) else {
+        return Some(base.to_string());
+    };
+    // Newest first, and only what `base` cannot reach.
+    let Some(log) = git(
+        root,
+        &[
+            "log",
+            "--first-parent",
+            "--format=%H %ct",
+            &format!("{base}..HEAD"),
+        ],
+    ) else {
+        return Some(base.to_string());
+    };
+
+    let mut oldest_own: Option<&str> = None;
+    for line in log.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(sha), Some(committed)) = (
+            parts.next(),
+            parts.next().and_then(|t| t.parse::<u64>().ok()),
+        ) else {
+            return Some(base.to_string());
+        };
+        if since_secs.is_some_and(|since| committed < since) {
+            return Some(sha.to_string());
+        }
+        oldest_own = Some(sha);
+    }
+    match oldest_own {
+        // HEAD is `base` itself or behind it (a reset, a checkout of an older
+        // commit): the session committed nothing, only the worktree is its.
+        None => Some(head),
+        // Every commit in range is the session's; its work starts at the
+        // parent of the oldest one — `base` itself on a linear history.
+        Some(oldest) => git(root, &["rev-parse", &format!("{oldest}^")]).or(Some(base.to_string())),
+    }
+}
+
 /// Extensions whose contents no test can execute. Used to decide whether a
 /// session's changes are worth running the suite over.
 ///
@@ -284,6 +351,154 @@ mod tests {
         assert!(touches_source(&root, base.as_deref()), "source changed");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A repository whose history is under the test's control: every commit
+    /// gets an explicit committer date, since "did this exist before the
+    /// session began" is exactly what `session_base` reads.
+    struct Repo {
+        root: PathBuf,
+    }
+
+    impl Repo {
+        fn new(name: &str) -> Option<Repo> {
+            let root = std::env::temp_dir().join(format!("cq-sbase-{name}-{}", std::process::id()));
+            std::fs::remove_dir_all(&root).ok();
+            std::fs::create_dir_all(&root).unwrap();
+            let repo = Repo { root };
+            if !repo.git(&["init", "-q"], None) {
+                return None; // no git on this machine: nothing to test
+            }
+            // Whatever `init.defaultBranch` says, the tests call it `main`.
+            repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"], None);
+            repo.git(&["config", "user.email", "t@t"], None);
+            repo.git(&["config", "user.name", "t"], None);
+            Some(repo)
+        }
+
+        fn git(&self, args: &[&str], committed_at: Option<u64>) -> bool {
+            let mut c = std::process::Command::new("git");
+            c.args(args).current_dir(&self.root);
+            if let Some(at) = committed_at {
+                c.env("GIT_COMMITTER_DATE", format!("@{at} +0000"));
+                c.env("GIT_AUTHOR_DATE", format!("@{at} +0000"));
+            }
+            crate::procutil::no_window(&mut c);
+            c.output().map(|o| o.status.success()).unwrap_or(false)
+        }
+
+        /// Write `file`, commit it at `at`, return the new HEAD.
+        fn commit(&self, file: &str, at: u64) -> String {
+            std::fs::write(self.root.join(file), format!("// {file} @ {at}\n")).unwrap();
+            assert!(self.git(&["add", "-A"], None));
+            assert!(self.git(&["commit", "-q", "-m", file], Some(at)));
+            super::super::evidence::git_head(&self.root).expect("HEAD")
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    /// The session in these tests begins at t=1000.
+    const SESSION_START: u64 = 1_000;
+
+    #[test]
+    fn a_fast_forward_over_existing_commits_is_not_the_sessions_work() {
+        // The run that prompted this: `git merge --ff-only origin/main` moved
+        // HEAD across a release the session had only been asked to explain.
+        let Some(repo) = Repo::new("ff") else { return };
+        let start = repo.commit("a.rs", 100);
+        assert!(repo.git(&["checkout", "-q", "-b", "upstream"], None));
+        repo.commit("b.rs", 200);
+        let release = repo.commit("c.rs", 300);
+        assert!(repo.git(&["checkout", "-q", "main"], None));
+        assert!(repo.git(&["merge", "-q", "--ff-only", "upstream"], None));
+
+        assert!(
+            touches_source(&repo.root, Some(&start)),
+            "against the run's starting commit, the release looks like the session's edits"
+        );
+        let base = session_base(&repo.root, Some(&start), Some(SESSION_START));
+        assert_eq!(base.as_deref(), Some(release.as_str()));
+        assert!(!touches_source(&repo.root, base.as_deref()));
+        assert_eq!(
+            changed_lines(&repo.root, base.as_deref()).map(|c| c.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn work_on_top_of_a_fast_forward_is_still_the_sessions() {
+        let Some(repo) = Repo::new("ff-then-work") else {
+            return;
+        };
+        let start = repo.commit("a.rs", 100);
+        assert!(repo.git(&["checkout", "-q", "-b", "upstream"], None));
+        let release = repo.commit("b.rs", 300);
+        assert!(repo.git(&["checkout", "-q", "main"], None));
+        assert!(repo.git(&["merge", "-q", "--ff-only", "upstream"], None));
+        repo.commit("mine.rs", SESSION_START + 60);
+        std::fs::write(repo.root.join("wip.rs"), "fn wip() {}\n").unwrap();
+
+        let base = session_base(&repo.root, Some(&start), Some(SESSION_START));
+        assert_eq!(base.as_deref(), Some(release.as_str()));
+        let mut changed: Vec<String> = changed_files(&repo.root, base.as_deref())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        changed.sort();
+        assert_eq!(
+            changed,
+            ["mine.rs", "wip.rs"],
+            "the release's b.rs is not ours"
+        );
+    }
+
+    #[test]
+    fn the_sessions_own_commits_keep_the_starting_base() {
+        let Some(repo) = Repo::new("own") else { return };
+        let start = repo.commit("a.rs", 100);
+        repo.commit("one.rs", SESSION_START + 10);
+        repo.commit("two.rs", SESSION_START + 20);
+
+        let base = session_base(&repo.root, Some(&start), Some(SESSION_START));
+        assert_eq!(base.as_deref(), Some(start.as_str()));
+        assert!(touches_source(&repo.root, base.as_deref()));
+    }
+
+    #[test]
+    fn without_a_session_start_nothing_is_assumed_to_be_foreign() {
+        // No timestamp to judge by: keep the starting commit and verify.
+        let Some(repo) = Repo::new("nosince") else {
+            return;
+        };
+        let start = repo.commit("a.rs", 100);
+        repo.commit("b.rs", 200);
+
+        assert_eq!(
+            session_base(&repo.root, Some(&start), None).as_deref(),
+            Some(start.as_str())
+        );
+        assert_eq!(session_base(&repo.root, None, Some(SESSION_START)), None);
+    }
+
+    #[test]
+    fn a_head_moved_behind_the_base_leaves_only_the_worktree() {
+        // `git reset --hard HEAD~1`, or checking out an older commit: diffing
+        // against the old base would report the dropped commit, reversed.
+        let Some(repo) = Repo::new("behind") else {
+            return;
+        };
+        let older = repo.commit("a.rs", 100);
+        let start = repo.commit("b.rs", 200);
+        assert!(repo.git(&["reset", "-q", "--hard", &older], None));
+
+        let base = session_base(&repo.root, Some(&start), Some(SESSION_START));
+        assert_eq!(base.as_deref(), Some(older.as_str()));
+        assert!(!touches_source(&repo.root, base.as_deref()));
     }
 
     #[test]

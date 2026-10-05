@@ -378,8 +378,16 @@ pub fn linked_golden_state(records: &[SessionRecord]) -> (u32, u32, Vec<String>)
 /// The earliest recorded base commit for the session (the git HEAD when work
 /// first began), or None if no `BaseCommit` record exists yet.
 pub fn earliest_base_commit(records: &[SessionRecord]) -> Option<String> {
+    earliest_base_commit_at(records).map(|(sha, _)| sha)
+}
+
+/// [`earliest_base_commit`] together with when it was recorded (ms) — the
+/// moment this session's work began. The quality gate uses it to tell commits
+/// the session made from commits that already existed and merely arrived in
+/// the worktree (a pull, a fast-forward, a branch switch).
+pub fn earliest_base_commit_at(records: &[SessionRecord]) -> Option<(String, u64)> {
     records.iter().find_map(|r| match r {
-        SessionRecord::BaseCommit { sha, .. } => Some(sha.clone()),
+        SessionRecord::BaseCommit { sha, ts } => Some((sha.clone(), *ts)),
         _ => None,
     })
 }
