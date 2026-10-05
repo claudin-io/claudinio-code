@@ -9,6 +9,7 @@ pub mod permissions;
 pub mod persist;
 pub mod plugins;
 pub mod provider;
+pub mod prune;
 pub mod run_state;
 pub mod session;
 pub mod skills;

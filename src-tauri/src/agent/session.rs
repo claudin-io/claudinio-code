@@ -93,7 +93,7 @@ fn estimate_block_tokens(block: &ContentBlock) -> u64 {
     }
 }
 
-fn estimate_tokens(history: &[Message], system: &str, tools: &[ToolDescription]) -> u64 {
+pub(crate) fn estimate_tokens(history: &[Message], system: &str, tools: &[ToolDescription]) -> u64 {
     let mut total = system.len() as u64 / 3;
     if !tools.is_empty() {
         total += serde_json::to_string(tools).unwrap_or_default().len() as u64 / 3;
@@ -1484,6 +1484,112 @@ fn effective_compact_threshold(config: &AgentConfig, profile: PromptProfile) -> 
     }
 }
 
+/// The context size at which a run must shed weight: the handoff line for
+/// Standard sessions, the compaction line otherwise.
+fn context_limit(config: &AgentConfig, profile: PromptProfile) -> u64 {
+    if profile == PromptProfile::Standard {
+        config.effective_handoff_threshold()
+    } else {
+        effective_compact_threshold(config, profile)
+    }
+}
+
+/// A verbatim compaction must land at most this share of the limit, or the
+/// limit is crossed again a few rounds later and the cold prefix was wasted.
+pub(crate) const PRUNE_TARGET: f64 = 0.8;
+
+/// Take a verbatim compaction only when it frees enough and leaves room.
+pub(crate) fn accept_prune(
+    outcome: &crate::agent::prune::Outcome,
+    new_estimate: u64,
+    limit: u64,
+) -> bool {
+    outcome.reduction() >= crate::agent::prune::MIN_REDUCTION
+        && (new_estimate as f64) < limit as f64 * PRUNE_TARGET
+}
+
+/// Before handing off or summarizing, try the lossless way: let Jev drop the
+/// old tool traffic and keep every word of the conversation
+/// (`agent::prune`). Returns the new context estimate and what Jev cost, or
+/// `None` — no credential, Jev failed, or not enough freed — and the caller
+/// falls through to the handoff / compaction exactly as before.
+#[allow(clippy::too_many_arguments)]
+async fn try_verbatim_compaction(
+    config: &AgentConfig,
+    profile: PromptProfile,
+    estimated: u64,
+    history: &mut Vec<Message>,
+    system: &str,
+    tools: &[ToolDescription],
+    store: &SessionStore,
+    ctx: &ToolContext,
+    event_tx: &Channel<AgentEvent>,
+) -> Option<(u64, f64)> {
+    let limit = context_limit(config, profile);
+    if estimated < limit {
+        return None;
+    }
+    let backend = crate::agent::jev::backend(config)?;
+    let outcome = crate::agent::prune::plan(history, &backend).await?;
+    let pruned = crate::agent::prune::apply(
+        history,
+        &outcome.decision,
+        crate::agent::prune::TRUNCATE_HEAD_CHARS,
+    );
+    let new_estimate = estimate_tokens(&pruned, system, tools);
+    if !accept_prune(&outcome, new_estimate, limit) {
+        return None;
+    }
+
+    // The transcript is about to lose content: PreCompact's contract.
+    let mut hook_note = None;
+    if let Some(h) = &ctx.hooks {
+        let out = crate::agent::hooks::fire_pre_compact(
+            h,
+            crate::agent::hooks::CompactTrigger::Auto,
+            Some(event_tx),
+        )
+        .await;
+        hook_note = out.context();
+    }
+
+    let _ = event_tx.send(AgentEvent::TextStep {
+        text: format!(
+            "__compact_start__:{}/{}",
+            estimated / 1000,
+            MAX_CONTEXT_TOKENS / 1000
+        ),
+    });
+    store
+        .append(&SessionRecord::Pruned {
+            drop_calls: outcome.decision.drop_calls.clone(),
+            truncate_results: outcome.decision.truncate_results.clone(),
+            head_chars: crate::agent::prune::TRUNCATE_HEAD_CHARS,
+            stats: Some(outcome.stats_json()),
+            ts: now_ms(),
+        })
+        .ok()?;
+    crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+    // Rebuild exactly as a reload would, so the live run and a resumed one
+    // see the same conversation.
+    *history = crate::agent::persist::history_from_records(
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+            .unwrap_or_default(),
+    );
+    if let Some(note) = hook_note {
+        push_user_blocks(history, store, ctx, vec![ContentBlock::text(note)]);
+    }
+    let new_estimate = estimate_tokens(history, system, tools);
+    let _ = event_tx.send(AgentEvent::TextStep {
+        text: format!(
+            "__compact_done__:{}/{}",
+            estimated / 1000,
+            new_estimate / 1000
+        ),
+    });
+    Some((new_estimate, outcome.cost))
+}
+
 /// When the context crosses the configured handoff threshold, ask the model to
 /// compress its own context into a handoff document (Matt Pocock style) and
 /// request a linked-session handoff carrying it as the successor's first
@@ -1864,7 +1970,19 @@ pub async fn run_workflow_with_profile(
         .unwrap_or_default();
     let estimated = estimate_tokens(history, &system, &tools)
         .max(crate::agent::persist::last_context_tokens(&records).unwrap_or(0));
-    // Context-handoff first (Standard sessions): the model compresses its own
+    // Lossless first: Jev drops old tool traffic, every word stays. Only when
+    // that is unavailable or not enough does the handoff / summary run.
+    let mut estimated = estimated;
+    let mut pre_run_jev_cost = 0.0;
+    if let Some((new_estimate, cost)) = try_verbatim_compaction(
+        config, profile, estimated, history, &system, &tools, store, ctx, event_tx,
+    )
+    .await
+    {
+        estimated = new_estimate;
+        pre_run_jev_cost = cost;
+    }
+    // Context-handoff next (Standard sessions): the model compresses its own
     // context and the run continues in a fresh linked session. Compaction
     // below stays as the safety net when generation fails or doesn't apply.
     if let Some(outcome) = maybe_context_handoff(
@@ -1974,6 +2092,7 @@ pub async fn run_workflow_with_profile(
             .unwrap_or_default(),
     );
     let mut ledger = CostLedger::resuming(cumul);
+    ledger.jev_cost += pre_run_jev_cost;
     let emit_final_stats = |ledger: &CostLedger, last_context: u64| {
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: ledger.cumul_in as u32,
@@ -2061,7 +2180,15 @@ pub async fn run_workflow_with_profile(
 
         // Per-round context re-check: tool_results from the previous round may
         // the next LLM call so we never feed an oversized context.
-        let pre_tokens = estimate_tokens(history, &system, &tools);
+        let mut pre_tokens = estimate_tokens(history, &system, &tools);
+        if let Some((new_estimate, cost)) = try_verbatim_compaction(
+            config, profile, pre_tokens, history, &system, &tools, store, ctx, event_tx,
+        )
+        .await
+        {
+            pre_tokens = new_estimate;
+            ledger.jev_cost += cost;
+        }
         if let Some(outcome) = maybe_context_handoff(
             config,
             profile,
@@ -6210,5 +6337,49 @@ mod jev_harness_tests {
             loop_verdict(&mut w, None).await.0,
             LoopAction::Nudge(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod verbatim_compaction_tests {
+    use super::*;
+    use crate::agent::prune::Outcome;
+
+    fn outcome(before: usize, after: usize) -> Outcome {
+        Outcome {
+            chars_before: before,
+            chars_after: after,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_prune_that_frees_enough_and_lands_well_under_the_limit_is_taken() {
+        assert!(accept_prune(&outcome(100, 40), 60_000, 120_000));
+    }
+
+    #[test]
+    fn a_prune_that_frees_too_little_falls_back() {
+        // 20% < MIN_REDUCTION: not worth a cold prefix; the handoff decides.
+        assert!(!accept_prune(&outcome(100, 80), 60_000, 120_000));
+    }
+
+    #[test]
+    fn a_prune_that_stays_near_the_limit_falls_back() {
+        // Freed half, but would cross the limit again a few rounds later.
+        assert!(!accept_prune(&outcome(100, 50), 110_000, 120_000));
+    }
+
+    #[test]
+    fn the_limit_is_the_handoff_line_for_standard_sessions() {
+        let cfg = AgentConfig::default();
+        assert_eq!(
+            context_limit(&cfg, PromptProfile::Standard),
+            cfg.effective_handoff_threshold()
+        );
+        assert_eq!(
+            context_limit(&cfg, PromptProfile::GitSync),
+            effective_compact_threshold(&cfg, PromptProfile::GitSync)
+        );
     }
 }
