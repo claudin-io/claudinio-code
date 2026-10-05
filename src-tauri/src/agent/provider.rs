@@ -250,6 +250,10 @@ pub struct AgentConfig {
     /// connect time so inference never depends on the catalog being reachable.
     #[serde(default)]
     pub providers: std::collections::HashMap<String, ProviderEntry>,
+    /// Jev, the cheap decision model the harness asks instead of a chat model
+    /// for its own judgements — see `crate::agent::jev`.
+    #[serde(default)]
+    pub jev: crate::agent::jev::JevPrefs,
 }
 
 /// A connected external provider. Credentials follow the existing plaintext
@@ -447,6 +451,7 @@ impl Default for AgentConfig {
             auto_commit_plan: true,
             thinking_effort: default_thinking_effort(),
             providers: std::collections::HashMap::new(),
+            jev: crate::agent::jev::JevPrefs::default(),
             local: crate::llama::LocalPrefs::default(),
         }
     }

@@ -147,6 +147,9 @@ pub enum SessionRecord {
         verdict: String,
         nudged: bool,
         streak: u32,
+        /// Which judge decided: "jev" or "llm". Absent in older sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        judge: Option<String>,
         ts: u64,
     },
     /// The git HEAD at the moment this session's work began. Written once per
@@ -1508,6 +1511,16 @@ mod tests {
     }
 
     #[test]
+    fn a_continuation_judge_record_from_before_jev_still_loads() {
+        let old =
+            r#"{"kind":"continuation_judge","verdict":"done","nudged":false,"streak":0,"ts":1}"#;
+        match serde_json::from_str::<SessionRecord>(old).unwrap() {
+            SessionRecord::ContinuationJudge { judge, .. } => assert_eq!(judge, None),
+            other => panic!("expected ContinuationJudge, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn continuation_judge_record_serialization() {
         // The judge decision is transparent to the user (UI renders nothing) but
         // MUST be auditable in the JSONL — guard the on-disk shape.
@@ -1515,9 +1528,11 @@ mod tests {
             verdict: "continue".into(),
             nudged: true,
             streak: 1,
+            judge: Some("jev".into()),
             ts: 42,
         };
         let json = serde_json::to_string(&rec).unwrap();
+        assert!(json.contains("\"judge\":\"jev\""), "got: {json}");
         assert!(
             json.contains("\"kind\":\"continuation_judge\""),
             "got: {json}"
@@ -1531,8 +1546,10 @@ mod tests {
                 verdict,
                 nudged,
                 streak,
+                judge,
                 ts,
             } => {
+                assert_eq!(judge.as_deref(), Some("jev"));
                 assert_eq!(verdict, "continue");
                 assert!(nudged);
                 assert_eq!(streak, 1);

@@ -761,6 +761,9 @@ pub struct SetConfigArgs {
     pub thinking_effort: Option<String>,
     pub browser: Option<crate::browser::BrowserPrefs>,
     pub local: Option<crate::llama::LocalPrefs>,
+    pub jev_enabled: Option<bool>,
+    /// A TypeSafe API key; an empty string removes it.
+    pub jev_api_key: Option<String>,
 }
 
 #[tauri::command]
@@ -841,6 +844,7 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(mcp) = args.mcp {
         cfg.mcp = mcp;
     }
+    crate::agent::jev::apply_settings(&mut cfg, args.jev_enabled, args.jev_api_key);
     if let Some(code_intel_enabled) = args.code_intel_enabled {
         cfg.code_intel_enabled = code_intel_enabled;
     }
@@ -911,6 +915,8 @@ pub async fn get_config(
         "thinkingEffort": cfg.thinking_effort,
         "browser": cfg.browser,
         "local": cfg.local,
+        // Which credential Jev uses — never the key.
+        "jev": crate::agent::jev::status_json(&cfg),
         // Connected external providers — never the keys (hasApiKey precedent).
         "providers": cfg.providers.iter().map(|(id, p)| {
             (id.clone(), serde_json::json!({

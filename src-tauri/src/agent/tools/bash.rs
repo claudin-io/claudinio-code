@@ -10,7 +10,6 @@ use tokio::process::Command;
 use crate::agent::tools::ToolContext;
 use crate::procutil::no_window_tokio;
 
-const MAX_OUTPUT_BYTES: u64 = 100 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Cache for the resolved login PATH (with nvm, cargo, etc.).
@@ -156,6 +155,14 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         .spawn()
         .map_err(|e| format!("failed to spawn command: {e}"))?;
 
+    // Drain stdout/stderr while the child runs. Reading them only after
+    // `wait()` deadlocked any command that printed more than a pipe buffer
+    // (~64 KB): the child blocked on a full pipe, never exited, and the call
+    // ended as a 30s timeout. Started before stdin is written, so a command that
+    // echoes a large stdin cannot block either.
+    let stdout_task = drain(child.stdout.take());
+    let stderr_task = drain(child.stderr.take());
+
     if let Some(stdin_data) = &args.stdin
         && let Some(stdin_handle) = child.stdin.take()
     {
@@ -164,11 +171,6 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         let _ = writer.write_all(stdin_data.as_bytes()).await;
         let _ = writer.shutdown().await;
     }
-
-    // Take the stdout/stderr handles before the select loop so we can
-    // still read them after child.wait() completes.
-    let mut child_stdout = child.stdout.take();
-    let mut child_stderr = child.stderr.take();
 
     let interrupt = &ctx.interrupt;
     let timeout_sleep = tokio::time::sleep(Duration::from_secs(timeout_secs));
@@ -206,24 +208,8 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         }
     }?;
 
-    // Read captured stdout/stderr
-    use tokio::io::AsyncReadExt;
-    let stdout_text = match child_stdout.as_mut() {
-        Some(pipe) => {
-            let mut buf = Vec::new();
-            let _ = pipe.read_to_end(&mut buf).await;
-            String::from_utf8_lossy(&buf).to_string()
-        }
-        None => String::new(),
-    };
-    let stderr_text = match child_stderr.as_mut() {
-        Some(pipe) => {
-            let mut buf = Vec::new();
-            let _ = pipe.read_to_end(&mut buf).await;
-            String::from_utf8_lossy(&buf).to_string()
-        }
-        None => String::new(),
-    };
+    let stdout_text = String::from_utf8_lossy(&stdout_task.await.unwrap_or_default()).to_string();
+    let stderr_text = String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).to_string();
 
     let mut text = String::new();
     if !stdout_text.is_empty() {
@@ -247,19 +233,31 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         text = format!("{text}\n({exit_info})");
     }
 
-    if text.len() as u64 > MAX_OUTPUT_BYTES {
-        let mut end = MAX_OUTPUT_BYTES as usize;
-        while end < text.len() && !text.is_char_boundary(end) {
-            end += 1;
-        }
-        text.truncate(end);
-        text.push_str(&format!(
-            "\n...(output truncated, {} chars total)",
-            text.len()
-        ));
-    }
+    // A long output keeps its signal, not its first N chars: build and test
+    // tools print the verdict last. The full text goes to a temp file the
+    // model can read back. Jev ranks the blocks when the user has it.
+    let jev = ctx
+        .agent_config
+        .as_ref()
+        .and_then(crate::agent::jev::backend);
+    let (text, _jev_cost) = crate::agent::output_trim::fit(&args.command, text, jev.as_ref()).await;
 
     Ok(text)
+}
+
+/// Read a child pipe to the end on its own task.
+fn drain<R>(pipe: Option<R>) -> tokio::task::JoinHandle<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf).await;
+        }
+        buf
+    })
 }
 
 /// Poll the interrupt flag at ~200ms intervals until it becomes true.
@@ -319,6 +317,25 @@ mod tests {
                 ))),
             },
         ))
+    }
+
+    #[test]
+    fn a_command_printing_more_than_a_pipe_buffer_finishes() {
+        // Regression: stdout was read only after the child exited, so ~64 KB
+        // of output filled the pipe, the child blocked, and the call timed out.
+        let started = Instant::now();
+        let out = run("head -c 300000 /dev/zero | tr '\\0' 'a'");
+        assert!(out.is_ok(), "{out:?}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_long_output_keeps_its_end() {
+        // Build and test tools print the verdict last; a head cut lost it.
+        let out = run("seq 1 100000").unwrap();
+        assert!(out.contains("\n100000"), "the last line must survive");
+        assert!(out.len() <= 22_000, "got {} chars", out.len());
+        assert!(out.contains("saved to"), "the full output must be findable");
     }
 
     #[test]

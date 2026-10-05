@@ -12,6 +12,7 @@ import {
 export const NET_SOURCE_NAME: Record<string, string> = {
   llm_stream: "Model response",
   llm_classify: "Turn-completion check",
+  jev: "Jev decision",
   llm_one_shot: "One-off model call",
   list_models: "Model list",
   auth: "Authentication",
@@ -27,6 +28,7 @@ const NET_SOURCE_WHY: Record<string, string> = {
   llm_stream:
     "Streaming the agent's response from the model API. Runs until the turn finishes — including golden-loop cycles and subagents.",
   llm_classify: "Small model call that checks whether the agent's reply is really finished.",
+  jev: "TypeSafe Jev answering a yes/no question for the harness: is the turn finished, is the agent repeating itself, which part of a long output matters.",
   llm_one_shot: "Single non-streaming model request (enhancement, compaction, evaluation).",
   list_models: "Fetching the list of available models from the API.",
   auth: "Signing in or validating your API key.",

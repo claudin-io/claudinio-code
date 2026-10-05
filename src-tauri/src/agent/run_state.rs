@@ -35,6 +35,8 @@ pub struct CostLedger {
     pub run_cost_cache: Option<f64>,
 
     pub subagent_cost: f64,
+    /// What Jev decisions cost during this run (judge, loop watch).
+    pub jev_cost: f64,
 }
 
 /// The tuple shape `persist::cumulative_totals` returns.
@@ -71,7 +73,9 @@ impl CostLedger {
             self.run_cost_output,
             self.run_cost_cache,
         );
-        self.cumul_cost = Some(self.cumul_cost.unwrap_or(0.0) + ci + co + cc + self.subagent_cost);
+        self.cumul_cost = Some(
+            self.cumul_cost.unwrap_or(0.0) + ci + co + cc + self.subagent_cost + self.jev_cost,
+        );
         self.cumul_cost_input = Some(self.cumul_cost_input.unwrap_or(0.0) + ci);
         self.cumul_cost_output = Some(self.cumul_cost_output.unwrap_or(0.0) + co);
         self.cumul_cost_cache = Some(self.cumul_cost_cache.unwrap_or(0.0) + cc);
@@ -145,11 +149,24 @@ pub struct GuardState {
     /// How many times it has refused, so a hook that never relents cannot hold
     /// a session open forever. See `session::MAX_STOP_HOOK_BLOCKS`.
     pub stop_hook_blocks: u32,
+    /// Repetition watch over the run's tool calls — see `agent::loop_watch`.
+    pub loop_watch: crate::agent::loop_watch::LoopWatch,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roll_folds_what_jev_cost_into_the_session_total() {
+        let mut ledger = CostLedger::resuming((0, 0, Some(1.0), None, None, None));
+        ledger.jev_cost = 0.25;
+        ledger.run_cost_input = Some(0.0);
+        ledger.run_cost_output = Some(0.0);
+        ledger.run_cost_cache = Some(0.0);
+        ledger.roll("claudinio");
+        assert!((ledger.cumul_cost.unwrap() - 1.25).abs() < 1e-9);
+    }
 
     #[test]
     fn roll_folds_round_tokens_into_the_cumulative_totals() {

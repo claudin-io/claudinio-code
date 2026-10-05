@@ -378,6 +378,9 @@ pub async fn run_subagent(
     };
 
     let sub_max = config.sub_max_rounds.unwrap_or(usize::MAX);
+    // Subagents run unbounded by default too, so they get the same cycle
+    // breaker as the parent (see `agent::loop_watch`).
+    let mut loop_watch = crate::agent::loop_watch::LoopWatch::default();
     for _ in 0..sub_max {
         let mut assistant_text = String::new();
         let stream_output = match provider::stream_message(
@@ -532,6 +535,7 @@ pub async fn run_subagent(
                 .unwrap_or("")
                 .to_string();
             let tool_input = tool_use.get("input").cloned().unwrap_or(Value::Null);
+            let watched_input = tool_input.clone();
 
             tool_assistant_blocks.push(ContentBlock::tool_use(
                 &tool_use_id,
@@ -607,6 +611,9 @@ pub async fn run_subagent(
                 }
             }
 
+            if let ContentBlock::ToolResult { content, .. } = &block {
+                loop_watch.record(&tool_name, &watched_input, &content.as_text());
+            }
             tool_result_blocks.push(block);
         }
 
@@ -626,6 +633,35 @@ pub async fn run_subagent(
                     "<hook-feedback>\n{text}\n</hook-feedback>"
                 ))],
             });
+        }
+
+        let (loop_action, loop_cost) =
+            session::loop_verdict(&mut loop_watch, crate::agent::jev::backend(config).as_ref())
+                .await;
+        total_cost += loop_cost;
+        match loop_action {
+            crate::agent::loop_watch::LoopAction::None => {}
+            crate::agent::loop_watch::LoopAction::Nudge(msg) => {
+                // Into the user turn that carries the tool results, so the
+                // roles keep alternating.
+                match history.last_mut() {
+                    Some(last) if last.role == "user" => last.content.push(ContentBlock::text(msg)),
+                    _ => history.push(Message {
+                        role: "user".into(),
+                        content: vec![ContentBlock::text(msg)],
+                    }),
+                }
+            }
+            crate::agent::loop_watch::LoopAction::Stop(msg) => {
+                return SubagentResult {
+                    status: "failed",
+                    report: msg,
+                    rounds,
+                    in_tok: total_in,
+                    out_tok: total_out,
+                    cost: total_cost,
+                };
+            }
         }
     }
 
