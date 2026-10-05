@@ -26,6 +26,7 @@ import MermaidViewerModal from "./components/MermaidViewerModal";
 import { type AskpassRequest } from "./lib/ipc";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ProviderCatalogModal } from "./components/ProviderCatalogModal";
+import { CustomProviderModal } from "./components/CustomProviderModal";
 
 const RECENT_KEY = "claudinio_recent_projects";
 const OPEN_KEY = "claudinio_open_workspaces";
@@ -114,6 +115,9 @@ function App() {
   const [openrouterConnecting, setOpenrouterConnecting] = createSignal(false);
   const [providerError, setProviderError] = createSignal<string | null>(null);
   const [showProviderCatalog, setShowProviderCatalog] = createSignal(false);
+  /** The custom provider form: undefined = closed, null = adding a new one,
+   * a string = editing that provider id. */
+  const [customProviderTarget, setCustomProviderTarget] = createSignal<string | null | undefined>(undefined);
   const [configMaxRounds, setConfigMaxRounds] = createSignal<number | null>(null);
   const [configSubMaxRounds, setConfigSubMaxRounds] = createSignal<number | null>(null);
   const [configMaxGoldenCycles, setConfigMaxGoldenCycles] = createSignal<number | null>(null);
@@ -868,6 +872,7 @@ function App() {
         onOpenrouterCancel={doOpenrouterCancel}
         onDisconnectProvider={doDisconnectProvider}
         onOpenProviderCatalog={() => setShowProviderCatalog(true)}
+        onOpenCustomProvider={(providerId) => setCustomProviderTarget(providerId ?? null)}
         saveConfig={saveConfig}
         doLogin={doLogin}
         doLogout={doLogout}
@@ -882,6 +887,16 @@ function App() {
           providers={configProviders}
           onClose={() => setShowProviderCatalog(false)}
           onChanged={refreshProviders}
+        />
+      </Show>
+
+      <Show when={customProviderTarget() !== undefined}>
+        <CustomProviderModal
+          providerId={customProviderTarget() ?? null}
+          providers={configProviders}
+          onClose={() => setCustomProviderTarget(undefined)}
+          onChanged={refreshProviders}
+          onRemove={doDisconnectProvider}
         />
       </Show>
 

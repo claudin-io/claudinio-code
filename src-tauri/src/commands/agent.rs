@@ -925,6 +925,10 @@ pub async fn get_config(
                 "label": p.label,
                 "protocol": p.protocol,
                 "enabledModels": p.enabled_models,
+                // What the custom-provider form needs to reopen an entry.
+                "custom": p.custom,
+                "models": p.custom_models,
+                "hasApiKey": !p.api_key.is_empty(),
             }))
         }).collect::<serde_json::Map<String, Value>>(),
         "workspaceConfig": workspace_config,

@@ -63,7 +63,13 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
     onCleanup(() => document.removeEventListener("keydown", onKeyDown));
   });
 
-  const isConnected = (id: string) => Boolean(props.providers()[id]?.connected);
+  // A custom provider that happens to share a catalog id is not this
+  // catalog entry — showing it as "Connected" here would offer to disconnect
+  // something the user set up elsewhere.
+  const isConnected = (id: string) => {
+    const p = props.providers()[id];
+    return Boolean(p?.connected) && !p?.custom;
+  };
 
   const filtered = createMemo(() => {
     const q = query().trim().toLowerCase();
@@ -81,7 +87,7 @@ export const ProviderCatalogModal: Component<ProviderCatalogModalProps> = (props
   const select = (p: CatalogProvider) => {
     setSelectedId(p.id);
     setApiKey("");
-    setBaseUrl(props.providers()[p.id]?.baseUrl ?? p.api);
+    setBaseUrl((isConnected(p.id) ? props.providers()[p.id]?.baseUrl : undefined) ?? p.api);
     setConnectError(null);
     setConnectSuccess(null);
   };

@@ -185,6 +185,26 @@ describe("ProviderCatalogModal", () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it("a custom provider sharing a catalog id is not shown as that catalog entry", async () => {
+    mount({
+      deepseek: { connected: true, baseUrl: "http://localhost:4000/v1", custom: true, label: "DeepSeek" },
+    });
+    await flush();
+    Array.from(container.querySelectorAll("button"))
+      .find((b) => b.textContent?.includes("DeepSeek"))!
+      .click();
+    await flush();
+    expect(container.textContent).not.toContain("Connected");
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent === "Disconnect")).toBe(
+      false,
+    );
+    // The form starts from the catalog's URL, not the custom provider's.
+    const urlInput = Array.from(container.querySelectorAll<HTMLInputElement>("input[type=text]")).find((i) =>
+      i.value.includes("deepseek"),
+    );
+    expect(urlInput?.value).toBe("https://api.deepseek.com");
+  });
+
   it("catalog load failure offers a forced retry", async () => {
     __test.mockFetchProviderCatalog.mockRejectedValueOnce("network down");
     __test.mockFetchProviderCatalog.mockResolvedValueOnce({ providers: CATALOG });
