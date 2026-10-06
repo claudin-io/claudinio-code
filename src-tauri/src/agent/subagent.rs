@@ -431,6 +431,26 @@ pub async fn run_subagent(
     // breaker as the parent (see `agent::loop_watch`).
     let mut loop_watch = crate::agent::loop_watch::LoopWatch::default();
     for _ in 0..sub_max {
+        // Nothing left to shed and the request cannot be sent: stop with a
+        // report the parent can act on — narrow the goal, or split it —
+        // instead of failing at the provider.
+        if session::estimate_tokens(&history, &system, &tools) >= budget.ceiling {
+            return SubagentResult {
+                status: "context_full",
+                report: format!(
+                    "Stopped after {rounds} rounds: the conversation no longer fits this \
+                     model's context window ({}k tokens). Split the goal into smaller, \
+                     independent subagents.",
+                    budget.window / 1000
+                ),
+                rounds,
+                in_tok: total_in,
+                out_tok: total_out,
+                cost: total_cost,
+                tools: tool_calls.clone(),
+            };
+        }
+
         let mut assistant_text = String::new();
         let stream_output = match provider::stream_message(
             config,
@@ -688,43 +708,35 @@ pub async fn run_subagent(
             });
         }
 
-        // Subagents have no handoff and no summary: past the handoff line,
-        // drop their old tool traffic verbatim-style (`agent::prune`), in
-        // memory — a subagent has no session file to record it in.
+        // Subagents have no handoff and no summary: past the soft line their
+        // old tool traffic is dropped verbatim-style (`agent::prune`), in
+        // memory — a subagent has no session file to record it in. Nothing
+        // gentler comes after this, so it runs as a last resort: by age even
+        // when Jev judged the history and that was not enough, and dropping
+        // the oldest calls outright when cutting their results is not enough
+        // either.
         let limit = budget.soft;
-        if session::estimate_tokens(&history, &system, &tools) >= limit
-            && let Some(b) = crate::agent::jev::backend(config)
-            && let Some(outcome) = crate::agent::prune::plan(&history, &b).await
-        {
-            total_cost += outcome.cost;
-            let pruned = crate::agent::prune::apply(
+        let estimate = session::estimate_tokens(&history, &system, &tools);
+        if estimate >= limit {
+            let backend = crate::agent::jev::backend(config);
+            let shed = crate::agent::prune::shed(
                 &history,
-                &outcome.decision,
-                crate::agent::prune::TRUNCATE_HEAD_CHARS,
-            );
-            let new_estimate = session::estimate_tokens(&pruned, &system, &tools);
-            if session::accept_prune(&outcome, new_estimate, limit) {
+                backend.as_ref(),
+                session::shed_options(estimate, limit, &budget, true),
+                |outcome, pruned| {
+                    session::accept_prune(
+                        outcome,
+                        session::estimate_tokens(pruned, &system, &tools),
+                        limit,
+                        budget.prune_floor,
+                    )
+                },
+            )
+            .await;
+            total_cost += shed.cost;
+            if let Some((_, pruned)) = shed.accepted {
                 history = pruned;
             }
-        }
-        // Nothing left to shed and the next request cannot be sent: stop with
-        // what was learned instead of failing at the provider. The parent gets
-        // a report it can act on — narrow the goal, or split it.
-        if session::estimate_tokens(&history, &system, &tools) >= budget.ceiling {
-            return SubagentResult {
-                status: "context_full",
-                report: format!(
-                    "Stopped after {rounds} rounds: the conversation no longer fits this \
-                     model's context window ({}k tokens). Split the goal into smaller, \
-                     independent subagents.",
-                    budget.window / 1000
-                ),
-                rounds,
-                in_tok: total_in,
-                out_tok: total_out,
-                cost: total_cost,
-                tools: tool_calls.clone(),
-            };
         }
 
         let (loop_action, loop_cost) =
@@ -1226,10 +1238,11 @@ mod context_budget_tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    /// With the window known, nothing larger than it is ever sent — the run
-    /// stops with a report the parent can act on instead of a provider error.
+    /// With the window known, nothing larger than it is ever sent — and with
+    /// no Jev to ask, the oldest results are cut by age, so thirty reads of a
+    /// file many times the window all happen and the run finishes.
     #[tokio::test]
-    async fn with_a_known_window_no_request_exceeds_it() {
+    async fn with_a_known_window_no_request_exceeds_it_and_the_work_gets_done() {
         let (root, file) = workspace("known");
         let (base, sizes) = spawn(script(&file, 30)).await;
         let result = run(&config_for(&base, Some(WINDOW)), &root).await;
@@ -1238,9 +1251,46 @@ mod context_budget_tests {
             "largest request: {} tokens",
             largest_request_tokens(&sizes)
         );
+        assert_eq!(result.status, "completed", "{}", result.report);
+        assert_eq!(result.report, "done reading");
+        assert_eq!(result.tools.get("read_file").copied(), Some(30));
+        // 30 tool rounds and the final answer.
+        assert_eq!(sizes.lock().unwrap().len(), 31);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// When there is nothing to shed — the goal alone does not fit — the
+    /// subagent says so before sending anything.
+    #[tokio::test]
+    async fn a_goal_larger_than_the_window_is_refused_before_any_request() {
+        let (root, file) = workspace("refused");
+        let (base, sizes) = spawn(script(&file, 1)).await;
+        let config = config_for(&base, Some(WINDOW));
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let spec = SubagentSpec {
+            name: "reader".into(),
+            goal: "x".repeat(120_000),
+            mode: SubagentMode::Explore,
+            expected_output: None,
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let result = run_subagent(
+            &config,
+            &ctx,
+            &spec,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "test-session",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
         assert_eq!(result.status, "context_full", "{}", result.report);
         assert!(result.report.contains("32k"), "{}", result.report);
-        assert_eq!(result.tools.get("read_file").copied(), Some(result.rounds));
+        assert!(sizes.lock().unwrap().is_empty(), "nothing was sent");
         std::fs::remove_dir_all(root).ok();
     }
 }

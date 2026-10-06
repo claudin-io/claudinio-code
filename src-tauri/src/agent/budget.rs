@@ -93,6 +93,13 @@ pub struct ContextBudget {
     pub trim_chars: usize,
     /// Verbatim tail kept across a summarizing compaction.
     pub tail_tokens: u64,
+    /// The part of the context no prune can touch, when it is large enough to
+    /// matter: the fixed prefix of a scaled run. A prune is judged by the room
+    /// it leaves above this, not above zero — on a small window the prefix can
+    /// be half of everything, and a target measured from zero would be one no
+    /// prune could ever meet. Zero where the window is not the constraint,
+    /// which keeps those runs on the acceptance rule they always had.
+    pub prune_floor: u64,
 }
 
 impl ContextBudget {
@@ -116,6 +123,7 @@ impl ContextBudget {
                 tool_result_chars: TOOL_RESULT_CHARS,
                 trim_chars: TRIM_CHARS,
                 tail_tokens: TAIL_TOKENS,
+                prune_floor: 0,
             };
         }
         let reserve = reply_reserve
@@ -132,6 +140,7 @@ impl ContextBudget {
                 tool_result_chars: TOOL_RESULT_CHARS,
                 trim_chars: TRIM_CHARS,
                 tail_tokens: TAIL_TOKENS,
+                prune_floor: 0,
             };
         }
         // What is left for the conversation itself. A prefix as large as the
@@ -152,6 +161,7 @@ impl ContextBudget {
             tool_result_chars: result_chars,
             trim_chars: result_chars * TRIM_CHARS / TOOL_RESULT_CHARS,
             tail_tokens: TAIL_TOKENS.min(space * TAIL_PERCENT / 100),
+            prune_floor: floor,
         }
     }
 
@@ -249,6 +259,7 @@ mod tests {
             assert_eq!(b.tool_result_chars, 24_000);
             assert_eq!(b.trim_chars, 20_000);
             assert_eq!(b.tail_tokens, 20_000);
+            assert_eq!(b.prune_floor, 0);
         }
     }
 
@@ -313,6 +324,8 @@ mod tests {
         assert_eq!(b.tool_result_chars, 15_000);
         assert_eq!(b.trim_chars, 12_500);
         assert_eq!(b.tail_tokens, 6_000);
+        // Prunes are judged by the room they leave above the prefix.
+        assert_eq!(b.prune_floor, 4_576);
     }
 
     #[test]

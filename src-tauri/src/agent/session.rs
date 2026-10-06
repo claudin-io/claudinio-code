@@ -1576,19 +1576,42 @@ fn shed_line(budget: &ContextBudget, profile: PromptProfile) -> u64 {
 pub(crate) const PRUNE_TARGET: f64 = 0.8;
 
 /// Take a verbatim compaction only when it frees enough and leaves room.
+/// "Room" is measured above `floor` (`ContextBudget::prune_floor`): what no
+/// prune can touch is not counted against the prune.
 pub(crate) fn accept_prune(
     outcome: &crate::agent::prune::Outcome,
     new_estimate: u64,
     limit: u64,
+    floor: u64,
 ) -> bool {
     outcome.reduction() >= crate::agent::prune::MIN_REDUCTION
-        && (new_estimate as f64) < limit as f64 * PRUNE_TARGET
+        && (new_estimate.saturating_sub(floor) as f64)
+            < limit.saturating_sub(floor) as f64 * PRUNE_TARGET
 }
 
-/// Before handing off or summarizing, try the lossless way: let Jev drop the
-/// old tool traffic and keep every word of the conversation
-/// (`agent::prune`). Returns the new context estimate and what Jev cost, or
-/// `None` — no credential, Jev failed, or not enough freed — and the caller
+/// What a prune at `limit` should free, and what it must leave alone.
+pub(crate) fn shed_options(
+    estimated: u64,
+    limit: u64,
+    budget: &ContextBudget,
+    last_resort: bool,
+) -> crate::agent::prune::ShedOptions {
+    // Halfway down to the floor, not just under the line: every prune is a
+    // cold prefix, so one deep cut is cheaper than several shallow ones.
+    let floor = budget.prune_floor.min(limit);
+    let target = floor + (limit - floor) / 2;
+    crate::agent::prune::ShedOptions {
+        free_chars: usize::try_from(estimated.saturating_sub(target) * 3).unwrap_or(usize::MAX),
+        recent_chars: usize::try_from(budget.tail_tokens * 3).unwrap_or(usize::MAX),
+        last_resort,
+    }
+}
+
+/// Before handing off or summarizing, try the verbatim way: drop old tool
+/// traffic and keep every word of the conversation (`agent::prune::shed` —
+/// what is superseded first, then what Jev says is no longer needed, or the
+/// oldest results when there is no Jev to ask). Returns the new context
+/// estimate and what Jev cost, or `None` — not enough freed — and the caller
 /// falls through to the handoff / compaction exactly as before.
 #[allow(clippy::too_many_arguments)]
 async fn try_verbatim_compaction(
@@ -1607,17 +1630,24 @@ async fn try_verbatim_compaction(
     if estimated < limit {
         return None;
     }
-    let backend = crate::agent::jev::backend(config)?;
-    let outcome = crate::agent::prune::plan(history, &backend).await?;
-    let pruned = crate::agent::prune::apply(
+    let backend = crate::agent::jev::backend(config);
+    // What Jev chose to keep stays kept: when its pass is not enough, the
+    // handoff is gentler on a main session than cutting by age over its head.
+    let (outcome, _) = crate::agent::prune::shed(
         history,
-        &outcome.decision,
-        crate::agent::prune::TRUNCATE_HEAD_CHARS,
-    );
-    let new_estimate = estimate_tokens(&pruned, system, tools);
-    if !accept_prune(&outcome, new_estimate, limit) {
-        return None;
-    }
+        backend.as_ref(),
+        shed_options(estimated, limit, budget, false),
+        |outcome, pruned| {
+            accept_prune(
+                outcome,
+                estimate_tokens(pruned, system, tools),
+                limit,
+                budget.prune_floor,
+            )
+        },
+    )
+    .await
+    .accepted?;
 
     // The transcript is about to lose content: PreCompact's contract.
     let mut hook_note = None;
@@ -6571,19 +6601,48 @@ mod verbatim_compaction_tests {
 
     #[test]
     fn a_prune_that_frees_enough_and_lands_well_under_the_limit_is_taken() {
-        assert!(accept_prune(&outcome(100, 40), 60_000, 120_000));
+        assert!(accept_prune(&outcome(100, 40), 60_000, 120_000, 0));
     }
 
     #[test]
     fn a_prune_that_frees_too_little_falls_back() {
         // 20% < MIN_REDUCTION: not worth a cold prefix; the handoff decides.
-        assert!(!accept_prune(&outcome(100, 80), 60_000, 120_000));
+        assert!(!accept_prune(&outcome(100, 80), 60_000, 120_000, 0));
     }
 
     #[test]
     fn a_prune_that_stays_near_the_limit_falls_back() {
         // Freed half, but would cross the limit again a few rounds later.
-        assert!(!accept_prune(&outcome(100, 50), 110_000, 120_000));
+        assert!(!accept_prune(&outcome(100, 50), 110_000, 120_000, 0));
+    }
+
+    /// On a small window the prefix is most of the context. Measured from
+    /// zero, the target would sit below the prefix itself and no prune could
+    /// ever be taken; measured above the prefix, a real one is.
+    #[test]
+    fn room_is_measured_above_what_no_prune_can_touch() {
+        // 10k of prefix, a soft line at 18k: 8k of conversation, pruned to 5k.
+        assert!(!accept_prune(&outcome(100, 40), 15_000, 18_000, 0));
+        assert!(accept_prune(&outcome(100, 40), 15_000, 18_000, 10_000));
+        // Still refused when the conversation stays near the line.
+        assert!(!accept_prune(&outcome(100, 40), 17_000, 18_000, 10_000));
+    }
+
+    #[test]
+    fn a_prune_aims_halfway_between_the_floor_and_the_line() {
+        let full = ContextBudget::new(200_000, 120_000, None, 30_000);
+        let o = shed_options(130_000, full.soft, &full, false);
+        // Floor 0: land at 60k, so free 70k tokens of history.
+        assert_eq!(o.free_chars, 70_000 * 3);
+        assert_eq!(o.recent_chars, 20_000 * 3);
+        assert!(!o.last_resort);
+
+        let small = ContextBudget::new(32_768, 120_000, Some(8_192), 4_576);
+        let o = shed_options(17_000, small.soft, &small, true);
+        // Floor 4_576, line 16_576: land at 10_576.
+        assert_eq!(o.free_chars, (17_000 - 10_576) * 3);
+        assert_eq!(o.recent_chars, 6_000 * 3);
+        assert!(o.last_resort);
     }
 
     #[test]

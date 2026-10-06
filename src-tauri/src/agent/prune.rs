@@ -21,6 +21,22 @@
 //! each request inside what every backend accepts, the claudin.io plan
 //! endpoint included. Anything going wrong yields `None` and the caller falls
 //! back to the handoff or the summarizing compaction.
+//!
+//! Jev is one of three stages ([`shed`]), and the only one that needs a
+//! credential:
+//!
+//! 0. **Lossless** ([`plan_lossless`]) — what a newer copy in the same history
+//!    already supersedes: older task-list snapshots, and a file read again
+//!    later with the same range. Nothing is judged because nothing is lost.
+//! 1. **Judged** ([`plan`]) — the Jev pass above, on what stage 0 left.
+//! 2. **By age** ([`plan_by_age`]) — no judge to ask: the oldest tool results
+//!    are cut to their head until enough is freed. Outputs go, calls stay:
+//!    knowing a call was made is cheap and stops the model from making it
+//!    again. Only as a last resort — a subagent, which has no handoff and no
+//!    summary behind it — are the oldest calls dropped outright, because the
+//!    stubs of a long run add up too and the alternative is to overflow.
+//!
+//! Stage 2 is what a session without Jev gets instead of nothing.
 
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -87,6 +103,41 @@ pub struct Decision {
     pub truncate_results: Vec<String>,
 }
 
+impl Decision {
+    pub fn is_empty(&self) -> bool {
+        self.drop_calls.is_empty() && self.truncate_results.is_empty()
+    }
+
+    /// Both decisions as one. A call dropped by either is dropped — cutting
+    /// the result of a call that is gone means nothing.
+    pub fn merged(&self, other: &Decision) -> Decision {
+        let mut seen = HashSet::new();
+        let drop_calls: Vec<String> = self
+            .drop_calls
+            .iter()
+            .chain(&other.drop_calls)
+            .filter(|id| seen.insert(id.as_str()))
+            .cloned()
+            .collect();
+        let truncate_results = self
+            .truncate_results
+            .iter()
+            .chain(&other.truncate_results)
+            .filter(|id| seen.insert(id.as_str()))
+            .cloned()
+            .collect();
+        Decision {
+            drop_calls,
+            truncate_results,
+        }
+    }
+}
+
+/// Which stage of [`shed`] produced an outcome.
+pub const SOURCE_LOSSLESS: &str = "lossless";
+pub const SOURCE_JEV: &str = "jev";
+pub const SOURCE_RULES: &str = "rules";
+
 #[derive(Debug, Clone, Default)]
 pub struct Outcome {
     pub decision: Decision,
@@ -94,6 +145,9 @@ pub struct Outcome {
     pub chars_after: usize,
     pub requests: usize,
     pub stage: &'static str,
+    /// [`SOURCE_LOSSLESS`] | [`SOURCE_JEV`] | [`SOURCE_RULES`]: the last stage
+    /// that contributed. Empty for an outcome straight out of [`plan`].
+    pub source: &'static str,
     pub cost: f64,
     /// (tool_use_id, P(keep call), P(keep result)) for every judged call.
     pub judged: Vec<(String, f64, f64)>,
@@ -106,6 +160,7 @@ impl Outcome {
         json!({
             "requests": self.requests,
             "stage": self.stage,
+            "source": self.source,
             "reduction": (self.reduction() * 1000.0).round() / 1000.0,
             "chars_before": self.chars_before,
             "chars_after": self.chars_after,
@@ -598,9 +653,304 @@ pub async fn plan(history: &[Message], backend: &crate::agent::jev::JevBackend) 
         chars_after: history_chars(&after),
         requests,
         stage,
+        source: SOURCE_JEV,
         cost,
         judged,
     })
+}
+
+/// Tools whose call or result carries the whole task list.
+const TASK_SNAPSHOT_TOOLS: [&str; 2] = ["tasks_get", "tasks_set"];
+/// Every tool that reads or changes the task list.
+const TASK_TOOLS: [&str; 3] = ["tasks_get", "tasks_set", "tasks_update"];
+/// What `apply` appends to a result it cut; a result carrying it is no longer
+/// a full copy of anything.
+const COMPACTED_MARK: &str = "[compacted: ";
+
+/// The file and range a `read_file` call asked for.
+fn read_key(input: &Value) -> Option<(String, Option<u64>, Option<u64>)> {
+    let path = input
+        .get("path")
+        .or_else(|| input.get("file_path"))?
+        .as_str()?;
+    let line = |k: &str| input.get(k).and_then(Value::as_u64);
+    Some((path.to_string(), line("start_line"), line("end_line")))
+}
+
+/// Stage 0: what a newer copy in the same history already supersedes.
+///
+/// - **Task snapshots.** `tasks_get` returns the whole list and `tasks_set`
+///   sends it, so every task call before the latest successful snapshot repeats
+///   information the latest one holds in full. The calls go, results and all:
+///   the arguments are where the bulk is.
+/// - **Repeated reads.** A `read_file` with the same path and range as a later
+///   successful one is cut to its head. The call stays, so the history still
+///   shows the file was looked at then.
+///
+/// Measured on 509 real sessions before this existed: `tasks_set` arguments
+/// were 24% of everything the main session wrote, and 10% of `read_file` calls
+/// repeated an earlier one exactly.
+pub fn plan_lossless(history: &[Message]) -> Decision {
+    let calls = collect_tool_calls(history);
+    let mut compacted: HashSet<&str> = HashSet::new();
+    for b in history.iter().flat_map(|m| m.content.iter()) {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } = b
+            && content.as_text().contains(COMPACTED_MARK)
+        {
+            compacted.insert(tool_use_id.as_str());
+        }
+    }
+    let mut decision = Decision::default();
+
+    let latest_snapshot = calls
+        .iter()
+        .rposition(|c| TASK_SNAPSHOT_TOOLS.contains(&c.tool.as_str()) && !c.is_error);
+    if let Some(latest) = latest_snapshot {
+        for c in &calls[..latest] {
+            if !c.pinned && TASK_TOOLS.contains(&c.tool.as_str()) {
+                decision.drop_calls.push(c.tool_use_id.clone());
+            }
+        }
+    }
+
+    // Newest first, so each read is checked against the reads after it.
+    let mut newer_reads = HashSet::new();
+    for c in calls.iter().rev() {
+        if c.tool != "read_file" {
+            continue;
+        }
+        let Some(key) = read_key(&c.input) else {
+            continue;
+        };
+        let full_copy = !c.is_error && !compacted.contains(c.tool_use_id.as_str());
+        if newer_reads.contains(&key) {
+            if !c.pinned && full_copy {
+                decision.truncate_results.push(c.tool_use_id.clone());
+            }
+        } else if full_copy {
+            // Only a result that is still whole can stand in for an older one.
+            newer_reads.insert(key);
+        }
+    }
+    decision.truncate_results.reverse();
+    decision
+}
+
+/// Characters of one message, counted as [`history_chars`] counts them.
+fn message_chars(m: &Message) -> usize {
+    history_chars(std::slice::from_ref(m))
+}
+
+/// Index of the first message of the recent window: the newest messages that
+/// fit in `recent_chars`, never fewer than the last round (two messages) and
+/// never more than [`PRESERVE_RECENT_MESSAGES`].
+///
+/// A fixed message count is the wrong pin on a small window: three rounds of
+/// tool results can be most of what the model can hold, which would leave
+/// nothing old enough to cut.
+fn recent_start(history: &[Message], recent_chars: usize) -> usize {
+    let total = history.len();
+    let mut start = total;
+    let mut used = 0usize;
+    while start > 0 && total - start < PRESERVE_RECENT_MESSAGES {
+        let next = message_chars(&history[start - 1]);
+        if total - start >= 2 && used + next > recent_chars {
+            break;
+        }
+        used += next;
+        start -= 1;
+    }
+    start
+}
+
+/// What cutting one result to its head frees, or `None` when `apply` would
+/// leave it as it is.
+fn freed_by_cut(result_chars: usize) -> Option<usize> {
+    (result_chars > TRUNCATE_HEAD_CHARS + 120).then(|| result_chars - TRUNCATE_HEAD_CHARS)
+}
+
+/// Roughly what `apply` leaves of a cut result: the head and its note.
+const CUT_RESULT_CHARS: usize = TRUNCATE_HEAD_CHARS + 100;
+
+/// Stage 2: cut the oldest tool results to their head until `free_chars` are
+/// freed, leaving the first message and the recent window alone.
+///
+/// The blunt rule, for when there is no judge: age is a poor proxy for "no
+/// longer needed", which is why Jev goes first when it can. But the cost of a
+/// wrong cut is a re-read, and the alternative here is a handoff, a summary or
+/// an overflow. On the stored sessions that reached 96k it frees a median 70%
+/// of the history.
+///
+/// With `drop_calls`, and only when cutting every eligible result still falls
+/// short, the oldest calls are dropped outright, oldest first, until enough is
+/// freed.
+pub fn plan_by_age(
+    history: &[Message],
+    free_chars: usize,
+    recent_chars: usize,
+    drop_calls: bool,
+) -> Decision {
+    let recent = recent_start(history, recent_chars);
+    let mut result_msg = std::collections::HashMap::new();
+    for (i, m) in history.iter().enumerate() {
+        for b in &m.content {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                result_msg.insert(tool_use_id.as_str(), i);
+            }
+        }
+    }
+    let eligible: Vec<ToolCall> = collect_tool_calls(history)
+        .into_iter()
+        .filter(|c| {
+            result_msg
+                .get(c.tool_use_id.as_str())
+                .is_some_and(|&ri| ri != 0 && ri < recent)
+        })
+        .collect();
+    let mut decision = Decision::default();
+    let mut freed = 0usize;
+    for c in &eligible {
+        if freed >= free_chars {
+            return decision;
+        }
+        if let Some(gain) = freed_by_cut(c.result_chars) {
+            freed += gain;
+            decision.truncate_results.push(c.tool_use_id.clone());
+        }
+    }
+    if !drop_calls {
+        return decision;
+    }
+    for c in &eligible {
+        if freed >= free_chars {
+            break;
+        }
+        freed += c.input.to_string().len() + c.result_chars.min(CUT_RESULT_CHARS);
+        decision.truncate_results.retain(|id| id != &c.tool_use_id);
+        decision.drop_calls.push(c.tool_use_id.clone());
+    }
+    decision
+}
+
+/// How [`shed`] should go about it.
+#[derive(Debug, Clone, Copy)]
+pub struct ShedOptions {
+    /// What stage 2 aims to free, counted from the history as given.
+    pub free_chars: usize,
+    /// Size of the recent window stage 2 leaves alone.
+    pub recent_chars: usize,
+    /// Nothing gentler comes after this shed: run stage 2 even when Jev judged
+    /// the history and it was not enough, and let it drop the oldest calls
+    /// outright when cutting results falls short.
+    ///
+    /// False for the main session, which hands off next — what Jev chose to
+    /// keep is kept, and no call disappears. True for a subagent, which has
+    /// nothing after this but running out of window.
+    pub last_resort: bool,
+}
+
+/// What [`shed`] came to.
+#[derive(Debug, Default)]
+pub struct Shed {
+    /// The accepted outcome and the history it leaves, when a stage was enough.
+    pub accepted: Option<(Outcome, Vec<Message>)>,
+    /// What Jev cost, whether or not its answer was used.
+    pub cost: f64,
+}
+
+/// Free context in three stages, stopping at the first one `accept` takes:
+/// lossless, judged, by age. Each stage builds on the lossless one, and the
+/// outcome is cumulative — one decision that, applied to `history`, gives the
+/// returned history.
+pub async fn shed<F>(
+    history: &[Message],
+    backend: Option<&crate::agent::jev::JevBackend>,
+    opts: ShedOptions,
+    accept: F,
+) -> Shed
+where
+    F: Fn(&Outcome, &[Message]) -> bool,
+{
+    let chars_before = history_chars(history);
+    let lossless = plan_lossless(history);
+    let after_lossless = apply(history, &lossless, TRUNCATE_HEAD_CHARS);
+    if !lossless.is_empty() {
+        let outcome = Outcome {
+            decision: lossless.clone(),
+            chars_before,
+            chars_after: history_chars(&after_lossless),
+            stage: SOURCE_LOSSLESS,
+            source: SOURCE_LOSSLESS,
+            ..Default::default()
+        };
+        if accept(&outcome, &after_lossless) {
+            return Shed {
+                accepted: Some((outcome, after_lossless)),
+                cost: 0.0,
+            };
+        }
+    }
+
+    let mut cost = 0.0;
+    let mut requests = 0;
+    if let Some(backend) = backend
+        && let Some(judged) = plan(&after_lossless, backend).await
+    {
+        cost = judged.cost;
+        requests = judged.requests;
+        let decision = lossless.merged(&judged.decision);
+        let after = apply(history, &decision, TRUNCATE_HEAD_CHARS);
+        let outcome = Outcome {
+            decision,
+            chars_before,
+            chars_after: history_chars(&after),
+            ..judged
+        };
+        if accept(&outcome, &after) {
+            return Shed {
+                accepted: Some((outcome, after)),
+                cost,
+            };
+        }
+        if !opts.last_resort {
+            return Shed {
+                accepted: None,
+                cost,
+            };
+        }
+    }
+
+    let already_freed = chars_before - history_chars(&after_lossless).min(chars_before);
+    let by_age = plan_by_age(
+        &after_lossless,
+        opts.free_chars.saturating_sub(already_freed),
+        opts.recent_chars,
+        opts.last_resort,
+    );
+    if by_age.is_empty() {
+        return Shed {
+            accepted: None,
+            cost,
+        };
+    }
+    let decision = lossless.merged(&by_age);
+    let after = apply(history, &decision, TRUNCATE_HEAD_CHARS);
+    let outcome = Outcome {
+        decision,
+        chars_before,
+        chars_after: history_chars(&after),
+        requests,
+        stage: SOURCE_RULES,
+        source: SOURCE_RULES,
+        cost,
+        judged: Vec::new(),
+    };
+    let accepted = accept(&outcome, &after).then_some((outcome, after));
+    Shed { accepted, cost }
 }
 
 #[cfg(test)]
@@ -888,6 +1238,548 @@ mod tests {
         let h = vec![user("hi"), assistant("hello")];
         let b = stub_backend("http://127.0.0.1:9/unused");
         assert!(plan(&h, &b).await.is_none());
+    }
+
+    // ── Stage 0: lossless ────────────────────────────────────────────────────
+
+    fn tasks(n: usize) -> Value {
+        json!({"tasks": (0..n).map(|i| json!({
+            "id": format!("t{i}"), "title": "task", "description": "d".repeat(200),
+            "journal": [], "status": "todo"
+        })).collect::<Vec<_>>()})
+    }
+
+    /// A Builder run: the list is loaded, then re-sent whole on every status
+    /// change, with some unrelated work in between and a recent tail.
+    fn task_session() -> Vec<Message> {
+        let mut h = vec![user("Build the feature.")];
+        h.push(assistant_call("", "get_1", "tasks_get", json!({})));
+        h.push(result("get_1", &tasks(8).to_string()));
+        for i in 0..4 {
+            h.push(assistant_call(
+                "",
+                &format!("set_{i}"),
+                "tasks_set",
+                tasks(8),
+            ));
+            h.push(result(&format!("set_{i}"), "Tasks updated."));
+            h.push(assistant_call(
+                "",
+                &format!("bash_{i}"),
+                "bash",
+                json!({"command": "cargo test"}),
+            ));
+            h.push(result(&format!("bash_{i}"), "ok"));
+        }
+        // A rejected write is not a snapshot of anything.
+        h.push(assistant_call("", "set_bad", "tasks_set", tasks(8)));
+        h.push(result("set_bad", "Error: quality gate is red"));
+        for i in 0..4 {
+            h.push(assistant(&format!("note {i}")));
+            h.push(user("go on"));
+        }
+        h
+    }
+
+    #[test]
+    fn task_snapshots_older_than_the_latest_good_one_are_superseded() {
+        let h = task_session();
+        let d = plan_lossless(&h);
+        // set_3 is the latest successful snapshot: it stays, and so does the
+        // rejected write after it. Everything about tasks before it goes.
+        assert_eq!(d.drop_calls, vec!["get_1", "set_0", "set_1", "set_2"]);
+        assert!(d.truncate_results.is_empty());
+        let after = apply(&h, &d, TRUNCATE_HEAD_CHARS);
+        let ids: Vec<String> = after
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(ids.contains(&"set_3".to_string()));
+        assert!(ids.contains(&"set_bad".to_string()));
+        assert!(!ids.contains(&"set_0".to_string()));
+        // Unrelated calls are not this stage's business.
+        assert_eq!(ids.iter().filter(|id| id.starts_with("bash_")).count(), 4);
+        assert!(history_chars(&after) < history_chars(&h) / 2);
+    }
+
+    #[test]
+    fn deltas_after_the_latest_snapshot_stay_and_older_ones_go() {
+        let mut h = vec![user("Build.")];
+        h.push(assistant_call(
+            "",
+            "upd_old",
+            "tasks_update",
+            json!({"id": "t0"}),
+        ));
+        h.push(result("upd_old", "t0: doing"));
+        h.push(assistant_call("", "set_1", "tasks_set", tasks(3)));
+        h.push(result("set_1", "Tasks updated."));
+        h.push(assistant_call(
+            "",
+            "upd_new",
+            "tasks_update",
+            json!({"id": "t1"}),
+        ));
+        h.push(result("upd_new", "t1: done"));
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        // The delta before the snapshot is folded into it; the one after is
+        // the only record of that change.
+        assert_eq!(plan_lossless(&h).drop_calls, vec!["upd_old"]);
+    }
+
+    #[test]
+    fn a_read_repeated_later_with_the_same_range_is_cut_to_its_head() {
+        let body = "fn body() {}\n".repeat(400);
+        let mut h = vec![user("Look at lib.rs.")];
+        let read = |h: &mut Vec<Message>, id: &str, input: Value, text: &str| {
+            h.push(assistant_call("", id, "read_file", input));
+            h.push(result(id, text));
+        };
+        read(&mut h, "r1", json!({"path": "src/lib.rs"}), &body);
+        read(
+            &mut h,
+            "r2",
+            json!({"path": "src/lib.rs", "start_line": 1, "end_line": 50}),
+            &body,
+        );
+        read(&mut h, "r3", json!({"path": "src/other.rs"}), &body);
+        // `file_path` is an accepted alias of `path`.
+        read(&mut h, "r4", json!({"file_path": "src/lib.rs"}), &body);
+        read(
+            &mut h,
+            "r5",
+            json!({"path": "src/lib.rs", "start_line": 1, "end_line": 50}),
+            &body,
+        );
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        let d = plan_lossless(&h);
+        // r1 is repeated by r4 and r2 by r5. r3 was read once.
+        assert_eq!(d.truncate_results, vec!["r1", "r2"]);
+        assert!(d.drop_calls.is_empty(), "the calls stay visible");
+    }
+
+    #[test]
+    fn a_read_is_not_superseded_by_a_failed_or_an_already_cut_one() {
+        let body = "fn body() {}\n".repeat(400);
+        let mut h = vec![user("Look.")];
+        h.push(assistant_call(
+            "",
+            "r1",
+            "read_file",
+            json!({"path": "a.rs"}),
+        ));
+        h.push(result("r1", &body));
+        h.push(assistant_call(
+            "",
+            "r2",
+            "read_file",
+            json!({"path": "a.rs"}),
+        ));
+        h.push(result("r2", "Error: cannot access: No such file"));
+        h.push(assistant_call(
+            "",
+            "r3",
+            "read_file",
+            json!({"path": "b.rs"}),
+        ));
+        h.push(result("r3", &body));
+        h.push(assistant_call(
+            "",
+            "r4",
+            "read_file",
+            json!({"path": "b.rs"}),
+        ));
+        h.push(result("r4", "fn body() {}\n[compacted: 5000 chars of this tool result removed; re-run the tool if needed]"));
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        // r1 and r3 are each the only whole copy left of their file.
+        assert!(plan_lossless(&h).is_empty());
+    }
+
+    #[test]
+    fn the_newest_messages_are_never_touched_by_the_lossless_stage() {
+        let body = "fn body() {}\n".repeat(400);
+        let mut h = vec![user("Look.")];
+        for id in ["r1", "r2"] {
+            h.push(assistant_call("", id, "read_file", json!({"path": "a.rs"})));
+            h.push(result(id, &body));
+        }
+        // Five messages: both reads are inside the pinned window.
+        assert!(plan_lossless(&h).is_empty());
+    }
+
+    // ── Stage 2: by age ──────────────────────────────────────────────────────
+
+    #[test]
+    fn by_age_cuts_the_oldest_results_first_and_stops_when_enough_is_freed() {
+        let h = session(8);
+        let one = "fn body() {}\n".repeat(400).len();
+        // Asking for a little more than one result frees exactly two.
+        let d = plan_by_age(&h, one + 10, usize::MAX, false);
+        assert_eq!(d.truncate_results, vec!["toolu_0", "toolu_1"]);
+        assert!(d.drop_calls.is_empty(), "by age never drops a call");
+        // Asking for everything stops at the recent window.
+        let all = plan_by_age(&h, usize::MAX, usize::MAX, false);
+        assert_eq!(all.truncate_results.len(), 8);
+        assert!(!all.truncate_results.contains(&"toolu_edit".to_string()));
+    }
+
+    #[test]
+    fn by_age_skips_results_too_small_to_be_worth_a_note() {
+        let mut h = vec![user("go")];
+        for i in 0..6 {
+            h.push(assistant_call(
+                "",
+                &format!("b{i}"),
+                "bash",
+                json!({"command": "true"}),
+            ));
+            h.push(result(&format!("b{i}"), "ok"));
+        }
+        for _ in 0..3 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        assert!(plan_by_age(&h, usize::MAX, usize::MAX, false).is_empty());
+    }
+
+    #[test]
+    fn the_recent_window_shrinks_to_fit_its_budget_but_keeps_the_last_round() {
+        let big = "x".repeat(9_000);
+        let mut h = vec![user("go")];
+        for i in 0..5 {
+            h.push(assistant_call(
+                "",
+                &format!("r{i}"),
+                "read_file",
+                json!({"path": format!("f{i}")}),
+            ));
+            h.push(result(&format!("r{i}"), &big));
+        }
+        // Eleven messages. A roomy budget pins the usual six: r2, r3, r4.
+        assert_eq!(recent_start(&h, usize::MAX), 5);
+        assert_eq!(
+            plan_by_age(&h, usize::MAX, usize::MAX, false).truncate_results,
+            vec!["r0", "r1"]
+        );
+        // A budget one result wide pins only the last round, so the two
+        // before it become old enough to cut — which is what lets a small
+        // window shed anything at all.
+        assert_eq!(recent_start(&h, 10_000), 9);
+        assert_eq!(
+            plan_by_age(&h, usize::MAX, 10_000, false).truncate_results,
+            vec!["r0", "r1", "r2", "r3"]
+        );
+        // No budget at all still leaves the last round alone.
+        assert_eq!(recent_start(&h, 0), 9);
+    }
+
+    #[test]
+    fn only_a_last_resort_drops_calls_and_only_when_cutting_falls_short() {
+        let h = session(8);
+        let one = "fn body() {}\n".repeat(400).len();
+        // Cutting is enough: no call is dropped even when allowed.
+        let enough = plan_by_age(&h, one * 3, usize::MAX, true);
+        assert!(enough.drop_calls.is_empty());
+        assert_eq!(enough.truncate_results.len(), 4);
+        // Cutting all eight results frees less than eight whole results, so
+        // the oldest calls go — oldest first, and no more than needed.
+        let all_cut = 8 * (one - TRUNCATE_HEAD_CHARS);
+        let short = plan_by_age(&h, all_cut + 500, usize::MAX, true);
+        assert_eq!(short.drop_calls, vec!["toolu_0", "toolu_1"]);
+        assert_eq!(short.truncate_results.len(), 6);
+        assert!(!short.truncate_results.contains(&"toolu_0".to_string()));
+        // Not allowed: the same shortfall leaves every call in place.
+        let kept = plan_by_age(&h, all_cut + 500, usize::MAX, false);
+        assert!(kept.drop_calls.is_empty());
+        assert_eq!(kept.truncate_results.len(), 8);
+    }
+
+    // ── The ladder ───────────────────────────────────────────────────────────
+
+    fn opts(last_resort: bool) -> ShedOptions {
+        ShedOptions {
+            // More than cutting every old result can free, so a last resort
+            // has to go on to dropping calls.
+            free_chars: usize::MAX,
+            recent_chars: usize::MAX,
+            last_resort,
+        }
+    }
+
+    /// Accept what frees at least `min` of the history.
+    fn frees(min: f64) -> impl Fn(&Outcome, &[Message]) -> bool {
+        move |o, _| o.reduction() >= min
+    }
+
+    #[tokio::test]
+    async fn without_jev_the_ladder_falls_back_to_age_and_touches_no_prose() {
+        let h = session(8);
+        let shed = shed(&h, None, opts(false), frees(MIN_REDUCTION)).await;
+        let (outcome, after) = shed.accepted.expect("by age frees enough");
+        assert_eq!(outcome.source, SOURCE_RULES);
+        assert_eq!(outcome.requests, 0);
+        assert_eq!(shed.cost, 0.0);
+        // The decision alone reproduces the history: that is what makes a
+        // resumed session identical to the live one.
+        let replayed = apply(&h, &outcome.decision, TRUNCATE_HEAD_CHARS);
+        assert_eq!(
+            serde_json::to_string(&after).unwrap(),
+            serde_json::to_string(&replayed).unwrap()
+        );
+        // Every word a person or the model wrote is still there, in order.
+        let prose = |h: &[Message]| -> Vec<String> {
+            h.iter()
+                .flat_map(|m| m.content.iter())
+                .filter_map(|b| b.get_text().map(str::to_string))
+                .collect()
+        };
+        assert_eq!(prose(&after), prose(&h));
+        assert!(prose(&after)[0].contains("Never edit src/generated"));
+    }
+
+    #[tokio::test]
+    async fn the_lossless_stage_alone_is_taken_when_it_frees_enough() {
+        let h = task_session();
+        // No backend is passed, and none is needed: nothing was judged.
+        let shed = shed(&h, None, opts(false), frees(MIN_REDUCTION)).await;
+        let (outcome, _) = shed.accepted.expect("superseded snapshots are most of it");
+        assert_eq!(outcome.source, SOURCE_LOSSLESS);
+        assert_eq!(outcome.decision, plan_lossless(&h));
+        assert_eq!(outcome.stats_json()["source"], "lossless");
+    }
+
+    fn jev_keeps_everything(calls: usize) -> &'static str {
+        let mut answers = serde_json::Map::new();
+        for i in 1..=calls {
+            answers.insert(format!("call_t{i}"), json!({"type": "noul", "noul": 0.9}));
+            answers.insert(format!("result_t{i}"), json!({"type": "noul", "noul": 0.9}));
+        }
+        Box::leak(
+            json!({"answers": answers, "usage": {"input_tokens": 100, "cost": 1e-6}})
+                .to_string()
+                .into_boxed_str(),
+        )
+    }
+
+    #[tokio::test]
+    async fn what_jev_chose_to_keep_is_kept_in_a_main_session() {
+        let (url, stub) = spawn_stub(200, jev_keeps_everything(4));
+        let h = session(4);
+        let shed = shed(
+            &h,
+            Some(&stub_backend(&url)),
+            opts(false),
+            frees(MIN_REDUCTION),
+        )
+        .await;
+        stub.join().unwrap();
+        // Jev said every result is still needed. Cutting them by age anyway
+        // would override the one judge that read the conversation; the caller
+        // hands off instead.
+        assert!(shed.accepted.is_none());
+        assert!(shed.cost > 0.0, "the question was still paid for");
+    }
+
+    #[tokio::test]
+    async fn a_subagent_cuts_by_age_even_after_jev_kept_everything() {
+        let (url, stub) = spawn_stub(200, jev_keeps_everything(4));
+        let h = session(4);
+        let shed = shed(
+            &h,
+            Some(&stub_backend(&url)),
+            opts(true),
+            frees(MIN_REDUCTION),
+        )
+        .await;
+        stub.join().unwrap();
+        let (outcome, _) = shed.accepted.expect("nothing gentler comes after this");
+        assert_eq!(outcome.source, SOURCE_RULES);
+        assert!(shed.cost > 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_jev_outage_falls_through_to_age_instead_of_giving_up() {
+        let (url, stub) = spawn_stub(529, r#"{"error":"overloaded"}"#);
+        let h = session(8);
+        let shed = shed(
+            &h,
+            Some(&stub_backend(&url)),
+            opts(false),
+            frees(MIN_REDUCTION),
+        )
+        .await;
+        stub.join().unwrap();
+        assert_eq!(shed.accepted.expect("by age").0.source, SOURCE_RULES);
+    }
+
+    #[tokio::test]
+    async fn the_judged_stage_builds_on_the_lossless_one() {
+        // Two superseded task snapshots, then three reads Jev says to drop.
+        let mut h = vec![user("Build.")];
+        for id in ["set_a", "set_b", "set_c"] {
+            h.push(assistant_call("", id, "tasks_set", tasks(4)));
+            h.push(result(id, "Tasks updated."));
+        }
+        for i in 0..3 {
+            h.push(assistant_call(
+                "",
+                &format!("r{i}"),
+                "read_file",
+                json!({"path": format!("f{i}")}),
+            ));
+            h.push(result(&format!("r{i}"), &"fn body() {}\n".repeat(400)));
+        }
+        for _ in 0..3 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        // After stage 0 Jev sees set_c and the three reads — t1..t4, which is
+        // one request. It keeps the task list and lets the reads go.
+        let mut answers = serde_json::Map::new();
+        for i in 1..=4 {
+            let p = if i == 1 { 0.9 } else { 0.1 };
+            answers.insert(format!("call_t{i}"), json!({"type": "noul", "noul": p}));
+            answers.insert(format!("result_t{i}"), json!({"type": "noul", "noul": p}));
+        }
+        let body: &'static str = Box::leak(
+            json!({"answers": answers, "usage": {"input_tokens": 100, "cost": 1e-6}})
+                .to_string()
+                .into_boxed_str(),
+        );
+        let (url, stub) = spawn_stub(200, body);
+        // Stage 0 alone is not enough here, so the ladder goes on to Jev.
+        let shed = shed(&h, Some(&stub_backend(&url)), opts(false), frees(0.9)).await;
+        let request = stub.join().unwrap();
+        let (outcome, after) = shed.accepted.expect("both stages together");
+        assert_eq!(outcome.source, SOURCE_JEV);
+        assert_eq!(
+            outcome.decision.drop_calls,
+            vec!["set_a", "set_b", "r0", "r1", "r2"]
+        );
+        // Jev was never asked about what stage 0 had already removed.
+        assert!(request.contains("call_t4"), "{request}");
+        assert!(
+            !request.contains("call_t5"),
+            "four calls were left to judge"
+        );
+        // The decision alone reproduces the history: that is what makes a
+        // resumed session identical to the live one.
+        let replayed = apply(&h, &outcome.decision, TRUNCATE_HEAD_CHARS);
+        assert_eq!(
+            serde_json::to_string(&after).unwrap(),
+            serde_json::to_string(&replayed).unwrap()
+        );
+    }
+
+    #[test]
+    fn merging_decisions_drops_once_and_never_cuts_what_is_dropped() {
+        let a = Decision {
+            drop_calls: vec!["x".into(), "y".into()],
+            truncate_results: vec!["z".into()],
+        };
+        let b = Decision {
+            drop_calls: vec!["y".into(), "w".into()],
+            truncate_results: vec!["x".into(), "z".into(), "v".into()],
+        };
+        let m = a.merged(&b);
+        assert_eq!(m.drop_calls, vec!["x", "y", "w"]);
+        assert_eq!(m.truncate_results, vec!["z", "v"]);
+        assert!(Decision::default().is_empty());
+        assert!(!m.is_empty());
+    }
+
+    /// Replay the Jev-less ladder over real session files — the gate for
+    /// turning it on. Point `CLAUDINIO_REPLAY_SESSIONS` at a `sessions`
+    /// directory:
+    ///
+    ///   CLAUDINIO_REPLAY_SESSIONS=~/proj/.claudinio/sessions \
+    ///     cargo test --lib -- --ignored replay_the_ladder --nocapture
+    ///
+    /// Every session whose history grew past ~60k tokens is taken as it stood
+    /// before its first summarizing compaction, shed without a judge, and
+    /// checked: at least `MIN_REDUCTION` freed, and no prose changed.
+    #[tokio::test]
+    #[ignore]
+    async fn replay_the_ladder_on_stored_sessions() {
+        let dir = std::env::var("CLAUDINIO_REPLAY_SESSIONS").expect("CLAUDINIO_REPLAY_SESSIONS");
+        let prose = |h: &[Message]| -> String {
+            h.iter()
+                .flat_map(|m| m.content.iter())
+                .filter_map(|b| b.get_text())
+                .collect::<Vec<_>>()
+                .join("\u{1}")
+        };
+        let (mut seen, mut short, mut reductions) = (0usize, 0usize, Vec::new());
+        let mut by_source = std::collections::BTreeMap::<&str, usize>::new();
+        for entry in std::fs::read_dir(&dir).expect("readable sessions directory") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mut records = crate::agent::persist::load_records(&path).unwrap_or_default();
+            if let Some(cut) = records
+                .iter()
+                .position(|r| matches!(r, crate::agent::persist::SessionRecord::Compacted { .. }))
+            {
+                records.truncate(cut);
+            }
+            let history = crate::agent::persist::history_from_records(&records);
+            if history_chars(&history) < 180_000 {
+                continue;
+            }
+            seen += 1;
+            let options = ShedOptions {
+                free_chars: history_chars(&history) / 2,
+                recent_chars: 60_000,
+                last_resort: false,
+            };
+            let shed = shed(&history, None, options, |o, _| {
+                o.reduction() >= MIN_REDUCTION
+            })
+            .await;
+            let Some((outcome, after)) = shed.accepted else {
+                short += 1;
+                println!("NOT ENOUGH {}", path.display());
+                continue;
+            };
+            assert_eq!(prose(&after), prose(&history), "{}", path.display());
+            *by_source.entry(outcome.source).or_default() += 1;
+            reductions.push(outcome.reduction());
+        }
+        reductions.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let at =
+            |q: f64| reductions[((reductions.len() as f64 * q) as usize).min(reductions.len() - 1)];
+        println!(
+            "sessions past 60k tokens: {seen} | freed enough: {} {by_source:?} | fell short: {short}",
+            reductions.len()
+        );
+        if !reductions.is_empty() {
+            println!(
+                "reduction: min {:.0}% p10 {:.0}% median {:.0}% max {:.0}%",
+                reductions[0] * 100.0,
+                at(0.1) * 100.0,
+                at(0.5) * 100.0,
+                reductions[reductions.len() - 1] * 100.0
+            );
+        }
+        assert!(
+            seen > 0,
+            "no session in {dir} is long enough to say anything"
+        );
+        assert_eq!(short, 0, "the ladder must free enough on every one");
     }
 
     /// Live probe against the real Jev. Needs JEV_LIVE_OPENROUTER_KEY.
