@@ -305,6 +305,25 @@ pub enum SessionRecord {
         prefix: PrefixBreakdown,
         ts: u64,
     },
+    /// The router's verdict on a session's first prompt (`agent::route`).
+    /// `verdict` is what it would start the session as; `ran_as` is what the
+    /// session actually started as. In shadow the two are independent, and
+    /// comparing them is the whole point of recording this.
+    ModeRoute {
+        verdict: String,
+        ran_as: String,
+        /// `rules` | `jev` | `unavailable`.
+        source: String,
+        /// True when the verdict was only recorded, not acted on.
+        shadow: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_decisions: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_design: Option<f64>,
+        #[serde(default)]
+        cost: f64,
+        ts: u64,
+    },
     /// One subagent, finished. A subagent keeps no transcript of its own, so
     /// this is the only trace of what it did: without it the tool usage of the
     /// agents that do all the editing is invisible.
@@ -1079,6 +1098,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::HookContext { ts, .. }
                 | SessionRecord::HookTrust { ts, .. }
                 | SessionRecord::RunConfig { ts, .. }
+                | SessionRecord::ModeRoute { ts, .. }
                 | SessionRecord::SubagentRun { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);

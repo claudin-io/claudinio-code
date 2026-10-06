@@ -121,10 +121,15 @@ export interface AgentConfig {
   workspaceConfig?: Record<string, unknown> | null;
 }
 
+/** How much say Jev has over the phase a new session starts in. */
+export type JevRoute = "off" | "shadow" | "on";
+
 export interface JevStatus {
   enabled: boolean;
   hasApiKey: boolean;
   backend: "typesafe" | "claudinio" | "openrouter" | null;
+  /** Absent in a config written before the setting existed. */
+  route?: JevRoute;
 }
 
 /** A connected external provider as reported by get_config — never the key. */
@@ -169,6 +174,7 @@ export interface SetConfigArgs {
   browser?: BrowserPrefs;
   local?: LocalPrefs;
   jevEnabled?: boolean;
+  jevRoute?: JevRoute;
   /** A TypeSafe API key; an empty string removes it. */
   jevApiKey?: string;
 }
@@ -457,7 +463,9 @@ export function sendMessage(
   message: string,
   attachments: AttachmentInput[],
   onEvent: (event: AgentEvent) => void,
-  mode?: SessionMode,
+  // "auto" leaves the session's mode alone and lets the harness pick the
+  // starting phase of a fresh session — see lib/modeChoice.
+  mode?: SessionMode | "auto",
 ): Promise<SessionStarted> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
@@ -531,7 +539,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust" | "run_config" | "subagent_run";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust" | "run_config" | "subagent_run" | "mode_route";
   [key: string]: unknown;
 };
 

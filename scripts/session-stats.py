@@ -169,7 +169,8 @@ class Stats:
                 for name, count in (rec.get("tools") or {}).items():
                     self.sub_tools[tool_label(name)] += count
             elif kind == "mode_route":
-                self.routes[(rec.get("verdict"), rec.get("source"), bool(rec.get("shadow")))] += 1
+                self.routes[(rec.get("verdict"), rec.get("ran_as"), rec.get("source"),
+                             bool(rec.get("shadow")))] += 1
             elif kind == "turn":
                 role = rec.get("role")
                 if role == "assistant":
@@ -349,7 +350,15 @@ class Stats:
             print(f"  {mode:8} first prompt median {quantile(self.first_prompt[mode], .5)} chars | "
                   f"assistant rounds median {quantile(self.rounds[mode], .5)}")
         if self.routes:
-            print("  auto-route verdicts (verdict, source, shadow):", dict(self.routes))
+            # Shadow verdicts with an answer are the calibration set: the
+            # router's pick next to what the user actually started the session as.
+            judged = {k: v for k, v in self.routes.items() if k[3] and k[2] != "unavailable"}
+            agree = sum(v for k, v in judged.items() if k[0] == k[1])
+            wrong_brain = sum(v for k, v in judged.items() if k[0] == "brain" and k[1] != "brain")
+            total = sum(judged.values())
+            print(f"  auto-route in shadow: {total} verdicts, agree with the user {pct(agree, total)}, "
+                  f"would have sent a builder session to brain {pct(wrong_brain, total)}")
+            print("  auto-route records (verdict, ran_as, source, shadow):", dict(self.routes))
 
         shares = [after / total for after, total in self.tails]
         print(f"\nRUNS rounds median {quantile(self.rounds_per_run, .5)} p90 "

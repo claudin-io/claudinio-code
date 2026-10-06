@@ -51,6 +51,10 @@ pub struct JevPrefs {
     /// A TypeSafe API key. Wins over the OpenRouter connection when both exist.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Whether Jev picks the phase a new session starts in — see
+    /// `crate::agent::route`. Off unless the user turns it on.
+    #[serde(default)]
+    pub route: crate::agent::route::RouteMode,
 }
 
 fn default_true() -> bool {
@@ -62,6 +66,7 @@ impl Default for JevPrefs {
         Self {
             enabled: true,
             api_key: None,
+            route: Default::default(),
         }
     }
 }
@@ -137,13 +142,25 @@ pub fn status_json(config: &AgentConfig) -> Value {
         "enabled": config.jev.enabled,
         "hasApiKey": config.jev.api_key.as_deref().is_some_and(|k| !k.trim().is_empty()),
         "backend": backend,
+        "route": config.jev.route.as_str(),
     })
 }
 
-/// Apply a Settings change. A blank key clears it.
-pub fn apply_settings(config: &mut AgentConfig, enabled: Option<bool>, api_key: Option<String>) {
+/// Apply a Settings change. A blank key clears it; an unknown route is ignored.
+pub fn apply_settings(
+    config: &mut AgentConfig,
+    enabled: Option<bool>,
+    api_key: Option<String>,
+    route: Option<String>,
+) {
     if let Some(e) = enabled {
         config.jev.enabled = e;
+    }
+    if let Some(r) = route
+        .as_deref()
+        .and_then(crate::agent::route::RouteMode::parse)
+    {
+        config.jev.route = r;
     }
     if let Some(k) = api_key {
         let k = k.trim();
@@ -471,13 +488,33 @@ mod tests {
     #[test]
     fn setting_a_blank_key_clears_it_and_keys_are_trimmed() {
         let mut cfg = AgentConfig::default();
-        apply_settings(&mut cfg, None, Some("  ts-key \n".into()));
+        apply_settings(&mut cfg, None, Some("  ts-key \n".into()), None);
         assert_eq!(cfg.jev.api_key.as_deref(), Some("ts-key"));
-        apply_settings(&mut cfg, Some(false), None);
+        apply_settings(&mut cfg, Some(false), None, None);
         assert!(!cfg.jev.enabled);
         assert_eq!(cfg.jev.api_key.as_deref(), Some("ts-key"));
-        apply_settings(&mut cfg, None, Some("   ".into()));
+        apply_settings(&mut cfg, None, Some("   ".into()), None);
         assert!(cfg.jev.api_key.is_none());
+    }
+
+    #[test]
+    fn the_route_setting_is_off_until_changed_and_ignores_nonsense() {
+        use crate::agent::route::RouteMode;
+        let mut cfg = AgentConfig::default();
+        assert_eq!(cfg.jev.route, RouteMode::Off);
+        assert_eq!(status_json(&cfg)["route"], "off");
+        apply_settings(&mut cfg, None, None, Some("on".into()));
+        assert_eq!(cfg.jev.route, RouteMode::On);
+        apply_settings(&mut cfg, None, None, Some("sometimes".into()));
+        assert_eq!(
+            cfg.jev.route,
+            RouteMode::On,
+            "an unknown value changes nothing"
+        );
+        // A config saved before the setting existed loads with it off: no
+        // first prompt goes anywhere new until the user asks for it.
+        let old: JevPrefs = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(old.route, RouteMode::Off);
     }
 
     #[test]

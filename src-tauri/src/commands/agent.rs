@@ -208,7 +208,10 @@ pub async fn send_message(
 
     // Sync the session's mode with what the UI toggle sent: a human-set value
     // that differs from the current one is persisted before the run starts.
+    // "auto" is not a mode: it leaves the session as it is and tells the run
+    // that the choice of phase was left to the harness (`agent::route`).
     let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
+    mode_ctl.request_auto(mode.as_deref() == Some("auto"));
     if let Some(m) = mode.as_deref().and_then(session::SessionMode::parse)
         && mode_ctl.get().0 != m
     {
@@ -765,6 +768,8 @@ pub struct SetConfigArgs {
     pub jev_enabled: Option<bool>,
     /// A TypeSafe API key; an empty string removes it.
     pub jev_api_key: Option<String>,
+    /// "off" | "shadow" | "on" — see `agent::route::RouteMode`.
+    pub jev_route: Option<String>,
 }
 
 #[tauri::command]
@@ -845,7 +850,7 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(mcp) = args.mcp {
         cfg.mcp = mcp;
     }
-    crate::agent::jev::apply_settings(&mut cfg, args.jev_enabled, args.jev_api_key);
+    crate::agent::jev::apply_settings(&mut cfg, args.jev_enabled, args.jev_api_key, args.jev_route);
     if let Some(code_intel_enabled) = args.code_intel_enabled {
         cfg.code_intel_enabled = code_intel_enabled;
     }
