@@ -217,10 +217,19 @@ it refuses anyway, it gets three tries and then the run ends.
 
 ## Seeing what happened
 
-Every run is a row in the timeline — the `statusMessage` while it runs, then its
-status, exit code and duration — and a line in the session JSONL, including runs
-that were skipped for lack of approval. Context a hook injected is its own row,
-so "the brain added five facts to your prompt" is visible rather than an
+Every run is in the timeline and is a line in the session JSONL, including runs
+that were skipped for lack of approval.
+
+A hook that ran and had nothing to report is an icon, and hooks that fired
+together share a line — a `PreToolUse` guard on every call would otherwise put a
+row under every tool in the thread. Hover the icon for the event, status, exit
+code, duration and source; click it for the command and what it printed. While
+it runs it shows its `statusMessage`.
+
+A hook that failed, timed out, blocked something, was skipped for lack of
+approval or left a `systemMessage` keeps a full row: a failure the size of an
+icon would look like silence. Context a hook injected is its own row too, so
+"the brain added five facts to your prompt" is visible rather than an
 unexplained bulge in your message.
 
 Settings → **Hooks** lists every hook with its source, its resolved command,

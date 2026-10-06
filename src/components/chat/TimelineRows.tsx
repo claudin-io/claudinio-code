@@ -6,11 +6,12 @@
 // local UI state (expanded, hovered). The timeline state itself lives in
 // ChatPanel.
 
-import { createEffect, createSignal, onCleanup, onMount, For, Show, type Component } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, For, Index, Show, type Component } from "solid-js";
 import { Icon, type IconName } from "../Icon";
 import { ProseContent } from "../ProseContent";
 import { DiffViewer } from "../DiffViewer";
 import { NetworkIndicator } from "../NetworkIndicator";
+import { Popover } from "../Popover";
 import { ToolBody } from "../tool-renderers/ToolBody";
 import {
   alwaysShowsBody,
@@ -366,7 +367,12 @@ export const TimelineSteps: Component<{
             <QualityRow quality={step.quality!} />
           </Show>
           <Show when={step.type === "hook" && step.hook}>
-            <HookRow hook={step.hook!} />
+            <Show when={isQuietHook(step.hook!)} fallback={<HookRow hook={step.hook!} />}>
+              {/* Only the first of a run renders; it draws the whole run. */}
+              <Show when={quietHookRun(props.steps, i())}>
+                {(run) => <HookStrip hooks={run()} />}
+              </Show>
+            </Show>
           </Show>
           <Show when={step.type === "linked" && step.linked}>
             <LinkedRow linked={step.linked!} />
@@ -462,6 +468,204 @@ export const HookRow: Component<{
       </Show>
       <Show when={props.hook.systemMessage}>
         <span class="ml-1 font-mono text-[10px] text-amber-500">{props.hook.systemMessage}</span>
+      </Show>
+    </div>
+  );
+};
+
+type HookItem = NonNullable<TimelineItem["hook"]>;
+
+/// A hook with nothing to report: it ran, or is running, and it neither failed,
+/// blocked, added context nor left a message for the user.
+///
+/// These are the ones that fire on every tool call, so a row each buries the
+/// work they are attached to. They shrink to an icon. Everything else keeps
+/// its `HookRow`, for the reason given there — a failure the size of an icon is
+/// a failure that looks like silence.
+export function isQuietHook(hook: HookItem): boolean {
+  if (hook.context || hook.systemMessage) return false;
+  return hook.status === "ok" || hook.status === "running";
+}
+
+/// The run of consecutive quiet hooks that starts at `index`, or null when
+/// `index` is not the start of one. Hooks that fire together (a tool's
+/// PreToolUse and PostToolUse, or several hooks on one event) share a line.
+export function quietHookRun(steps: TimelineItem[], index: number): HookItem[] | null {
+  const quietAt = (i: number): HookItem | null => {
+    const hook = steps[i]?.type === "hook" ? steps[i].hook : undefined;
+    return hook && isQuietHook(hook) ? hook : null;
+  };
+  if (!quietAt(index) || quietAt(index - 1)) return null;
+  const run: HookItem[] = [];
+  for (let i = index, hook = quietAt(i); hook; hook = quietAt(++i)) run.push(hook);
+  return run;
+}
+
+/// What each event is, in the words of docs/HOOKS.md. An icon carries no
+/// label, so the tooltip has to say what fired, not only that something did.
+const HOOK_EVENT_FIRES: Record<string, string> = {
+  SessionStart: "Fires when a run begins.",
+  UserPromptSubmit: "Fires before your message becomes a turn.",
+  PreToolUse: "Fires before a tool call is dispatched.",
+  PostToolUse: "Fires after a tool returns.",
+  Notification: "Fires when the agent is waiting on you.",
+  Stop: "Fires when the run is about to end.",
+  SubagentStop: "Fires when a subagent is about to finish.",
+  PreCompact: "Fires when the context is about to be compacted or handed off.",
+  SessionEnd: "Fires when the conversation is cleared or the app quits.",
+};
+
+/// "ok · exit 0 · 38ms" — the facts the pill used to spell out.
+function hookOutcome(hook: HookItem): string {
+  if (hook.status === "running") return "running";
+  const bits = [hook.status];
+  if (hook.exitCode !== null && hook.exitCode !== undefined) {
+    bits.push(`exit ${String(hook.exitCode)}`);
+  }
+  if (hook.durationMs) bits.push(formatDuration(hook.durationMs));
+  return bits.join(" · ");
+}
+
+/// One quiet hook as an icon. Hovering explains it; clicking asks the strip to
+/// open its command and output.
+const HookChip: Component<{
+  hook: HookItem;
+  isOpen: boolean;
+  onToggle: () => void;
+}> = (props) => {
+  let buttonRef: HTMLButtonElement | undefined;
+  const [hovered, setHovered] = createSignal(false);
+  const running = () => props.hook.status === "running";
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        class="flex h-5 items-center gap-1 rounded px-1 text-neutral-500 hover:bg-surface-2 hover:text-ink-muted"
+        classList={{ "bg-surface-2 text-ink-muted": props.isOpen }}
+        aria-label={`${props.hook.event} hook · ${hookOutcome(props.hook)}`}
+        aria-expanded={props.isOpen}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocus={() => setHovered(true)}
+        onBlur={() => setHovered(false)}
+        onClick={() => props.onToggle()}
+      >
+        <Icon
+          name={running() ? "loader" : "check-circle"}
+          class={`h-3 w-3 ${running() ? "animate-spin-slow text-accent" : ""}`}
+        />
+        {/* The label the config author wrote, for as long as it is true. */}
+        <Show when={running() && props.hook.statusMessage}>
+          <span class="text-[11px] text-accent">{props.hook.statusMessage}</span>
+        </Show>
+      </button>
+      {/* Not while its panel is open: the panel already says all of this. */}
+      <Show when={hovered() && !props.isOpen}>
+        <Popover
+          open
+          onClose={() => setHovered(false)}
+          triggerRef={() => buttonRef}
+          gap={{ y: 6 }}
+          showBackdrop={false}
+          class="pointer-events-none w-72 rounded-lg border border-border-subtle bg-surface-1 p-3 shadow-modal"
+        >
+          <p class="text-[12px] font-medium text-ink">{`${props.hook.event} hook`}</p>
+          <Show when={HOOK_EVENT_FIRES[props.hook.event]}>
+            <p class="text-[11px] leading-snug text-ink-faint">{HOOK_EVENT_FIRES[props.hook.event]}</p>
+          </Show>
+          <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+            <dt class="text-ink-faint">{"Status"}</dt>
+            <dd class="text-ink-muted">{props.hook.status}</dd>
+            <Show when={props.hook.exitCode !== null && props.hook.exitCode !== undefined}>
+              <dt class="text-ink-faint">{"Exit code"}</dt>
+              <dd class="text-ink-muted">{String(props.hook.exitCode)}</dd>
+            </Show>
+            <Show when={props.hook.durationMs}>
+              <dt class="text-ink-faint">{"Took"}</dt>
+              <dd class="text-ink-muted">{formatDuration(props.hook.durationMs!)}</dd>
+            </Show>
+            <Show when={props.hook.decision}>
+              <dt class="text-ink-faint">{"Decision"}</dt>
+              <dd class="text-ink-muted">{props.hook.decision}</dd>
+            </Show>
+            <Show when={props.hook.source}>
+              <dt class="text-ink-faint">{"From"}</dt>
+              <dd class="break-words text-ink-muted">{props.hook.source}</dd>
+            </Show>
+            <Show when={props.hook.command}>
+              <dt class="text-ink-faint">{"Command"}</dt>
+              <dd class="line-clamp-2 break-all font-mono text-ink-muted">{props.hook.command}</dd>
+            </Show>
+          </dl>
+          <p class="mt-2 text-[10px] text-ink-faint">{"Click to see the command and its output."}</p>
+        </Popover>
+      </Show>
+    </>
+  );
+};
+
+/// A run of quiet hooks on one line, and the one the user opened underneath.
+export const HookStrip: Component<{ hooks: HookItem[] }> = (props) => {
+  const [open, setOpen] = createSignal<number | null>(null);
+  const openHook = () => {
+    const i = open();
+    return i === null ? undefined : props.hooks[i];
+  };
+
+  return (
+    <div class="ml-6 flex flex-col gap-1">
+      <div class="flex flex-wrap items-center gap-0.5">
+        {/* Index, not For: a hook is replaced by its finished self, and the
+            icon under the pointer should update rather than be rebuilt. */}
+        <Index each={props.hooks}>
+          {(hook, i) => (
+            <HookChip
+              hook={hook()}
+              isOpen={open() === i}
+              onToggle={() => setOpen((o) => (o === i ? null : i))}
+            />
+          )}
+        </Index>
+      </div>
+      <Show when={openHook()}>
+        {(hook) => (
+          <div class="mb-1 rounded-md bg-surface-1 p-2 text-left text-xs">
+            <div class="mb-2 flex flex-wrap items-baseline gap-x-2 text-[11px]">
+              <span class="font-medium text-ink-muted">{`${hook().event} hook`}</span>
+              <span class="text-ink-faint">{hookOutcome(hook())}</span>
+              <Show when={hook().source}>
+                <span class="text-ink-faint">{hook().source}</span>
+              </Show>
+            </div>
+            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{"Command"}</div>
+            <pre class="mb-2 overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+              {hook().command}
+            </pre>
+            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{"Output"}</div>
+            <Show
+              when={hook().output}
+              fallback={
+                <p class="text-[11px] text-ink-faint">
+                  {hook().status === "running" ? "Still running." : "No output to show."}
+                </p>
+              }
+            >
+              <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+                {hook().output}
+              </pre>
+            </Show>
+            {/* On a quiet hook this is only ever stderr read back from the
+                session file: a live run reports an error only when it failed. */}
+            <Show when={hook().error}>
+              <div class="mb-1 mt-2 font-mono text-[11px] font-medium text-ink-muted">{"Stderr"}</div>
+              <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+                {hook().error}
+              </pre>
+            </Show>
+          </div>
+        )}
       </Show>
     </div>
   );
