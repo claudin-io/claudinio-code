@@ -652,6 +652,16 @@ pub(crate) mod test_support {
         status: u16,
         body: &'static str,
     ) -> (String, std::thread::JoinHandle<String>) {
+        spawn_stub_after(std::time::Duration::ZERO, status, body)
+    }
+
+    /// `spawn_stub`, answering only after `delay`: a backend that takes its
+    /// time, for what can happen while the caller waits.
+    pub(crate) fn spawn_stub_after(
+        delay: std::time::Duration,
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
@@ -691,6 +701,7 @@ pub(crate) mod test_support {
                     break;
                 }
             }
+            std::thread::sleep(delay);
             let resp = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()

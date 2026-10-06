@@ -21,9 +21,11 @@ const TRUNCATED = /\.\.\.\(truncated, \d+ chars total\)$/;
 /** How the history copy of a repeated `read_file` starts. */
 export const UNCHANGED_MARK = "[unchanged: ";
 
-/** The output's lines, without a last line the event cut in the middle. */
+/** The output's lines, without a last line the event cut in the middle. Only
+ * trailing newlines are dropped: a trailing space can be part of the last row
+ * (a match on an empty line is written `12: `). */
 function wholeLines(output: string): string[] {
-  const text = output.trimEnd();
+  const text = output.replace(/\n+$/, "");
   if (!TRUNCATED.test(text)) return text.split("\n");
   const lines = text.replace(TRUNCATED, "").split("\n");
   lines.pop();
@@ -32,10 +34,11 @@ function wholeLines(output: string): string[] {
 
 function listDir(lines: string[]): ListRow[] | null {
   if (!lines[0]?.endsWith("/")) return null;
-  return lines
-    .slice(1)
-    .filter((l) => l !== "" && l !== "(empty)")
-    .map((l) => (l.endsWith("/") ? { title: l.slice(0, -1), isDir: true } : { title: l }));
+  const names = lines.slice(1).filter((l) => l !== "");
+  // The writer's word for a directory with nothing in it — and only then: a
+  // file can be called "(empty)" too.
+  if (names.length === 1 && names[0] === "(empty)") return [];
+  return names.map((l) => (l.endsWith("/") ? { title: l.slice(0, -1), isDir: true } : { title: l }));
 }
 
 function grep(lines: string[]): ListRow[] | null {
@@ -54,23 +57,26 @@ function grep(lines: string[]): ListRow[] | null {
       expectFile = false;
       continue;
     }
-    const m = line.match(/^(\d+): (.*)$/);
-    if (m && file !== null) rows.push({ title: `${file}:${m[1]}`, sub: m[2] });
+    const m = line.match(/^(\d+):(?: (.*))?$/);
+    if (m && file !== null) rows.push({ title: `${file}:${m[1]}`, sub: m[2] ?? "" });
   }
   return rows;
 }
 
-/** `path:line kind signature`, optionally `path:start-end` and a `[match score]` tail. */
-const SYMBOL_ROW = /^(.+?):(\d+(?:-\d+)?) (\S+) (.*?)(?: \[\w+ \d(?:\.\d+)?\])?$/;
+/** `path:line kind signature`, the line optionally a `start-end` range. */
+const SYMBOL_ROW = /^(.+?):(\d+(?:-\d+)?) (\S+) (.*)$/;
+/** What `semantic_search` adds after the signature: ` [hybrid 0.78]`. */
+const MATCH_TAIL = / \[(?:hybrid|semantic|lexical) [\d.]+\]$/;
 
-function symbolRow(line: string): ListRow | null {
+function symbolRow(line: string, tail?: RegExp): ListRow | null {
   const m = line.match(SYMBOL_ROW);
-  return m ? { title: m[4], badge: m[3], sub: `${m[1]}:${m[2]}` } : null;
+  if (!m) return null;
+  return { title: tail ? m[4].replace(tail, "") : m[4], badge: m[3], sub: `${m[1]}:${m[2]}` };
 }
 
 function symbols(lines: string[]): ListRow[] | null {
   if (lines[0] === "No symbols found.") return [];
-  const rows = lines.filter((l) => l !== "").map(symbolRow);
+  const rows = lines.filter((l) => l !== "").map((l) => symbolRow(l));
   return rows.length > 0 && rows.every((r) => r !== null) ? (rows as ListRow[]) : null;
 }
 
@@ -95,11 +101,11 @@ function semantic(lines: string[]): ListRow[] | null {
       if (line === fence) fence = null;
       continue;
     }
-    if (line === "```" || line === "~~~~") {
+    if (/^(```|~{4,})$/.test(line)) {
       fence = line;
       continue;
     }
-    const row = symbolRow(line);
+    const row = symbolRow(line, MATCH_TAIL);
     if (row) rows.push(row);
   }
   return rows;
@@ -121,7 +127,9 @@ const PARSERS: Record<string, (lines: string[]) => ListRow[] | null> = {
  */
 export function parseLineList(toolName: string, output: string): ListRow[] | null {
   const parse = PARSERS[toolName];
-  if (!parse) return null;
+  // A failed call is shown as what it says. On reload there is no error flag,
+  // only the text — and "Error: not a directory: /ws/x/" ends like a listing.
+  if (!parse || output.startsWith("Error")) return null;
   const lines = wholeLines(output);
   return lines.length > 0 ? parse(lines) : null;
 }

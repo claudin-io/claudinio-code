@@ -150,6 +150,20 @@ const BASH_BLACKLIST: &[&str] = &[
     "cp /",
 ];
 
+/// `bash_permission` for a session that edits files itself (the Compact
+/// profile). Everywhere else a command that writes a file is refused before
+/// its permission is ever looked up, so the allowlist could be a list of
+/// prefixes: `cat `, `echo `, `python ` read and report. Here `cat > src/main.rs`
+/// reaches the tool, and a prefix that reads is no reason to let it write
+/// unasked — an edit made through the shell is asked about exactly like one
+/// made through `edit_file`.
+pub fn bash_permission_writing(command: &str, auto_approve_git: bool) -> PermissionLevel {
+    match bash_permission(command, auto_approve_git) {
+        PermissionLevel::Auto if bash_writes_files(command) => PermissionLevel::RequiresApproval,
+        other => other,
+    }
+}
+
 /// Heuristic: does this bash command WRITE file contents? Used to keep the
 /// main Builder session from editing files through bash (all modifications
 /// must go through code-mode subagents). Deliberately targets content

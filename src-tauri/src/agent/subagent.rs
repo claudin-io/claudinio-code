@@ -436,9 +436,11 @@ pub async fn run_subagent(
     // breaker as the parent (see `agent::loop_watch`).
     let mut loop_watch = crate::agent::loop_watch::LoopWatch::default();
     for _ in 0..sub_max {
-        // Nothing left to shed and the request cannot be sent: stop with a
-        // report the parent can act on — narrow the goal, or split it —
-        // instead of failing at the provider.
+        // Everything that could be shed has been (the end of the previous
+        // round takes any prune at all once past the hard line) and the
+        // request still cannot be sent: stop with a report the parent can act
+        // on — narrow the goal, or split it — instead of failing at the
+        // provider.
         if session::estimate_tokens(&history, &system, &tools) >= budget.ceiling {
             return SubagentResult {
                 status: "context_full",
@@ -704,6 +706,8 @@ pub async fn run_subagent(
             role: "assistant".into(),
             content: tool_assistant_blocks,
         });
+        let calls = history.last().map_or(&[][..], |m| m.content.as_slice());
+        session::fit_round(&mut tool_result_blocks, calls, budget.round_chars);
         history.push(Message {
             role: "user".into(),
             content: tool_result_blocks,
@@ -744,7 +748,29 @@ pub async fn run_subagent(
             )
             .await;
             total_cost += shed.cost;
-            if let Some((_, pruned)) = shed.accepted {
+            let mut accepted = shed.accepted;
+            // The rule above is about cost: a prune that frees little or lands
+            // near the line is not worth the cached prefix it throws away —
+            // for a session that has a handoff to fall back on. Past the hard
+            // line a subagent has nothing to fall back on but stopping, so
+            // there any prune that frees something is taken: the lossless
+            // stage if it gets back under the line by itself, otherwise the
+            // last thing the shed has to offer, however little. Jev was
+            // already asked above.
+            if accepted.is_none() && estimate >= budget.hard {
+                accepted = crate::agent::prune::shed(
+                    &history,
+                    None,
+                    session::shed_options(estimate, limit, &budget, true),
+                    |outcome, pruned| {
+                        let left = session::estimate_tokens(pruned, &system, &tools);
+                        left < estimate && (left < limit || outcome.last)
+                    },
+                )
+                .await
+                .accepted;
+            }
+            if let Some((_, pruned)) = accepted {
                 history = pruned;
             }
         }
@@ -1076,7 +1102,12 @@ pub(crate) mod scripted_model {
     /// What the scripted model answers one request with.
     #[derive(Clone)]
     pub enum Reply {
-        Tool { name: &'static str, input: Value },
+        Tool {
+            name: &'static str,
+            input: Value,
+        },
+        /// Several calls in one turn, as a model reading files in parallel makes.
+        Tools(Vec<(&'static str, Value)>),
         Text(&'static str),
     }
 
@@ -1086,23 +1117,31 @@ pub(crate) mod scripted_model {
 
     fn render(reply: &Reply, n: usize) -> String {
         let mut out = String::new();
+        let tool_use = |index: usize, name: &str, input: &Value| {
+            sse(
+                "content_block_start",
+                json!({"index": index, "content_block":
+                    {"type": "tool_use", "id": format!("tu_{n}_{index}"), "name": name, "input": {}}}),
+            ) + &sse(
+                "content_block_delta",
+                json!({"index": index, "delta":
+                    {"type": "input_json_delta", "partial_json": input.to_string()}}),
+            ) + &sse("content_block_stop", json!({"index": index}))
+        };
+        let stop = sse(
+            "message_delta",
+            json!({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}}),
+        );
         match reply {
             Reply::Tool { name, input } => {
-                out += &sse(
-                    "content_block_start",
-                    json!({"index": 0, "content_block":
-                        {"type": "tool_use", "id": format!("tu_{n}"), "name": name, "input": {}}}),
-                );
-                out += &sse(
-                    "content_block_delta",
-                    json!({"index": 0, "delta":
-                        {"type": "input_json_delta", "partial_json": input.to_string()}}),
-                );
-                out += &sse("content_block_stop", json!({"index": 0}));
-                out += &sse(
-                    "message_delta",
-                    json!({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}}),
-                );
+                out += &tool_use(0, name, input);
+                out += &stop;
+            }
+            Reply::Tools(calls) => {
+                for (index, (name, input)) in calls.iter().enumerate() {
+                    out += &tool_use(index, name, input);
+                }
+                out += &stop;
             }
             Reply::Text(text) => {
                 out += &sse(
@@ -1312,6 +1351,47 @@ mod context_budget_tests {
         assert!(bodies[2].contains(crate::agent::prune::UNCHANGED_MARK));
         assert!(bodies[2].len() < bodies[1].len() + 1_500);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Several files a round, each as large as one result may be. Two is more
+    // than the strict rule for taking a prune can accept, since the round just
+    // read is never cut: the subagent used to stop with `context_full` on its
+    // second round while a prune that put it back under its line had been
+    // computed and thrown away. Five is more than the window holds at all,
+    // unless the round as a whole is held to a share of it.
+    #[tokio::test]
+    async fn parallel_reads_on_a_small_window_are_shed_rather_than_fatal() {
+        for per_round in [2usize, 5] {
+            let (root, file) = workspace(&format!("parallel{per_round}"));
+            let round = |i: usize| {
+                Reply::Tools(
+                    (0..per_round)
+                        .map(|k| {
+                            let first = 1 + (i * per_round + k) * 300;
+                            (
+                                "read_file",
+                                serde_json::json!({
+                                    "path": file, "start_line": first, "end_line": first + 299,
+                                }),
+                            )
+                        })
+                        .collect(),
+                )
+            };
+            let mut script: Vec<Reply> = (0..3).map(round).collect();
+            script.push(Reply::Text("read all of it"));
+            let (base, sizes) = spawn(script).await;
+            let result = run(&config_for(&base, Some(WINDOW)), &root).await;
+
+            assert_eq!(result.status, "completed", "{per_round}: {}", result.report);
+            assert_eq!(result.rounds, 4, "{per_round}");
+            assert!(
+                largest_request_tokens(&sizes) < WINDOW as usize,
+                "{per_round} a round: largest request {} tokens",
+                largest_request_tokens(&sizes)
+            );
+            std::fs::remove_dir_all(&root).ok();
+        }
     }
 
     /// Tokens of the largest request sent, by the session's own chars/3 rule.

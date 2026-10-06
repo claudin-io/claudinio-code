@@ -173,6 +173,30 @@ pub const COMPACT_TOOLS: [&str; 10] = [
     "run_quality",
 ];
 
+/// What a Compact tool's description says about tools the profile leaves out.
+/// `grep` calls itself a last resort behind the indexed searches — which here
+/// do not exist, while the prompt names `grep` as the way to find things.
+const COMPACT_REWRITES: [(&str, &str); 1] = [(
+    " LAST RESORT for search \u{2014} prefer the indexed tools first: semantic_search for \
+     behavior/concepts, code_search/symbol_lookup for known names. Reach for grep only when \
+     those come up empty or you need a literal regex over raw file text.",
+    "",
+)];
+
+/// The Compact catalog out of the full one: only [`COMPACT_TOOLS`], and no
+/// description pointing at a tool that is not among them.
+pub fn compact_defs(defs: Vec<ToolDef>) -> Vec<ToolDef> {
+    defs.into_iter()
+        .filter(|t| COMPACT_TOOLS.contains(&t.name.as_str()))
+        .map(|mut t| {
+            for (from, to) in COMPACT_REWRITES {
+                t.description = t.description.replace(from, to);
+            }
+            t
+        })
+        .collect()
+}
+
 /// The whole system prompt of the Compact profile. Everything in it is there
 /// because a small model does worse without it; anything else was left out
 /// because on a 32k window every line here is a line of the user's code that
@@ -421,6 +445,42 @@ mod tests {
         ] {
             assert!(COMPACT_PROMPT.contains(&format!("`{name}`")), "{name}");
         }
+    }
+
+    // The description of a tool is prompt too. One that sends a small model
+    // after `semantic_search` costs it a failed call out of a window with none
+    // to spare.
+    #[test]
+    fn no_compact_tool_points_at_a_tool_the_profile_leaves_out() {
+        let all = crate::agent::tools::get_defs(4);
+        let compact = compact_defs(all.clone());
+        assert_eq!(compact.len(), COMPACT_TOOLS.len());
+        let mut left_out: Vec<String> = all
+            .iter()
+            .map(|t| t.name.clone())
+            .filter(|n| !COMPACT_TOOLS.contains(&n.as_str()))
+            .collect();
+        for name in [
+            "write_plan",
+            "finalize_plan",
+            "enter_plan_mode",
+            "exit_plan_mode",
+        ] {
+            left_out.push(name.into());
+        }
+        for tool in &compact {
+            for name in &left_out {
+                assert!(
+                    !tool.description.contains(name.as_str()),
+                    "{} points at {name}",
+                    tool.name
+                );
+            }
+        }
+        // `grep` is still described as what it is.
+        let grep = compact.iter().find(|t| t.name == "grep").unwrap();
+        assert!(grep.description.starts_with("Search for a regex pattern"));
+        assert!(!grep.description.contains("LAST RESORT"));
     }
 
     #[test]

@@ -127,8 +127,14 @@ class Stats:
         with open(path, errors="replace") as handle:
             for line in handle:
                 try:
-                    records.append(json.loads(line))
+                    record = json.loads(line)
                 except ValueError:
+                    record = None
+                # A line that is JSON but not a record (`null`, a bare string)
+                # is as unusable as one that is not JSON.
+                if isinstance(record, dict):
+                    records.append(record)
+                else:
                     self.kinds["(unparseable)"] += 1
         created = next((r.get("created_at") for r in records if r.get("kind") == "meta"), None)
         if since_ms and (created or 0) < since_ms:
@@ -196,11 +202,17 @@ class Stats:
                     btype, chars = block.get("type"), block_chars(block)
                     if btype == "tool_use":
                         name = tool_label(block.get("name"))
-                        args = block.get("input") or {}
+                        # A model can send anything as arguments — a string
+                        # of JSON, a list where a path belongs — and the
+                        # session file keeps what it sent.
+                        args = block.get("input")
+                        args = args if isinstance(args, dict) else {}
                         read_key = None
                         if name == "read_file":
-                            read_key = (args.get("path") or args.get("file_path"),
-                                        args.get("start_line"), args.get("end_line"))
+                            read_key = tuple(
+                                v if isinstance(v, (str, int)) else None
+                                for v in (args.get("path") or args.get("file_path"),
+                                          args.get("start_line"), args.get("end_line")))
                         tool_of[block.get("id")] = (name, read_key)
                         self.calls[name] += 1
                         self.arg_chars[name] += chars
@@ -210,13 +222,16 @@ class Stats:
                         if name == "tasks_set":
                             tasks_set += 1
                             self.tasks_set_sizes.append(chars)
+                        agents = args.get("agents")
                         if name == "edit_file" or (name == "spawn_agents" and any(
-                                a.get("mode") == "code" for a in (args.get("agents") or [])
+                                a.get("mode") == "code"
+                                for a in (agents if isinstance(agents, list) else [])
                                 if isinstance(a, dict))):
                             last_edit = run_rounds
                         if name == "bash":
+                            command = args.get("command")
                             command = re.sub(r"^(cd [^;&]+(&&|;)\s*)+", "",
-                                             (args.get("command") or "").strip())
+                                             command.strip() if isinstance(command, str) else "")
                             words = command.split()
                             self.bash_first[words[0][:20] if words else ""] += 1
                     elif btype == "tool_result":
@@ -409,4 +424,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # `| head`: the reader has what it wanted.
+        sys.stderr.close()

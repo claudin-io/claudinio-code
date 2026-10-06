@@ -22,33 +22,44 @@ use crate::code_intel::db::{SearchResult, SemanticSearchResult, SymbolRecord};
 /// otherwise spend the whole result on a single row.
 const MAX_LINE_CHARS: usize = 240;
 
-/// `text` on one line, at most [`MAX_LINE_CHARS`] characters.
+/// `text` cut to [`MAX_LINE_CHARS`] characters.
+fn clipped(mut text: String) -> String {
+    if let Some((cut, _)) = text.char_indices().nth(MAX_LINE_CHARS) {
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
+
+/// A declaration on one line: a signature can span several, and its line
+/// breaks and indentation are layout, not content.
 fn one_line(text: &str) -> String {
-    let mut out = String::new();
-    for (count, word) in text.split_whitespace().enumerate() {
-        if count > 0 {
-            out.push(' ');
-        }
-        out.push_str(word);
+    clipped(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// True when `text` holds `name` as a name of its own, not as part of a longer
+/// identifier: `id` is not in `fn valid(x: u8)`.
+fn names(text: &str, name: &str) -> bool {
+    let part_of_word = |c: char| c.is_alphanumeric() || c == '_';
+    if !name.chars().any(part_of_word) {
+        // `{` or `*`, as an import is indexed: nothing to delimit.
+        return text.contains(name);
     }
-    match out.char_indices().nth(MAX_LINE_CHARS) {
-        Some((cut, _)) => {
-            out.truncate(cut);
-            out.push('…');
-            out
-        }
-        None => out,
-    }
+    text.match_indices(name).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + name.len()..].chars().next();
+        !before.is_some_and(part_of_word) && !after.is_some_and(part_of_word)
+    })
 }
 
 /// What a symbol's row says after its location: the kind, then its signature —
 /// or its name, when the index holds no signature or one that does not carry
-/// the name.
+/// the name (the index keeps only the start of a long declaration).
 fn symbol_text(kind: &str, name: &str, signature: Option<&str>) -> String {
     let signature = one_line(signature.unwrap_or(""));
     if signature.is_empty() {
         format!("{kind} {name}")
-    } else if signature.contains(name) {
+    } else if names(&signature, name) {
         format!("{kind} {signature}")
     } else {
         format!("{kind} {name}: {signature}")
@@ -82,7 +93,8 @@ pub fn list_dir(dir: &str, entries: &[DirEntryInfo]) -> String {
 }
 
 /// A count, then ripgrep's grouped form: each file once, its matches under it
-/// as `line: text`, a blank line between files.
+/// as `line: text`, a blank line between files. The text is the line as it is
+/// in the file, less the indentation around it.
 pub fn grep(matches: &[GrepMatch]) -> String {
     if matches.is_empty() {
         return "No matches.".into();
@@ -97,7 +109,11 @@ pub fn grep(matches: &[GrepMatch]) -> String {
             body.push_str("\n\n");
             body.push_str(&m.file);
         }
-        body.push_str(&format!("\n{}: {}", m.line, one_line(&m.content)));
+        body.push_str(&format!(
+            "\n{}: {}",
+            m.line,
+            clipped(m.content.trim().to_string())
+        ));
     }
     let matches_word = if matches.len() == 1 {
         "match"
@@ -175,12 +191,15 @@ pub fn semantic(mode: &str, note: Option<&str>, results: &[SemanticSearchResult]
             r.score
         ));
         if let Some(snippet) = r.snippet.as_deref().filter(|s| !s.trim().is_empty()) {
-            // A fence the snippet cannot close by accident.
-            let fence = if snippet.contains("```") {
-                "~~~~"
-            } else {
-                "```"
-            };
+            // A fence the snippet cannot close by accident: tildes when it
+            // holds backticks, and more tildes than any run it holds.
+            let mut fence = String::from("```");
+            if snippet.contains("```") {
+                fence = "~~~~".into();
+                while snippet.contains(&fence) {
+                    fence.push('~');
+                }
+            }
             out.push_str(&format!("\n{fence}\n{}\n{fence}", snippet.trim_end()));
         }
     }
@@ -233,12 +252,14 @@ mod tests {
     fn matches_are_grouped_under_the_file_they_are_in() {
         let text = grep(&[
             hit("/ws/a.rs", 12, "    let x = 1;"),
-            hit("/ws/a.rs", 40, "\tlet y = x;  "),
+            hit("/ws/a.rs", 40, "\tlet y  =  x;  "),
             hit("/ws/b.rs", 3, "use x;"),
         ]);
         assert_eq!(
             text,
-            "3 matches in 2 files\n\n/ws/a.rs\n12: let x = 1;\n40: let y = x;\n\n/ws/b.rs\n3: use x;"
+            // Indentation goes; what is between the first and last character
+            // of the line is the file's own text.
+            "3 matches in 2 files\n\n/ws/a.rs\n12: let x = 1;\n40: let y  =  x;\n\n/ws/b.rs\n3: use x;"
         );
         assert_eq!(
             grep(&[hit("/ws/a.rs", 1, "x")]),
@@ -290,6 +311,33 @@ mod tests {
              /ws/src/App.tsx:3 interface Props: { open: boolean }"
         );
         assert_eq!(symbols(&[]), "No symbols found.");
+    }
+
+    // The index keeps the start of a declaration. A short name can be cut off
+    // the end of it and still "appear" inside a longer word.
+    #[test]
+    fn a_name_is_given_when_the_signature_only_holds_it_inside_another_word() {
+        assert_eq!(
+            symbol_text("field", "id", Some("pub valid: bool, pub width: u32, pub")),
+            "field id: pub valid: bool, pub width: u32, pub"
+        );
+        assert_eq!(
+            symbol_text("field", "id", Some("pub id: u64")),
+            "field pub id: u64"
+        );
+        assert_eq!(
+            symbol_text("function", "run", Some("fn run_all()")),
+            "function run: fn run_all()"
+        );
+        // An import is indexed under its punctuation.
+        assert_eq!(
+            symbol_text("import", "{", Some("import { a } from \"b\";")),
+            "import import { a } from \"b\";"
+        );
+        assert_eq!(
+            symbol_text("fn", "größe", Some("fn größe()")),
+            "fn fn größe()"
+        );
     }
 
     #[test]
@@ -365,6 +413,11 @@ mod tests {
             &[semantic_hit("doc", Some("/// ```\n/// run()\n/// ```"))],
         );
         assert!(text.contains("\n~~~~\n/// ```\n/// run()\n/// ```\n~~~~"));
+
+        // A document that shows both kinds of fence.
+        let both = "```\ncode\n```\n~~~~\nmore\n~~~~";
+        let text = semantic("hybrid", None, &[semantic_hit("doc", Some(both))]);
+        assert!(text.contains(&format!("\n~~~~~\n{both}\n~~~~~")), "{text}");
     }
 
     // The saving is the reason for the format: measured against what the same

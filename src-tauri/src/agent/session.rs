@@ -1136,9 +1136,8 @@ fn api_tools(
             .collect();
     }
     if profile == PromptProfile::Compact {
-        return tools::get_defs(maxp)
+        return crate::agent::surface::compact_defs(tools::get_defs(maxp))
             .into_iter()
-            .filter(|t| crate::agent::surface::COMPACT_TOOLS.contains(&t.name.as_str()))
             .map(|t| ToolDescription {
                 name: t.name,
                 description: t.description,
@@ -1666,6 +1665,15 @@ async fn stream_message_with_retry(
     }
 }
 
+/// False while the history is one message: the prompt that opened the session,
+/// or the handoff document a successor starts from. A handoff or a summary of
+/// that is the same text again at best — and for a successor already over its
+/// line, a handoff answered by another handoff, with nothing ever run in
+/// between. Such a run is sent as it is, or refused at the ceiling.
+fn has_something_to_compress(history: &[Message]) -> bool {
+    history.len() > 1
+}
+
 /// The context size at which a run must shed weight: the handoff line for
 /// chat sessions; the compaction line for the single-purpose profiles, which have no
 /// handoff to try first.
@@ -1739,7 +1747,7 @@ async fn try_verbatim_compaction(
     let backend = crate::agent::jev::backend(config);
     // What Jev chose to keep stays kept: when its pass is not enough, the
     // handoff is gentler on a main session than cutting by age over its head.
-    let (outcome, _) = crate::agent::prune::shed(
+    let (outcome, pruned) = crate::agent::prune::shed(
         history,
         backend.as_ref(),
         shed_options(estimated, limit, budget, false),
@@ -1784,12 +1792,13 @@ async fn try_verbatim_compaction(
         })
         .ok()?;
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-    // Rebuild exactly as a reload would, so the live run and a resumed one
-    // see the same conversation.
-    *history = crate::agent::persist::history_from_records(
-        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
-            .unwrap_or_default(),
-    );
+    // The decision applied to the history in memory, not a rebuild from the
+    // file: `push_user_blocks` merges into the last user turn without writing
+    // a record, so the file does not hold everything the model is about to be
+    // shown — the prompt just typed after a run that ended on tool results, a
+    // hook's feedback, a loop nudge. A reload applies the same decision to the
+    // same turns and differs only by those merges, as it already did.
+    *history = pruned;
     if let Some(note) = hook_note {
         push_user_blocks(history, store, ctx, vec![ContentBlock::text(note)]);
     }
@@ -1831,7 +1840,7 @@ async fn maybe_context_handoff(
     if !profile.is_chat() {
         return None;
     }
-    if estimated < budget.soft {
+    if estimated < budget.soft || !has_something_to_compress(history) {
         return None;
     }
     let _ = event_tx.send(AgentEvent::TextStep {
@@ -2053,6 +2062,12 @@ async fn route_first_prompt(
     if profile != PromptProfile::Standard || route_mode == RouteMode::Off || !fresh {
         return 0.0;
     }
+    // Brain always runs the Standard profile. On a window that small it has
+    // nowhere to go but the refusal, and routing would trade a Builder session
+    // that works (the Compact profile) for one that cannot start.
+    if config.context_window_for(&config.brain_model) < crate::agent::surface::COMPACT_BELOW {
+        return 0.0;
+    }
     let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
         .unwrap_or_default();
     // A successor session carries a plan; a session with tasks (golden goals
@@ -2066,7 +2081,8 @@ async fn route_first_prompt(
     if has_work {
         return 0.0;
     }
-    let (ran_as, _) = mode_ctl.get();
+    let chosen = mode_ctl.get();
+    let (ran_as, _) = chosen;
     let backend = crate::agent::jev::backend(config);
     let record = move |v: &route::Verdict, shadow: bool| SessionRecord::ModeRoute {
         verdict: v.mode.as_str().into(),
@@ -2081,8 +2097,12 @@ async fn route_first_prompt(
 
     if route_mode == RouteMode::On && auto {
         let verdict = route::route(prompt, backend.as_ref()).await;
-        store.try_append(&record(&verdict, false));
-        if verdict.mode == SessionMode::Brain && ran_as != SessionMode::Brain {
+        // The verdict was awaited, and the mode toggle works meanwhile. A
+        // choice the user made in that time is theirs: writing over it would
+        // also hand the agent the right to leave a Brain the user turned on.
+        let untouched = mode_ctl.get() == chosen;
+        store.try_append(&record(&verdict, !untouched));
+        if untouched && verdict.mode == SessionMode::Brain && ran_as != SessionMode::Brain {
             // Agent origin, like `enter_plan_mode`: the flow then runs
             // interview → plan → tasks → build without a manual flip, and the
             // interview's final confirmation is the user's approval point.
@@ -2104,13 +2124,23 @@ async fn route_first_prompt(
 
     // Shadow, or the user chose a mode themselves: the verdict is only worth
     // having next to that choice, and must not cost the first request a wait.
+    // What the rules decide costs none, so it is written here, in order with
+    // everything else this run writes.
+    if route::rules(prompt).is_some() {
+        let verdict = route::route(prompt, None).await;
+        store.try_append(&record(&verdict, true));
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        return 0.0;
+    }
     let prompt = prompt.to_string();
     let path = store.path.clone();
     let cache = ctx.records_cache.clone();
     tokio::spawn(async move {
         let verdict = route::route(&prompt, backend.as_ref()).await;
         // Nobody answered: there is nothing to compare with the user's choice.
-        if verdict.source == route::SOURCE_UNAVAILABLE {
+        // And a session deleted while Jev was thinking is not brought back as
+        // a file holding one verdict.
+        if verdict.source == route::SOURCE_UNAVAILABLE || !path.exists() {
             return;
         }
         SessionStore { path: path.clone() }.try_append(&record(&verdict, true));
@@ -2296,6 +2326,8 @@ pub async fn run_workflow_with_profile(
         &mcp_defs,
         has_golden_goals,
     );
+    ctx.limits
+        .set_writes_files(profile == PromptProfile::Compact);
     // Every line the run is held to comes from the model it is about to talk
     // to, and is re-derived whenever a mode switch changes that model.
     let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -2305,6 +2337,12 @@ pub async fn run_workflow_with_profile(
         prefix_tokens,
     );
     ctx.limits.apply(&budget);
+    // Before anything else is tried: no handoff and no summary can shrink
+    // what is sent ahead of the conversation, and each would cost a request —
+    // and the user's message, replaced by a summary of it — to find that out.
+    if budget.prefix_overflows(prefix_tokens) {
+        return Err(budget.refusal(prefix_tokens));
+    }
 
     {
         let model = config.model_for_mode(cur_mode.as_str());
@@ -2323,7 +2361,13 @@ pub async fn run_workflow_with_profile(
                 &tools,
             ),
             profile: profile.as_str().into(),
-            surface: config.tool_surface_for(model).as_str().into(),
+            // The surface is a Standard-profile setting; elsewhere it was not
+            // applied, and saying "lean" would describe a prefix that is not.
+            surface: if profile == PromptProfile::Standard {
+                config.tool_surface_for(model).as_str().into()
+            } else {
+                String::new()
+            },
             ts: now_ms(),
         });
         crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -2359,7 +2403,7 @@ pub async fn run_workflow_with_profile(
     {
         return Ok(outcome);
     }
-    if estimated >= budget.hard {
+    if estimated >= budget.hard && has_something_to_compress(history) {
         let _ = event_tx.send(AgentEvent::TextStep {
             text: format!(
                 "__compact_start__:{}/{}",
@@ -2539,6 +2583,8 @@ pub async fn run_workflow_with_profile(
                 &mcp_defs,
                 has_golden_goals,
             );
+            ctx.limits
+                .set_writes_files(profile == PromptProfile::Compact);
             // A mode switch is also a model switch (brain_model vs
             // builder_model), and the two need not share a window.
             prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -2548,6 +2594,9 @@ pub async fn run_workflow_with_profile(
                 prefix_tokens,
             );
             ctx.limits.apply(&budget);
+            if budget.prefix_overflows(prefix_tokens) {
+                return Err(budget.refusal(prefix_tokens));
+            }
         }
 
         // Per-round context re-check: tool_results from the previous round may
@@ -2582,7 +2631,7 @@ pub async fn run_workflow_with_profile(
         {
             return Ok(outcome);
         }
-        if pre_tokens >= budget.hard {
+        if pre_tokens >= budget.hard && has_something_to_compress(history) {
             let _ = event_tx.send(AgentEvent::TextStep {
                 text: format!(
                     "__compact_start__:{}/{}",
@@ -2626,6 +2675,8 @@ pub async fn run_workflow_with_profile(
                             &mcp_defs,
                             has_golden_goals,
                         );
+                        ctx.limits
+                            .set_writes_files(profile == PromptProfile::Compact);
                         prefix_tokens = estimate_tokens(&[], &system, &tools);
                         budget = ContextBudget::for_model(
                             config,
@@ -2633,6 +2684,9 @@ pub async fn run_workflow_with_profile(
                             prefix_tokens,
                         );
                         ctx.limits.apply(&budget);
+                        if budget.prefix_overflows(prefix_tokens) {
+                            return Err(budget.refusal(prefix_tokens));
+                        }
                     }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
@@ -3421,8 +3475,10 @@ pub async fn run_workflow_with_profile(
 
             let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
             // The Compact profile has no subagents to delegate an edit to: its
-            // session changes files itself, each change still going through the
-            // approval `edit_file` asks for. Brain's read-only gates are
+            // session changes files itself. Each change is asked about — an
+            // `edit_file` as always, and a shell command that writes a file
+            // even when its prefix is allowlisted (`run_tool`, through
+            // `RunLimits::writes_files`). Brain's read-only gates are
             // untouched — Compact never runs in Brain, and a toggle mid-round
             // is caught by `in_brain` below before this is.
             let direct_edit = profile == PromptProfile::Compact && !in_brain;
@@ -3438,6 +3494,24 @@ pub async fn run_workflow_with_profile(
                     &tool_use_id,
                     &tool_input,
                     reason,
+                    event_tx,
+                    session_id,
+                )
+            } else if direct_edit
+                && !crate::agent::surface::COMPACT_TOOLS.contains(&tool_name.as_str())
+            {
+                // The profile exists because this model's window cannot hold
+                // more than these: a call to anything else — a subagent, a
+                // plan, an MCP server — is one it was never offered, and would
+                // spend the window the profile was protecting.
+                deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    &format!(
+                        "{tool_name} is not available in this session. Your tools are: {}.",
+                        crate::agent::surface::COMPACT_TOOLS.join(", ")
+                    ),
                     event_tx,
                     session_id,
                 )
@@ -3634,6 +3708,9 @@ pub async fn run_workflow_with_profile(
                 content: tool_assistant_blocks,
             },
         );
+        // `history` now ends with the assistant turn these results answer.
+        let calls = history.last().map_or(&[][..], |m| m.content.as_slice());
+        fit_round(&mut tool_result_blocks, calls, budget.round_chars);
         push_turn(
             history,
             store,
@@ -4159,7 +4236,12 @@ pub(crate) async fn run_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            match permissions::bash_permission(command, ctx.auto_approve_git) {
+            let resolved = if ctx.limits.writes_files() {
+                permissions::bash_permission_writing(command, ctx.auto_approve_git)
+            } else {
+                permissions::bash_permission(command, ctx.auto_approve_git)
+            };
+            match resolved {
                 permissions::PermissionLevel::Denied => {
                     let msg = format!("Command blocked by security policy: {command}");
                     let _ = event_tx.send(AgentEvent::ToolCall {
@@ -5083,6 +5165,102 @@ async fn run_and_report(
 /// search cannot take the context — a cap that follows the model's window.
 fn tool_result_block(tool_use_id: &str, content: &str, max_chars: usize) -> ContentBlock {
     ContentBlock::tool_result(tool_use_id, truncate(content, max_chars))
+}
+
+/// What `truncate` appends, split around the size it reports.
+const CAP_NOTE: (&str, &str) = ("...(truncated, ", " chars total)");
+
+/// A result's text without the note an earlier cap left on it, and the size
+/// the result had before any cap.
+fn uncapped(text: &str) -> (&str, usize) {
+    let (open, close) = CAP_NOTE;
+    if let Some(at) = text.rfind(open)
+        && let Some(total) = text[at + open.len()..]
+            .strip_suffix(close)
+            .and_then(|n| n.parse::<usize>().ok())
+    {
+        return (&text[..at], total);
+    }
+    (text, text.len())
+}
+
+/// The least a result is cut to: below this it says nothing but its own note.
+const MIN_ROUND_SHARE: usize = 200;
+
+/// Hold the results of one round to `round_chars` together
+/// (`ContextBudget::round_chars`). The cap per result does not bound a round:
+/// a model that reads four files in one turn gets four results, and the round
+/// just read is the one thing no prune will cut.
+///
+/// The room is shared the way water fills glasses: a small result keeps all of
+/// itself, and what it does not use goes to the larger ones. A result the cap
+/// per result already cut is cut from its text, not from text plus note, and
+/// still reports the size it really had — that note is the only way the model
+/// learns how much of a file it has not seen. The user's answers (`ask_user`,
+/// looked up in `calls`, the assistant turn these results answer) are never
+/// cut.
+pub(crate) fn fit_round(blocks: &mut [ContentBlock], calls: &[ContentBlock], round_chars: usize) {
+    use crate::agent::provider::ToolResultContent;
+    if round_chars == usize::MAX {
+        return;
+    }
+    let answers: std::collections::HashSet<&str> = calls
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, .. } if name == "ask_user" => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut kept_whole = 0usize;
+    let mut bodies: Vec<usize> = Vec::new();
+    for b in blocks.iter() {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content: ToolResultContent::Text(text),
+            ..
+        } = b
+        {
+            if answers.contains(tool_use_id.as_str()) {
+                kept_whole += text.len();
+            } else {
+                bodies.push(uncapped(text).0.len());
+            }
+        }
+    }
+    let mut room = round_chars.saturating_sub(kept_whole);
+    if bodies.iter().sum::<usize>() <= room {
+        return;
+    }
+    // The level every larger result is cut to.
+    bodies.sort_unstable();
+    let mut level = 0;
+    for (i, len) in bodies.iter().enumerate() {
+        let share = room / (bodies.len() - i);
+        if *len > share {
+            level = share;
+            break;
+        }
+        room -= len;
+    }
+    let level = level.max(MIN_ROUND_SHARE);
+    for b in blocks.iter_mut() {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content: ToolResultContent::Text(text),
+            ..
+        } = b
+            && !answers.contains(tool_use_id.as_str())
+        {
+            let (body, total) = uncapped(text);
+            if body.len() > level {
+                let mut end = level;
+                while end < body.len() && !body.is_char_boundary(end) {
+                    end += 1;
+                }
+                *text = format!("{}{}{total}{}", &body[..end], CAP_NOTE.0, CAP_NOTE.1);
+            }
+        }
+    }
 }
 
 /// Build the tool_result block for a `ToolOutput::Rich`, emitting both the
@@ -7218,6 +7396,104 @@ mod route_tests {
         std::fs::remove_file(&store.path).ok();
     }
 
+    // The verdict is awaited for up to two seconds, and the mode toggle works
+    // in the meantime. What the user picks then is their choice — and a Brain
+    // they turned on must stay one the agent cannot leave by itself.
+    #[tokio::test]
+    async fn a_mode_the_user_picks_while_auto_is_deciding_is_kept_as_theirs() {
+        let (url, stub) = crate::agent::jev::test_support::spawn_stub_after(
+            std::time::Duration::from_millis(400),
+            200,
+            jev_says(0.95, 0.9),
+        );
+        let (store, mode) = (store("race"), builder());
+        mode.request_auto(true);
+        let toggle = mode.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            toggle.set(SessionMode::Brain, ModeOrigin::Human);
+        });
+        run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        stub.join().unwrap();
+
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Human));
+        // Recorded as a verdict that decided nothing.
+        assert_eq!(
+            routes(&store),
+            vec![("brain".into(), "builder".into(), "jev".into(), true)]
+        );
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            None,
+            "no mode record of ours"
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // Brain always runs the Standard profile. Where the Brain model's window
+    // is too small for that, Auto would turn a Builder session that works —
+    // on the Compact profile — into one that is refused on its first message.
+    #[tokio::test]
+    async fn auto_does_not_send_a_session_to_a_brain_that_cannot_run() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let mut cfg = config(RouteMode::On, Some(&url));
+        cfg.brain_model = "tiny/m".into();
+        cfg.providers.insert(
+            "tiny".into(),
+            crate::agent::provider::ProviderEntry {
+                api_key: "k".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: Default::default(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window: Some(32_768),
+            },
+        );
+        let (store, mode) = (store("tinybrain"), builder());
+        mode.request_auto(true);
+        let cost = run(&cfg, &store, &mode, true).await;
+        // Nobody was asked: the stub is left waiting and gives up.
+        drop(stub);
+
+        assert_eq!(cost, 0.0);
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        assert!(routes(&store).is_empty());
+        assert!(!mode.take_auto(), "Auto is still for one prompt only");
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // What the rules decide needs no wait, so it is written in line — not by a
+    // background task racing the run for the same file.
+    #[tokio::test]
+    async fn in_shadow_a_verdict_the_rules_reach_is_recorded_before_the_run_goes_on() {
+        let (store, mode) = (store("inline"), builder());
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        route_first_prompt(
+            &config(RouteMode::Shadow, None),
+            PromptProfile::Standard,
+            true,
+            "fix the typo",
+            &store,
+            &ctx,
+            &mode,
+            &events,
+        )
+        .await;
+        // No waiting: it is there by the time the call returns.
+        assert_eq!(
+            routes(&store),
+            vec![("builder".into(), "builder".into(), "rules".into(), true)]
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
     #[tokio::test]
     async fn on_auto_an_ordinary_request_stays_in_builder() {
         let (url, stub) = spawn_stub(200, jev_says(0.3, 0.9));
@@ -7332,7 +7608,7 @@ mod surface_tests {
 
     /// A provider "stub" serving model "m" as the builder, with the window the
     /// user typed for it.
-    fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
+    pub(super) fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
             builder_model: "stub/m".into(),
             // Edits are approved without a person, so a run can finish.
@@ -7549,6 +7825,34 @@ mod surface_tests {
     /// One user message against a model that reads a file, edits it, and says
     /// it is done.
     async fn read_edit_answer(tag: &str, context_window: Option<u32>) -> Run {
+        run_script(tag, context_window, None, |path| {
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": path }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "hello", "new_string": "goodbye",
+                    }),
+                },
+                Reply::Text("changed the greeting"),
+            ]
+        })
+        .await
+    }
+
+    /// One user message against a model that follows `script` (built from the
+    /// path of `greet.txt`, the one file in its workspace). With `answer`,
+    /// approvals are switched on and every prompt gets that answer; without
+    /// it they are off (`yolo_mode`).
+    async fn run_script(
+        tag: &str,
+        context_window: Option<u32>,
+        answer: Option<bool>,
+        script: impl FnOnce(&str) -> Vec<Reply>,
+    ) -> Run {
         let root = std::env::temp_dir().join(format!(
             "claudinio-surface-{tag}-{}-{}",
             std::process::id(),
@@ -7563,27 +7867,29 @@ mod surface_tests {
         };
         std::fs::write(&store.path, "").unwrap();
 
-        let (base, _, bodies) = spawn_recording(vec![
-            Reply::Tool {
-                name: "read_file",
-                input: serde_json::json!({ "path": path }),
-            },
-            Reply::Tool {
-                name: "edit_file",
-                input: serde_json::json!({
-                    "path": path, "old_string": "hello", "new_string": "goodbye",
-                }),
-            },
-            Reply::Text("changed the greeting"),
-        ])
-        .await;
-        let config = config_for(&base, context_window);
+        let (base, _, bodies) = spawn_recording(script(&path)).await;
+        let mut config = config_for(&base, context_window);
+        config.yolo_mode = answer.is_none();
         let ctx = ToolContext {
             workspace_root: Some(root.to_string_lossy().to_string()),
             session_store_path: Some(store.path.to_string_lossy().to_string()),
             ..crate::agent::tools::tests_support::ctx()
         };
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let approvals = ApprovalMap::default();
+        // The person at the other end of every approval prompt.
+        let user = answer.map(|answer| {
+            let approvals = approvals.clone();
+            tokio::spawn(async move {
+                loop {
+                    let pending: Vec<_> = approvals.lock().await.drain().collect();
+                    for (_, reply) in pending {
+                        let _ = reply.send(answer);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        });
         let mut history = Vec::new();
         let outcome = run_workflow(
             &config,
@@ -7591,7 +7897,7 @@ mod surface_tests {
             "say goodbye instead".into(),
             Vec::new(),
             &events,
-            &ApprovalMap::default(),
+            &approvals,
             &AnswerMap::default(),
             "surface-test",
             &ctx,
@@ -7600,6 +7906,9 @@ mod surface_tests {
             &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
         )
         .await;
+        if let Some(user) = user {
+            user.abort();
+        }
         let bodies = bodies.lock().unwrap().clone();
         Run {
             outcome,
@@ -7608,6 +7917,80 @@ mod surface_tests {
             bodies,
             root,
         }
+    }
+
+    // In every other profile a shell command that writes a file never reaches
+    // the tool, so the allowlist could afford to be a list of prefixes. In
+    // Compact it does reach it — and `echo …` being harmless to run is no
+    // reason for `echo … > file` to be written without anyone being asked.
+    #[tokio::test]
+    async fn a_compact_session_asks_before_a_shell_command_writes_a_file() {
+        let write = |path: &str| {
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("echo goodbye > {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        };
+
+        let refused = run_script("bash-no", Some(32_768), Some(false), write).await;
+        assert!(matches!(refused.outcome, Ok(RunOutcome::Completed)));
+        assert_eq!(
+            std::fs::read_to_string(&refused.file).unwrap(),
+            "hello world\n"
+        );
+        assert!(
+            refused.bodies[1].contains("rejected by user"),
+            "the model is told"
+        );
+
+        let approved = run_script("bash-yes", Some(32_768), Some(true), write).await;
+        assert_eq!(
+            std::fs::read_to_string(&approved.file).unwrap(),
+            "goodbye\n"
+        );
+
+        // A command that only reads is still not worth a prompt: with every
+        // prompt answered "no", it runs.
+        let reads = run_script("bash-read", Some(32_768), Some(false), |path| {
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("cat {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(reads.bodies[1].contains("hello world"));
+        for run in [refused, approved, reads] {
+            std::fs::remove_dir_all(&run.root).ok();
+        }
+    }
+
+    // What the model is not offered it cannot run, whatever it asks for.
+    #[tokio::test]
+    async fn a_compact_session_runs_only_the_tools_it_was_offered() {
+        let run = run_script("offered", Some(32_768), None, |_| {
+            vec![
+                Reply::Tool {
+                    name: "spawn_agents",
+                    input: serde_json::json!({
+                        "agents": [{"name": "a", "goal": "look around", "mode": "explore"}],
+                    }),
+                },
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(matches!(run.outcome, Ok(RunOutcome::Completed)));
+        // Two requests: the call, and the answer to its refusal. A subagent
+        // would have made more against the same stub.
+        assert_eq!(run.bodies.len(), 2);
+        assert!(run.bodies[1].contains("spawn_agents is not available in this session"));
+        std::fs::remove_dir_all(&run.root).ok();
     }
 
     fn run_config(store: &SessionStore) -> (String, u64) {
@@ -7687,5 +8070,323 @@ mod surface_tests {
             "the denial reaches the model"
         );
         std::fs::remove_dir_all(&run.root).ok();
+    }
+}
+
+/// What a run does at its context lines when there is nothing to shed.
+#[cfg(test)]
+mod context_line_tests {
+    use super::surface_tests::config_for;
+    use super::*;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+
+    fn store(tag: &str) -> SessionStore {
+        let path = std::env::temp_dir().join(format!(
+            "claudinio_lines_{tag}_{}_{}.jsonl",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::write(&path, "").unwrap();
+        SessionStore { path }
+    }
+
+    /// One opening message of `message_chars` against a model that just answers.
+    async fn open_with(
+        tag: &str,
+        window: u32,
+        message_chars: usize,
+    ) -> (Result<RunOutcome, String>, usize, Vec<SessionRecord>) {
+        let (base, _, bodies) = spawn_recording(vec![Reply::Text("on it")]).await;
+        let config = config_for(&base, Some(window));
+        let store = store(tag);
+        let ctx = ToolContext {
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let mut history = Vec::new();
+        let outcome = run_workflow(
+            &config,
+            &mut history,
+            "x ".repeat(message_chars / 2),
+            Vec::new(),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "lines-test",
+            &ctx,
+            &store,
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+        )
+        .await;
+        let requests = bodies.lock().unwrap().len();
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        let _ = std::fs::remove_file(&store.path);
+        (outcome, requests, records)
+    }
+
+    /// The lines a Compact run on a `window`-sized stub model is held to.
+    fn lines(window: u32) -> (ContextBudget, u64) {
+        let config = config_for("http://127.0.0.1:1", Some(window));
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let (_, system, tools) = run_prefix(
+            &config,
+            &ctx,
+            PromptProfile::Standard,
+            SessionMode::Builder,
+            None,
+            None,
+            &[],
+            false,
+        );
+        let prefix = estimate_tokens(&[], &system, &tools);
+        (
+            ContextBudget::for_model(&config, &config.builder_model, prefix),
+            prefix,
+        )
+    }
+
+    #[test]
+    fn a_round_of_results_is_held_to_its_share_together() {
+        let text = |b: &ContentBlock| match b {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            _ => panic!("a tool result"),
+        };
+        let round = |sizes: &[usize]| -> Vec<ContentBlock> {
+            sizes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| ContentBlock::tool_result(format!("t{i}"), "x".repeat(*n)))
+                .collect()
+        };
+
+        // Under the cap, or where there is none: untouched.
+        let mut fits = round(&[10_000, 10_000]);
+        fit_round(&mut fits, &[], 30_000);
+        assert!(fits.iter().all(|b| text(b).len() == 10_000));
+        let mut unbounded = round(&[24_000; 6]);
+        fit_round(&mut unbounded, &[], usize::MAX);
+        assert!(unbounded.iter().all(|b| text(b).len() == 24_000));
+
+        // Over it: the small result keeps all of itself, and the room it does
+        // not use goes to the others — (30_000 - 400) / 3 each.
+        let mut over = round(&[15_000, 15_000, 15_000, 400]);
+        fit_round(&mut over, &[], 30_000);
+        for b in &over[..3] {
+            assert!(text(b).starts_with(&"x".repeat(9_866)));
+            assert!(text(b).ends_with("...(truncated, 15000 chars total)"));
+        }
+        assert_eq!(text(&over[3]).len(), 400);
+        let bodies: usize = over.iter().map(|b| uncapped(&text(b)).0.len()).sum();
+        assert!(bodies <= 30_000, "{bodies}");
+    }
+
+    // The cap per result runs first and leaves its note. A round of two such
+    // results is exactly the round's room plus two notes — not "over" — and a
+    // result cut twice must still say how large the file was, not how large
+    // the first cut left it.
+    #[test]
+    fn a_result_cut_twice_still_reports_the_size_it_really_had() {
+        let text = |b: &ContentBlock| match b {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            _ => panic!("a tool result"),
+        };
+        let capped = |id: &str, total: usize| tool_result_block(id, &"x".repeat(total), 15_000);
+
+        let mut two = vec![capped("a", 60_000), capped("b", 48_213)];
+        let before: Vec<String> = two.iter().map(&text).collect();
+        fit_round(&mut two, &[], 30_000);
+        assert_eq!(two.iter().map(&text).collect::<Vec<_>>(), before);
+
+        let mut four = vec![
+            capped("a", 60_000),
+            capped("b", 48_213),
+            capped("c", 20_000),
+            capped("d", 16_000),
+        ];
+        fit_round(&mut four, &[], 30_000);
+        for (b, total) in four.iter().zip([60_000, 48_213, 20_000, 16_000]) {
+            let t = text(b);
+            assert!(t.starts_with(&"x".repeat(7_500)) && !t.starts_with(&"x".repeat(7_501)));
+            assert!(
+                t.ends_with(&format!("...(truncated, {total} chars total)")),
+                "{}",
+                &t[7_490..]
+            );
+        }
+    }
+
+    // What the user answered is not a file that can be read again.
+    #[test]
+    fn a_round_never_cuts_what_the_user_answered() {
+        let text = |b: &ContentBlock| match b {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            _ => panic!("a tool result"),
+        };
+        let calls = vec![
+            ContentBlock::tool_use("ask", "ask_user", serde_json::json!({})),
+            ContentBlock::tool_use("r1", "read_file", serde_json::json!({})),
+            ContentBlock::tool_use("r2", "read_file", serde_json::json!({})),
+        ];
+        let answer = format!(
+            "Question: which?\nAnswer: {}",
+            "the second one. ".repeat(90)
+        );
+        let mut round = vec![
+            ContentBlock::tool_result("ask", answer.clone()),
+            ContentBlock::tool_result("r1", "x".repeat(2_000)),
+            ContentBlock::tool_result("r2", "y".repeat(2_000)),
+        ];
+        fit_round(&mut round, &calls, 3_864);
+        assert_eq!(text(&round[0]), answer);
+        // The reads share what the answer left.
+        let room = (3_864 - answer.len()) / 2;
+        assert!(text(&round[1]).starts_with(&"x".repeat(room)));
+        assert!(text(&round[1]).ends_with("...(truncated, 2000 chars total)"));
+        assert!(uncapped(&text(&round[2])).0.len() <= room);
+    }
+
+    fn rewrites(records: &[SessionRecord]) -> usize {
+        records
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    SessionRecord::Compacted { .. }
+                        | SessionRecord::Pruned { .. }
+                        | SessionRecord::HandoffTo { .. }
+                )
+            })
+            .count()
+    }
+
+    // The prompt and tools alone are more than this model can be sent. That
+    // used to be found out after a handoff request and a summarizing run, the
+    // second of which replaced the user's message with a summary of it.
+    #[tokio::test]
+    async fn a_prefix_the_window_cannot_hold_is_refused_before_anything_is_tried() {
+        let (budget, prefix) = lines(4_096);
+        assert!(budget.prefix_overflows(prefix), "{budget:?} / {prefix}");
+
+        let (outcome, requests, records) = open_with("overflow", 4_096, 200).await;
+        let err = outcome.err().expect("refused");
+        assert!(err.contains("too small for the"), "{err}");
+        assert_eq!(requests, 0, "nothing was sent to find that out");
+        assert_eq!(rewrites(&records), 0);
+    }
+
+    // A session that opens over its handoff line — a successor whose handoff
+    // document is large, or simply a long first prompt — has nothing to hand
+    // off: the only thing in it is the message. Handing that off produced a
+    // successor in the same state, with no round ever run in between.
+    #[tokio::test]
+    async fn an_opening_message_over_the_line_is_sent_not_handed_off_or_summarized() {
+        let (budget, prefix) = lines(32_768);
+        assert!(budget.soft < budget.hard && budget.hard < budget.ceiling);
+        for (tag, total) in [
+            ("soft", (budget.soft + budget.hard) / 2),
+            ("hard", (budget.hard + budget.ceiling) / 2),
+        ] {
+            let chars = usize::try_from((total - prefix) * 3).unwrap();
+            let (outcome, requests, records) = open_with(tag, 32_768, chars).await;
+            assert!(
+                matches!(outcome, Ok(RunOutcome::Completed)),
+                "{tag}: {:?}",
+                outcome.err()
+            );
+            assert_eq!(requests, 1, "{tag}: the message itself, and nothing else");
+            assert_eq!(rewrites(&records), 0, "{tag}");
+        }
+
+        // Past the ceiling there is still nothing to try: it is refused as
+        // what it is, a message too long for the model.
+        let chars = usize::try_from((budget.ceiling + 500 - prefix) * 3).unwrap();
+        let (outcome, requests, records) = open_with("ceiling", 32_768, chars).await;
+        assert!(
+            outcome
+                .err()
+                .unwrap()
+                .contains("exceeds the model's context limit")
+        );
+        assert_eq!((requests, rewrites(&records)), (0, 0));
+    }
+
+    // `push_user_blocks` merges into the last user turn without writing a
+    // record. A prune that rebuilt the history from the file dropped whatever
+    // had been merged — the prompt typed after a run that ended on tool
+    // results, a hook's correction — just before the model was to read it.
+    #[tokio::test]
+    async fn what_was_merged_into_the_last_turn_survives_a_prune() {
+        let config = AgentConfig::default();
+        let store = store("merge");
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let system = "You are a test.".to_string();
+        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+
+        let mut history = vec![Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text("Refactor the parser.")],
+        }];
+        for i in 0..30 {
+            let id = format!("r{i}");
+            history.push(Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::tool_use(
+                    &id,
+                    "read_file",
+                    serde_json::json!({ "path": format!("/ws/src/f{i}.rs") }),
+                )],
+            });
+            history.push(Message {
+                role: "user".into(),
+                content: vec![ContentBlock::tool_result(
+                    &id,
+                    format!("// {i}\n").repeat(3_000),
+                )],
+            });
+        }
+        // In memory only: no record of it exists in the store.
+        history
+            .last_mut()
+            .unwrap()
+            .content
+            .push(ContentBlock::text("ONLY TOUCH THE LEXER"));
+
+        let estimated = estimate_tokens(&history, &system, &[]);
+        assert!(estimated >= budget.soft, "{estimated}");
+        let (new_estimate, _) = try_verbatim_compaction(
+            &config,
+            &budget,
+            PromptProfile::Standard,
+            estimated,
+            &mut history,
+            &system,
+            &[],
+            &store,
+            &ctx,
+            &events,
+        )
+        .await
+        .expect("thirty old reads are worth cutting");
+        assert!(new_estimate < estimated * 8 / 10);
+
+        let last = history.last().unwrap();
+        assert_eq!(last.role, "user");
+        assert!(
+            last.content
+                .iter()
+                .any(|b| b.get_text() == Some("ONLY TOUCH THE LEXER")),
+            "the instruction is still the last thing the model reads"
+        );
+        assert_eq!(
+            history[0].content[0].get_text(),
+            Some("Refactor the parser.")
+        );
+        // And the cut is on record, so a reload makes the same one.
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        assert_eq!(rewrites(&records), 1);
+        let _ = std::fs::remove_file(&store.path);
     }
 }

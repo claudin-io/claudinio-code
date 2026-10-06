@@ -148,6 +148,9 @@ pub struct Outcome {
     /// [`SOURCE_LOSSLESS`] | [`SOURCE_JEV`] | [`SOURCE_RULES`]: the last stage
     /// that contributed. Empty for an outcome straight out of [`plan`].
     pub source: &'static str,
+    /// True when nothing comes after this outcome: taking it or not is the
+    /// last decision this shed has to offer.
+    pub last: bool,
     pub cost: f64,
     /// (tool_use_id, P(keep call), P(keep result)) for every judged call.
     pub judged: Vec<(String, f64, f64)>,
@@ -519,6 +522,16 @@ pub fn apply(history: &[Message], decision: &Decision, head_chars: usize) -> Vec
         .iter()
         .map(String::as_str)
         .collect();
+    // A subagent's report is not something to "re-run": the work it describes
+    // was done, and spawning it again would do it twice.
+    let reports: HashSet<&str> = history
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, .. } if name == "spawn_agents" => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut out: Vec<Message> = Vec::with_capacity(history.len());
     for m in history {
         let content: Vec<ContentBlock> = m
@@ -538,8 +551,17 @@ pub fn apply(history: &[Message], decision: &Decision, head_chars: usize) -> Vec
                     ..
                 } if cut.contains(tool_use_id.as_str()) => {
                     let text = content.as_text();
-                    if text.len() <= head_chars + 120
-                        && matches!(content, ToolResultContent::Text(_))
+                    // Already cut, by this decision's earlier application or
+                    // by an earlier prune: cutting the cut would shorten the
+                    // head by the length of the note each time, and make the
+                    // live history drift from what a reload rebuilds.
+                    let already_cut = text
+                        .rsplit('\n')
+                        .next()
+                        .is_some_and(|last| last.starts_with(COMPACTED_MARK));
+                    if already_cut
+                        || (text.len() <= head_chars + (MAX_CUT_CHARS - TRUNCATE_HEAD_CHARS)
+                            && matches!(content, ToolResultContent::Text(_)))
                     {
                         return b.clone();
                     }
@@ -549,11 +571,17 @@ pub fn apply(history: &[Message], decision: &Decision, head_chars: usize) -> Vec
                     } else {
                         ""
                     };
+                    // Short: see `MAX_CUT_CHARS`.
+                    let advice = if reports.contains(tool_use_id.as_str()) {
+                        "the work is done, do not spawn it again"
+                    } else {
+                        "re-run the tool if needed"
+                    };
                     ContentBlock::tool_result(
                         tool_use_id.clone(),
                         format!(
                             "{}\n[compacted: {removed} chars of this tool result removed{error}; \
-                             re-run the tool if needed]",
+                             {advice}]",
                             head_at(&text, head_chars)
                         ),
                     )
@@ -654,6 +682,7 @@ pub async fn plan(history: &[Message], backend: &crate::agent::jev::JevBackend) 
         requests,
         stage,
         source: SOURCE_JEV,
+        last: false,
         cost,
         judged,
     })
@@ -692,28 +721,11 @@ fn read_key(input: &Value) -> Option<(String, Option<u64>, Option<u64>)> {
 /// repeated an earlier one exactly.
 pub fn plan_lossless(history: &[Message]) -> Decision {
     let calls = collect_tool_calls(history);
-    // Results that are not the whole of what the tool returned: cut by an
-    // earlier prune, or a pointer to an earlier read (`repeated_read`).
-    let mut compacted: HashSet<&str> = HashSet::new();
-    for b in history.iter().flat_map(|m| m.content.iter()) {
-        if let ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            ..
-        } = b
-        {
-            let text = content.as_text();
-            if text.contains(COMPACTED_MARK) || text.starts_with(UNCHANGED_MARK) {
-                compacted.insert(tool_use_id.as_str());
-            }
-        }
-    }
+    let results = ResultKinds::of(history);
+    let whole = |c: &ToolCall| !results.partial.contains(c.tool_use_id.as_str());
     let mut decision = Decision::default();
 
-    let latest_snapshot = calls
-        .iter()
-        .rposition(|c| TASK_SNAPSHOT_TOOLS.contains(&c.tool.as_str()) && !c.is_error);
-    if let Some(latest) = latest_snapshot {
+    if let Some(latest) = results.whole_task_snapshot(&calls) {
         for c in &calls[..latest] {
             if !c.pinned && TASK_TOOLS.contains(&c.tool.as_str()) {
                 decision.drop_calls.push(c.tool_use_id.clone());
@@ -721,8 +733,14 @@ pub fn plan_lossless(history: &[Message]) -> Decision {
         }
     }
 
-    // Newest first, so each read is checked against the reads after it.
-    let mut newer_reads = HashSet::new();
+    // Newest first, so each read is checked against the reads after it. The
+    // value is the least an older copy must be covered by: all of it when the
+    // newer one was cut by the result cap (a cap that shrank with the model
+    // must not replace a fuller copy), half of it otherwise — a newer copy
+    // much smaller than the old one is more likely a refusal in words this
+    // module does not know (a hook's own reason) than the same file. Keeping
+    // both costs tokens; cutting the only real one costs the file.
+    let mut newer_reads: std::collections::HashMap<_, usize> = std::collections::HashMap::new();
     for c in calls.iter().rev() {
         if c.tool != "read_file" {
             continue;
@@ -730,18 +748,97 @@ pub fn plan_lossless(history: &[Message]) -> Decision {
         let Some(key) = read_key(&c.input) else {
             continue;
         };
-        let full_copy = !c.is_error && !compacted.contains(c.tool_use_id.as_str());
-        if newer_reads.contains(&key) {
-            if !c.pinned && full_copy {
-                decision.truncate_results.push(c.tool_use_id.clone());
+        match newer_reads.get(&key) {
+            Some(&covers) => {
+                if !c.pinned && whole(c) && c.result_chars <= covers {
+                    decision.truncate_results.push(c.tool_use_id.clone());
+                }
             }
-        } else if full_copy {
             // Only a result that is still whole can stand in for an older one.
-            newer_reads.insert(key);
+            None if whole(c) => {
+                let capped = results.capped.contains(c.tool_use_id.as_str());
+                let covers = if capped {
+                    c.result_chars
+                } else {
+                    c.result_chars.saturating_mul(2)
+                };
+                newer_reads.insert(key, covers);
+            }
+            None => {}
         }
     }
     decision.truncate_results.reverse();
     decision
+}
+
+/// What the session writes as a result when the tool never ran.
+const NOT_RUN_PREFIXES: [&str; 4] = [
+    "Error",
+    "Tool call rejected",
+    "Edit rejected",
+    "Interrupted by the user",
+];
+/// How the result cap marks what it cut (`session::truncate`).
+const CAPPED_MARK: &str = "...(truncated, ";
+
+/// Which results in a history are less than what their tool returned.
+struct ResultKinds<'a> {
+    /// The tool failed or never ran, a prune cut the text, or it is a pointer
+    /// to an earlier read. None of these can stand in for another result.
+    partial: HashSet<&'a str>,
+    /// Cut by the result cap: a real result, but not all of it.
+    capped: HashSet<&'a str>,
+}
+
+impl<'a> ResultKinds<'a> {
+    fn of(history: &'a [Message]) -> Self {
+        let mut kinds = ResultKinds {
+            partial: HashSet::new(),
+            capped: HashSet::new(),
+        };
+        for b in history.iter().flat_map(|m| m.content.iter()) {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = b
+            else {
+                continue;
+            };
+            let text = content.as_text();
+            if text.contains(COMPACTED_MARK)
+                || text.starts_with(UNCHANGED_MARK)
+                || NOT_RUN_PREFIXES.iter().any(|p| text.starts_with(p))
+            {
+                kinds.partial.insert(tool_use_id.as_str());
+            } else if text.ends_with(" chars total)") && text.contains(CAPPED_MARK) {
+                kinds.capped.insert(tool_use_id.as_str());
+            }
+        }
+        kinds
+    }
+
+    /// Index in `calls` of the newest task snapshot that holds the whole
+    /// list: the one every earlier task call only repeats part of.
+    fn whole_task_snapshot(&self, calls: &[ToolCall]) -> Option<usize> {
+        calls.iter().rposition(|c| {
+            let id = c.tool_use_id.as_str();
+            TASK_SNAPSHOT_TOOLS.contains(&c.tool.as_str())
+                && !self.partial.contains(id)
+                && !self.capped.contains(id)
+        })
+    }
+
+    /// Index in `calls` of the newest task snapshot the model was actually
+    /// shown, whole or cut by the result cap: the list as it knows it. A list
+    /// too long for the cap is never whole, and it is still the current one —
+    /// with every older copy of it as old as any other result.
+    fn current_task_snapshot(&self, calls: &[ToolCall]) -> Option<usize> {
+        calls.iter().rposition(|c| {
+            TASK_SNAPSHOT_TOOLS.contains(&c.tool.as_str())
+                && !self.partial.contains(c.tool_use_id.as_str())
+        })
+    }
 }
 
 /// How the history copy of a repeated read starts.
@@ -862,10 +959,15 @@ fn recent_start(history: &[Message], recent_chars: usize) -> usize {
     start
 }
 
+/// The most `apply` leaves of a cut result: its head and a note. A result at
+/// or under this is left as it is — so a note must never be longer than the
+/// difference, or a cut result would look worth cutting again.
+const MAX_CUT_CHARS: usize = TRUNCATE_HEAD_CHARS + 120;
+
 /// What cutting one result to its head frees, or `None` when `apply` would
 /// leave it as it is.
 fn freed_by_cut(result_chars: usize) -> Option<usize> {
-    (result_chars > TRUNCATE_HEAD_CHARS + 120).then(|| result_chars - TRUNCATE_HEAD_CHARS)
+    (result_chars > MAX_CUT_CHARS).then(|| result_chars - TRUNCATE_HEAD_CHARS)
 }
 
 /// Roughly what `apply` leaves of a cut result: the head and its note.
@@ -898,13 +1000,30 @@ pub fn plan_by_age(
             }
         }
     }
-    let eligible: Vec<ToolCall> = collect_tool_calls(history)
-        .into_iter()
+    let calls = collect_tool_calls(history);
+    // The current task list, and every change made to it since, stay: with
+    // them cut the model works from a list it can no longer see. Everything
+    // before that snapshot is the lossless stage's to drop.
+    let current_tasks: HashSet<&str> = ResultKinds::of(history)
+        .current_task_snapshot(&calls)
+        .map(|latest| {
+            calls[latest..]
+                .iter()
+                .filter(|c| TASK_TOOLS.contains(&c.tool.as_str()))
+                .map(|c| c.tool_use_id.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let eligible: Vec<&ToolCall> = calls
+        .iter()
         .filter(|c| {
             result_msg
                 .get(c.tool_use_id.as_str())
                 .is_some_and(|&ri| ri != 0 && ri < recent)
         })
+        // An `ask_user` result is the user's answer. It is their words in a
+        // tool result's clothes, and no tool can be re-run to get it back.
+        .filter(|c| c.tool != "ask_user" && !current_tasks.contains(c.tool_use_id.as_str()))
         .collect();
     let mut decision = Decision::default();
     let mut freed = 0usize;
@@ -1027,8 +1146,20 @@ where
         opts.last_resort,
     );
     if by_age.is_empty() {
+        // Nothing to cut by age. What the lossless stage found was offered
+        // above as one stage of several; it is offered again as all there is.
+        let outcome = Outcome {
+            decision: lossless,
+            chars_before,
+            chars_after: history_chars(&after_lossless),
+            stage: SOURCE_LOSSLESS,
+            source: SOURCE_LOSSLESS,
+            last: true,
+            ..Default::default()
+        };
+        let take = !outcome.decision.is_empty() && accept(&outcome, &after_lossless);
         return Shed {
-            accepted: None,
+            accepted: take.then_some((outcome, after_lossless)),
             cost,
         };
     }
@@ -1041,6 +1172,7 @@ where
         requests,
         stage: SOURCE_RULES,
         source: SOURCE_RULES,
+        last: true,
         cost,
         judged: Vec::new(),
     };
@@ -1673,6 +1805,287 @@ mod tests {
             ContentBlock::tool_result("b1", body.clone()),
         ));
         assert_eq!(text, body);
+    }
+
+    /// `reads`, then enough later turns that none of them is pinned as recent.
+    fn old_reads(reads: &[(&str, Value, &str)]) -> Vec<Message> {
+        let mut h = history_of_reads(reads);
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        h
+    }
+
+    // A later call that never ran says nothing about the file. Cutting the
+    // earlier read on its account would remove the only copy there is.
+    #[test]
+    fn a_read_that_never_ran_does_not_supersede_the_one_that_did() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+        for not_run in [
+            "Interrupted by the user — the tool was not run.",
+            "Tool call rejected by user",
+            // A hook's own reason: no prefix to know it by, only its size.
+            "This path is off limits until the migration lands. Ask in #infra first.",
+        ] {
+            let h = old_reads(&[("r1", lib.clone(), &body), ("r2", lib.clone(), not_run)]);
+            assert!(plan_lossless(&h).is_empty(), "{not_run}");
+        }
+    }
+
+    // The result cap follows the model, and a mode switch can change the
+    // model: the same file read again under a smaller cap is less of it.
+    #[test]
+    fn a_read_cut_by_a_smaller_cap_does_not_replace_a_fuller_copy() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+        let capped = |chars: usize| {
+            format!(
+                "{}...(truncated, {} chars total)",
+                &body[..chars],
+                body.len()
+            )
+        };
+
+        let shrunk = old_reads(&[
+            ("r1", lib.clone(), &body),
+            ("r2", lib.clone(), &capped(2_000)),
+        ]);
+        assert!(plan_lossless(&shrunk).is_empty());
+
+        // Under the same cap the two are the same text, and one is enough.
+        let same = old_reads(&[
+            ("r1", lib.clone(), &capped(2_000)),
+            ("r2", lib.clone(), &capped(2_000)),
+        ]);
+        assert_eq!(plan_lossless(&same).truncate_results, vec!["r1"]);
+    }
+
+    #[test]
+    fn a_task_call_that_never_ran_is_not_the_current_list() {
+        let list = json!({"tasks": [{"id": "t1", "title": "x".repeat(300), "status": "todo"}]});
+        let mut h = vec![user("Do it.")];
+        h.push(assistant_call("", "set1", "tasks_set", list.clone()));
+        h.push(result("set1", "Tasks updated (1 total)"));
+        h.push(assistant_call("", "set2", "tasks_set", list));
+        h.push(result(
+            "set2",
+            "Interrupted by the user — the tool was not run.",
+        ));
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        // set1 is still the list the session is working from.
+        assert!(plan_lossless(&h).drop_calls.is_empty());
+    }
+
+    // What the user said through `ask_user`, and the task list as it stands,
+    // are not "old tool output": neither can be had again by re-running a tool
+    // on the same terms.
+    #[test]
+    fn by_age_never_cuts_the_users_answers_or_the_current_task_list() {
+        let big = "x".repeat(5_000);
+        let mut h = vec![user("Plan the export feature.")];
+        let call = |h: &mut Vec<Message>, id: &str, tool: &str, text: &str| {
+            h.push(assistant_call("", id, tool, json!({"n": id})));
+            h.push(result(id, text));
+        };
+        call(
+            &mut h,
+            "ask1",
+            "ask_user",
+            &format!("Question: format?\nAnswer: CSV. {big}"),
+        );
+        call(&mut h, "old_get", "tasks_get", &big);
+        call(&mut h, "read1", "read_file", &big);
+        call(&mut h, "get", "tasks_get", &big);
+        call(&mut h, "upd", "tasks_update", &big);
+        call(&mut h, "read2", "read_file", &big);
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        for drop_calls in [false, true] {
+            let d = plan_by_age(&h, usize::MAX, usize::MAX, drop_calls);
+            let touched: Vec<&String> = d.truncate_results.iter().chain(&d.drop_calls).collect();
+            for kept in ["ask1", "get", "upd"] {
+                assert!(
+                    !touched.iter().any(|id| *id == kept),
+                    "{kept} ({drop_calls})"
+                );
+            }
+            // Ordinary results, and a task list a newer one replaced, still go.
+            for cut in ["old_get", "read1", "read2"] {
+                assert!(touched.iter().any(|id| *id == cut), "{cut} ({drop_calls})");
+            }
+        }
+    }
+
+    // A task list too long for the result cap is never "whole", so the
+    // lossless stage has no snapshot to drop the older copies against. They
+    // must then be as cuttable by age as any old result — only the newest one
+    // is the list the model is working from.
+    #[test]
+    fn older_copies_of_a_task_list_too_long_for_the_cap_are_still_cut_by_age() {
+        let capped = format!("{}...(truncated, 40000 chars total)", "t".repeat(15_000));
+        let mut h = vec![user("Work through the list.")];
+        h.push(assistant_call("", "set", "tasks_set", json!({"tasks": []})));
+        h.push(result("set", "Tasks updated (60 total)"));
+        for i in 0..4 {
+            h.push(assistant_call(
+                "",
+                &format!("get{i}"),
+                "tasks_get",
+                json!({}),
+            ));
+            h.push(result(&format!("get{i}"), &capped));
+            h.push(assistant_call(
+                "",
+                &format!("upd{i}"),
+                "tasks_update",
+                json!({"id": "t1"}),
+            ));
+            h.push(result(&format!("upd{i}"), "'t1': todo -> doing"));
+        }
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        let d = plan_by_age(&h, usize::MAX, usize::MAX, false);
+        assert_eq!(d.truncate_results, vec!["get0", "get1", "get2"]);
+        // The newest list and the change made after it are what is current.
+        let d = plan_by_age(&h, usize::MAX, usize::MAX, true);
+        let touched: Vec<&String> = d.truncate_results.iter().chain(&d.drop_calls).collect();
+        assert!(
+            !touched.iter().any(|id| *id == "get3" || *id == "upd3"),
+            "{touched:?}"
+        );
+        assert!(touched.iter().any(|id| *id == "upd0"));
+    }
+
+    // Applying a decision to a history it was already applied to changes
+    // nothing: a session applies each prune live and again, with every later
+    // one, on reload.
+    #[test]
+    fn a_result_that_was_cut_is_not_cut_again() {
+        let report =
+            "## worker — completed (9 rounds)\n".to_string() + &"edited a file\n".repeat(900);
+        let mut h = vec![user("Build it.")];
+        h.push(assistant_call(
+            "",
+            "sp",
+            "spawn_agents",
+            json!({"agents": []}),
+        ));
+        h.push(result("sp", &report));
+        h.push(assistant_call(
+            "",
+            "rd",
+            "read_file",
+            json!({"path": "a.rs"}),
+        ));
+        h.push(result("rd", &format!("Error: {report}")));
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        let d = Decision {
+            truncate_results: vec!["sp".into(), "rd".into()],
+            ..Default::default()
+        };
+        let once = apply(&h, &d, TRUNCATE_HEAD_CHARS);
+        let twice = apply(&once, &d, TRUNCATE_HEAD_CHARS);
+        assert_eq!(
+            serde_json::to_string(&once).unwrap(),
+            serde_json::to_string(&twice).unwrap()
+        );
+        // And cutting by age does not pick an already cut result again.
+        assert!(plan_by_age(&once, usize::MAX, usize::MAX, false).is_empty());
+        for m in &once {
+            for b in &m.content {
+                if let ContentBlock::ToolResult { content, .. } = b {
+                    assert!(content.as_text().len() <= MAX_CUT_CHARS);
+                }
+            }
+        }
+    }
+
+    // A subagent past its hard line takes whatever the shed can still offer.
+    // When nothing is old enough to cut by age, that is the lossless stage —
+    // offered once more, as the last thing there is.
+    #[tokio::test]
+    async fn the_lossless_stage_is_offered_as_the_last_one_when_nothing_else_can_be_cut() {
+        let list = json!({"tasks": [{"id": "t1", "title": "x".repeat(4_000), "status": "todo"}]});
+        let mut h = vec![user("Do it.")];
+        for i in 0..5 {
+            h.push(assistant_call(
+                "",
+                &format!("set{i}"),
+                "tasks_set",
+                list.clone(),
+            ));
+            h.push(result(&format!("set{i}"), "Tasks updated (1 total)"));
+        }
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        let opts = ShedOptions {
+            free_chars: usize::MAX,
+            recent_chars: usize::MAX,
+            last_resort: true,
+        };
+        let before = history_chars(&h);
+        // "Only if it is the last offer": refused as a first stage, taken as the last.
+        let shed = shed(&h, None, opts, |outcome, _| outcome.last).await;
+        let (outcome, after) = shed.accepted.expect("the older task lists can go");
+        assert_eq!(outcome.source, SOURCE_LOSSLESS);
+        assert!(history_chars(&after) < before / 2);
+        // With nothing to free at all there is still nothing to accept.
+        let empty = vec![user("Do it."), assistant("ok")];
+        assert!(shed_nothing(&empty, opts).await);
+    }
+
+    async fn shed_nothing(history: &[Message], opts: ShedOptions) -> bool {
+        shed(history, None, opts, |_, _| true)
+            .await
+            .accepted
+            .is_none()
+    }
+
+    #[test]
+    fn a_cut_subagent_report_does_not_invite_running_the_work_again() {
+        let report =
+            "## worker — completed (9 rounds)\n".to_string() + &"edited a file\n".repeat(300);
+        let mut h = vec![user("Build it.")];
+        h.push(assistant_call(
+            "",
+            "sp",
+            "spawn_agents",
+            json!({"agents": []}),
+        ));
+        h.push(result("sp", &report));
+        h.push(assistant_call(
+            "",
+            "rd",
+            "read_file",
+            json!({"path": "a.rs"}),
+        ));
+        h.push(result("rd", &report));
+        let d = Decision {
+            truncate_results: vec!["sp".into(), "rd".into()],
+            ..Default::default()
+        };
+        let out = apply(&h, &d, TRUNCATE_HEAD_CHARS);
+        let text = |i: usize| match &out[i].content[0] {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            _ => panic!("a tool result"),
+        };
+        assert!(text(2).contains(COMPACTED_MARK) && !text(2).contains("re-run"));
+        assert!(text(2).contains("do not spawn it again"));
+        assert!(text(4).contains("re-run the tool if needed"));
     }
 
     #[test]

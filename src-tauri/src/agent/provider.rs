@@ -418,6 +418,21 @@ impl AgentConfig {
     }
 }
 
+impl AgentConfig {
+    /// The `max_tokens` a request to `model` carries, when anything pins it:
+    /// the model's own limit, held to what its window leaves a prompt
+    /// (`budget::reply_tokens` — the same number the context budget reserves).
+    /// `None` when neither is known, which sends the default.
+    pub fn max_output_for(&self, model: &str) -> Option<u32> {
+        let limit = self.known_output_limit(model);
+        let tokens = match self.known_context_window(model) {
+            Some(window) => Some(crate::agent::budget::reply_tokens(window, limit)),
+            None => limit,
+        };
+        tokens.map(|t| u32::try_from(t).unwrap_or(u32::MAX))
+    }
+}
+
 /// The window a local model is served with: what `effective_ctx` will start
 /// the server at, or what the weights declare when that is left to them.
 fn local_window(config: &AgentConfig, wire_model: &str) -> Option<u32> {
@@ -634,7 +649,7 @@ impl AgentConfig {
                 model: rest.to_string(),
                 provider_id: prefix.to_string(),
                 pricing: entry.model_pricing.get(rest).copied(),
-                max_output_tokens: entry.model_output_limits.get(rest).copied(),
+                max_output_tokens: self.max_output_for(model),
             };
         }
         ResolvedProvider {
@@ -683,7 +698,7 @@ pub async fn resolve_provider_live(
             crate::llama::supervisor::ensure_serving(&rp.model, &config.local, ctx_budget).await?;
         rp.base_url = endpoint.base_url;
         rp.api_key = endpoint.api_key;
-        rp.max_output_tokens = local_window(config, &rp.model).map(local_reply_cap);
+        rp.max_output_tokens = config.max_output_for(model);
     }
     Ok(rp)
 }
@@ -1371,7 +1386,11 @@ pub async fn stream_message(
             Some(tools.to_vec())
         },
         system: system.map(|s| s.to_string()),
-        thinking: Some(ThinkingConfig {
+        // A reply this small has no room for thinking and an answer both: the
+        // API refuses a thinking budget that is not below `max_tokens`, and
+        // the smallest budget it takes is 1024. Reachable since `max_tokens`
+        // follows the model's window (`max_output_for`).
+        thinking: (budget_tokens < max_tokens).then_some(ThinkingConfig {
             kind: "enabled",
             budget_tokens,
         }),
@@ -2024,6 +2043,41 @@ mod tests {
         assert_eq!(cfg.known_context_window("deepseek/other"), None);
         assert_eq!(cfg.known_context_window("claudinio"), None);
         assert_eq!(cfg.known_context_window("nobody/model"), None);
+    }
+
+    // A custom endpoint has a window the user typed and no output limit at
+    // all. Sent the 32k default, a server that checks prompt + max_tokens
+    // against its context refuses every request.
+    #[test]
+    fn the_reply_a_request_asks_for_fits_the_window_it_is_sent_to() {
+        let mut cfg = AgentConfig::default();
+        let mut local = entry_with_windows(true, &[]);
+        local.context_window = Some(32_768);
+        cfg.providers.insert("vllm".into(), local);
+        assert_eq!(cfg.max_output_for("vllm/qwen"), Some(8_192));
+        assert_eq!(
+            cfg.resolve_provider("vllm/qwen").max_output_tokens,
+            Some(8_192)
+        );
+
+        // A catalog entry claiming as much output as it has context.
+        let mut greedy = entry_with_windows(false, &[("m", 65_536)]);
+        greedy.model_output_limits.insert("m".into(), 65_536);
+        cfg.providers.insert("cat".into(), greedy);
+        assert_eq!(cfg.max_output_for("cat/m"), Some(16_384));
+
+        // With no window known, the entry's limit is taken as it is; with
+        // nothing known, the request keeps its default.
+        let mut plain = entry_with_windows(false, &[]);
+        plain.model_output_limits.insert("m".into(), 16_384);
+        cfg.providers.insert("plain".into(), plain);
+        assert_eq!(cfg.max_output_for("plain/m"), Some(16_384));
+        assert_eq!(cfg.max_output_for("plain/other"), None);
+        assert_eq!(cfg.max_output_for("claudinio"), None);
+
+        // And it is the number the context budget set aside.
+        let budget = crate::agent::budget::ContextBudget::for_model(&cfg, "vllm/qwen", 0);
+        assert_eq!(budget.ceiling, 32_768 - 8_192);
     }
 
     #[test]

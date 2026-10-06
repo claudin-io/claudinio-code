@@ -88,9 +88,19 @@ past which nothing is sent, and the caps a single tool result is held to. At
 window, after the reply reserve and the fixed prefix are taken out. A mode
 switch changes the model, so the budget is derived again.
 
+The reply reserve is the request's `max_tokens`, by construction
+(`budget::reply_tokens` feeds both): a server that checks prompt plus
+`max_tokens` against its context rejects a request that asks for more reply
+than the budget set aside, whatever the prompt's size. On a scaled window the
+results of one round are also capped together, not only one by one — the round
+just read is the one thing no prune cuts, so it has to fit by itself. And a
+prefix that does not fit the window at all is refused before anything is tried:
+no handoff or summary makes a system prompt smaller.
+
 Crossing a line sheds weight in three stages (`agent/prune.rs`), cheapest
 first: copies a newer result supersedes; what Jev judges disposable; then the
-oldest tool results by age. Text is never touched. A stage is accepted only if
+oldest tool results by age. Text is never touched, nor are the user's answers
+to `ask_user` or the current task list. A stage is accepted only if
 it frees enough to be worth the cache it invalidates — which is also why
 nothing is pruned early: on a caching provider the history is cheap to resend
 and expensive to rewrite.
@@ -100,6 +110,10 @@ What is sent ahead of the conversation is chosen once per run
 `Compact` under 64k in Builder), then the tool surface the user set for that
 model. Prompt, tool list and the write gates are derived together and never
 change between turns of the same mode, because they are the cached prefix.
+A Compact session edits files itself, so two things hold there that hold
+nowhere else: a shell command that writes a file is asked about like an
+`edit_file` even when its prefix is allowlisted, and a call to any tool outside
+the profile's ten is refused rather than run.
 
 Each run writes a `run_config` record (model, window, lines, prefix by part,
 profile), each subagent a `subagent_run`, each routing decision a `mode_route`.

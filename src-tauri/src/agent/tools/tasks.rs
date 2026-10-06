@@ -28,6 +28,7 @@ pub fn execute_set(
         .session_store_path
         .as_ref()
         .ok_or("session_store_path not set")?;
+    let _writing = lock_task_list();
     let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
@@ -68,6 +69,18 @@ pub struct UpdateTaskArgs {
 
 const TASK_STATUSES: [&str; 3] = ["todo", "doing", "done"];
 
+/// Held from reading the task list to writing it back. Subagents run in
+/// parallel and are offered these tools: two of them each closing its own
+/// task would otherwise both start from the same list, and the second write
+/// would put the first one's task back to `doing`.
+static TASK_LIST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_task_list() -> std::sync::MutexGuard<'static, ()> {
+    // A panic while holding it leaves nothing half-written: the list is one
+    // appended record. The next writer just goes ahead.
+    TASK_LIST.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Update a single task in place.
 ///
 /// `tasks_set` is a full replacement, so moving one task from `doing` to
@@ -88,6 +101,7 @@ pub fn execute_update(
         .session_store_path
         .as_ref()
         .ok_or("session_store_path not set")?;
+    let _writing = lock_task_list();
     let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
     let id = args.id.trim();
     let Some(index) = prev.iter().position(|t| t.id == id) else {
@@ -440,6 +454,50 @@ mod lld_gate_tests {
             ))),
         };
         (ctx, root)
+    }
+
+    // Subagents run in parallel and each closes its own task. Without one
+    // writer at a time, two of them start from the same list and the later
+    // write undoes the earlier one.
+    #[test]
+    fn updates_from_parallel_agents_do_not_undo_each_other() {
+        let (ctx, root) = ctx_for("parallel-updates", None);
+        let tasks: Vec<TaskItem> = (0..24)
+            .map(|i| TaskItem {
+                id: format!("t{i}"),
+                title: "t".into(),
+                description: "d".into(),
+                journal: vec![],
+                status: "todo".into(),
+            })
+            .collect();
+        execute_set(SetTasksArgs { tasks }, &ctx).unwrap();
+
+        std::thread::scope(|scope| {
+            for i in 0..24 {
+                let ctx = &ctx;
+                scope.spawn(move || {
+                    execute_update(
+                        UpdateTaskArgs {
+                            id: format!("t{i}"),
+                            status: Some("done".into()),
+                            journal: vec![format!("closed by agent {i}")],
+                        },
+                        ctx,
+                    )
+                    .unwrap();
+                });
+            }
+        });
+
+        let store = ctx.session_store_path.as_deref().unwrap();
+        let after = crate::agent::persist::load_last_tasks(Path::new(store)).unwrap();
+        assert_eq!(after.len(), 24);
+        for (i, task) in after.iter().enumerate() {
+            assert_eq!(task.status, "done", "{}", task.id);
+            assert_eq!(task.journal, vec![format!("closed by agent {i}")]);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn one_task() -> SetTasksArgs {

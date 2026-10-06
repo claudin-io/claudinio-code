@@ -35,7 +35,7 @@ use crate::agent::jev::{JevBackend, noul};
 use crate::agent::session::SessionMode;
 
 /// How much say the router has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouteMode {
     /// Never asked.
@@ -58,12 +58,26 @@ impl RouteMode {
     }
 
     pub fn parse(s: &str) -> Option<RouteMode> {
-        match s.trim() {
+        match s.trim().to_ascii_lowercase().as_str() {
             "off" => Some(RouteMode::Off),
             "shadow" => Some(RouteMode::Shadow),
             "on" => Some(RouteMode::On),
             _ => None,
         }
+    }
+}
+
+// By hand, so that a value this build does not know is Off rather than an
+// error. The config is loaded whole or not at all: a derived impl failing on
+// `"route": "On"` — a hand edit, a value from a newer build — would discard
+// the user's API key and providers along with it.
+impl<'de> Deserialize<'de> for RouteMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        Ok(value
+            .as_str()
+            .and_then(RouteMode::parse)
+            .unwrap_or_default())
     }
 }
 
@@ -229,6 +243,35 @@ mod tests {
             .to_string()
             .into_boxed_str(),
         )
+    }
+
+    #[test]
+    fn a_route_setting_this_build_does_not_know_is_off_not_a_broken_config() {
+        let load = |route: Value| -> crate::agent::provider::AgentConfig {
+            serde_json::from_value(json!({
+                "base_url": "https://api.claudin.io",
+                "api_key": "sk-kept",
+                "jev": { "route": route },
+            }))
+            .expect("the rest of the config still loads")
+        };
+        assert_eq!(load(json!("shadow")).jev.route, RouteMode::Shadow);
+        assert_eq!(load(json!("On")).jev.route, RouteMode::On);
+        for unknown in [
+            json!("always"),
+            json!(true),
+            json!(null),
+            json!({"mode": "on"}),
+        ] {
+            let cfg = load(unknown);
+            assert_eq!(cfg.jev.route, RouteMode::Off);
+            assert_eq!(cfg.api_key, "sk-kept");
+        }
+        // And what is written is what `parse` reads back.
+        assert_eq!(
+            serde_json::to_value(RouteMode::Shadow).unwrap(),
+            json!("shadow")
+        );
     }
 
     #[test]

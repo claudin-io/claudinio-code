@@ -5,13 +5,26 @@ import type { JevStatus, SessionMode } from "./ipc";
  *  which decides once, on the first prompt (see `agent::route` in the backend). */
 export type ModeChoice = SessionMode | "auto";
 
-/** Auto is offered only where it can mean something: the router is switched
- *  on, Jev is enabled, and the session has not had its first prompt yet. Past
- *  that point the session is in a real mode and the control shows it. */
-export function autoAvailable(jev: JevStatus | undefined, sessionIsFresh: boolean): boolean {
-  return sessionIsFresh && jev?.enabled !== false && jev?.route === "on";
+/** Whether there is a router to hand the choice to: it is switched on, and Jev
+ *  — which it asks — is enabled. */
+export function routerOn(jev: JevStatus | undefined): boolean {
+  return jev?.enabled !== false && jev?.route === "on";
 }
 
-export function modeToSend(mode: SessionMode, auto: boolean): ModeChoice {
-  return auto ? "auto" : mode;
+/** Auto is offered only where it can mean something: there is a router, and
+ *  the session has not had its first prompt yet. Past that point the session
+ *  is in a real mode and the control shows it. */
+export function autoAvailable(jev: JevStatus | undefined, sessionIsFresh: boolean): boolean {
+  return sessionIsFresh && routerOn(jev);
+}
+
+/**
+ * What goes out with a prompt. `armed` is whether Auto was left on for this
+ * conversation — and deliberately not whether the conversation still looks
+ * fresh: sending a prompt adds it to the conversation first, so by the time
+ * the request is built nothing looks fresh any more. Asking that question at
+ * send time is how Auto once sent "builder" for every session it was on for.
+ */
+export function modeToSend(mode: SessionMode, armed: boolean, jev: JevStatus | undefined): ModeChoice {
+  return armed && routerOn(jev) ? "auto" : mode;
 }

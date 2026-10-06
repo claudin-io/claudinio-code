@@ -544,7 +544,12 @@ impl SessionStore {
             .append(true)
             .open(&self.path)
             .map_err(|e| format!("open session file: {e}"))?;
-        writeln!(file, "{line}").map_err(|e| format!("write session file: {e}"))?;
+        // One write, newline included. `writeln!` issues the line and its
+        // newline as two, and this file has more than one writer — parallel
+        // subagents record their runs, a background verdict records itself —
+        // so two records could land on one line and both be lost on reload.
+        file.write_all(format!("{line}\n").as_bytes())
+            .map_err(|e| format!("write session file: {e}"))?;
         Ok(())
     }
 
@@ -892,12 +897,20 @@ pub fn last_mode(records: &[SessionRecord]) -> Option<(String, String)> {
     })
 }
 
-/// The context size recorded by the most recent Status record, if any.
+/// The context size recorded by the most recent Status record, if it still
+/// describes the conversation: a prune or a compaction written after it made
+/// the history smaller, and the number is then the size of something that no
+/// longer exists. A run that compared it against its limits refused to send a
+/// context it had just successfully shrunk.
 pub fn last_context_tokens(records: &[SessionRecord]) -> Option<u64> {
-    records.iter().rev().find_map(|r| match r {
-        SessionRecord::Status { context_tokens, .. } => *context_tokens,
-        _ => None,
-    })
+    for r in records.iter().rev() {
+        match r {
+            SessionRecord::Status { context_tokens, .. } => return *context_tokens,
+            SessionRecord::Pruned { .. } | SessionRecord::Compacted { .. } => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Compute cumulative token/cost stats from Status records.
@@ -1809,6 +1822,38 @@ mod tests {
         ];
         assert_eq!(last_context_tokens(&recs), Some(1500));
         assert_eq!(last_context_tokens(&[]), None);
+
+        // A history rewrite after the last Status makes its number the size
+        // of a conversation that no longer exists.
+        let mut pruned = recs.clone();
+        pruned.push(SessionRecord::Pruned {
+            drop_calls: vec![],
+            truncate_results: vec!["t1".into()],
+            head_chars: 300,
+            stats: None,
+            ts: 3,
+        });
+        assert_eq!(last_context_tokens(&pruned), None);
+        let mut compacted = recs.clone();
+        compacted.push(SessionRecord::Compacted {
+            summary: "…".into(),
+            tail_turns: 0,
+            ts: 3,
+        });
+        assert_eq!(last_context_tokens(&compacted), None);
+        // …until the next Status measures the new one.
+        compacted.push(SessionRecord::Status {
+            session_id: "s1".into(),
+            total_input_tokens: 30,
+            total_output_tokens: 12,
+            total_cost: None,
+            total_cost_input: None,
+            total_cost_output: None,
+            total_cost_cache_read: None,
+            context_tokens: Some(700),
+            ts: 4,
+        });
+        assert_eq!(last_context_tokens(&compacted), Some(700));
     }
 
     fn user_turn(text: &str, ts: u64) -> SessionRecord {

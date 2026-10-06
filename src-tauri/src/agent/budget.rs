@@ -25,7 +25,7 @@
 
 use crate::agent::provider::AgentConfig;
 use crate::agent::session::{COMPACT_THRESHOLD, MAX_CONTEXT_TOKENS};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// History cap for one tool result when the window is not the constraint.
 pub const TOOL_RESULT_CHARS: usize = 24_000;
@@ -39,15 +39,42 @@ pub const TAIL_TOKENS: u64 = 20_000;
 const SOFT_PERCENT: u64 = 60;
 /// Share at which a scaled run falls back to the summarizing compaction.
 const HARD_PERCENT: u64 = 85;
-/// Assumed reply size when nothing pins one, and never more than a quarter of
-/// the window: a model whose catalog entry says "64k output, 64k context" still
-/// has to be sent a prompt.
-const DEFAULT_REPLY_RESERVE: u64 = 8_192;
+/// The most output any request asks for, and what one asks for when the
+/// model's entry pins nothing: large tasks (thinking plus a whole-file edit in
+/// one tool call) blow past 8k, and a truncated stream ends the turn with the
+/// work half done.
+pub const MAX_REPLY_TOKENS: u64 = 32_000;
+/// The least a reply is given, whatever the window.
+const MIN_REPLY_TOKENS: u64 = 256;
+
+/// How many tokens a request to a `window`-sized model asks it to write —
+/// and so how many the prompt may not use.
+///
+/// One function because the two must be the same number. A server that checks
+/// `prompt + max_tokens <= context` (vLLM and most local runtimes do) rejects
+/// a request that asks for 32k of reply on a 32k window before reading a word
+/// of the prompt, whatever a budget that reserved 8k for it had concluded.
+///
+/// Never more than a quarter of the window: a model whose catalog entry says
+/// "64k output, 64k context" still has to be sent a prompt.
+pub fn reply_tokens(window: u64, limit: Option<u64>) -> u64 {
+    limit
+        .filter(|l| *l > 0)
+        .unwrap_or(MAX_REPLY_TOKENS)
+        .min(MAX_REPLY_TOKENS)
+        .min(window / 4)
+        .max(MIN_REPLY_TOKENS)
+}
 /// The gap kept between the handoff line and the compaction behind it, so the
 /// fallback is not the same request as the thing it falls back from.
 const HARD_GAP: u64 = 10_000;
 /// One tool result may take at most this share of a scaled conversation space.
 const RESULT_PERCENT: u64 = 25;
+/// All the results of one round together may take at most this share. A cap
+/// per result alone is no cap at all on a model that reads four files in one
+/// turn: the round just read is never cut, so a round larger than the window
+/// leaves nothing to do but stop.
+const ROUND_PERCENT: u64 = 50;
 /// Below this a result stops being useful at all; the model would only see
 /// truncation notes.
 const MIN_TOOL_RESULT_CHARS: usize = 2_000;
@@ -89,6 +116,9 @@ pub struct ContextBudget {
     pub ceiling: u64,
     /// History cap for one tool result.
     pub tool_result_chars: usize,
+    /// History cap for the results of one round together. Unbounded where the
+    /// window is not the constraint.
+    pub round_chars: usize,
     /// What a trimmed command output may occupy.
     pub trim_chars: usize,
     /// Verbatim tail kept across a summarizing compaction.
@@ -103,10 +133,11 @@ pub struct ContextBudget {
 }
 
 impl ContextBudget {
-    /// `slider` is the user's handoff preference; `reply_reserve` the most
-    /// output a request will ask for, when known; `prefix_tokens` the fixed
-    /// part of every request.
-    pub fn new(window: u64, slider: u64, reply_reserve: Option<u64>, prefix_tokens: u64) -> Self {
+    /// `slider` is the user's handoff preference; `output_limit` the most
+    /// output the model's entry allows, when known ([`reply_tokens`] turns it
+    /// into what a request asks for); `prefix_tokens` the fixed part of every
+    /// request.
+    pub fn new(window: u64, slider: u64, output_limit: Option<u64>, prefix_tokens: u64) -> Self {
         if window >= MAX_CONTEXT_TOKENS {
             // The slider goes to 256k but nothing above the ceiling is ever
             // sent, so an unclamped value put the handoff — and the
@@ -121,15 +152,13 @@ impl ContextBudget {
                 hard: COMPACT_THRESHOLD.max(soft + HARD_GAP),
                 ceiling: MAX_CONTEXT_TOKENS,
                 tool_result_chars: TOOL_RESULT_CHARS,
+                round_chars: usize::MAX,
                 trim_chars: TRIM_CHARS,
                 tail_tokens: TAIL_TOKENS,
                 prune_floor: 0,
             };
         }
-        let reserve = reply_reserve
-            .unwrap_or(DEFAULT_REPLY_RESERVE)
-            .min(window / 4);
-        let usable = window - reserve;
+        let usable = window.saturating_sub(reply_tokens(window, output_limit));
         if usable >= slider {
             return Self {
                 window,
@@ -138,6 +167,7 @@ impl ContextBudget {
                 hard: (slider + HARD_GAP).min(usable),
                 ceiling: usable,
                 tool_result_chars: TOOL_RESULT_CHARS,
+                round_chars: usize::MAX,
                 trim_chars: TRIM_CHARS,
                 tail_tokens: TAIL_TOKENS,
                 prune_floor: 0,
@@ -159,6 +189,10 @@ impl ContextBudget {
             hard: floor + space * HARD_PERCENT / 100,
             ceiling: usable,
             tool_result_chars: result_chars,
+            // Never less than one full result: a round of one is not cut twice.
+            round_chars: usize::try_from(space * CHARS_PER_TOKEN * ROUND_PERCENT / 100)
+                .unwrap_or(usize::MAX)
+                .max(result_chars),
             trim_chars: result_chars * TRIM_CHARS / TOOL_RESULT_CHARS,
             tail_tokens: TAIL_TOKENS.min(space * TAIL_PERCENT / 100),
             prune_floor: floor,
@@ -201,15 +235,18 @@ impl ContextBudget {
     }
 }
 
-/// The per-run caps a tool needs while it runs, shared through `ToolContext`.
+/// What a tool needs to know about the run it is called from, shared through
+/// `ToolContext`: the caps on what it returns, and whether this session is one
+/// that writes files itself.
 ///
 /// Atomics rather than plain fields because the context is built before the
 /// run knows its model, and a mode switch mid-run changes the model — and with
-/// it the caps — without rebuilding the context.
+/// it all of these — without rebuilding the context.
 #[derive(Debug)]
 pub struct RunLimits {
     tool_result_chars: AtomicUsize,
     trim_chars: AtomicUsize,
+    writes_files: AtomicBool,
 }
 
 impl Default for RunLimits {
@@ -217,6 +254,7 @@ impl Default for RunLimits {
         Self {
             tool_result_chars: AtomicUsize::new(TOOL_RESULT_CHARS),
             trim_chars: AtomicUsize::new(TRIM_CHARS),
+            writes_files: AtomicBool::new(false),
         }
     }
 }
@@ -238,6 +276,19 @@ impl RunLimits {
         self.tool_result_chars.load(Ordering::Relaxed)
     }
 
+    /// Set for the Compact profile, whose session edits files itself instead
+    /// of delegating: there a shell command that writes a file is an edit, and
+    /// is asked about like one (`writes_files`).
+    pub fn set_writes_files(&self, yes: bool) {
+        self.writes_files.store(yes, Ordering::Relaxed);
+    }
+
+    /// True when a file-writing shell command reaches the tool at all. Where
+    /// it is false such a command was refused before it got here.
+    pub fn writes_files(&self) -> bool {
+        self.writes_files.load(Ordering::Relaxed)
+    }
+
     pub fn trim_chars(&self) -> usize {
         self.trim_chars.load(Ordering::Relaxed)
     }
@@ -257,6 +308,7 @@ mod tests {
             assert_eq!((b.soft, b.hard, b.ceiling), (120_000, 150_000, 200_000));
             assert_eq!(b.window, 200_000);
             assert_eq!(b.tool_result_chars, 24_000);
+            assert_eq!(b.round_chars, usize::MAX, "a round is not capped");
             assert_eq!(b.trim_chars, 20_000);
             assert_eq!(b.tail_tokens, 20_000);
             assert_eq!(b.prune_floor, 0);
@@ -322,6 +374,8 @@ mod tests {
         assert!(b.soft < b.hard && b.hard < b.ceiling);
         // A quarter of the space, in chars: 20k tokens * 3 * 25%.
         assert_eq!(b.tool_result_chars, 15_000);
+        // And half of it for everything one round returns.
+        assert_eq!(b.round_chars, 30_000);
         assert_eq!(b.trim_chars, 12_500);
         assert_eq!(b.tail_tokens, 6_000);
         // Prunes are judged by the room they leave above the prefix.
@@ -346,9 +400,33 @@ mod tests {
         // A catalog entry claiming a 64k output on a 64k window.
         let b = ContextBudget::new(64_000, 120_000, Some(64_000), 0);
         assert_eq!(b.ceiling, 48_000);
-        // Unknown output limit: the default reserve.
+        // Unknown output limit: what a request asks for by default, under the
+        // same quarter.
         let b = ContextBudget::new(64_000, 120_000, None, 0);
-        assert_eq!(b.ceiling, 64_000 - 8_192);
+        assert_eq!(b.ceiling, 48_000);
+        let b = ContextBudget::new(160_000, 120_000, None, 0);
+        assert_eq!(b.ceiling, 160_000 - 32_000);
+    }
+
+    // What the budget reserves is what the request asks for. Before the two
+    // were one number, a custom 32k endpoint was sent `max_tokens: 32000`.
+    #[test]
+    fn the_reply_is_one_number_for_the_budget_and_for_the_request() {
+        assert_eq!(reply_tokens(32_768, None), 8_192);
+        assert_eq!(reply_tokens(32_768, Some(4_096)), 4_096);
+        assert_eq!(reply_tokens(131_072, None), 32_000);
+        assert_eq!(reply_tokens(131_072, Some(64_000)), 32_000);
+        assert_eq!(reply_tokens(1_000_000, None), 32_000);
+        // An entry that says zero says nothing.
+        assert_eq!(reply_tokens(32_768, Some(0)), 8_192);
+        // A window too small to matter still asks for something, and the
+        // budget does not underflow on it.
+        assert_eq!(reply_tokens(512, None), 256);
+        assert_eq!(ContextBudget::new(100, 120_000, None, 0).ceiling, 0);
+        for window in [4_096, 8_192, 32_768, 65_536, 128_192] {
+            let b = ContextBudget::new(window, 120_000, None, 0);
+            assert_eq!(b.ceiling + reply_tokens(window, None), window);
+        }
     }
 
     #[test]
@@ -362,6 +440,7 @@ mod tests {
         assert!(msg.contains("too small"), "{msg}");
         // A result cap that is still a usable size, not zero.
         assert_eq!(b.tool_result_chars, 2_000);
+        assert_eq!(b.round_chars, 2_000);
 
         // The ordinary refusal names the real window, not a hardcoded 200k.
         let full = ContextBudget::new(200_000, 120_000, None, 30_000);

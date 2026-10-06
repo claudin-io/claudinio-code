@@ -27,7 +27,6 @@ import {
   enhancePrompt,
   getTasks,
   type EnhancePromptContext,
-  type JevStatus,
   type ModeOrigin,
   type SessionMode,
   type ThinkingEffort,
@@ -52,7 +51,8 @@ import {
   type SessionRecord,
   type UserAnswer,
 } from "../lib/ipc";
-import { autoAvailable, modeToSend } from "../lib/modeChoice";
+import { createAutoMode } from "../lib/autoMode";
+import type { ModeChoice } from "../lib/modeChoice";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
 import { renderMarkdown, renderLiveMarkdown } from "../lib/markdown";
@@ -267,32 +267,23 @@ export const ChatPanel: Component<{
   const [mode, setMode] = createSignal<SessionMode>("builder");
   const [modeOrigin, setModeOrigin] = createSignal<ModeOrigin>("human");
   // Auto: the choice of starting phase is left to the harness. Only a state of
-  // the control before a session's first prompt — never a mode a session is in.
-  const [jevStatus, setJevStatus] = createSignal<JevStatus | undefined>(undefined);
-  const [autoMode, setAutoMode] = createSignal(false);
-  const sessionIsFresh = () => messages().length === 0 && activeSessionId() === null;
-  const autoOffered = () => autoAvailable(jevStatus(), sessionIsFresh());
-  // Auto only counts while it is on offer: opening an old session must not
-  // leave the control showing no mode at all, or send "auto" for it.
-  const autoActive = () => autoMode() && autoOffered();
-  // A new conversation starts on Auto when the router is on. The config is
-  // re-read each time so a change in Settings applies to the next session.
-  const armAutoMode = () => {
-    getConfig()
-      .then((cfg) => {
-        setJevStatus(cfg.jev);
-        setAutoMode(autoAvailable(cfg.jev, sessionIsFresh()));
-      })
-      .catch(() => setAutoMode(false));
-  };
+  // the control before a session's first prompt — never a mode a session is in
+  // (`lib/autoMode`).
+  const auto = createAutoMode({
+    mode,
+    sessionIsFresh: () => messages().length === 0 && activeSessionId() === null,
+    loadJev: async () => (await getConfig()).jev,
+  });
   const [hasPlanBeenWritten, setHasPlanBeenWritten] = createSignal(false);
 
   // Human toggle: persists a Mode record in the session JSONL immediately so
   // the mode survives reloads; a running workflow picks it up next round.
   const switchMode = async (m: SessionMode) => {
     // Picking a mode by hand takes the choice back from the harness, even
-    // when it is the mode the session is already in.
-    setAutoMode(false);
+    // when it is the mode the session is already in — and from a message
+    // waiting behind the sign-in card, which is then sent in this mode.
+    auto.disarm();
+    setPendingChoice(null);
     if (m === mode()) return;
     setHasPlanBeenWritten(false);
     setMode(m);
@@ -612,10 +603,9 @@ export const ChatPanel: Component<{
       .then((cfg) => {
         if (cfg.maxContextTokens) setMaxContextTokens(cfg.maxContextTokens);
         if (cfg.compactThreshold) setCompactThreshold(cfg.compactThreshold);
-        setJevStatus(cfg.jev);
-        setAutoMode(autoAvailable(cfg.jev, sessionIsFresh()));
       })
       .catch(() => {});
+    void auto.arm();
 
     // Listen for native file drop events via Tauri window API. Every mounted
     // panel receives these, so only the visible one may react.
@@ -696,6 +686,9 @@ export const ChatPanel: Component<{
   let historyButtonRef: HTMLButtonElement | undefined;
   let plansButtonRef: HTMLButtonElement | undefined;
   const [pendingMessage, setPendingMessage] = createSignal<string | null>(null);
+  // The mode choice that message was sent with, so signing in sends it again
+  // as it was — Auto included, which by then is spent.
+  const [pendingChoice, setPendingChoice] = createSignal<ModeChoice | null>(null);
   const [authSigningIn, setAuthSigningIn] = createSignal(false);
 
   // Smart scroll: only auto-follow new content while the user is at the
@@ -1260,8 +1253,8 @@ export const ChatPanel: Component<{
         setStatus("thinking");
         scrollToBottom(true);
         try {
-          const choice = modeToSend(mode(), autoActive());
-          setAutoMode(false);
+          const choice = pendingChoice() ?? mode();
+          setPendingChoice(null);
           const result = await sendMessage(
             props.workspace,
             pending,
@@ -1395,6 +1388,9 @@ export const ChatPanel: Component<{
     // isn't lost or double-rendered once the new run's events start.
     flushPendingDone();
 
+    // Auto is for one prompt: whatever the harness picks, the session is in a
+    // real mode from here on and the control shows that.
+    const choice = auto.take();
     setMessages((prev) => [
       ...prev,
       {
@@ -1415,10 +1411,6 @@ export const ChatPanel: Component<{
 
     try {
       const atts = attachments();
-      const choice = modeToSend(mode(), autoActive());
-      // Auto is for one prompt: whatever the harness picks, the session is in
-      // a real mode from here on and the control shows that.
-      setAutoMode(false);
       const result = await sendMessage(
         props.workspace,
         text,
@@ -1431,6 +1423,7 @@ export const ChatPanel: Component<{
     } catch (e) {
       if (String(e).includes("API key not configured")) {
         setPendingMessage(text);
+        setPendingChoice(choice);
         setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
         setStatus("idle");
       } else {
@@ -1494,7 +1487,7 @@ export const ChatPanel: Component<{
     setMode("builder");
     setStatus("idle");
     setShowSessions(false);
-    armAutoMode();
+    void auto.arm();
   };
 
   const handleConfirmNew = async () => {
@@ -1514,7 +1507,7 @@ export const ChatPanel: Component<{
     setMode("builder");
     setStatus("idle");
     setShowSessions(false);
-    armAutoMode();
+    void auto.arm();
   };
 
   const toggleSessions = async () => {
@@ -1577,6 +1570,8 @@ export const ChatPanel: Component<{
         setMode("builder");
       }
       setActiveSessionId(id);
+      // A session with a past is in the mode it was left in, not on Auto.
+      auto.disarm();
       setCurrentSteps([]);
       setThinkingStart(0);
       setStatus("idle");
@@ -2250,13 +2245,13 @@ export const ChatPanel: Component<{
                   <Icon name="notebook-pen" class="h-4 w-4" stroke />
                 </button>
                 <div class="flex shrink-0 items-center rounded-md border border-border-subtle bg-surface-0 p-0.5">
-                  <Show when={autoOffered()}>
+                  <Show when={auto.offered()}>
                     <button
                       data-mode-choice="auto"
-                      aria-pressed={autoActive()}
-                      onClick={() => setAutoMode(true)}
+                      aria-pressed={auto.active()}
+                      onClick={() => auto.select()}
                       class={`flex h-7 items-center justify-center rounded px-2 text-[11px] font-medium ${
-                        autoActive()
+                        auto.active()
                           ? "bg-accent/15 text-accent"
                           : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
                       }`}
@@ -2268,7 +2263,7 @@ export const ChatPanel: Component<{
                   <button
                     onClick={() => switchMode("brain")}
                     class={`flex h-7 w-7 items-center justify-center rounded ${
-                      mode() === "brain" && !autoActive()
+                      mode() === "brain" && !auto.active()
                         ? "bg-accent/15 text-accent"
                         : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
                     }`}
@@ -2279,7 +2274,7 @@ export const ChatPanel: Component<{
                   <button
                     onClick={() => switchMode("builder")}
                     class={`flex h-7 w-7 items-center justify-center rounded ${
-                      mode() === "builder" && !autoActive()
+                      mode() === "builder" && !auto.active()
                         ? "bg-accent/15 text-accent"
                         : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
                     }`}

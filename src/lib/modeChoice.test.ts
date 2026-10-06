@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { autoAvailable, modeToSend } from "./modeChoice";
+import { autoAvailable, modeToSend, routerOn } from "./modeChoice";
 import type { JevStatus } from "./ipc";
 
 const jev = (over: Partial<JevStatus>): JevStatus => ({
@@ -34,12 +34,19 @@ describe("autoAvailable", () => {
 
 describe("modeToSend", () => {
   it("sends auto instead of the mode when the choice was left to the harness", () => {
-    expect(modeToSend("builder", true)).toBe("auto");
-    expect(modeToSend("brain", true)).toBe("auto");
+    expect(modeToSend("builder", true, jev({}))).toBe("auto");
+    expect(modeToSend("brain", true, jev({}))).toBe("auto");
   });
 
   it("sends the mode the user picked otherwise", () => {
-    expect(modeToSend("brain", false)).toBe("brain");
-    expect(modeToSend("builder", false)).toBe("builder");
+    expect(modeToSend("brain", false, jev({}))).toBe("brain");
+    expect(modeToSend("builder", false, jev({}))).toBe("builder");
+  });
+
+  it("sends the mode when there is no router to leave the choice to", () => {
+    expect(modeToSend("builder", true, jev({ route: "shadow" }))).toBe("builder");
+    expect(modeToSend("brain", true, jev({ enabled: false }))).toBe("brain");
+    expect(modeToSend("builder", true, undefined)).toBe("builder");
+    expect(routerOn(jev({}))).toBe(true);
   });
 });

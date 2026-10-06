@@ -76,6 +76,43 @@ describe("parseLineList", () => {
     );
   });
 
+  it("keeps a match on an empty line, at the end of the output or not", () => {
+    const out = "2 matches in 1 file\n\n/ws/a.txt\n3: \n10: ";
+    expect(parseLineList("grep", out)).toEqual([
+      { title: "/ws/a.txt:3", sub: "" },
+      { title: "/ws/a.txt:10", sub: "" },
+    ]);
+    expect(parseLineList("grep", "1 match in 1 file\n\n/ws/a.txt\n10:")).toEqual([{ title: "/ws/a.txt:10", sub: "" }]);
+  });
+
+  it("lists a file that happens to be called (empty)", () => {
+    expect(parseLineList("list_dir", "/ws/odd/\n(empty)\nnotes.md")).toEqual([
+      { title: "(empty)" },
+      { title: "notes.md" },
+    ]);
+  });
+
+  it("leaves a signature that ends in brackets alone outside semantic search", () => {
+    expect(parseLineList("code_search", "/ws/a.md:4 doc_section Notes [draft 2]")).toEqual([
+      { title: "Notes [draft 2]", badge: "doc_section", sub: "/ws/a.md:4" },
+    ]);
+    expect(parseLineList("semantic_search", "mode: hybrid\n/ws/a.md:4 doc_section Notes [draft 2] [lexical 0.50]")).toEqual([
+      { title: "Notes [draft 2]", badge: "doc_section", sub: "/ws/a.md:4" },
+    ]);
+  });
+
+  it("skips a snippet fenced with more tildes than it contains", () => {
+    const out = ["mode: hybrid", "/ws/a.md:1-9 doc_section Fences [hybrid 0.90]", "~~~~~", "~~~~", "/ws/x.rs:1 function fn fake()", "~~~~", "~~~~~", "/ws/b.rs:2 function fn real() [lexical 0.40]"].join("\n");
+    expect(parseLineList("semantic_search", out)).toEqual([
+      { title: "Fences", badge: "doc_section", sub: "/ws/a.md:1-9" },
+      { title: "fn real()", badge: "function", sub: "/ws/b.rs:2" },
+    ]);
+  });
+
+  it("shows a failed listing as its error, not as an empty directory", () => {
+    expect(parseLineList("list_dir", "Error: not a directory: /ws/missing/")).toBeNull();
+  });
+
   it("drops the row a live result was cut in the middle of", () => {
     const out = "/ws/src/\nagent/\nmain.rs\nlib...(truncated, 5231 chars total)";
     expect(parseLineList("list_dir", out)).toEqual([{ title: "agent", isDir: true }, { title: "main.rs" }]);
