@@ -263,6 +263,7 @@ pub fn rebuild_tool_context(
         workspace_root: old_ctx.workspace_root.clone(),
         embedding_model: old_ctx.embedding_model.clone(),
         session_store_path: Some(new_store_path.to_string_lossy().to_string()),
+        limits: Default::default(),
         read_tracker: Arc::new(Mutex::new(crate::agent::tools::ReadTracker::default())),
         browser: None,
         interrupt: old_ctx.interrupt.clone(),

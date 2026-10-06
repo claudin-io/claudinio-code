@@ -139,6 +139,8 @@ export interface ConnectedProviderInfo {
   custom?: boolean;
   /** A custom provider's saved model ids (unqualified). */
   models?: string[];
+  /** A custom provider's context window in tokens, when the user set one. */
+  contextWindow?: number | null;
   hasApiKey?: boolean;
 }
 
@@ -529,7 +531,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust" | "run_config" | "subagent_run";
   [key: string]: unknown;
 };
 
@@ -1206,6 +1208,9 @@ export interface CustomProviderInput {
   apiKey?: string | null;
   /** Unqualified model ids; empty = take whatever the endpoint lists. */
   models: string[];
+  /** Context window in tokens for this provider's models; null = whatever the
+   *  endpoint reports, or the app's default. */
+  contextWindow?: number | null;
 }
 
 /** Create or update a custom provider; resolves with its id and model list. */

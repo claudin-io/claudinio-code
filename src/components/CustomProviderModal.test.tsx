@@ -19,7 +19,7 @@ vi.mock("./Icon", () => ({
   ),
 }));
 
-import { CustomProviderModal, parseModelList, requestUrlPreview } from "./CustomProviderModal";
+import { CustomProviderModal, parseContextWindow, parseModelList, requestUrlPreview } from "./CustomProviderModal";
 
 function flush() {
   return new Promise((r) => setTimeout(r, 10));
@@ -43,6 +43,22 @@ describe("parseModelList", () => {
       "qwen3",
     ]);
     expect(parseModelList("  \n ")).toEqual([]);
+  });
+});
+
+describe("parseContextWindow", () => {
+  it("reads plain token counts and the k shorthand", () => {
+    expect(parseContextWindow("32768")).toBe(32768);
+    expect(parseContextWindow(" 128k ")).toBe(128000);
+    expect(parseContextWindow("32 K")).toBe(32000);
+    expect(parseContextWindow("65,536")).toBe(65536);
+  });
+
+  it("is null for blank, zero and anything that is not a number", () => {
+    expect(parseContextWindow("")).toBeNull();
+    expect(parseContextWindow("0")).toBeNull();
+    expect(parseContextWindow("big")).toBeNull();
+    expect(parseContextWindow("-4096")).toBeNull();
   });
 });
 
@@ -136,6 +152,7 @@ describe("CustomProviderModal", () => {
       protocol: "openai",
       apiKey: "sk-test",
       models: ["gpt-4o", "claude-sonnet"],
+      contextWindow: null,
     });
     expect(onChanged).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
@@ -232,7 +249,27 @@ describe("CustomProviderModal", () => {
       protocol: "anthropic",
       apiKey: null,
       models: ["claude-sonnet"],
+      contextWindow: null,
     });
+  });
+
+  it("sends a typed context window, and reopens with the saved one", async () => {
+    __test.mockSaveCustomProvider.mockResolvedValue({ providerId: "ollama", models: ["qwen3"] });
+    mount();
+    type(field("name"), "Ollama");
+    type(field("base-url"), "http://localhost:11434/v1");
+    type(field("context-window"), "32k");
+    await flush();
+    button("Add provider").click();
+    await flush();
+    expect(__test.mockSaveCustomProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ contextWindow: 32000 }),
+    );
+    dispose?.();
+    container.remove();
+
+    mount("litellm", { litellm: { ...LITELLM, contextWindow: 16384 } });
+    expect(field("context-window").value).toBe("16384");
   });
 
   it("fetching while editing passes the id so the saved key is reused", async () => {

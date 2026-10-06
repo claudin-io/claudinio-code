@@ -28,6 +28,24 @@ pub struct AttachmentMeta {
     pub size: u64,
 }
 
+/// The fixed part of every request — everything sent before any conversation
+/// — itemized, in tokens by the same chars/3 rule as the context meter.
+///
+/// Kept on the run rather than recomputed from the JSONL because none of it is
+/// in the JSONL: the system prompt, the skills index and the tool schemas are
+/// rebuilt on every run and never persisted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixBreakdown {
+    /// The built-in system prompt and mode block.
+    pub system: u64,
+    pub skills: u64,
+    pub specs: u64,
+    /// Built-in tool schemas.
+    pub tools: u64,
+    /// MCP tool schemas.
+    pub mcp: u64,
+}
+
 /// One line of a session JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -68,6 +86,12 @@ pub enum SessionRecord {
     Done {
         input_tokens: u32,
         output_tokens: u32,
+        /// Input tokens the provider served from its prefix cache during the
+        /// run. Separate from `input_tokens`, which a caching provider reports
+        /// as cache misses only — so without this the share of a run that was
+        /// cached cannot be read back. Absent in older sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u32>,
         ts: u64,
     },
     /// A run failed.
@@ -262,6 +286,38 @@ pub enum SessionRecord {
         status: String,
         hash: String,
         commands: Vec<String>,
+        ts: u64,
+    },
+    /// What a run started with: the model, the window the harness believes it
+    /// has, and the fixed prefix itemized. Written once per run, never read by
+    /// the app — it exists so "where does the context go" is answered from the
+    /// session file instead of estimated after the fact.
+    RunConfig {
+        model: String,
+        mode: String,
+        context_window: u64,
+        /// `full` | `sized` | `scaled` — see `agent::budget`.
+        regime: String,
+        /// The three lines the run was held to, in tokens.
+        soft: u64,
+        hard: u64,
+        ceiling: u64,
+        prefix: PrefixBreakdown,
+        ts: u64,
+    },
+    /// One subagent, finished. A subagent keeps no transcript of its own, so
+    /// this is the only trace of what it did: without it the tool usage of the
+    /// agents that do all the editing is invisible.
+    SubagentRun {
+        name: String,
+        mode: String,
+        status: String,
+        rounds: u32,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost: f64,
+        /// Tool name → number of calls.
+        tools: std::collections::BTreeMap<String, u32>,
         ts: u64,
     },
 }
@@ -1022,6 +1078,8 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Hook { ts, .. }
                 | SessionRecord::HookContext { ts, .. }
                 | SessionRecord::HookTrust { ts, .. }
+                | SessionRecord::RunConfig { ts, .. }
+                | SessionRecord::SubagentRun { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }

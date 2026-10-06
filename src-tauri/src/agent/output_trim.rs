@@ -198,14 +198,16 @@ fn save_full(text: &str) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
-/// Fit `text` (the output of `command`) into [`BUDGET_CHARS`]. Unchanged when
-/// it already fits. Returns the text and what Jev cost, in USD.
+/// Fit `text` (the output of `command`) into `budget` chars — [`BUDGET_CHARS`]
+/// unless the model's window calls for less (`ContextBudget::trim_chars`).
+/// Unchanged when it already fits. Returns the text and what Jev cost, in USD.
 pub async fn fit(
     command: &str,
     text: String,
     jev: Option<&crate::agent::jev::JevBackend>,
+    budget: usize,
 ) -> (String, f64) {
-    if text.len() <= BUDGET_CHARS {
+    if text.len() <= budget {
         return (text, 0.0);
     }
     let blocks = split_blocks(&text);
@@ -240,7 +242,7 @@ pub async fn fit(
         }
         _ => None,
     };
-    let kept = select(&blocks, scores.as_deref(), BUDGET_CHARS);
+    let kept = select(&blocks, scores.as_deref(), budget);
     let path = save_full(&text);
     (render(&blocks, &kept, text.len(), path.as_deref()), cost)
 }
@@ -348,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_that_fits_is_returned_untouched() {
-        let (out, cost) = fit("ls", "a\nb\n".into(), None).await;
+        let (out, cost) = fit("ls", "a\nb\n".into(), None, BUDGET_CHARS).await;
         assert_eq!(out, "a\nb\n");
         assert_eq!(cost, 0.0);
     }
@@ -356,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn long_output_without_jev_keeps_the_verdict_and_saves_the_rest() {
         let text = cargo_log(3000);
-        let (out, cost) = fit("cargo test", text.clone(), None).await;
+        let (out, cost) = fit("cargo test", text.clone(), None, BUDGET_CHARS).await;
         assert!(out.len() < text.len());
         assert!(out.len() <= BUDGET_CHARS + 1_000);
         assert!(out.contains("test result: FAILED"));
@@ -374,5 +376,31 @@ mod tests {
             .expect("the full output path is named");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A small-window model gets a smaller budget, and the same output is cut
+    /// to it — still verdict-last, still with the full text on disk.
+    #[tokio::test]
+    async fn a_smaller_budget_trims_harder_and_keeps_the_verdict() {
+        let text = cargo_log(3000);
+        let (wide, _) = fit("cargo test", text.clone(), None, BUDGET_CHARS).await;
+        let (narrow, _) = fit("cargo test", text.clone(), None, 8_000).await;
+        assert!(narrow.len() < wide.len());
+        assert!(narrow.len() <= 8_000 + 1_000);
+        assert!(narrow.contains("test result: FAILED"));
+        // Output that fits the default but not the smaller budget is trimmed
+        // only under the smaller one.
+        let medium = cargo_log(300);
+        assert!(medium.len() > 8_000 && medium.len() <= BUDGET_CHARS);
+        let (same, _) = fit("cargo test", medium.clone(), None, BUDGET_CHARS).await;
+        assert_eq!(same, medium);
+        let (cut, _) = fit("cargo test", medium.clone(), None, 8_000).await;
+        assert!(cut.len() < medium.len());
+        for l in wide.lines().chain(narrow.lines()).chain(cut.lines()) {
+            if let Some(p) = l.split("saved to ").nth(1) {
+                let p = p.split_whitespace().next().unwrap();
+                let _ = std::fs::remove_file(p.trim_end_matches(['.', ';', ')']));
+            }
+        }
     }
 }

@@ -50,6 +50,15 @@ export function requestUrlPreview(baseUrl: string, protocol: ProviderProtocol): 
   return `${base}/chat/completions`;
 }
 
+/** A context window as typed: digits, optionally with a "k" ("32k", "128 K").
+ * Empty or anything else is null, which the backend reads as "not set". */
+export function parseContextWindow(text: string): number | null {
+  const m = /^(\d+(?:\.\d+)?)\s*(k)?$/i.exec(text.trim().replace(/[,_\s]/g, ""));
+  if (!m) return null;
+  const tokens = Math.round(Number(m[1]) * (m[2] ? 1000 : 1));
+  return tokens > 0 ? tokens : null;
+}
+
 const inputClass =
   "w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent";
 
@@ -68,6 +77,9 @@ export const CustomProviderModal: Component<CustomProviderModalProps> = (props) 
   const [baseUrl, setBaseUrl] = createSignal(existing?.baseUrl ?? "");
   const [apiKey, setApiKey] = createSignal("");
   const [modelsText, setModelsText] = createSignal((existing?.models ?? []).join("\n"));
+  const [contextText, setContextText] = createSignal(
+    existing?.contextWindow ? String(existing.contextWindow) : "",
+  );
   const [saving, setSaving] = createSignal(false);
   const [fetching, setFetching] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -111,6 +123,7 @@ export const CustomProviderModal: Component<CustomProviderModalProps> = (props) 
         protocol: protocol(),
         apiKey: apiKey().trim() || null,
         models: parseModelList(modelsText()),
+        contextWindow: parseContextWindow(contextText()),
       });
       await props.onChanged();
       props.onClose();
@@ -228,6 +241,20 @@ export const CustomProviderModal: Component<CustomProviderModalProps> = (props) 
           <Show when={fetchedCount() !== null}>
             <p class="mb-2 text-xs text-green-500">{`Found ${String(fetchedCount())} models.`}</p>
           </Show>
+
+          <label class="mb-1 mt-2 block text-xs text-ink-muted">{"Context window (optional)"}</label>
+          <input
+            type="text"
+            inputmode="numeric"
+            data-field="context-window"
+            value={contextText()}
+            onInput={(e) => setContextText(e.currentTarget.value)}
+            placeholder={"32768"}
+            class={`mb-1 ${inputClass}`}
+          />
+          <p class="mb-3 text-[11px] text-ink-faint">
+            {"Tokens the server accepts per request. A session hands off and compacts relative to it; left blank, it assumes 200k unless the server reports otherwise."}
+          </p>
           <Show when={error()}>
             <p class="mb-2 text-sm text-red-400">{error()}</p>
           </Show>

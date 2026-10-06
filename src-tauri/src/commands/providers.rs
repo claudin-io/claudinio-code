@@ -116,7 +116,7 @@ pub async fn openrouter_login(
     // Pricing/output-limit snapshots from the models.dev catalog are
     // best-effort — OpenRouter reports cost natively on each response, so a
     // missing catalog only loses the max_tokens clamp.
-    let (model_pricing, model_output_limits) = match catalog::fetch_catalog(false).await {
+    let snapshots = match catalog::fetch_catalog(false).await {
         Ok(cat) => catalog::find_provider(&cat, OPENROUTER_ID)
             .map(catalog::model_snapshots)
             .unwrap_or_default(),
@@ -133,10 +133,12 @@ pub async fn openrouter_login(
                 protocol: "openai".into(),
                 enabled_models: Vec::new(),
                 label: Some("OpenRouter".into()),
-                model_pricing,
-                model_output_limits,
+                model_pricing: snapshots.pricing,
+                model_output_limits: snapshots.output_limits,
                 custom: false,
                 custom_models: Vec::new(),
+                model_context_limits: snapshots.context_limits,
+                context_window: None,
             },
         );
         save_config(&cfg);
@@ -250,11 +252,12 @@ pub async fn connect_provider(
         .get("name")
         .and_then(|n| n.as_str())
         .map(String::from);
-    let (model_pricing, model_output_limits) = catalog::model_snapshots(provider);
-    let models: Vec<String> = model_pricing
+    let snapshots = catalog::model_snapshots(provider);
+    let models: Vec<String> = snapshots
+        .pricing
         .keys()
         .cloned()
-        .chain(model_output_limits.keys().cloned())
+        .chain(snapshots.output_limits.keys().cloned())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -303,10 +306,12 @@ pub async fn connect_provider(
                 protocol,
                 enabled_models: Vec::new(),
                 label,
-                model_pricing,
-                model_output_limits,
+                model_pricing: snapshots.pricing,
+                model_output_limits: snapshots.output_limits,
                 custom: false,
                 custom_models: Vec::new(),
+                model_context_limits: snapshots.context_limits,
+                context_window: None,
             },
         );
         save_config(&cfg);
@@ -335,6 +340,10 @@ pub struct CustomProviderInput {
     pub api_key: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
+    /// Context window in tokens, for every model of this provider. Left out,
+    /// the session uses what the endpoint reports, or its 200k default.
+    #[serde(default)]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -457,6 +466,50 @@ fn parse_models_response(body: &Value) -> Vec<String> {
     normalize_model_ids(ids)
 }
 
+/// Field names under which "compatible" servers report a model's context
+/// window in `/models`: OpenRouter and Together (`context_length`), Groq
+/// (`context_window`), Mistral and LM Studio (`max_context_length`), vLLM
+/// (`max_model_len`), LiteLLM (`max_input_tokens`).
+const CONTEXT_KEYS: [&str; 5] = [
+    "context_length",
+    "context_window",
+    "max_context_length",
+    "max_model_len",
+    "max_input_tokens",
+];
+
+/// Context windows out of a `/models` response, for the servers that report
+/// one. Most do not, and a model missing here simply stays unknown.
+fn parse_model_context_limits(body: &Value) -> std::collections::HashMap<String, u32> {
+    let items = body
+        .get("data")
+        .or_else(|| body.get("models"))
+        .unwrap_or(body);
+    let mut out = std::collections::HashMap::new();
+    for m in items.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let Some(id) = m.get("id").and_then(|i| i.as_str()).map(str::trim) else {
+            continue;
+        };
+        let window = CONTEXT_KEYS
+            .iter()
+            .find_map(|k| m.get(*k).and_then(|v| v.as_u64()))
+            .filter(|w| *w > 0);
+        if let Some(w) = window
+            && !id.is_empty()
+        {
+            out.insert(id.to_string(), u32::try_from(w).unwrap_or(u32::MAX));
+        }
+    }
+    out
+}
+
+/// What a custom endpoint said about itself.
+#[derive(Debug, Default, PartialEq)]
+struct ProbedModels {
+    ids: Vec<String>,
+    context_limits: std::collections::HashMap<String, u32>,
+}
+
 /// Ask a custom endpoint for its models. Short timeouts: this runs while the
 /// user watches a form, against hosts that are often a laptop's own loopback
 /// or a VPN address that is not there today.
@@ -464,7 +517,7 @@ async fn fetch_custom_models(
     base_url: &str,
     protocol: &str,
     api_key: &str,
-) -> Result<Vec<String>, ProbeError> {
+) -> Result<ProbedModels, ProbeError> {
     let url = models_url(base_url, protocol);
     let _net_guard = crate::net_activity::NetGuard::begin(
         crate::net_activity::NetSource::ListModels,
@@ -502,7 +555,10 @@ async fn fetch_custom_models(
         .json()
         .await
         .map_err(|e| ProbeError::Unavailable(format!("not a JSON model list: {e}")))?;
-    Ok(parse_models_response(&body))
+    Ok(ProbedModels {
+        ids: parse_models_response(&body),
+        context_limits: parse_model_context_limits(&body),
+    })
 }
 
 const AUTH_FAILED: &str = "Authentication failed — check your API key";
@@ -537,11 +593,11 @@ pub async fn probe_custom_provider(
         effective_api_key(api_key.as_deref(), saved)
     };
     match fetch_custom_models(&base_url, protocol, &key).await {
-        Ok(models) if models.is_empty() => Err(format!(
+        Ok(probed) if probed.ids.is_empty() => Err(format!(
             "{} returned no models",
             models_url(&base_url, protocol)
         )),
-        Ok(models) => Ok(models),
+        Ok(probed) => Ok(probed.ids),
         Err(ProbeError::Auth) => Err(AUTH_FAILED.into()),
         Err(ProbeError::Unavailable(why)) => Err(format!(
             "could not list models from {} ({why})",
@@ -584,7 +640,14 @@ pub async fn save_custom_provider(
     let api_key = effective_api_key(input.api_key.as_deref(), existing.as_ref());
 
     let typed = normalize_model_ids(input.models);
-    let models = match fetch_custom_models(&base_url, protocol, &api_key).await {
+    let probe = fetch_custom_models(&base_url, protocol, &api_key).await;
+    // Windows are kept only for the models that end up saved, whoever named
+    // them: a typed id the endpoint also lists still gets its reported window.
+    let mut probed_context = probe
+        .as_ref()
+        .map(|p| p.context_limits.clone())
+        .unwrap_or_default();
+    let models = match probe.map(|p| p.ids) {
         Err(ProbeError::Auth) => return Err(AUTH_FAILED.into()),
         _ if !typed.is_empty() => typed,
         Ok(found) if !found.is_empty() => found,
@@ -624,6 +687,7 @@ pub async fn save_custom_provider(
         .into_iter()
         .filter(|m| models.contains(m))
         .collect();
+    probed_context.retain(|id, _| models.contains(id));
     cfg.providers.insert(
         provider_id.clone(),
         ProviderEntry {
@@ -636,6 +700,10 @@ pub async fn save_custom_provider(
             model_output_limits: Default::default(),
             custom: true,
             custom_models: models.clone(),
+            model_context_limits: probed_context,
+            // The form always sends its current value, so a cleared field
+            // clears the saved one rather than silently keeping it.
+            context_window: input.context_window.filter(|w| *w > 0),
         },
     );
     save_config(&cfg);
@@ -926,6 +994,8 @@ mod tests {
             model_output_limits: Default::default(),
             custom: true,
             custom_models: vec![],
+            model_context_limits: Default::default(),
+            context_window: None,
         };
         assert_eq!(effective_api_key(Some(" sk-new "), Some(&saved)), "sk-new");
         assert_eq!(effective_api_key(Some("  "), Some(&saved)), "sk-saved");
@@ -935,11 +1005,17 @@ mod tests {
 
     #[tokio::test]
     async fn an_openai_endpoint_is_asked_with_a_bearer_key() {
-        let (url, stub) = spawn_stub(200, r#"{"data":[{"id":"gpt-4o"},{"id":"qwen3"}]}"#);
+        let (url, stub) = spawn_stub(
+            200,
+            r#"{"data":[{"id":"gpt-4o","context_length":128000},{"id":"qwen3"}]}"#,
+        );
         let models = fetch_custom_models(&stub_base(&url), "openai", "sk-test")
             .await
             .unwrap();
-        assert_eq!(models, vec!["gpt-4o", "qwen3"]);
+        assert_eq!(models.ids, vec!["gpt-4o", "qwen3"]);
+        // Only the model the endpoint described gets a window.
+        assert_eq!(models.context_limits.get("gpt-4o"), Some(&128_000));
+        assert!(!models.context_limits.contains_key("qwen3"));
         let request = stub.join().unwrap().to_ascii_lowercase();
         assert!(request.starts_with("get /v1/models "), "{request}");
         assert!(
@@ -954,7 +1030,7 @@ mod tests {
         let models = fetch_custom_models(&stub_base(&url), "openai", "")
             .await
             .unwrap();
-        assert_eq!(models, vec!["llama3"]);
+        assert_eq!(models.ids, vec!["llama3"]);
         let request = stub.join().unwrap().to_ascii_lowercase();
         assert!(!request.contains("authorization:"), "{request}");
     }
@@ -965,7 +1041,7 @@ mod tests {
         let models = fetch_custom_models(&stub_base(&url), "anthropic", "sk-ant")
             .await
             .unwrap();
-        assert_eq!(models, vec!["claude-sonnet-4-5"]);
+        assert_eq!(models.ids, vec!["claude-sonnet-4-5"]);
         let request = stub.join().unwrap().to_ascii_lowercase();
         assert!(request.starts_with("get /v1/models "), "{request}");
         assert!(request.contains("x-api-key: sk-ant"), "{request}");
@@ -1000,5 +1076,39 @@ mod tests {
         assert!(input.provider_id.is_none());
         assert_eq!(input.base_url, "http://localhost:4000/v1");
         assert_eq!(input.models, vec!["gpt-4o"]);
+        // A form from before the field existed still deserializes.
+        assert!(input.context_window.is_none());
+
+        let with_window: CustomProviderInput = serde_json::from_value(json!({
+            "name": "Ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "protocol": "openai",
+            "contextWindow": 32768,
+        }))
+        .unwrap();
+        assert_eq!(with_window.context_window, Some(32_768));
+    }
+
+    #[test]
+    fn context_windows_are_read_under_every_name_servers_use() {
+        let body = json!({"data": [
+            {"id": "a", "context_length": 128000},
+            {"id": "b", "context_window": 8192},
+            {"id": "c", "max_context_length": 32768},
+            {"id": "d", "max_model_len": 16384},
+            {"id": "e", "max_input_tokens": 200000},
+            {"id": "f"},
+            {"id": "g", "context_length": 0},
+        ]});
+        let got = parse_model_context_limits(&body);
+        assert_eq!(got.get("a"), Some(&128_000));
+        assert_eq!(got.get("b"), Some(&8_192));
+        assert_eq!(got.get("c"), Some(&32_768));
+        assert_eq!(got.get("d"), Some(&16_384));
+        assert_eq!(got.get("e"), Some(&200_000));
+        // Unreported and zero both mean "unknown", never "no window".
+        assert!(!got.contains_key("f"));
+        assert!(!got.contains_key("g"));
+        assert!(parse_model_context_limits(&json!(["plain", "ids"])).is_empty());
     }
 }

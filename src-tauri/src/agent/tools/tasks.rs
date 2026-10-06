@@ -312,6 +312,7 @@ mod lld_gate_tests {
             workspace_root: Some(root.to_string_lossy().to_string()),
             embedding_model: Arc::new(tokio::sync::Mutex::new(None)),
             session_store_path: Some(store.to_string_lossy().to_string()),
+            limits: Default::default(),
             read_tracker: Arc::new(tokio::sync::Mutex::new(
                 crate::agent::tools::ReadTracker::default(),
             )),

@@ -1,3 +1,4 @@
+use crate::agent::budget::ContextBudget;
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
@@ -106,16 +107,47 @@ pub(crate) fn estimate_tokens(history: &[Message], system: &str, tools: &[ToolDe
     total
 }
 
+/// Itemize the fixed prefix of a request by the same chars/3 rule as
+/// `estimate_tokens`, so the parts add up to what the context meter counts.
+/// `system` is the whole prompt; the skills and spec sections are carved out
+/// of it because they are the parts a workspace, not the app, decides.
+pub(crate) fn prefix_breakdown(
+    system: &str,
+    skills_section: Option<&str>,
+    spec_section: Option<&str>,
+    tools: &[ToolDescription],
+) -> crate::agent::persist::PrefixBreakdown {
+    // A profile that leaves a section out of its prompt (GitSync) must not be
+    // charged for it.
+    let chars =
+        |s: Option<&str>| s.filter(|s| system.contains(*s)).map(str::len).unwrap_or(0) as u64;
+    let skills = chars(skills_section);
+    let specs = chars(spec_section);
+    let schema_chars = |mcp: bool| -> u64 {
+        tools
+            .iter()
+            .filter(|t| t.name.starts_with("mcp__") == mcp)
+            .map(|t| serde_json::to_string(t).unwrap_or_default().len() as u64)
+            .sum()
+    };
+    crate::agent::persist::PrefixBreakdown {
+        system: (system.len() as u64).saturating_sub(skills + specs) / 3,
+        skills: skills / 3,
+        specs: specs / 3,
+        tools: schema_chars(false) / 3,
+        mcp: schema_chars(true) / 3,
+    }
+}
+
 /// How many recent user↔agent exchanges stay verbatim after a compaction.
 const TAIL_USER_TURNS: usize = 2;
-/// Budget for the kept tail; if the recent exchanges alone exceed this, the
-/// tail shrinks (down to zero) so compaction still frees the context.
-const TAIL_MAX_TOKENS: u64 = 20_000;
 
 /// Number of Turn records (counted back from the end) to keep verbatim when
 /// compacting: the last `TAIL_USER_TURNS` real user exchanges, bounded by
-/// `TAIL_MAX_TOKENS`. Only looks at records after the previous compaction.
-fn compute_tail_turns(records: &[SessionRecord]) -> usize {
+/// `tail_tokens` (`ContextBudget::tail_tokens`) — if the recent exchanges alone
+/// exceed it, the tail shrinks, down to zero, so compaction still frees the
+/// context. Only looks at records after the previous compaction.
+fn compute_tail_turns(records: &[SessionRecord], tail_tokens: u64) -> usize {
     let start = records
         .iter()
         .rposition(|r| matches!(r, SessionRecord::Compacted { .. }))
@@ -131,7 +163,7 @@ fn compute_tail_turns(records: &[SessionRecord]) -> usize {
         };
         turns += 1;
         tokens += estimate_message_tokens(message);
-        if tokens > TAIL_MAX_TOKENS {
+        if tokens > tail_tokens {
             break;
         }
         if crate::agent::persist::is_real_user_turn(rec) {
@@ -160,6 +192,7 @@ pub async fn compact_history(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
     trigger: crate::agent::hooks::CompactTrigger,
+    tail_tokens: u64,
 ) -> Result<String, String> {
     // ── Hooks: PreCompact ────────────────────────────────────────────────────
     //
@@ -178,7 +211,7 @@ pub async fn compact_history(
     let jsonl_path = store.path.to_string_lossy().to_string();
     let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
         .unwrap_or_default();
-    let tail_turns = compute_tail_turns(&records);
+    let tail_turns = compute_tail_turns(&records, tail_tokens);
 
     let summary = subagent::run_summary_agent(
         config,
@@ -1527,24 +1560,14 @@ async fn stream_message_with_retry(
     }
 }
 
-/// Compaction threshold adjusted so it never fires BEFORE the context-handoff
-/// threshold in Standard sessions: compaction is the fallback, not the first
-/// responder. GitSync (and any non-Standard profile) keeps the plain constant.
-fn effective_compact_threshold(config: &AgentConfig, profile: PromptProfile) -> u64 {
-    if profile == PromptProfile::Standard {
-        COMPACT_THRESHOLD.max(config.effective_handoff_threshold() + 10_000)
-    } else {
-        COMPACT_THRESHOLD
-    }
-}
-
 /// The context size at which a run must shed weight: the handoff line for
-/// Standard sessions, the compaction line otherwise.
-fn context_limit(config: &AgentConfig, profile: PromptProfile) -> u64 {
+/// Standard sessions; the compaction line for the lean profiles, which have no
+/// handoff to try first.
+fn shed_line(budget: &ContextBudget, profile: PromptProfile) -> u64 {
     if profile == PromptProfile::Standard {
-        config.effective_handoff_threshold()
+        budget.soft
     } else {
-        effective_compact_threshold(config, profile)
+        budget.hard
     }
 }
 
@@ -1570,6 +1593,7 @@ pub(crate) fn accept_prune(
 #[allow(clippy::too_many_arguments)]
 async fn try_verbatim_compaction(
     config: &AgentConfig,
+    budget: &ContextBudget,
     profile: PromptProfile,
     estimated: u64,
     history: &mut Vec<Message>,
@@ -1579,7 +1603,7 @@ async fn try_verbatim_compaction(
     ctx: &ToolContext,
     event_tx: &Channel<AgentEvent>,
 ) -> Option<(u64, f64)> {
-    let limit = context_limit(config, profile);
+    let limit = shed_line(budget, profile);
     if estimated < limit {
         return None;
     }
@@ -1611,7 +1635,7 @@ async fn try_verbatim_compaction(
         text: format!(
             "__compact_start__:{}/{}",
             estimated / 1000,
-            MAX_CONTEXT_TOKENS / 1000
+            budget.ceiling / 1000
         ),
     });
     store
@@ -1653,6 +1677,7 @@ async fn try_verbatim_compaction(
 #[allow(clippy::too_many_arguments)]
 async fn maybe_context_handoff(
     config: &AgentConfig,
+    budget: &ContextBudget,
     profile: PromptProfile,
     estimated: u64,
     history: &mut Vec<Message>,
@@ -1665,18 +1690,19 @@ async fn maybe_context_handoff(
     mode_ctl: &Arc<ModeCtl>,
     run_in: u32,
     run_out: u32,
+    run_cache: u32,
 ) -> Option<RunOutcome> {
     if profile != PromptProfile::Standard {
         return None;
     }
-    if estimated < config.effective_handoff_threshold() {
+    if estimated < budget.soft {
         return None;
     }
     let _ = event_tx.send(AgentEvent::TextStep {
         text: format!(
             "__handoff_start__:{}/{}",
             estimated / 1000,
-            MAX_CONTEXT_TOKENS / 1000
+            budget.ceiling / 1000
         ),
     });
 
@@ -1731,6 +1757,7 @@ async fn maybe_context_handoff(
     let net_detail = format!("{resolved_model} · handoff");
     let mut gen_in: u32 = 0;
     let mut gen_out: u32 = 0;
+    let mut gen_cache: u32 = 0;
     let mut handoff_text = String::new();
     for attempt in 0..2 {
         let mut assistant_text = String::new();
@@ -1764,6 +1791,7 @@ async fn maybe_context_handoff(
         if let Some(u) = &out.usage {
             gen_in += u.input_tokens;
             gen_out += u.output_tokens;
+            gen_cache += u.cache_read_input_tokens;
         }
         let trimmed = assistant_text.trim();
         // Sanity check: a usable handoff has real substance and the requested
@@ -1810,6 +1838,7 @@ async fn maybe_context_handoff(
     store.try_append(&SessionRecord::Done {
         input_tokens: run_in + gen_in,
         output_tokens: run_out + gen_out,
+        cache_read_tokens: Some(run_cache + gen_cache),
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -1832,7 +1861,7 @@ async fn maybe_context_handoff(
         text: format!(
             "__handoff_done__:{}/{}",
             estimated / 1000,
-            MAX_CONTEXT_TOKENS / 1000
+            budget.ceiling / 1000
         ),
     });
 
@@ -2016,6 +2045,36 @@ pub async fn run_workflow_with_profile(
         .map(|m| m.cached_defs())
         .unwrap_or_default();
     let mut tools = api_tools(cur_mode, profile, &mcp_defs, config);
+    // Every line the run is held to comes from the model it is about to talk
+    // to, and is re-derived whenever a mode switch changes that model.
+    let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
+    let mut budget = ContextBudget::for_model(
+        config,
+        config.model_for_mode(cur_mode.as_str()),
+        prefix_tokens,
+    );
+    ctx.limits.apply(&budget);
+
+    {
+        let model = config.model_for_mode(cur_mode.as_str());
+        store.try_append(&SessionRecord::RunConfig {
+            model: model.to_string(),
+            mode: cur_mode.as_str().into(),
+            context_window: budget.window,
+            regime: budget.regime.as_str().into(),
+            soft: budget.soft,
+            hard: budget.hard,
+            ceiling: budget.ceiling,
+            prefix: prefix_breakdown(
+                &system,
+                skills_section.as_deref(),
+                spec_section.as_deref(),
+                &tools,
+            ),
+            ts: now_ms(),
+        });
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+    }
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
@@ -2029,7 +2088,7 @@ pub async fn run_workflow_with_profile(
     let mut estimated = estimated;
     let mut pre_run_jev_cost = 0.0;
     if let Some((new_estimate, cost)) = try_verbatim_compaction(
-        config, profile, estimated, history, &system, &tools, store, ctx, event_tx,
+        config, &budget, profile, estimated, history, &system, &tools, store, ctx, event_tx,
     )
     .await
     {
@@ -2040,19 +2099,19 @@ pub async fn run_workflow_with_profile(
     // context and the run continues in a fresh linked session. Compaction
     // below stays as the safety net when generation fails or doesn't apply.
     if let Some(outcome) = maybe_context_handoff(
-        config, profile, estimated, history, &system, store, ctx, event_tx, session_id, steering,
-        mode_ctl, 0, 0,
+        config, &budget, profile, estimated, history, &system, store, ctx, event_tx, session_id,
+        steering, mode_ctl, 0, 0, 0,
     )
     .await
     {
         return Ok(outcome);
     }
-    if estimated >= effective_compact_threshold(config, profile) {
+    if estimated >= budget.hard {
         let _ = event_tx.send(AgentEvent::TextStep {
             text: format!(
                 "__compact_start__:{}/{}",
                 estimated / 1000,
-                MAX_CONTEXT_TOKENS / 1000
+                budget.ceiling / 1000
             ),
         });
         match compact_history(
@@ -2065,6 +2124,7 @@ pub async fn run_workflow_with_profile(
             session_id,
             steering,
             crate::agent::hooks::CompactTrigger::Auto,
+            budget.tail_tokens,
         )
         .await
         {
@@ -2101,8 +2161,8 @@ pub async fn run_workflow_with_profile(
                     cost_output: cco,
                     cost_cache_read: ccc,
                     context_tokens: new_context,
-                    max_context_tokens: MAX_CONTEXT_TOKENS,
-                    compact_threshold: COMPACT_THRESHOLD,
+                    max_context_tokens: budget.ceiling,
+                    compact_threshold: budget.hard,
                 });
                 let _ = event_tx.send(AgentEvent::TextStep {
                     text: format!(
@@ -2131,12 +2191,8 @@ pub async fn run_workflow_with_profile(
             )
             .unwrap_or(0),
         );
-        if post_compact >= MAX_CONTEXT_TOKENS {
-            return Err(
-                "A mensagem excede o limite de contexto do modelo (200k tokens). \
-                 Reduza os anexos ou inicie uma nova sessão para continuar."
-                    .into(),
-            );
+        if post_compact >= budget.ceiling {
+            return Err(budget.refusal(prefix_tokens));
         }
     }
 
@@ -2147,7 +2203,7 @@ pub async fn run_workflow_with_profile(
     );
     let mut ledger = CostLedger::resuming(cumul);
     ledger.jev_cost += pre_run_jev_cost;
-    let emit_final_stats = |ledger: &CostLedger, last_context: u64| {
+    let emit_final_stats = |ledger: &CostLedger, last_context: u64, budget: &ContextBudget| {
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: ledger.cumul_in as u32,
             output_tokens: ledger.cumul_out as u32,
@@ -2156,8 +2212,8 @@ pub async fn run_workflow_with_profile(
             cost_output: ledger.cumul_cost_output,
             cost_cache_read: ledger.cumul_cost_cache,
             context_tokens: last_context,
-            max_context_tokens: MAX_CONTEXT_TOKENS,
-            compact_threshold: COMPACT_THRESHOLD,
+            max_context_tokens: budget.ceiling,
+            compact_threshold: budget.hard,
         });
     };
     let mut last_text = String::new();
@@ -2230,13 +2286,22 @@ pub async fn run_workflow_with_profile(
                 subagent::effective_max_parallel(config),
             );
             tools = api_tools(cur_mode, profile, &mcp_defs, config);
+            // A mode switch is also a model switch (brain_model vs
+            // builder_model), and the two need not share a window.
+            prefix_tokens = estimate_tokens(&[], &system, &tools);
+            budget = ContextBudget::for_model(
+                config,
+                config.model_for_mode(cur_mode.as_str()),
+                prefix_tokens,
+            );
+            ctx.limits.apply(&budget);
         }
 
         // Per-round context re-check: tool_results from the previous round may
         // the next LLM call so we never feed an oversized context.
         let mut pre_tokens = estimate_tokens(history, &system, &tools);
         if let Some((new_estimate, cost)) = try_verbatim_compaction(
-            config, profile, pre_tokens, history, &system, &tools, store, ctx, event_tx,
+            config, &budget, profile, pre_tokens, history, &system, &tools, store, ctx, event_tx,
         )
         .await
         {
@@ -2245,6 +2310,7 @@ pub async fn run_workflow_with_profile(
         }
         if let Some(outcome) = maybe_context_handoff(
             config,
+            &budget,
             profile,
             pre_tokens,
             history,
@@ -2257,17 +2323,18 @@ pub async fn run_workflow_with_profile(
             mode_ctl,
             ledger.total_in,
             ledger.total_out,
+            ledger.total_cache,
         )
         .await
         {
             return Ok(outcome);
         }
-        if pre_tokens >= effective_compact_threshold(config, profile) {
+        if pre_tokens >= budget.hard {
             let _ = event_tx.send(AgentEvent::TextStep {
                 text: format!(
                     "__compact_start__:{}/{}",
                     pre_tokens / 1000,
-                    MAX_CONTEXT_TOKENS / 1000
+                    budget.ceiling / 1000
                 ),
             });
             match compact_history(
@@ -2280,6 +2347,7 @@ pub async fn run_workflow_with_profile(
                 session_id,
                 steering,
                 crate::agent::hooks::CompactTrigger::Auto,
+                budget.tail_tokens,
             )
             .await
             {
@@ -2305,6 +2373,13 @@ pub async fn run_workflow_with_profile(
                             subagent::effective_max_parallel(config),
                         );
                         tools = api_tools(cur_mode, profile, &mcp_defs, config);
+                        prefix_tokens = estimate_tokens(&[], &system, &tools);
+                        budget = ContextBudget::for_model(
+                            config,
+                            config.model_for_mode(cur_mode.as_str()),
+                            prefix_tokens,
+                        );
+                        ctx.limits.apply(&budget);
                     }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
@@ -2334,8 +2409,8 @@ pub async fn run_workflow_with_profile(
                         cost_output: cco,
                         cost_cache_read: ccc,
                         context_tokens: new_ctx,
-                        max_context_tokens: MAX_CONTEXT_TOKENS,
-                        compact_threshold: COMPACT_THRESHOLD,
+                        max_context_tokens: budget.ceiling,
+                        compact_threshold: budget.hard,
                     });
                     let _ = event_tx.send(AgentEvent::TextStep {
                         text: format!("__compact_done__:{}/{}", pre_tokens / 1000, new_ctx / 1000),
@@ -2359,12 +2434,8 @@ pub async fn run_workflow_with_profile(
                 )
                 .unwrap_or(0),
             );
-            if cur_ctx >= MAX_CONTEXT_TOKENS {
-                return Err(
-                    "A mensagem excede o limite de contexto do modelo (200k tokens). \
-                     Reduza os anexos ou inicie uma nova sessão para continuar."
-                        .into(),
-                );
+            if cur_ctx >= budget.ceiling {
+                return Err(budget.refusal(prefix_tokens));
             }
         }
 
@@ -2450,8 +2521,8 @@ pub async fn run_workflow_with_profile(
             cost_output: Some(live_cost_output),
             cost_cache_read: Some(live_cost_cache),
             context_tokens: last_context,
-            max_context_tokens: MAX_CONTEXT_TOKENS,
-            compact_threshold: COMPACT_THRESHOLD,
+            max_context_tokens: budget.ceiling,
+            compact_threshold: budget.hard,
         });
 
         // Interrupted mid-stream: persist any partial text, reset the flag,
@@ -2482,12 +2553,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -2550,12 +2622,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "max_tokens".into(),
                 text_output: last_text,
@@ -2719,6 +2792,7 @@ pub async fn run_workflow_with_profile(
                     store.try_append(&SessionRecord::Done {
                         input_tokens: ledger.total_in,
                         output_tokens: ledger.total_out,
+                        cache_read_tokens: Some(ledger.total_cache),
                         ts: now_ms(),
                     });
                     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -2973,12 +3047,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: stop_reason.into(),
                 text_output: last_text,
@@ -3328,6 +3403,7 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -3339,12 +3415,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             // No AgentEvent::Done: the conversation continues in the linked
             // successor session — SessionLinked (emitted by link_session) is
             // what the UI reacts to.
@@ -3369,12 +3446,13 @@ pub async fn run_workflow_with_profile(
                 store.try_append(&SessionRecord::Done {
                     input_tokens: ledger.total_in,
                     output_tokens: ledger.total_out,
+                    cache_read_tokens: Some(ledger.total_cache),
                     ts: now_ms(),
                 });
                 crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                 ledger.roll(resolved_model);
                 ledger.write_status(store, ctx, session_id, Some(last_context));
-                emit_final_stats(&ledger, last_context);
+                emit_final_stats(&ledger, last_context, &budget);
                 let _ = event_tx.send(AgentEvent::Done {
                     stop_reason: "tool_loop".into(),
                     text_output: msg,
@@ -3448,12 +3526,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -3477,12 +3556,13 @@ pub async fn run_workflow_with_profile(
     store.try_append(&SessionRecord::Done {
         input_tokens: ledger.total_in,
         output_tokens: ledger.total_out,
+        cache_read_tokens: Some(ledger.total_cache),
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
     ledger.roll(config.model_for_mode(cur_mode.as_str()));
     ledger.write_status(store, ctx, session_id, Some(last_context));
-    emit_final_stats(&ledger, last_context);
+    emit_final_stats(&ledger, last_context, &budget);
     let _ = event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
@@ -3634,11 +3714,16 @@ async fn execute_and_report(
                 output: truncated,
                 error: None,
             });
-            tool_result_block(tool_use_id, &content)
+            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
         }
-        Ok(ToolOutput::Rich { content, images }) => {
-            rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-        }
+        Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+            tool_use_id,
+            tool_name,
+            &content,
+            images,
+            event_tx,
+            ctx.limits.tool_result_chars(),
+        ),
         Ok(ToolOutput::EditProposal {
             path,
             old_string,
@@ -3844,7 +3929,7 @@ pub(crate) async fn run_tool(
                                 output: truncated,
                                 error: None,
                             });
-                            tool_result_block(tool_use_id, &content)
+                            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
                         }
                         _ => {
                             let err = "unexpected output type from bash".to_string();
@@ -3893,7 +3978,11 @@ pub(crate) async fn run_tool(
                                         output: truncated,
                                         error: None,
                                     });
-                                    tool_result_block(tool_use_id, &content)
+                                    tool_result_block(
+                                        tool_use_id,
+                                        &content,
+                                        ctx.limits.tool_result_chars(),
+                                    )
                                 }
                                 Ok(_) => {
                                     let err_msg: String =
@@ -4059,11 +4148,16 @@ pub(crate) async fn run_tool(
                             output: truncated,
                             error: None,
                         });
-                        tool_result_block(tool_use_id, &content)
+                        tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
                     }
-                    Ok(ToolOutput::Rich { content, images }) => {
-                        rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-                    }
+                    Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+                        tool_use_id,
+                        tool_name,
+                        &content,
+                        images,
+                        event_tx,
+                        ctx.limits.tool_result_chars(),
+                    ),
                     Ok(ToolOutput::EditProposal { .. }) => {
                         let err_msg = "MCP tools should not produce edit proposals".to_string();
                         let _ = event_tx.send(AgentEvent::ToolResult {
@@ -4106,11 +4200,16 @@ pub(crate) async fn run_tool(
                         output: content.clone(),
                         error: None,
                     });
-                    tool_result_block(tool_use_id, &content)
+                    tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
                 }
-                Ok(ToolOutput::Rich { content, images }) => {
-                    rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-                }
+                Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+                    tool_use_id,
+                    tool_name,
+                    &content,
+                    images,
+                    event_tx,
+                    ctx.limits.tool_result_chars(),
+                ),
                 Ok(ToolOutput::EditProposal {
                     path,
                     old_string,
@@ -4628,10 +4727,6 @@ async fn ask_user(
     ContentBlock::tool_result(tool_use_id, &compiled)
 }
 
-/// Maximum chars for a tool_result stored in the conversation history.
-/// Prevents a large subagent report or file read from blowing up the context.
-const MAX_TOOL_RESULT_CHARS: usize = 24_000;
-
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
         // Respect char boundaries so we never slice mid-codepoint.
@@ -4684,11 +4779,16 @@ async fn run_and_report(
                 output: truncate(&content, 2000),
                 error: None,
             });
-            tool_result_block(tool_use_id, &content)
+            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
         }
-        Ok(ToolOutput::Rich { content, images }) => {
-            rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-        }
+        Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+            tool_use_id,
+            tool_name,
+            &content,
+            images,
+            event_tx,
+            ctx.limits.tool_result_chars(),
+        ),
         Ok(ToolOutput::EditProposal { .. }) => {
             let msg = format!("{tool_name} should not produce edit proposals");
             let _ = event_tx.send(AgentEvent::ToolResult {
@@ -4711,8 +4811,11 @@ async fn run_and_report(
     }
 }
 
-fn tool_result_block(tool_use_id: &str, content: &str) -> ContentBlock {
-    ContentBlock::tool_result(tool_use_id, truncate(content, MAX_TOOL_RESULT_CHARS))
+/// The history copy of a tool result, cut to `max_chars`
+/// (`ContextBudget::tool_result_chars`) so one large report, file read or
+/// search cannot take the context — a cap that follows the model's window.
+fn tool_result_block(tool_use_id: &str, content: &str, max_chars: usize) -> ContentBlock {
+    ContentBlock::tool_result(tool_use_id, truncate(content, max_chars))
 }
 
 /// Build the tool_result block for a `ToolOutput::Rich`, emitting both the
@@ -4727,6 +4830,7 @@ fn rich_result_block(
     content: &str,
     images: Vec<crate::imageutil::ImageAttachment>,
     event_tx: &Channel<AgentEvent>,
+    max_chars: usize,
 ) -> ContentBlock {
     let _ = event_tx.send(AgentEvent::ToolResult {
         tool_id: tool_use_id.to_string(),
@@ -4735,14 +4839,14 @@ fn rich_result_block(
         error: None,
     });
     if images.is_empty() {
-        return tool_result_block(tool_use_id, content);
+        return tool_result_block(tool_use_id, content, max_chars);
     }
     let _ = event_tx.send(AgentEvent::ToolResultImages {
         tool_id: tool_use_id.to_string(),
         images: images.clone(),
     });
 
-    let text = truncate(content, MAX_TOOL_RESULT_CHARS);
+    let text = truncate(content, max_chars);
     let mut blocks = Vec::with_capacity(images.len() + 1);
     // Anthropic rejects empty text blocks, and a tool that returns only an
     // image (a bare screenshot) is a normal case, not an error.
@@ -4939,6 +5043,7 @@ mod tests {
             workspace_root: None,
             embedding_model: Default::default(),
             session_store_path: None,
+            limits: Default::default(),
             read_tracker: Default::default(),
             browser: None,
             interrupt: None,
@@ -5568,12 +5673,17 @@ mod tests {
             asst("a3"),
         ];
         // Last 2 exchanges = q2..a3 = 4 Turn records
-        assert_eq!(compute_tail_turns(&recs), 4);
+        let tail = crate::agent::budget::TAIL_TOKENS;
+        assert_eq!(compute_tail_turns(&recs, tail), 4);
+        // A budget too small for even the last exchange keeps nothing verbatim,
+        // which is what a small-window model gets instead of an overflow.
+        assert_eq!(compute_tail_turns(&recs, 0), 0);
     }
 
     #[test]
     fn compute_tail_turns_shrinks_when_over_budget() {
-        let big = "x".repeat((TAIL_MAX_TOKENS as usize) * 4); // way over budget alone
+        let tail = crate::agent::budget::TAIL_TOKENS;
+        let big = "x".repeat((tail as usize) * 4); // way over budget alone
         let recs = vec![
             SessionRecord::Turn {
                 message: Message {
@@ -5591,7 +5701,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            compute_tail_turns(&recs),
+            compute_tail_turns(&recs, tail),
             0,
             "oversized tail must be dropped"
         );
@@ -6479,14 +6589,63 @@ mod verbatim_compaction_tests {
     #[test]
     fn the_limit_is_the_handoff_line_for_standard_sessions() {
         let cfg = AgentConfig::default();
+        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 30_000);
         assert_eq!(
-            context_limit(&cfg, PromptProfile::Standard),
+            shed_line(&budget, PromptProfile::Standard),
             cfg.effective_handoff_threshold()
         );
+        // The lean profiles have no handoff: their first line is the compaction.
         assert_eq!(
-            context_limit(&cfg, PromptProfile::GitSync),
-            effective_compact_threshold(&cfg, PromptProfile::GitSync)
+            shed_line(&budget, PromptProfile::GitSync),
+            COMPACT_THRESHOLD
         );
+    }
+
+    /// The default config against the default models is the contract with
+    /// every existing session: nothing about its three lines may move.
+    #[test]
+    fn the_default_models_run_on_the_lines_they_always_had() {
+        let cfg = AgentConfig::default();
+        for model in [cfg.brain_model.as_str(), cfg.builder_model.as_str()] {
+            let b = ContextBudget::for_model(&cfg, model, 33_000);
+            assert_eq!(
+                (b.soft, b.hard, b.ceiling),
+                (120_000, COMPACT_THRESHOLD, MAX_CONTEXT_TOKENS),
+                "{model}"
+            );
+        }
+    }
+
+    /// A catalog model with a 64k window used to be driven by the 200k lines,
+    /// so it overflowed at the provider before any of them was reached.
+    #[test]
+    fn a_small_catalog_model_gets_lines_inside_its_own_window() {
+        let mut cfg = AgentConfig::default();
+        cfg.providers.insert(
+            "deepseek".into(),
+            crate::agent::provider::ProviderEntry {
+                api_key: "k".into(),
+                base_url: "https://api.deepseek.com".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("deepseek-chat".to_string(), 8_192u32)]
+                    .into_iter()
+                    .collect(),
+                custom: false,
+                custom_models: vec![],
+                model_context_limits: [("deepseek-chat".to_string(), 65_536u32)]
+                    .into_iter()
+                    .collect(),
+                context_window: None,
+            },
+        );
+        let b = ContextBudget::for_model(&cfg, "deepseek/deepseek-chat", 10_000);
+        assert_eq!(b.window, 65_536);
+        assert!(b.soft < b.hard && b.hard < b.ceiling, "{b:?}");
+        assert!(b.ceiling < 65_536);
+        assert!(b.soft > 10_000, "the soft line is past the prefix: {b:?}");
     }
 }
 

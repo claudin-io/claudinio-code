@@ -48,6 +48,9 @@ pub struct SubagentResult {
     pub in_tok: u32,
     pub out_tok: u32,
     pub cost: f64,
+    /// Tool name → calls made. A subagent keeps no transcript, so this is all
+    /// that survives of how it worked.
+    pub tools: std::collections::BTreeMap<String, u32>,
 }
 
 const TOOL_PREFERENCE: &str = "\
@@ -268,6 +271,7 @@ pub async fn run_spawn_agents(
                 in_tok: 0,
                 out_tok: 0,
                 cost: 0.0,
+                tools: Default::default(),
             },
         };
 
@@ -285,6 +289,25 @@ pub async fn run_spawn_agents(
         total_in += result.in_tok;
         total_out += result.out_tok;
         total_cost += result.cost;
+
+        if let Some(path) = ctx.session_store_path.as_deref() {
+            let store = crate::agent::persist::SessionStore { path: path.into() };
+            store.try_append(&crate::agent::persist::SessionRecord::SubagentRun {
+                name: specs.get(i).map(|s| s.name.clone()).unwrap_or_default(),
+                mode: match specs.get(i).map(|s| s.mode) {
+                    Some(SubagentMode::Code) => "code".into(),
+                    _ => "explore".into(),
+                },
+                status: result.status.into(),
+                rounds: result.rounds,
+                input_tokens: result.in_tok,
+                output_tokens: result.out_tok,
+                cost: result.cost,
+                tools: result.tools.clone(),
+                ts: crate::agent::persist::now_ms(),
+            });
+            crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        }
 
         reports.push(format!(
             "## {} — {} ({} rounds)\n{}\n---",
@@ -344,6 +367,31 @@ pub async fn run_subagent(
     };
     let system = subagent_system_prompt(ctx.workspace_root.as_deref(), &skills_hint);
 
+    // A subagent runs on the builder model whatever mode its parent is in, so
+    // it gets a budget — and result caps — of its own rather than the
+    // parent's: a Brain on a 200k model can spawn workers on a 32k one.
+    let prefix_tokens = session::estimate_tokens(&[], &system, &tools);
+    let budget = crate::agent::budget::ContextBudget::for_model(
+        config,
+        &config.builder_model,
+        prefix_tokens,
+    );
+    let ctx = &ToolContext {
+        limits: Arc::new(crate::agent::budget::RunLimits::for_budget(&budget)),
+        ..ctx.clone()
+    };
+    if budget.prefix_overflows(prefix_tokens) {
+        return SubagentResult {
+            status: "failed",
+            report: budget.refusal(prefix_tokens),
+            rounds: 0,
+            in_tok: 0,
+            out_tok: 0,
+            cost: 0.0,
+            tools: Default::default(),
+        };
+    }
+
     let mut history = vec![Message {
         role: "user".into(),
         content: vec![ContentBlock::text(format!(
@@ -360,6 +408,7 @@ pub async fn run_subagent(
     let mut total_out = 0u32;
     let mut total_cost = 0.0f64;
     let mut rounds: u32 = 0;
+    let mut tool_calls: std::collections::BTreeMap<String, u32> = Default::default();
     // A Stop hook that always blocks would keep a subagent alive forever.
     // Bounded the same way the quality retries and the continuation judge are,
     // and for the same reason.
@@ -407,6 +456,7 @@ pub async fn run_subagent(
                     in_tok: total_in,
                     out_tok: total_out,
                     cost: total_cost,
+                    tools: tool_calls.clone(),
                 };
             }
         };
@@ -440,6 +490,7 @@ pub async fn run_subagent(
                 in_tok: total_in,
                 out_tok: total_out,
                 cost: final_cost,
+                tools: tool_calls.clone(),
             };
         }
 
@@ -490,6 +541,7 @@ pub async fn run_subagent(
                 in_tok: total_in,
                 out_tok: total_out,
                 cost: final_cost,
+                tools: tool_calls.clone(),
             };
         }
 
@@ -536,6 +588,7 @@ pub async fn run_subagent(
                 .to_string();
             let tool_input = tool_use.get("input").cloned().unwrap_or(Value::Null);
             let watched_input = tool_input.clone();
+            *tool_calls.entry(tool_name.clone()).or_default() += 1;
 
             tool_assistant_blocks.push(ContentBlock::tool_use(
                 &tool_use_id,
@@ -638,7 +691,7 @@ pub async fn run_subagent(
         // Subagents have no handoff and no summary: past the handoff line,
         // drop their old tool traffic verbatim-style (`agent::prune`), in
         // memory — a subagent has no session file to record it in.
-        let limit = config.effective_handoff_threshold();
+        let limit = budget.soft;
         if session::estimate_tokens(&history, &system, &tools) >= limit
             && let Some(b) = crate::agent::jev::backend(config)
             && let Some(outcome) = crate::agent::prune::plan(&history, &b).await
@@ -653,6 +706,25 @@ pub async fn run_subagent(
             if session::accept_prune(&outcome, new_estimate, limit) {
                 history = pruned;
             }
+        }
+        // Nothing left to shed and the next request cannot be sent: stop with
+        // what was learned instead of failing at the provider. The parent gets
+        // a report it can act on — narrow the goal, or split it.
+        if session::estimate_tokens(&history, &system, &tools) >= budget.ceiling {
+            return SubagentResult {
+                status: "context_full",
+                report: format!(
+                    "Stopped after {rounds} rounds: the conversation no longer fits this \
+                     model's context window ({}k tokens). Split the goal into smaller, \
+                     independent subagents.",
+                    budget.window / 1000
+                ),
+                rounds,
+                in_tok: total_in,
+                out_tok: total_out,
+                cost: total_cost,
+                tools: tool_calls.clone(),
+            };
         }
 
         let (loop_action, loop_cost) =
@@ -680,6 +752,7 @@ pub async fn run_subagent(
                     in_tok: total_in,
                     out_tok: total_out,
                     cost: total_cost,
+                    tools: tool_calls.clone(),
                 };
             }
         }
@@ -692,6 +765,7 @@ pub async fn run_subagent(
         in_tok: total_in,
         out_tok: total_out,
         cost: total_cost,
+        tools: tool_calls.clone(),
     }
 }
 
@@ -925,5 +999,248 @@ mod tests {
         // effective_max_parallel with Some(99) -> clamped to 8
         cfg.max_parallel_agents = Some(99);
         assert_eq!(effective_max_parallel(&cfg), 8);
+    }
+}
+
+/// End-to-end: a real subagent loop against a scripted model over HTTP, so the
+/// context budget is exercised where it matters — in what is actually sent.
+#[cfg(test)]
+pub(crate) mod scripted_model {
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// What the scripted model answers one request with.
+    #[derive(Clone)]
+    pub enum Reply {
+        Tool { name: &'static str, input: Value },
+        Text(&'static str),
+    }
+
+    fn sse(event: &str, data: Value) -> String {
+        format!("event: {event}\ndata: {data}\n\n")
+    }
+
+    fn render(reply: &Reply, n: usize) -> String {
+        let mut out = String::new();
+        match reply {
+            Reply::Tool { name, input } => {
+                out += &sse(
+                    "content_block_start",
+                    json!({"index": 0, "content_block":
+                        {"type": "tool_use", "id": format!("tu_{n}"), "name": name, "input": {}}}),
+                );
+                out += &sse(
+                    "content_block_delta",
+                    json!({"index": 0, "delta":
+                        {"type": "input_json_delta", "partial_json": input.to_string()}}),
+                );
+                out += &sse("content_block_stop", json!({"index": 0}));
+                out += &sse(
+                    "message_delta",
+                    json!({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}}),
+                );
+            }
+            Reply::Text(text) => {
+                out += &sse(
+                    "content_block_delta",
+                    json!({"index": 0, "delta": {"type": "text_delta", "text": text}}),
+                );
+                out += &sse(
+                    "message_delta",
+                    json!({"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}),
+                );
+            }
+        }
+        out
+    }
+
+    /// Serve `script` one reply per request (the last one repeats), speaking
+    /// the Anthropic streaming protocol. Returns the base URL and the size in
+    /// bytes of every request body received, in order.
+    pub async fn spawn(script: Vec<Reply>) -> (String, Arc<Mutex<Vec<usize>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let seen = sizes.clone();
+        let next = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                // The whole request has to be read: its size is the measurement,
+                // and a body left unread resets the connection under the client.
+                let mut raw = Vec::new();
+                let mut chunk = [0u8; 16 * 1024];
+                let body_len = loop {
+                    let Ok(n) = socket.read(&mut chunk).await else {
+                        break 0;
+                    };
+                    if n == 0 {
+                        break 0;
+                    }
+                    raw.extend_from_slice(&chunk[..n]);
+                    let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+                    let declared = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if raw.len() >= head_end + 4 + declared {
+                        break declared;
+                    }
+                };
+                seen.lock().unwrap().push(body_len);
+                let n = next.fetch_add(1, Ordering::SeqCst);
+                let reply = script.get(n).or(script.last()).expect("a script");
+                let body = render(reply, n);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}"), sizes)
+    }
+}
+
+#[cfg(test)]
+mod context_budget_tests {
+    use super::scripted_model::{Reply, spawn};
+    use super::*;
+    use crate::agent::provider::ProviderEntry;
+    use std::sync::Mutex as StdMutex;
+
+    const WINDOW: u32 = 32_768;
+
+    /// A provider called "stub" serving model "m" at `base_url`, with the
+    /// window the user typed for it — or none, which is how every model was
+    /// treated before windows were tracked.
+    fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
+        let mut config = AgentConfig {
+            builder_model: "stub/m".into(),
+            ..AgentConfig::default()
+        };
+        config.providers.insert(
+            "stub".into(),
+            ProviderEntry {
+                api_key: "k".into(),
+                base_url: base_url.into(),
+                protocol: "anthropic".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("m".to_string(), 8_192u32)].into_iter().collect(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window,
+            },
+        );
+        config
+    }
+
+    /// A workspace holding one file far larger than a small window.
+    fn workspace(tag: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio-budget-{tag}-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.rs");
+        let line = format!("// {}\n", "x".repeat(76));
+        std::fs::write(&file, line.repeat(6_000)).unwrap();
+        (dir, file.to_string_lossy().to_string())
+    }
+
+    /// `reads` different 400-line windows of the file, then a final answer.
+    fn script(file: &str, reads: usize) -> Vec<Reply> {
+        let mut script: Vec<Reply> = (0..reads)
+            .map(|i| Reply::Tool {
+                name: "read_file",
+                input: serde_json::json!({
+                    "path": file,
+                    "start_line": 1 + i * 150,
+                    "end_line": 400 + i * 150,
+                }),
+            })
+            .collect();
+        script.push(Reply::Text("done reading"));
+        script
+    }
+
+    async fn run(config: &AgentConfig, root: &std::path::Path) -> SubagentResult {
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let spec = SubagentSpec {
+            name: "reader".into(),
+            goal: "read the file".into(),
+            mode: SubagentMode::Explore,
+            expected_output: None,
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        run_subagent(
+            config,
+            &ctx,
+            &spec,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "test-session",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await
+    }
+
+    /// Tokens of the largest request sent, by the session's own chars/3 rule.
+    fn largest_request_tokens(sizes: &StdMutex<Vec<usize>>) -> usize {
+        sizes.lock().unwrap().iter().copied().max().unwrap_or(0) / 3
+    }
+
+    /// The bug this budget exists for: with the window unknown, the session
+    /// sends a 32k model requests several times its size.
+    #[tokio::test]
+    async fn without_a_known_window_requests_outgrow_a_small_model() {
+        let (root, file) = workspace("unknown");
+        let (base, sizes) = spawn(script(&file, 10)).await;
+        let result = run(&config_for(&base, None), &root).await;
+        assert_eq!(result.status, "completed", "{}", result.report);
+        assert!(
+            largest_request_tokens(&sizes) > WINDOW as usize,
+            "largest request: {} tokens",
+            largest_request_tokens(&sizes)
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// With the window known, nothing larger than it is ever sent — the run
+    /// stops with a report the parent can act on instead of a provider error.
+    #[tokio::test]
+    async fn with_a_known_window_no_request_exceeds_it() {
+        let (root, file) = workspace("known");
+        let (base, sizes) = spawn(script(&file, 30)).await;
+        let result = run(&config_for(&base, Some(WINDOW)), &root).await;
+        assert!(
+            largest_request_tokens(&sizes) < WINDOW as usize,
+            "largest request: {} tokens",
+            largest_request_tokens(&sizes)
+        );
+        assert_eq!(result.status, "context_full", "{}", result.report);
+        assert!(result.report.contains("32k"), "{}", result.report);
+        assert_eq!(result.tools.get("read_file").copied(), Some(result.rounds));
+        std::fs::remove_dir_all(root).ok();
     }
 }

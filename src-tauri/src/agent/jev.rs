@@ -305,6 +305,8 @@ mod tests {
             model_output_limits: Default::default(),
             custom: false,
             custom_models: Vec::new(),
+            model_context_limits: Default::default(),
+            context_window: None,
         }
     }
 

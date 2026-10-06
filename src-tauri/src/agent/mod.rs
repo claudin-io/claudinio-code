@@ -1,4 +1,5 @@
 pub mod app_sign;
+pub mod budget;
 pub mod hooks;
 pub mod install_id;
 pub mod jev;
