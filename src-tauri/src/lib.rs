@@ -62,6 +62,8 @@ pub fn run() {
             commands::providers::openrouter_login_cancel,
             commands::providers::fetch_provider_catalog,
             commands::providers::connect_provider,
+            commands::providers::probe_custom_provider,
+            commands::providers::save_custom_provider,
             commands::providers::disconnect_provider,
             commands::providers::list_provider_models,
             commands::providers::list_all_models,

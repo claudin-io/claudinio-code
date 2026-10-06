@@ -303,6 +303,8 @@ mod tests {
             label: Some("OpenRouter".into()),
             model_pricing: Default::default(),
             model_output_limits: Default::default(),
+            custom: false,
+            custom_models: Vec::new(),
         }
     }
 

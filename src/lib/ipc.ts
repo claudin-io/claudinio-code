@@ -134,6 +134,12 @@ export interface ConnectedProviderInfo {
   label?: string | null;
   protocol?: string;
   enabledModels?: string[];
+  /** Typed in by hand (localhost, a company proxy) rather than picked from
+   *  the models.dev catalog. */
+  custom?: boolean;
+  /** A custom provider's saved model ids (unqualified). */
+  models?: string[];
+  hasApiKey?: boolean;
 }
 
 export interface SetConfigArgs {
@@ -1186,6 +1192,42 @@ export function connectProvider(providerId: string, apiKey: string, baseUrl?: st
 
 export function disconnectProvider(providerId: string): Promise<void> {
   return invoke<void>("disconnect_provider", { providerId });
+}
+
+export type ProviderProtocol = "openai" | "anthropic";
+
+/** The custom provider form. `providerId` is set when editing; a blank
+ *  `apiKey` on an edit keeps the saved key (the form never receives it). */
+export interface CustomProviderInput {
+  providerId?: string | null;
+  name: string;
+  baseUrl: string;
+  protocol: ProviderProtocol;
+  apiKey?: string | null;
+  /** Unqualified model ids; empty = take whatever the endpoint lists. */
+  models: string[];
+}
+
+/** Create or update a custom provider; resolves with its id and model list. */
+export function saveCustomProvider(
+  input: CustomProviderInput,
+): Promise<{ providerId: string; models: string[] }> {
+  return invoke<{ providerId: string; models: string[] }>("save_custom_provider", { input });
+}
+
+/** List the models a custom endpoint serves, without saving anything. */
+export function probeCustomProvider(
+  baseUrl: string,
+  protocol: ProviderProtocol,
+  apiKey?: string | null,
+  providerId?: string | null,
+): Promise<string[]> {
+  return invoke<string[]>("probe_custom_provider", {
+    baseUrl,
+    protocol,
+    apiKey: apiKey || null,
+    providerId: providerId ?? null,
+  });
 }
 
 export function listProviderModels(providerId: string): Promise<string[]> {

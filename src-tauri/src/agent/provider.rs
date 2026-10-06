@@ -10,7 +10,7 @@ use tauri::ipc::Channel;
 pub mod catalog;
 pub mod openai;
 
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Sentinel prefix for budget-exhausted errors. The frontend keys off it to
 /// swap the retry error bar for an upgrade banner, and the retry loop
@@ -280,6 +280,17 @@ pub struct ProviderEntry {
     /// Clamps the request max_tokens so smaller models don't 400.
     #[serde(default)]
     pub model_output_limits: std::collections::HashMap<String, u32>,
+    /// True for a provider the user typed in by hand (a localhost server, a
+    /// company LiteLLM proxy) rather than one picked from the models.dev
+    /// catalog. There is no catalog entry behind it, so its model list is
+    /// `custom_models` and nothing is ever looked up by its id.
+    #[serde(default)]
+    pub custom: bool,
+    /// Wire model ids of a custom provider — discovered from `GET /models`
+    /// when it was saved, or typed in. Snapshotted like everything else here,
+    /// so the pickers never wait on a server that is switched off.
+    #[serde(default)]
+    pub custom_models: Vec<String>,
 }
 
 fn default_openai_protocol() -> String {
@@ -1856,6 +1867,43 @@ mod tests {
         assert!(cfg.providers.is_empty());
     }
 
+    #[test]
+    fn test_provider_entry_from_before_custom_providers_is_not_custom() {
+        let entry: ProviderEntry = serde_json::from_str(
+            r#"{"api_key":"sk-x","base_url":"https://api.deepseek.com","protocol":"openai"}"#,
+        )
+        .expect("pre-custom-providers entry must deserialize");
+        assert!(!entry.custom);
+        assert!(entry.custom_models.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_provider_custom_entry_routes_by_its_id() {
+        let mut cfg = AgentConfig::default();
+        cfg.providers.insert(
+            "litellm".into(),
+            ProviderEntry {
+                api_key: String::new(),
+                base_url: "http://localhost:4000/v1/".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: Some("LiteLLM".into()),
+                model_pricing: Default::default(),
+                model_output_limits: Default::default(),
+                custom: true,
+                custom_models: vec!["team/gpt-4o".into()],
+            },
+        );
+        // Split at the first slash only: the wire id keeps its own.
+        let rp = cfg.resolve_provider("litellm/team/gpt-4o");
+        assert_eq!(rp.protocol, Protocol::OpenAiChat);
+        assert_eq!(rp.base_url, "http://localhost:4000/v1");
+        assert_eq!(rp.model, "team/gpt-4o");
+        assert_eq!(rp.provider_id, "litellm");
+        assert!(rp.api_key.is_empty());
+        assert!(rp.pricing.is_none());
+    }
+
     fn cfg_with_openrouter() -> AgentConfig {
         let mut cfg = AgentConfig {
             api_key: "sk-claudinio".into(),
@@ -1875,6 +1923,8 @@ mod tests {
                 model_output_limits: [("openai/gpt-4o-mini".to_string(), 16_384u32)]
                     .into_iter()
                     .collect(),
+                custom: false,
+                custom_models: Vec::new(),
             },
         );
         cfg
@@ -1972,6 +2022,8 @@ mod tests {
                 label: None,
                 model_pricing: Default::default(),
                 model_output_limits: Default::default(),
+                custom: false,
+                custom_models: Vec::new(),
             },
         );
         let rp = cfg.resolve_provider("local/abc");
@@ -2029,6 +2081,8 @@ mod tests {
                 label: Some("Anthropic".into()),
                 model_pricing: Default::default(),
                 model_output_limits: Default::default(),
+                custom: false,
+                custom_models: Vec::new(),
             },
         );
         let rp = cfg.resolve_provider("anthropic/claude-sonnet-4-5");

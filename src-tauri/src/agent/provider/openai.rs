@@ -354,6 +354,21 @@ fn shape_http_error(status: reqwest::StatusCode, body: &str) -> String {
     format!("API error: HTTP {status}")
 }
 
+/// `Authorization` for an OpenAI-protocol request. A keyless endpoint — a
+/// localhost server, a proxy on a trusted network — gets no header at all
+/// rather than a bare "Bearer ", which a stricter server rejects as malformed.
+pub(crate) fn with_bearer(
+    request: reqwest::RequestBuilder,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    let key = api_key.trim();
+    if key.is_empty() {
+        request
+    } else {
+        request.header("Authorization", format!("Bearer {key}"))
+    }
+}
+
 /// Streaming chat-completions call, mirroring the Anthropic
 /// `stream_message` contract: same idle timeout, interrupt handling,
 /// throttled text deltas, thinking events, and `StreamOutput` shape.
@@ -382,9 +397,8 @@ pub async fn stream_message(
     let request = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", rp.api_key))
-        .json(&body)
-        .send();
+        .json(&body);
+    let request = with_bearer(request, &rp.api_key).send();
     let Some(response) = until_stopped(request, interrupt).await else {
         return Ok(StreamOutput::stopped());
     };
@@ -715,11 +729,11 @@ pub async fn complete(
         ],
     });
     let url = format!("{}/chat/completions", rp.base_url.trim_end_matches('/'));
-    let response = client
+    let request = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", rp.api_key))
-        .json(&body)
+        .json(&body);
+    let response = with_bearer(request, &rp.api_key)
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;

@@ -169,6 +169,26 @@ async fn fetch_remote() -> Result<Value, String> {
     Ok(trim_catalog(&raw))
 }
 
+/// Provider ids in the catalog as last cached, without touching the network.
+/// Empty when it was never fetched — callers treat this as best-effort.
+pub fn cached_provider_ids() -> Vec<String> {
+    read_cache()
+        .map(|(_, data)| provider_ids(&data))
+        .unwrap_or_default()
+}
+
+fn provider_ids(trimmed: &Value) -> Vec<String> {
+    trimmed
+        .get("providers")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.get("id").and_then(|i| i.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Look up one provider in the trimmed catalog.
 pub fn find_provider<'a>(trimmed: &'a Value, provider_id: &str) -> Option<&'a Value> {
     trimmed
@@ -282,5 +302,12 @@ mod tests {
         assert_eq!(pricing.get("deepseek-chat"), Some(&(0.27, 1.1)));
         assert_eq!(limits.get("deepseek-chat"), Some(&8192));
         assert!(find_provider(&trimmed, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_provider_ids_lists_every_catalog_provider() {
+        let trimmed = trim_catalog(&raw_fixture());
+        assert_eq!(provider_ids(&trimmed), vec!["anthropic", "deepseek"]);
+        assert!(provider_ids(&json!({})).is_empty());
     }
 }

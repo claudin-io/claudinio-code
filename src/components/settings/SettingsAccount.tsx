@@ -19,6 +19,8 @@ interface SettingsAccountProps {
   onOpenrouterCancel: () => void;
   onDisconnectProvider: (providerId: string) => void;
   onOpenProviderCatalog: () => void;
+  /** Opens the custom provider form — empty to add one, or on an existing id. */
+  onOpenCustomProvider: (providerId?: string) => void;
 }
 
 const experimentalBadge = () => (
@@ -27,9 +29,16 @@ const experimentalBadge = () => (
   </span>
 );
 
+const customBadge = () => (
+  <span class="rounded border border-border-subtle bg-surface-2 px-1.5 py-px text-[10px] text-ink-muted">
+    {"Custom"}
+  </span>
+);
+
 export const SettingsAccount: Component<SettingsAccountProps> = (props) => {
   const openrouterConnected = () => Boolean(props.providers()["openrouter"]?.connected);
-  /** Catalog providers connected via the modal (everything but OpenRouter). */
+  /** Providers connected via the catalog modal or added by hand (everything
+   * but OpenRouter). */
   const otherProviders = createMemo(() =>
     Object.entries(props.providers())
       .filter(([id, p]) => id !== "openrouter" && p.connected)
@@ -135,31 +144,52 @@ export const SettingsAccount: Component<SettingsAccountProps> = (props) => {
         <div class="mb-2 text-sm text-red-400">{props.providerError()}</div>
       </Show>
 
-      {/* 3. Other connected catalog providers + the catalog itself */}
+      {/* 3. Other connected providers (catalog or custom) + the ways to add one */}
       <For each={otherProviders()}>
         {([id, info]) => (
-          <div class="mb-2 flex items-center justify-between rounded-md border border-border-subtle bg-surface-0 p-2 text-sm">
-            <span class="flex items-center gap-2 truncate text-ink">
-              {info.label ?? id}
+          <div
+            class="mb-2 flex items-center justify-between rounded-md border border-border-subtle bg-surface-0 p-2 text-sm"
+            data-provider={id}
+          >
+            <span class="flex min-w-0 items-center gap-2 text-ink">
+              <span class="truncate">{info.label ?? id}</span>
+              {info.custom ? customBadge() : null}
               {experimentalBadge()}
             </span>
-            <button
-              onClick={() => props.onDisconnectProvider(id)}
-              class="ml-2 shrink-0 text-xs text-ink-muted hover:text-ink hover:underline"
-            >
-              {"Disconnect"}
-            </button>
+            <span class="ml-2 flex shrink-0 items-center gap-3">
+              <Show when={info.custom}>
+                <button
+                  onClick={() => props.onOpenCustomProvider(id)}
+                  class="text-xs text-ink-muted hover:text-ink hover:underline"
+                >
+                  {"Edit"}
+                </button>
+              </Show>
+              <button
+                onClick={() => props.onDisconnectProvider(id)}
+                class="text-xs text-ink-muted hover:text-ink hover:underline"
+              >
+                {info.custom ? "Remove" : "Disconnect"}
+              </button>
+            </span>
           </div>
         )}
       </For>
 
-      <div class="mb-3">
+      <div class="mb-3 space-y-2">
         <button
           onClick={props.onOpenProviderCatalog}
           class="flex w-full items-center gap-2 rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink hover:bg-surface-2 hover:border-accent/40 transition-colors"
         >
           <Icon name="layers" class="h-4 w-4 shrink-0" />
           <span>{"More providers…"}</span>
+        </button>
+        <button
+          onClick={() => props.onOpenCustomProvider()}
+          class="flex w-full items-center gap-2 rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink hover:bg-surface-2 hover:border-accent/40 transition-colors"
+        >
+          <Icon name="plus" class="h-4 w-4 shrink-0" />
+          <span>{"Add custom provider…"}</span>
         </button>
       </div>
 
