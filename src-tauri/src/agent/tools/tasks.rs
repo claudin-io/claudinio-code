@@ -407,7 +407,14 @@ pub fn slugify(s: &str) -> String {
     }
     let result = result.trim_matches('-').to_string();
     if result.len() > 40 {
-        result[..40].to_string()
+        // By characters, not bytes: letters with accents are kept by the map
+        // above and are more than one byte each, so byte 40 can fall inside
+        // one — and slicing there panics, for any goal written in a language
+        // that has them.
+        match result.char_indices().nth(40) {
+            Some((end, _)) => result[..end].to_string(),
+            None => result,
+        }
     } else {
         result
     }
@@ -454,6 +461,29 @@ mod lld_gate_tests {
             ))),
         };
         (ctx, root)
+    }
+
+    // A goal in Portuguese: "ç" and "ã" are two bytes each, and the cut at
+    // byte 40 used to land inside one.
+    #[test]
+    fn a_goal_with_accents_gets_a_slug_instead_of_a_panic() {
+        // 39 one-byte letters, then "ç": byte 40 is its second byte.
+        let goal = format!("{}ção do cadastro", "x".repeat(39));
+        assert!(!goal.is_char_boundary(40));
+        let slug = slugify(&goal);
+        assert_eq!(slug, format!("{}ç", "x".repeat(39)));
+        assert_eq!(slug.chars().count(), 40);
+        // A real one, cut between two letters.
+        assert_eq!(
+            slugify("a migração da autenticação não pode quebrar sessões antigas"),
+            "a-migração-da-autenticação-não-pode-queb"
+        );
+        // Every offset the cut can fall on, inside a character or between two.
+        for lead in 0..4 {
+            let _ = slugify(&format!("{}{}", "x".repeat(lead), "çã".repeat(40)));
+        }
+        // Plain ASCII is cut where it always was.
+        assert_eq!(slugify(&"a".repeat(60)).len(), 40);
     }
 
     // Subagents run in parallel and each closes its own task. Without one
