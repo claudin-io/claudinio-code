@@ -90,7 +90,7 @@ describe("SettingsJev", () => {
     expect(el.querySelector('button[data-jev-route="on"]')!.getAttribute("aria-pressed")).toBe("true");
     expect(el.querySelector("[data-jev-route-hint]")!.textContent).toContain("start on Auto");
     // The privacy line is there whichever position is selected.
-    expect(el.querySelector("[data-jev-route-hint]")!.textContent).toContain("first message of a session");
+    expect(el.querySelector("[data-jev-route-hint]")!.textContent).toContain("first message of each new session");
   });
 
   it("cannot be changed while Jev itself is off", async () => {

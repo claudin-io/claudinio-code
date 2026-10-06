@@ -27,6 +27,9 @@ describe("autoAvailable", () => {
   it("is not offered when Jev is disabled or its status is unknown", () => {
     expect(autoAvailable(jev({ enabled: false }), true)).toBe(false);
     expect(autoAvailable(undefined, true)).toBe(false);
+    // On is the default, so "on" alone says nothing about whether there is a
+    // Jev to ask: with no credential there is nobody to leave the choice to.
+    expect(autoAvailable(jev({ backend: null }), true)).toBe(false);
     // A config from before the setting existed has no route at all.
     expect(autoAvailable({ enabled: true, hasApiKey: false, backend: null }, true)).toBe(false);
   });

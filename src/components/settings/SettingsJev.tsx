@@ -139,7 +139,7 @@ export const SettingsJev: Component = () => {
       </div>
       <p class="text-[11px] text-ink-faint" data-jev-route-hint>
         {ROUTES.find((r) => r.id === (status().route ?? "off"))!.hint}
-        {" Only the first message of a session is sent to Jev for this."}
+        {" On and Shadow send the first message of each new session to Jev, and nothing after it."}
       </p>
     </div>
   );

@@ -6,9 +6,11 @@ import type { JevStatus, SessionMode } from "./ipc";
 export type ModeChoice = SessionMode | "auto";
 
 /** Whether there is a router to hand the choice to: it is switched on, and Jev
- *  — which it asks — is enabled. */
+ *  — which it asks — is enabled and has a credential to run on. The setting is
+ *  on by default, so without the last check everyone who never set Jev up
+ *  would be offered an Auto that can only ever answer "Builder". */
 export function routerOn(jev: JevStatus | undefined): boolean {
-  return jev?.enabled !== false && jev?.route === "on";
+  return jev?.enabled !== false && jev?.route === "on" && jev.backend != null;
 }
 
 /** Auto is offered only where it can mean something: there is a router, and

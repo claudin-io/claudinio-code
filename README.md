@@ -85,11 +85,12 @@ running commands, verifying. The handoff between them starts a fresh session
 seeded with the plan, so execution never inherits a context window full of
 exploration.
 
-You pick the mode, or let the harness pick: with **Auto** (Settings › Agent,
-off by default) the first message of a new session is routed — a request that
-needs decisions and a design starts in Brain, everything else in Builder. A
-*Shadow* setting records what Auto would have chosen next to what you chose,
-without changing anything, so you can judge it on your own sessions first.
+You pick the mode, or let the harness pick. A new session starts on **Auto**
+wherever the decision model behind it (Jev) is available: its first message is
+routed — a request that needs decisions and a design starts in Brain,
+everything else in Builder — and you can still pick either by hand. Auto sends
+that first message to Jev; Settings › Agent switches it off, or to *Shadow*,
+which only records what Auto would have chosen next to what you chose.
 
 ### It fits the model you chose
 

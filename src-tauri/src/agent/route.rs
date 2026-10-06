@@ -19,13 +19,18 @@
 //! So Brain needs both questions answered yes with confidence, and everything
 //! short of that — a rule, an unclear answer, no Jev, a timeout — is Builder.
 //!
-//! The thresholds below are provisional. Per-prompt routing measured weak in
-//! other harnesses, so nothing here decides anything until it has been
-//! calibrated on real first prompts (`live_route_calibration`) and watched in
-//! shadow. The default is off: a session file lives on the user's machine, so
-//! a shadow verdict is only ever read by the person who turned shadow on, and
-//! switching it on for everyone would send every first prompt to Jev to
-//! produce records nobody looks at.
+//! It is on by default, which means two things for a user who has never
+//! opened Settings. A new session starts with Auto selected wherever there is
+//! a Jev to ask; where there is none the control does not offer it, and the
+//! session starts in Builder as it always did. And the first prompt of each
+//! new session is sent to Jev — the setting's hint says so, and Off is one
+//! click away.
+//!
+//! The thresholds below are still provisional: they have not been calibrated
+//! on real first prompts (`live_route_calibration` does that, and Shadow
+//! records what the router would have chosen next to what the user chose).
+//! What keeps a wrong threshold cheap is the asymmetry above — the failure it
+//! can produce by design is a session left in Builder.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,12 +44,12 @@ use crate::agent::session::SessionMode;
 #[serde(rename_all = "lowercase")]
 pub enum RouteMode {
     /// Never asked.
-    #[default]
     Off,
     /// Asked in the background and recorded next to what the session actually
     /// ran as. Changes nothing, costs no latency.
     Shadow,
     /// A session left on Auto starts in the phase the router picks.
+    #[default]
     On,
 }
 
@@ -67,10 +72,11 @@ impl RouteMode {
     }
 }
 
-// By hand, so that a value this build does not know is Off rather than an
-// error. The config is loaded whole or not at all: a derived impl failing on
-// `"route": "On"` — a hand edit, a value from a newer build — would discard
-// the user's API key and providers along with it.
+// By hand, so that a value this build does not know is read as if the setting
+// were absent — the default — rather than as an error. The config is loaded
+// whole or not at all: a derived impl failing on `"route": "On"` — a hand
+// edit, a value from a newer build — would discard the user's API key and
+// providers along with it.
 impl<'de> Deserialize<'de> for RouteMode {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
@@ -246,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn a_route_setting_this_build_does_not_know_is_off_not_a_broken_config() {
+    fn a_route_setting_this_build_does_not_know_is_the_default_not_a_broken_config() {
         let load = |route: Value| -> crate::agent::provider::AgentConfig {
             serde_json::from_value(json!({
                 "base_url": "https://api.claudin.io",
@@ -256,7 +262,7 @@ mod tests {
             .expect("the rest of the config still loads")
         };
         assert_eq!(load(json!("shadow")).jev.route, RouteMode::Shadow);
-        assert_eq!(load(json!("On")).jev.route, RouteMode::On);
+        assert_eq!(load(json!("OFF")).jev.route, RouteMode::Off);
         for unknown in [
             json!("always"),
             json!(true),
@@ -264,7 +270,7 @@ mod tests {
             json!({"mode": "on"}),
         ] {
             let cfg = load(unknown);
-            assert_eq!(cfg.jev.route, RouteMode::Off);
+            assert_eq!(cfg.jev.route, RouteMode::default());
             assert_eq!(cfg.api_key, "sk-kept");
         }
         // And what is written is what `parse` reads back.
@@ -379,12 +385,12 @@ mod tests {
     }
 
     #[test]
-    fn route_mode_round_trips_and_defaults_to_off() {
+    fn route_mode_round_trips_and_defaults_to_on() {
         for m in [RouteMode::Off, RouteMode::Shadow, RouteMode::On] {
             assert_eq!(RouteMode::parse(m.as_str()), Some(m));
         }
         assert_eq!(RouteMode::parse("always"), None);
-        assert_eq!(RouteMode::default(), RouteMode::Off);
+        assert_eq!(RouteMode::default(), RouteMode::On);
     }
 
     /// Calibrate the thresholds on real first prompts, labelled by what the

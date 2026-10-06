@@ -52,7 +52,7 @@ pub struct JevPrefs {
     #[serde(default)]
     pub api_key: Option<String>,
     /// Whether Jev picks the phase a new session starts in — see
-    /// `crate::agent::route`. Off unless the user turns it on.
+    /// `crate::agent::route`. On unless the user turns it off.
     #[serde(default)]
     pub route: crate::agent::route::RouteMode,
 }
@@ -498,23 +498,27 @@ mod tests {
     }
 
     #[test]
-    fn the_route_setting_is_off_until_changed_and_ignores_nonsense() {
+    fn the_route_setting_is_on_until_changed_and_ignores_nonsense() {
         use crate::agent::route::RouteMode;
         let mut cfg = AgentConfig::default();
-        assert_eq!(cfg.jev.route, RouteMode::Off);
-        assert_eq!(status_json(&cfg)["route"], "off");
-        apply_settings(&mut cfg, None, None, Some("on".into()));
         assert_eq!(cfg.jev.route, RouteMode::On);
+        assert_eq!(status_json(&cfg)["route"], "on");
+        apply_settings(&mut cfg, None, None, Some("off".into()));
+        assert_eq!(cfg.jev.route, RouteMode::Off);
         apply_settings(&mut cfg, None, None, Some("sometimes".into()));
         assert_eq!(
             cfg.jev.route,
-            RouteMode::On,
+            RouteMode::Off,
             "an unknown value changes nothing"
         );
-        // A config saved before the setting existed loads with it off: no
-        // first prompt goes anywhere new until the user asks for it.
+        // A config saved before the setting existed loads with the default,
+        // like a new one: Auto is on for whoever has a Jev to ask.
         let old: JevPrefs = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
-        assert_eq!(old.route, RouteMode::Off);
+        assert_eq!(old.route, RouteMode::On);
+        // And a choice to switch it off is kept across a save and a load.
+        let saved = serde_json::to_string(&cfg.jev).unwrap();
+        let back: JevPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.route, RouteMode::Off);
     }
 
     #[test]
