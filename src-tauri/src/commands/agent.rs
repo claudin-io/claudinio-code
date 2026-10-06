@@ -770,6 +770,15 @@ pub struct SetConfigArgs {
     pub jev_api_key: Option<String>,
     /// "off" | "shadow" | "on" — see `agent::route::RouteMode`.
     pub jev_route: Option<String>,
+    /// One model's tool surface — see `agent::surface`.
+    pub tool_surface: Option<ToolSurfaceArg>,
+}
+
+#[derive(Deserialize)]
+pub struct ToolSurfaceArg {
+    pub model: String,
+    /// "full" | "lean".
+    pub surface: String,
 }
 
 #[tauri::command]
@@ -851,6 +860,9 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
         cfg.mcp = mcp;
     }
     crate::agent::jev::apply_settings(&mut cfg, args.jev_enabled, args.jev_api_key, args.jev_route);
+    if let Some(choice) = args.tool_surface {
+        crate::agent::surface::set_for(&mut cfg, &choice.model, &choice.surface);
+    }
     if let Some(code_intel_enabled) = args.code_intel_enabled {
         cfg.code_intel_enabled = code_intel_enabled;
     }
@@ -929,6 +941,17 @@ pub async fn get_config(
         "local": cfg.local,
         // Which credential Jev uses — never the key.
         "jev": crate::agent::jev::status_json(&cfg),
+        // Models set to something other than the full tool catalog.
+        "toolSurface": cfg.tool_surface,
+        // "compact" when the builder model's window is too small for the
+        // Standard prompt — Settings says so rather than offering a surface
+        // that would not apply.
+        "builderProfile": crate::agent::surface::effective_profile(
+            session::PromptProfile::Standard,
+            &cfg,
+            session::SessionMode::Builder,
+            false,
+        ).as_str(),
         // Connected external providers — never the keys (hasApiKey precedent).
         "providers": cfg.providers.iter().map(|(id, p)| {
             (id.clone(), serde_json::json!({

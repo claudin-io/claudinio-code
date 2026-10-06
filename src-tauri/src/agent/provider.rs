@@ -254,6 +254,10 @@ pub struct AgentConfig {
     /// for its own judgements — see `crate::agent::jev`.
     #[serde(default)]
     pub jev: crate::agent::jev::JevPrefs,
+    /// Tool surface per model id ("lean"); a model that is not here gets the
+    /// full catalog — see `crate::agent::surface`.
+    #[serde(default)]
+    pub tool_surface: std::collections::HashMap<String, String>,
 }
 
 /// A connected external provider. Credentials follow the existing plaintext
@@ -550,6 +554,7 @@ impl Default for AgentConfig {
             providers: std::collections::HashMap::new(),
             jev: crate::agent::jev::JevPrefs::default(),
             local: crate::llama::LocalPrefs::default(),
+            tool_surface: std::collections::HashMap::new(),
         }
     }
 }

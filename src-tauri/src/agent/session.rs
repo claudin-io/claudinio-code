@@ -299,6 +299,27 @@ pub enum PromptProfile {
     Standard,
     /// Commit & push: a single-purpose git operator. Bash + ask_user only.
     GitSync,
+    /// A chat session on a window too small for `Standard`: one short prompt,
+    /// ten tools, and the session edits files itself. Never requested by a
+    /// caller — `surface::effective_profile` picks it from the model's window.
+    Compact,
+}
+
+impl PromptProfile {
+    /// True for the profiles a person is chatting through. What is theirs —
+    /// their prompt hooks, their Stop hook, the handoff that keeps a long
+    /// conversation going — applies to these and not to a single-purpose job.
+    pub fn is_chat(self) -> bool {
+        matches!(self, PromptProfile::Standard | PromptProfile::Compact)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PromptProfile::Standard => "standard",
+            PromptProfile::GitSync => "git_sync",
+            PromptProfile::Compact => "compact",
+        }
+    }
 }
 
 /// Who put the session in its current mode. The agent may only exit Brain
@@ -592,6 +613,20 @@ The bash tool already runs with this directory as its working directory - run co
 (e.g. \"git status\"), use relative paths, and never cd into guessed paths."
             ),
             None => GIT_SYNC_PROMPT.to_string(),
+        };
+    }
+    if profile == PromptProfile::Compact {
+        // No skills, no specs, no mode block: on the window this profile is
+        // for, each of them is a file the model can no longer read.
+        let prompt = crate::agent::surface::COMPACT_PROMPT;
+        return match workspace_root {
+            Some(root) => format!(
+                "{prompt}\n\nProject workspace root: {root}. \
+The bash tool already runs with this directory as its working directory - run commands directly \
+(e.g. \"git status\"), use relative paths, and never cd into guessed paths. \
+File tools take absolute paths inside this root."
+            ),
+            None => prompt.to_string(),
         };
     }
     let base = match workspace_root {
@@ -1035,11 +1070,53 @@ pub struct UserAnswer {
 
 pub type AnswerMap = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserAnswer>>>>>;
 
+/// What a run sends ahead of the conversation in `mode`: the profile the
+/// model's window calls for, then the prompt and tools of that profile as the
+/// user's surface for the model shapes them.
+///
+/// One function for the run's start and for every mode switch, so the three
+/// can never be derived from different inputs: a prompt that names a tool the
+/// list beside it does not carry costs a failed call each time it is believed.
+#[allow(clippy::too_many_arguments)]
+fn run_prefix(
+    config: &AgentConfig,
+    ctx: &ToolContext,
+    requested: PromptProfile,
+    mode: SessionMode,
+    skills_section: Option<&str>,
+    spec_section: Option<&str>,
+    mcp_defs: &[tools::ToolDef],
+    has_golden_goals: bool,
+) -> (PromptProfile, String, Vec<ToolDescription>) {
+    let profile =
+        crate::agent::surface::effective_profile(requested, config, mode, has_golden_goals);
+    let system = system_prompt(
+        ctx.workspace_root.as_deref(),
+        skills_section,
+        spec_section,
+        ctx.plan_save_path.as_deref(),
+        mode,
+        profile,
+        subagent::effective_max_parallel(config),
+    );
+    let system = if profile == PromptProfile::Standard {
+        crate::agent::surface::prompt_for(
+            config.tool_surface_for(config.model_for_mode(mode.as_str())),
+            system,
+        )
+    } else {
+        system
+    };
+    let tools = api_tools(mode, profile, mcp_defs, config);
+    (profile, system, tools)
+}
+
 /// Tools offered to the model for a given mode/profile. `GitSync` gets only
-/// `bash` + `ask_user` — no task system, no subagents, no MCP tools. Builder
-/// gets the full registry plus enter_plan_mode; Brain drops edit_file and
-/// gains write_plan + exit_plan_mode (bash stays but is gated to read-only
-/// commands in run_workflow).
+/// `bash` + `ask_user` — no task system, no subagents, no MCP tools. `Compact`
+/// gets `surface::COMPACT_TOOLS`, `edit_file` included. Builder gets the full
+/// registry plus enter_plan_mode; Brain drops edit_file and gains write_plan +
+/// exit_plan_mode (bash stays but is gated to read-only commands in
+/// run_workflow). Under `Standard` the user's per-model surface then applies.
 fn api_tools(
     mode: SessionMode,
     profile: PromptProfile,
@@ -1058,7 +1135,22 @@ fn api_tools(
             })
             .collect();
     }
+    if profile == PromptProfile::Compact {
+        return tools::get_defs(maxp)
+            .into_iter()
+            .filter(|t| crate::agent::surface::COMPACT_TOOLS.contains(&t.name.as_str()))
+            .map(|t| ToolDescription {
+                name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+            })
+            .collect();
+    }
     let mut defs = tools::get_defs(maxp);
+    crate::agent::surface::retain_for(
+        config.tool_surface_for(config.model_for_mode(mode.as_str())),
+        &mut defs,
+    );
     defs.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     // Same treatment as web_search: when the feature is off the tools leave the
     // prompt entirely rather than sitting there costing tokens.
@@ -1575,10 +1667,10 @@ async fn stream_message_with_retry(
 }
 
 /// The context size at which a run must shed weight: the handoff line for
-/// Standard sessions; the compaction line for the lean profiles, which have no
+/// chat sessions; the compaction line for the single-purpose profiles, which have no
 /// handoff to try first.
 fn shed_line(budget: &ContextBudget, profile: PromptProfile) -> u64 {
-    if profile == PromptProfile::Standard {
+    if profile.is_chat() {
         budget.soft
     } else {
         budget.hard
@@ -1736,7 +1828,7 @@ async fn maybe_context_handoff(
     run_out: u32,
     run_cache: u32,
 ) -> Option<RunOutcome> {
-    if profile != PromptProfile::Standard {
+    if !profile.is_chat() {
         return None;
     }
     if estimated < budget.soft {
@@ -2109,7 +2201,7 @@ pub async fn run_workflow_with_profile(
         // Not for GitSync: commit & push has no user prompt to submit, and a
         // hook that reads `.prompt` would be handed a git instruction the user
         // never typed.
-        let out = if profile == PromptProfile::Standard {
+        let out = if profile.is_chat() {
             crate::agent::hooks::fire_user_prompt_submit(hooks, &user_message, Some(event_tx)).await
         } else {
             crate::agent::hooks::BatchOutcome::default()
@@ -2175,15 +2267,6 @@ pub async fn run_workflow_with_profile(
     // them an input to planning rather than a document nobody opens.
     let spec_section = build_spec_prompt_section(ctx);
     let (mut cur_mode, _) = mode_ctl.get();
-    let mut system = system_prompt(
-        ctx.workspace_root.as_deref(),
-        skills_section.as_deref(),
-        spec_section.as_deref(),
-        ctx.plan_save_path.as_deref(),
-        cur_mode,
-        profile,
-        subagent::effective_max_parallel(config),
-    );
     // MCP tool discovery already happened before `run_workflow` was called
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
     // snapshot read, not a fresh connection attempt.
@@ -2192,7 +2275,27 @@ pub async fn run_workflow_with_profile(
         .as_ref()
         .map(|m| m.cached_defs())
         .unwrap_or_default();
-    let mut tools = api_tools(cur_mode, profile, &mcp_defs, config);
+    // Read once: goals are written before the run starts and never minted
+    // inside it, and a profile that moved mid-run would move the cached prefix.
+    let has_golden_goals = ctx
+        .session_store_path
+        .as_deref()
+        .and_then(|p| crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok())
+        .is_some_and(|t| t.iter().any(crate::agent::tools::tasks::is_golden));
+    // From here on `profile` is the one the run actually uses; what the caller
+    // asked for is kept to derive it again when the mode — and with it the
+    // model and its window — changes.
+    let requested_profile = profile;
+    let (mut profile, mut system, mut tools) = run_prefix(
+        config,
+        ctx,
+        requested_profile,
+        cur_mode,
+        skills_section.as_deref(),
+        spec_section.as_deref(),
+        &mcp_defs,
+        has_golden_goals,
+    );
     // Every line the run is held to comes from the model it is about to talk
     // to, and is re-derived whenever a mode switch changes that model.
     let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -2219,6 +2322,8 @@ pub async fn run_workflow_with_profile(
                 spec_section.as_deref(),
                 &tools,
             ),
+            profile: profile.as_str().into(),
+            surface: config.tool_surface_for(model).as_str().into(),
             ts: now_ms(),
         });
         crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -2424,16 +2529,16 @@ pub async fn run_workflow_with_profile(
         let (mode_now, _) = mode_ctl.get();
         if mode_now != cur_mode {
             cur_mode = mode_now;
-            system = system_prompt(
-                ctx.workspace_root.as_deref(),
+            (profile, system, tools) = run_prefix(
+                config,
+                ctx,
+                requested_profile,
+                cur_mode,
                 skills_section.as_deref(),
                 spec_section.as_deref(),
-                ctx.plan_save_path.as_deref(),
-                cur_mode,
-                profile,
-                subagent::effective_max_parallel(config),
+                &mcp_defs,
+                has_golden_goals,
             );
-            tools = api_tools(cur_mode, profile, &mcp_defs, config);
             // A mode switch is also a model switch (brain_model vs
             // builder_model), and the two need not share a window.
             prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -2511,16 +2616,16 @@ pub async fn run_workflow_with_profile(
                     let (mode_now2, _) = mode_ctl.get();
                     if mode_now2 != cur_mode {
                         cur_mode = mode_now2;
-                        system = system_prompt(
-                            ctx.workspace_root.as_deref(),
+                        (profile, system, tools) = run_prefix(
+                            config,
+                            ctx,
+                            requested_profile,
+                            cur_mode,
                             skills_section.as_deref(),
                             spec_section.as_deref(),
-                            ctx.plan_save_path.as_deref(),
-                            cur_mode,
-                            profile,
-                            subagent::effective_max_parallel(config),
+                            &mcp_defs,
+                            has_golden_goals,
                         );
-                        tools = api_tools(cur_mode, profile, &mcp_defs, config);
                         prefix_tokens = estimate_tokens(&[], &system, &tools);
                         budget = ContextBudget::for_model(
                             config,
@@ -3153,7 +3258,7 @@ pub async fn run_workflow_with_profile(
             // hook in a fight with the harness's own continuation logic and
             // produce two nudges for one unfinished turn.
             if let Some(h) = &ctx.hooks
-                && profile == PromptProfile::Standard
+                && profile.is_chat()
                 && guards.stop_hook_blocks < MAX_STOP_HOOK_BLOCKS
             {
                 let out =
@@ -3315,6 +3420,12 @@ pub async fn run_workflow_with_profile(
             }
 
             let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
+            // The Compact profile has no subagents to delegate an edit to: its
+            // session changes files itself, each change still going through the
+            // approval `edit_file` asks for. Brain's read-only gates are
+            // untouched — Compact never runs in Brain, and a toggle mid-round
+            // is caught by `in_brain` below before this is.
+            let direct_edit = profile == PromptProfile::Compact && !in_brain;
             // A denial short-circuits everything downstream, including the mode
             // gates — there is nothing left to decide once the tool will not
             // run. An `allow` or `ask` does NOT short-circuit: the mode gates
@@ -3365,9 +3476,9 @@ pub async fn run_workflow_with_profile(
                 ledger.total_out += sub_out;
                 ledger.subagent_cost += sub_cost;
                 block
-            } else if tool_name == "edit_file" {
-                // Not offered to the main session in any mode; deny defensively
-                // in case the model hallucinates the tool.
+            } else if tool_name == "edit_file" && !direct_edit {
+                // Not offered to a Standard main session in any mode; deny
+                // defensively in case the model hallucinates the tool.
                 deny_tool(
                     &tool_name,
                     &tool_use_id,
@@ -3383,6 +3494,7 @@ pub async fn run_workflow_with_profile(
                     session_id,
                 )
             } else if !in_brain
+                && !direct_edit
                 && tool_name == "bash"
                 && permissions::bash_writes_files(
                     tool_input
@@ -7198,5 +7310,375 @@ mod route_tests {
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         assert!(routes(&store).is_empty());
         std::fs::remove_file(&store.path).ok();
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::agent::provider::ProviderEntry;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+    use crate::agent::surface::{COMPACT_TOOLS, LEAN_DROPPED, ToolSurface, prompt_for};
+
+    const SKILLS: &str = "## SKILLS\n- deploy: ship the thing";
+    const SPECS: &str = "## SPECIFICATION\n- Scenario: it works";
+
+    /// A provider "stub" serving model "m" as the builder, with the window the
+    /// user typed for it.
+    fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
+        let mut config = AgentConfig {
+            builder_model: "stub/m".into(),
+            // Edits are approved without a person, so a run can finish.
+            yolo_mode: true,
+            ..AgentConfig::default()
+        };
+        config.providers.insert(
+            "stub".into(),
+            ProviderEntry {
+                api_key: "k".into(),
+                base_url: base_url.into(),
+                protocol: "anthropic".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("m".to_string(), 4_096u32)].into_iter().collect(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window,
+            },
+        );
+        config
+    }
+
+    fn names(tools: &[ToolDescription]) -> Vec<&str> {
+        tools.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    fn standard(mode: SessionMode) -> String {
+        system_prompt(
+            Some("/ws"),
+            Some(SKILLS),
+            Some(SPECS),
+            None,
+            mode,
+            PromptProfile::Standard,
+            4,
+        )
+    }
+
+    // A prompt that still steered toward a tool the model was not given would
+    // cost a failed call every time the model believed it.
+    #[test]
+    fn a_lean_prompt_names_none_of_the_tools_lean_drops() {
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            let full = standard(mode);
+            assert!(
+                LEAN_DROPPED.iter().any(|t| full.contains(t)) || full.contains("LSP"),
+                "{mode:?}: the full prompt steers toward the LSP tools"
+            );
+            let lean = prompt_for(ToolSurface::Lean, full.clone());
+            for tool in LEAN_DROPPED {
+                assert!(!lean.contains(tool), "{mode:?} still names {tool}");
+            }
+            assert!(!lean.contains("LSP"), "{mode:?} still ranks LSP first");
+            // Everything else is the same prompt.
+            assert!(lean.contains("`semantic_search`") && lean.contains(SKILLS));
+            assert!(lean.len() < full.len() && lean.len() > full.len() - 400);
+        }
+    }
+
+    #[test]
+    fn the_surface_is_set_per_model_so_brain_and_builder_can_differ() {
+        let mut cfg = AgentConfig::default();
+        cfg.tool_surface
+            .insert(cfg.builder_model.clone(), "lean".into());
+
+        let builder = api_tools(SessionMode::Builder, PromptProfile::Standard, &[], &cfg);
+        let brain = api_tools(SessionMode::Brain, PromptProfile::Standard, &[], &cfg);
+        for tool in LEAN_DROPPED {
+            assert!(!names(&builder).contains(&tool), "builder is lean: {tool}");
+            assert!(names(&brain).contains(&tool), "brain was not set: {tool}");
+        }
+        assert_eq!(builder.len() + LEAN_DROPPED.len(), brain.len());
+
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let prefix = |mode| {
+            run_prefix(
+                &cfg,
+                &ctx,
+                PromptProfile::Standard,
+                mode,
+                None,
+                None,
+                &[],
+                false,
+            )
+        };
+        let (profile, system, tools) = prefix(SessionMode::Builder);
+        assert_eq!(profile, PromptProfile::Standard);
+        assert!(!system.contains("symbol_lookup") && !names(&tools).contains(&"symbol_lookup"));
+        let (_, system, tools) = prefix(SessionMode::Brain);
+        assert!(system.contains("symbol_lookup") && names(&tools).contains(&"symbol_lookup"));
+    }
+
+    // With nothing set, nothing moves: the prefix every existing session
+    // caches is the one it had.
+    #[test]
+    fn with_no_surface_set_the_prefix_is_what_it_was() {
+        let cfg = AgentConfig::default();
+        let ctx = ToolContext {
+            workspace_root: Some("/ws".into()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            let (profile, system, tools) = run_prefix(
+                &cfg,
+                &ctx,
+                PromptProfile::Standard,
+                mode,
+                Some(SKILLS),
+                Some(SPECS),
+                &[],
+                false,
+            );
+            assert_eq!(profile, PromptProfile::Standard);
+            assert_eq!(system, standard(mode));
+            assert_eq!(
+                names(&tools),
+                names(&api_tools(mode, PromptProfile::Standard, &[], &cfg))
+            );
+            assert!(names(&tools).contains(&"go_to_definition"));
+        }
+    }
+
+    #[test]
+    fn the_compact_prefix_is_one_prompt_and_ten_tools() {
+        let cfg = config_for("http://127.0.0.1:1", Some(32_768));
+        let mcp = vec![tools::ToolDef {
+            name: "mcp__db__query".into(),
+            description: "Run a query".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let ctx = ToolContext {
+            workspace_root: Some("/ws".into()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let (profile, system, tools) = run_prefix(
+            &cfg,
+            &ctx,
+            PromptProfile::Standard,
+            SessionMode::Builder,
+            Some(SKILLS),
+            Some(SPECS),
+            &mcp,
+            false,
+        );
+        assert_eq!(profile, PromptProfile::Compact);
+        let mut offered = names(&tools);
+        offered.sort_unstable();
+        let mut expected = COMPACT_TOOLS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(offered, expected);
+
+        assert!(system.starts_with(crate::agent::surface::COMPACT_PROMPT));
+        assert!(system.contains("Project workspace root: /ws."));
+        for absent in [SKILLS, SPECS, "CURRENT MODE", "spawn_agents", "golden"] {
+            assert!(!system.contains(absent), "{absent}");
+        }
+        assert!(!system.contains("{max_parallel}") && !system.contains("{plans_subdir}"));
+
+        // The point of the profile: what a 32k model is sent before the first
+        // word of the conversation. 12% of the window, where the Standard
+        // prompt and tools — before any skill or MCP schema — took 30%.
+        let compact = estimate_tokens(&[], &system, &tools);
+        let full_tools = api_tools(SessionMode::Builder, PromptProfile::Standard, &mcp, &cfg);
+        let full = estimate_tokens(&[], &standard(SessionMode::Builder), &full_tools);
+        assert!(compact < 4_000, "compact prefix: {compact} tokens");
+        assert!(full > 2 * compact, "standard {full} vs compact {compact}");
+    }
+
+    // The same session in Brain keeps the Standard profile: a toggle must hand
+    // the model Brain's read-only protocol, not Compact's edit tools.
+    #[test]
+    fn switching_a_compact_session_to_brain_restores_the_standard_prefix() {
+        let mut cfg = config_for("http://127.0.0.1:1", Some(32_768));
+        cfg.brain_model = "stub/m".into();
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let (profile, system, tools) = run_prefix(
+            &cfg,
+            &ctx,
+            PromptProfile::Standard,
+            SessionMode::Brain,
+            None,
+            None,
+            &[],
+            false,
+        );
+        assert_eq!(profile, PromptProfile::Standard);
+        assert!(system.contains("CURRENT MODE: BRAIN"));
+        assert!(!names(&tools).contains(&"edit_file"));
+        assert!(names(&tools).contains(&"write_plan"));
+    }
+
+    #[test]
+    fn a_compact_session_is_still_a_chat_session() {
+        // Its hooks fire and its long conversations hand off, like Standard's.
+        assert!(PromptProfile::Compact.is_chat() && PromptProfile::Standard.is_chat());
+        assert!(!PromptProfile::GitSync.is_chat());
+        let cfg = config_for("http://127.0.0.1:1", Some(32_768));
+        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 3_600);
+        assert_eq!(shed_line(&budget, PromptProfile::Compact), budget.soft);
+    }
+
+    struct Run {
+        outcome: Result<RunOutcome, String>,
+        file: std::path::PathBuf,
+        store: SessionStore,
+        bodies: Vec<String>,
+        root: std::path::PathBuf,
+    }
+
+    /// One user message against a model that reads a file, edits it, and says
+    /// it is done.
+    async fn read_edit_answer(tag: &str, context_window: Option<u32>) -> Run {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-surface-{tag}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("greet.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+        let path = file.to_string_lossy().to_string();
+        let store = SessionStore {
+            path: root.join("session.jsonl"),
+        };
+        std::fs::write(&store.path, "").unwrap();
+
+        let (base, _, bodies) = spawn_recording(vec![
+            Reply::Tool {
+                name: "read_file",
+                input: serde_json::json!({ "path": path }),
+            },
+            Reply::Tool {
+                name: "edit_file",
+                input: serde_json::json!({
+                    "path": path, "old_string": "hello", "new_string": "goodbye",
+                }),
+            },
+            Reply::Text("changed the greeting"),
+        ])
+        .await;
+        let config = config_for(&base, context_window);
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let mut history = Vec::new();
+        let outcome = run_workflow(
+            &config,
+            &mut history,
+            "say goodbye instead".into(),
+            Vec::new(),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "surface-test",
+            &ctx,
+            &store,
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+        )
+        .await;
+        let bodies = bodies.lock().unwrap().clone();
+        Run {
+            outcome,
+            file,
+            store,
+            bodies,
+            root,
+        }
+    }
+
+    fn run_config(store: &SessionStore) -> (String, u64) {
+        crate::agent::persist::load_records(&store.path)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r {
+                SessionRecord::RunConfig {
+                    profile, prefix, ..
+                } => Some((
+                    profile,
+                    prefix.system + prefix.skills + prefix.specs + prefix.tools + prefix.mcp,
+                )),
+                _ => None,
+            })
+            .expect("a run_config record")
+    }
+
+    /// The whole reason the profile exists, end to end: a 32k model is sent a
+    /// request it can hold, and gets the change made without a second agent.
+    #[tokio::test]
+    async fn on_a_small_window_the_session_edits_the_file_itself() {
+        let run = read_edit_answer("compact", Some(32_768)).await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&run.file).unwrap(),
+            "goodbye world\n"
+        );
+
+        let (profile, prefix) = run_config(&run.store);
+        assert_eq!(profile, "compact");
+        assert!(prefix < 4_000, "prefix: {prefix} tokens");
+
+        let first: serde_json::Value = serde_json::from_str(&run.bodies[0]).unwrap();
+        let sent: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(sent.len(), COMPACT_TOOLS.len(), "{sent:?}");
+        assert!(sent.contains(&"edit_file") && !sent.contains(&"spawn_agents"));
+        // Every request of the run stays well inside the window.
+        let largest = run.bodies.iter().map(String::len).max().unwrap() / 3;
+        assert!(largest < 8_000, "largest request: {largest} tokens");
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    /// The counterpart: on a window that fits the Standard profile nothing was
+    /// relaxed. The Builder session still may not edit, even when a model asks.
+    #[tokio::test]
+    async fn on_a_large_window_the_builder_session_still_cannot_edit() {
+        let run = read_edit_answer("standard", None).await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(std::fs::read_to_string(&run.file).unwrap(), "hello world\n");
+        assert_eq!(run_config(&run.store).0, "standard");
+
+        let first: serde_json::Value = serde_json::from_str(&run.bodies[0]).unwrap();
+        let sent: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(sent.contains(&"spawn_agents") && !sent.contains(&"edit_file"));
+        // The model was told why, in the request that followed its attempt.
+        assert!(
+            run.bodies[2].contains("delegate"),
+            "the denial reaches the model"
+        );
+        std::fs::remove_dir_all(&run.root).ok();
     }
 }

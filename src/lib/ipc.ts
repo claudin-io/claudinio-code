@@ -118,8 +118,17 @@ export interface AgentConfig {
   providers?: Record<string, ConnectedProviderInfo>;
   /** Jev, the cheap decision model — which credential it uses, never the key. */
   jev?: JevStatus;
+  /** Models set to something other than the full tool catalog, by model id. */
+  toolSurface?: Record<string, ToolSurface>;
+  /** "compact" when the builder model's window is too small for the full
+   *  prompt and tools; its sessions then run a short prompt and ten tools. */
+  builderProfile?: "standard" | "compact";
   workspaceConfig?: Record<string, unknown> | null;
 }
+
+/** Which tools a model is offered. "lean" leaves out the three LSP navigation
+ *  tools (go_to_definition, find_references, symbol_lookup). */
+export type ToolSurface = "full" | "lean";
 
 /** How much say Jev has over the phase a new session starts in. */
 export type JevRoute = "off" | "shadow" | "on";
@@ -177,6 +186,8 @@ export interface SetConfigArgs {
   jevRoute?: JevRoute;
   /** A TypeSafe API key; an empty string removes it. */
   jevApiKey?: string;
+  /** Set one model's tool surface; "full" clears it. */
+  toolSurface?: { model: string; surface: ToolSurface };
 }
 
 export interface ApproveArgs {

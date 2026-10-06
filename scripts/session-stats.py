@@ -104,6 +104,7 @@ class Stats:
         self.elision = []
         self.prefix = collections.defaultdict(list)
         self.windows = Counter()
+        self.profiles = Counter()
         self.sub_runs = 0
         self.sub_tools = Counter()
         self.sub_modes = Counter()
@@ -163,6 +164,7 @@ class Stats:
                     self.prefix[part].append(tokens)
                 self.prefix["total"].append(sum(prefix.values()))
                 self.windows[rec.get("context_window")] += 1
+                self.profiles[(rec.get("profile") or "?", rec.get("surface") or "?")] += 1
             elif kind == "subagent_run":
                 self.sub_runs += 1
                 self.sub_modes[rec.get("mode")] += 1
@@ -293,6 +295,8 @@ class Stats:
                 vals = self.prefix[part]
                 print(f"  {part:7} {quantile(vals, .5):7} / {quantile(vals, .9)}")
             print(f"  context windows seen: {dict(self.windows)}")
+            profiles = {f"{p}/{s}": n for (p, s), n in self.profiles.items()}
+            print(f"  profile/surface per run: {profiles}")
 
         total_carried = sum(self.carried.values())
         print("\nCARRIED MASS (chars x later requests that re-read them)")

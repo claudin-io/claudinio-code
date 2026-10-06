@@ -88,6 +88,8 @@ pub fn subagent_defs(
         .into_iter()
         .filter(|t| t.name != "spawn_agents" && t.name != "ask_user")
         .collect();
+    // A subagent runs on the builder model, so that model's surface is its own.
+    crate::agent::surface::retain_for(config.tool_surface_for(&config.builder_model), &mut tools);
     tools.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     match mode {
         // Explore subagents are read-only by design (no edit_file/bash);
@@ -365,7 +367,10 @@ pub async fn run_subagent(
         Some(s) => format!("\n{s}"),
         None => String::new(),
     };
-    let system = subagent_system_prompt(ctx.workspace_root.as_deref(), &skills_hint);
+    let system = crate::agent::surface::prompt_for(
+        config.tool_surface_for(&config.builder_model),
+        subagent_system_prompt(ctx.workspace_root.as_deref(), &skills_hint),
+    );
 
     // A subagent runs on the builder model whatever mode its parent is in, so
     // it gets a budget — and result caps — of its own rather than the
@@ -880,6 +885,45 @@ mod tests {
         }
     }
 
+    // A subagent runs on the builder model: when that model is lean, so is it —
+    // in what it is offered and in what its prompt sends it after.
+    #[test]
+    fn a_lean_builder_model_makes_its_subagents_lean() {
+        use crate::agent::surface::{LEAN_DROPPED, ToolSurface, prompt_for};
+        let mut config = AgentConfig::default();
+        let full = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &config);
+        config
+            .tool_surface
+            .insert(config.builder_model.clone(), "lean".into());
+        for mode in [SubagentMode::Explore, SubagentMode::Code] {
+            let defs = subagent_defs(mode, &[], MAX_PARALLEL_AGENTS, &config);
+            for tool in LEAN_DROPPED {
+                assert!(!defs.iter().any(|d| d.name == tool), "{tool}");
+            }
+            assert!(defs.iter().any(|d| d.name == "semantic_search"));
+        }
+        // Setting it on the brain model alone changes nothing for a subagent.
+        let mut brain_only = AgentConfig::default();
+        brain_only
+            .tool_surface
+            .insert(brain_only.brain_model.clone(), "lean".into());
+        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &brain_only);
+        assert_eq!(defs.len(), full.len());
+
+        let prompt = subagent_system_prompt(Some("/ws"), "");
+        assert!(prompt.contains("symbol_lookup") && prompt.contains("LSP tools"));
+        let lean = prompt_for(ToolSurface::Lean, prompt);
+        for tool in LEAN_DROPPED {
+            assert!(!lean.contains(tool), "the lean prompt still names {tool}");
+        }
+        assert!(!lean.contains("LSP"), "{lean}");
+        assert!(lean.contains("file_outline") && lean.contains("semantic_search"));
+        assert!(
+            lean.contains("before reading) \u{2022} semantic_search"),
+            "{lean}"
+        );
+    }
+
     #[test]
     fn test_subagent_defs_explore_excludes_spawn_and_ask() {
         let config = AgentConfig::default();
@@ -1073,10 +1117,21 @@ pub(crate) mod scripted_model {
     /// the Anthropic streaming protocol. Returns the base URL and the size in
     /// bytes of every request body received, in order.
     pub async fn spawn(script: Vec<Reply>) -> (String, Arc<Mutex<Vec<usize>>>) {
+        let (base, sizes, _) = spawn_recording(script).await;
+        (base, sizes)
+    }
+
+    /// `spawn`, also keeping every request body: for a test about what the
+    /// model was sent rather than how much of it.
+    pub async fn spawn_recording(
+        script: Vec<Reply>,
+    ) -> (String, Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let sizes = Arc::new(Mutex::new(Vec::new()));
         let seen = sizes.clone();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let kept = bodies.clone();
         let next = Arc::new(AtomicUsize::new(0));
         tokio::spawn(async move {
             loop {
@@ -1109,6 +1164,10 @@ pub(crate) mod scripted_model {
                     }
                 };
                 seen.lock().unwrap().push(body_len);
+                let body_start = raw.len().saturating_sub(body_len);
+                kept.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&raw[body_start..]).into_owned());
                 let n = next.fetch_add(1, Ordering::SeqCst);
                 let reply = script.get(n).or(script.last()).expect("a script");
                 let body = render(reply, n);
@@ -1122,7 +1181,7 @@ pub(crate) mod scripted_model {
                 let _ = socket.flush().await;
             }
         });
-        (format!("http://{addr}"), sizes)
+        (format!("http://{addr}"), sizes, bodies)
     }
 }
 

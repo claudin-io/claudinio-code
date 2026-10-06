@@ -303,6 +303,13 @@ pub enum SessionRecord {
         hard: u64,
         ceiling: u64,
         prefix: PrefixBreakdown,
+        /// `standard` | `compact` | `git_sync`, and `full` | `lean` — which
+        /// prompt and tool catalog the prefix above was built from
+        /// (`agent::surface`). Empty on records written before they existed.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        profile: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        surface: String,
         ts: u64,
     },
     /// The router's verdict on a session's first prompt (`agent::route`).
