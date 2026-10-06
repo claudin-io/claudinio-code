@@ -3,6 +3,7 @@ mod browser;
 mod edit_file;
 pub mod finalize_plan;
 mod grep;
+mod lines;
 mod list_dir;
 pub mod quality;
 mod read_file;
@@ -341,7 +342,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "semantic_search".into(),
-            description: "Hybrid code & documentation search: BM25 keyword matching over code bodies, docs and file paths, fused with MiniLM semantic embeddings. Finds code by exact identifiers, rare terms and file names AND by meaning/behavior — e.g. 'message queue system' finds SteeringCtl.drain/push/queue without an identifier match, and 'TOKENIZERS_PARALLELISM' finds the exact term inside a body. Prefer this whenever you don't have a precise symbol position. The index is ENGLISH-ONLY: always translate the user's phrasing to English before querying — never pass a query in another language. Response is always {mode, note?, results}: mode is 'hybrid' or 'lexical-only' (while the embedding model loads), each result has score (relative confidence in (0,1]; 1.0 = top-ranked by both keyword and semantic evidence) and matchType ('hybrid'|'semantic'|'lexical'); top results include a source snippet. Ranking: go_to_definition (precise) → semantic_search → code_search (symbol names) → grep (fallback).".into(),
+            description: "Hybrid code & documentation search: BM25 keyword matching over code bodies, docs and file paths, fused with MiniLM semantic embeddings. Finds code by exact identifiers, rare terms and file names AND by meaning/behavior — e.g. 'message queue system' finds SteeringCtl.drain/push/queue without an identifier match, and 'TOKENIZERS_PARALLELISM' finds the exact term inside a body. Prefer this whenever you don't have a precise symbol position. The index is ENGLISH-ONLY: always translate the user's phrasing to English before querying — never pass a query in another language. The first line of the result is the mode: 'hybrid', or 'lexical-only' while the embedding model loads. Then one line per hit, best first: `path:lines kind signature [match score]`, where match is 'hybrid'|'semantic'|'lexical' and score is relative confidence in (0,1] (1.0 = top-ranked by both keyword and semantic evidence). The top hits are followed by their source in a fence. Ranking: go_to_definition (precise) → semantic_search → code_search (symbol names) → grep (fallback).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -671,9 +672,10 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let a: list_dir::ListDirArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             validate_read_path(&a.path, ctx)?;
+            let dir = a.path.clone();
             let entries = list_dir::execute(a)?;
             Ok(ToolOutput::Text {
-                content: serde_json::to_string_pretty(&entries).unwrap_or_default(),
+                content: lines::list_dir(&dir, &entries),
             })
         }
         "grep" => {
@@ -688,12 +690,12 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 };
                 let matches = grep::execute(a2)?;
                 return Ok(ToolOutput::Text {
-                    content: serde_json::to_string_pretty(&matches).unwrap_or_default(),
+                    content: lines::grep(&matches),
                 });
             }
             let matches = grep::execute(a)?;
             Ok(ToolOutput::Text {
-                content: serde_json::to_string_pretty(&matches).unwrap_or_default(),
+                content: lines::grep(&matches),
             })
         }
         "edit_file" => {
@@ -723,7 +725,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
             let results = db.search_symbols(query, limit)?;
             Ok(ToolOutput::Text {
-                content: serde_json::to_string_pretty(&results).unwrap_or_default(),
+                content: lines::symbols(&results),
             })
         }
         "symbol_lookup" => {
@@ -735,7 +737,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 .ok_or("missing name")?;
             let results = db.lookup_symbols_exact(name, 20)?;
             Ok(ToolOutput::Text {
-                content: serde_json::to_string_pretty(&results).unwrap_or_default(),
+                content: lines::symbols(&results),
             })
         }
         "file_outline" => {
@@ -749,7 +751,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             validate_read_path(file_path, ctx)?;
             let results = db.symbols_in_file(file_path)?;
             Ok(ToolOutput::Text {
-                content: serde_json::to_string_pretty(&results).unwrap_or_default(),
+                content: lines::outline(file_path, &results),
             })
         }
         "go_to_definition" => {
@@ -870,12 +872,8 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             } else {
                 None
             };
-            let mut envelope = serde_json::json!({ "mode": mode, "results": results });
-            if let Some(n) = note {
-                envelope["note"] = serde_json::json!(n);
-            }
             Ok(ToolOutput::Text {
-                content: serde_json::to_string_pretty(&envelope).unwrap_or_default(),
+                content: lines::semantic(mode, note.as_deref(), &results),
             })
         }
         "bash" => {
@@ -1332,6 +1330,59 @@ mod tests {
             _ => panic!("expected Text variant"),
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    // ── list results reach the model as lines ──
+
+    #[test]
+    fn a_listing_and_a_search_come_back_as_lines_not_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio_lines_{}_{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "alpha\nNEEDLE here\n").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), "  NEEDLE again\n").unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let ctx = ToolContext {
+            workspace_root: Some(root.clone()),
+            ..test_ctx()
+        };
+        let text = |name: &str, args: Value| match futures::executor::block_on(execute(
+            name, args, &ctx,
+        )) {
+            Ok(ToolOutput::Text { content }) => content,
+            _ => panic!("{name}: expected text"),
+        };
+
+        let listing = text("list_dir", serde_json::json!({ "path": root }));
+        assert_eq!(listing, format!("{root}/\nsub/\na.txt"));
+
+        // With and without a path: both arms of the tool format the same way.
+        for args in [
+            serde_json::json!({ "pattern": "NEEDLE", "path": root }),
+            serde_json::json!({ "pattern": "NEEDLE" }),
+        ] {
+            let found = text("grep", args);
+            assert!(found.starts_with("2 matches in 2 files\n\n"), "{found}");
+            assert!(
+                found.contains(&format!("{root}/a.txt\n2: NEEDLE here")),
+                "{found}"
+            );
+            assert!(
+                found.contains(&format!("{root}/sub/b.txt\n1: NEEDLE again")),
+                "{found}"
+            );
+        }
+        assert_eq!(
+            text(
+                "grep",
+                serde_json::json!({ "pattern": "ABSENT", "path": root })
+            ),
+            "No matches."
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── edit_file read-before-edit tests ──

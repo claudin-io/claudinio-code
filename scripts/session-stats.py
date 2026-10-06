@@ -57,6 +57,18 @@ def block_chars(block):
     return 0
 
 
+def result_text(block):
+    """The text of a tool_result block, whichever of its two shapes it has."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    return "".join(
+        part.get("text") or ""
+        for part in (content or [])
+        if isinstance(part, dict) and part.get("type") == "text"
+    )
+
+
 def quantile(values, q):
     values = sorted(values)
     return values[min(len(values) - 1, int(q * len(values)))] if values else 0
@@ -93,7 +105,7 @@ class Stats:
         self.tasks_set_sizes = []
         self.tasks_per_session = []
         self.bash_first = Counter()
-        self.reads = self.exact_rereads = 0
+        self.reads = self.exact_rereads = self.pointers = 0
         self.read_chars = self.superseded_chars = 0
         self.fresh = Counter()
         self.later_brain = 0
@@ -216,10 +228,16 @@ class Stats:
                         if read_key and read_key[0]:
                             self.reads += 1
                             self.read_chars += chars
-                            if read_key in seen_reads:
+                            if result_text(block).startswith("[unchanged: "):
+                                # Answered with a pointer to the earlier copy,
+                                # which stays the one in history.
                                 self.exact_rereads += 1
-                                self.superseded_chars += seen_reads[read_key]
-                            seen_reads[read_key] = chars
+                                self.pointers += 1
+                            else:
+                                if read_key in seen_reads:
+                                    self.exact_rereads += 1
+                                    self.superseded_chars += seen_reads[read_key]
+                                seen_reads[read_key] = chars
                     elif btype == "text":
                         live[role + "_text"] += chars
                         parts.append(("text", chars))
@@ -341,7 +359,8 @@ class Stats:
               f"of results holding {pct(big_chars, sum(self.result_sizes))} of the chars")
         print(f"  read_file exact repeats (same path and range): {self.exact_rereads} of {self.reads} "
               f"({pct(self.exact_rereads, self.reads)}); superseded copies are "
-              f"{pct(self.superseded_chars, self.read_chars)} of read chars")
+              f"{pct(self.superseded_chars, self.read_chars)} of read chars; "
+              f"{self.pointers} answered with a pointer instead of the file")
         if self.elision:
             print(f"  rule elision on the {len(self.elision)} sessions that peaked >=96k: frees "
                   f"median {quantile(self.elision, .5):.0%}, p10 {quantile(self.elision, .1):.0%}; "

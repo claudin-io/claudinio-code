@@ -692,6 +692,8 @@ fn read_key(input: &Value) -> Option<(String, Option<u64>, Option<u64>)> {
 /// repeated an earlier one exactly.
 pub fn plan_lossless(history: &[Message]) -> Decision {
     let calls = collect_tool_calls(history);
+    // Results that are not the whole of what the tool returned: cut by an
+    // earlier prune, or a pointer to an earlier read (`repeated_read`).
     let mut compacted: HashSet<&str> = HashSet::new();
     for b in history.iter().flat_map(|m| m.content.iter()) {
         if let ContentBlock::ToolResult {
@@ -699,9 +701,11 @@ pub fn plan_lossless(history: &[Message]) -> Decision {
             content,
             ..
         } = b
-            && content.as_text().contains(COMPACTED_MARK)
         {
-            compacted.insert(tool_use_id.as_str());
+            let text = content.as_text();
+            if text.contains(COMPACTED_MARK) || text.starts_with(UNCHANGED_MARK) {
+                compacted.insert(tool_use_id.as_str());
+            }
         }
     }
     let mut decision = Decision::default();
@@ -738,6 +742,97 @@ pub fn plan_lossless(history: &[Message]) -> Decision {
     }
     decision.truncate_results.reverse();
     decision
+}
+
+/// How the history copy of a repeated read starts.
+pub const UNCHANGED_MARK: &str = "[unchanged: ";
+
+/// A read shorter than this is repeated as it is: a pointer would save nothing.
+const POINTER_MIN_CHARS: usize = 600;
+
+/// What to put in history, instead of `content`, for a `read_file` whose
+/// result the conversation already holds word for word.
+///
+/// The check is on the text itself, not on a record of what was read when: the
+/// most recent read of the same file and range must still be in `history` and
+/// be exactly `content`. So it cannot point at a result a prune has cut, a
+/// compaction has summarized or another agent's history holds, and a file that
+/// changed in between is simply returned.
+///
+/// A pointer is never answered with another pointer. A model that asks again
+/// right after one is saying it could not use it, and gets the file.
+///
+/// Measured before this existed, on 509 real sessions: one `read_file` in ten
+/// repeated an earlier one exactly, and read results were 44% of everything
+/// carried from request to request.
+pub fn repeated_read(history: &[Message], input: &Value, content: &str) -> Option<String> {
+    if content.len() < POINTER_MIN_CHARS || content.starts_with("Error") {
+        return None;
+    }
+    let key = read_key(input)?;
+    let result_of = |id: &str| {
+        history
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == id => Some(content.as_text()),
+                _ => None,
+            })
+    };
+    let previous = history
+        .iter()
+        .rev()
+        .flat_map(|m| m.content.iter().rev())
+        .find_map(|b| match b {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } if name == "read_file" && read_key(input).as_ref() == Some(&key) => result_of(id),
+            _ => None,
+        })?;
+    if previous.starts_with(UNCHANGED_MARK) || previous != content {
+        return None;
+    }
+    let (path, start, end) = key;
+    let range = match (start, end) {
+        (Some(s), Some(e)) => format!(" lines {s}-{e}"),
+        _ => String::new(),
+    };
+    Some(format!(
+        "{UNCHANGED_MARK}{path}{range} is identical to what your earlier read_file of it \
+         returned ({} lines). That result is still in this conversation and is not repeated \
+         here. If you cannot find it, call read_file again and the content is returned.]",
+        content.lines().count()
+    ))
+}
+
+/// `block` as it should enter `history`: a `read_file` result the conversation
+/// already holds becomes a pointer to it ([`repeated_read`]); anything else is
+/// returned untouched.
+pub fn history_copy(
+    history: &[Message],
+    tool: &str,
+    input: &Value,
+    block: ContentBlock,
+) -> ContentBlock {
+    if tool != "read_file" {
+        return block;
+    }
+    let ContentBlock::ToolResult {
+        tool_use_id,
+        content: ToolResultContent::Text(text),
+        ..
+    } = &block
+    else {
+        return block;
+    };
+    match repeated_read(history, input, text) {
+        Some(pointer) => ContentBlock::tool_result(tool_use_id.clone(), pointer),
+        None => block,
+    }
 }
 
 /// Characters of one message, counted as [`history_chars`] counts them.
@@ -1406,6 +1501,178 @@ mod tests {
         }
         // r1 and r3 are each the only whole copy left of their file.
         assert!(plan_lossless(&h).is_empty());
+    }
+
+    /// A history in which `reads` (id, input, result) happened in order.
+    fn history_of_reads(reads: &[(&str, Value, &str)]) -> Vec<Message> {
+        let mut h = vec![user("Look at lib.rs.")];
+        for (id, input, text) in reads {
+            h.push(assistant_call("", id, "read_file", input.clone()));
+            h.push(result(id, text));
+        }
+        h
+    }
+
+    #[test]
+    fn a_read_the_conversation_already_holds_becomes_a_pointer_to_it() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+        let h = history_of_reads(&[("r1", lib.clone(), &body)]);
+
+        let pointer = repeated_read(&h, &lib, &body).expect("an exact repeat");
+        assert!(pointer.starts_with(UNCHANGED_MARK));
+        assert!(pointer.contains("src/lib.rs") && pointer.contains("400 lines"));
+        assert!(
+            pointer.len() < 400,
+            "{} chars for {}",
+            pointer.len(),
+            body.len()
+        );
+        // `file_path` is the same argument under its other name.
+        assert!(repeated_read(&h, &json!({"file_path": "src/lib.rs"}), &body).is_some());
+
+        // A range is named, so the model knows which earlier read is meant.
+        let part = json!({"path": "src/lib.rs", "start_line": 10, "end_line": 90});
+        let h = history_of_reads(&[("r1", part.clone(), &body)]);
+        assert!(
+            repeated_read(&h, &part, &body)
+                .unwrap()
+                .contains("src/lib.rs lines 10-90 is identical")
+        );
+    }
+
+    #[test]
+    fn a_read_is_returned_whole_when_the_earlier_one_cannot_stand_in_for_it() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+
+        // Nothing read yet, or only another file or another range.
+        assert!(repeated_read(&history_of_reads(&[]), &lib, &body).is_none());
+        let other = history_of_reads(&[
+            ("r1", json!({"path": "src/other.rs"}), &body),
+            (
+                "r2",
+                json!({"path": "src/lib.rs", "start_line": 1, "end_line": 50}),
+                &body,
+            ),
+        ]);
+        assert!(repeated_read(&other, &lib, &body).is_none());
+
+        // The file changed in between: the model edited it, or someone did.
+        let edited = format!("{body}fn added() {{}}\n");
+        let h = history_of_reads(&[("r1", lib.clone(), &body)]);
+        assert!(repeated_read(&h, &lib, &edited).is_none());
+
+        // The earlier result was cut by a prune: what it pointed at is gone.
+        let cut = format!(
+            "{}\n{COMPACTED_MARK}5000 chars of this tool result removed; re-run the tool if needed]",
+            &body[..300]
+        );
+        let h = history_of_reads(&[("r1", lib.clone(), &cut)]);
+        assert!(repeated_read(&h, &lib, &body).is_none());
+
+        // Too small to be worth a pointer.
+        let small = "fn main() {}\n";
+        let h = history_of_reads(&[("r1", lib.clone(), small)]);
+        assert!(repeated_read(&h, &lib, small).is_none());
+
+        // A read that failed twice is two errors, not a repeat.
+        let error = format!("Error: cannot read as text: {}", "x".repeat(700));
+        let h = history_of_reads(&[("r1", lib.clone(), &error)]);
+        assert!(repeated_read(&h, &lib, &error).is_none());
+    }
+
+    // The model asked again right after being pointed back: it could not use
+    // the pointer. One wasted round is the most this may ever cost.
+    #[test]
+    fn a_pointer_is_never_answered_with_another_pointer() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+        let pointer = repeated_read(
+            &history_of_reads(&[("r1", lib.clone(), &body)]),
+            &lib,
+            &body,
+        )
+        .unwrap();
+
+        let asked_again =
+            history_of_reads(&[("r1", lib.clone(), &body), ("r2", lib.clone(), &pointer)]);
+        assert!(repeated_read(&asked_again, &lib, &body).is_none());
+
+        // …and once it has the file again, that copy can be pointed at.
+        let given_again = history_of_reads(&[
+            ("r1", lib.clone(), &body),
+            ("r2", lib.clone(), &pointer),
+            ("r3", lib.clone(), &body),
+        ]);
+        assert!(repeated_read(&given_again, &lib, &body).is_some());
+    }
+
+    // The lossless stage cuts a read that a later one repeats. A pointer is a
+    // later read of the same range — and the one thing it must never do is get
+    // the result it points at removed.
+    #[test]
+    fn a_pointer_does_not_supersede_the_read_it_points_at() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+        let pointer = repeated_read(
+            &history_of_reads(&[("r1", lib.clone(), &body)]),
+            &lib,
+            &body,
+        )
+        .unwrap();
+        let mut h = history_of_reads(&[("r1", lib.clone(), &body), ("r2", lib.clone(), &pointer)]);
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        assert!(plan_lossless(&h).is_empty(), "r1 is the only copy there is");
+
+        // A real later copy still supersedes the first; the pointer between
+        // them is left alone — there is nothing in it to cut.
+        let mut h = history_of_reads(&[
+            ("r1", lib.clone(), &body),
+            ("r2", lib.clone(), &pointer),
+            ("r3", lib.clone(), &body),
+        ]);
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        assert_eq!(plan_lossless(&h).truncate_results, vec!["r1"]);
+    }
+
+    #[test]
+    fn only_a_repeated_read_is_swapped_for_its_history_copy() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+        let h = history_of_reads(&[("r1", lib.clone(), &body)]);
+        let text_of = |b: ContentBlock| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => (tool_use_id, content.as_text().into_owned()),
+            _ => panic!("a tool result"),
+        };
+
+        let (id, text) = text_of(history_copy(
+            &h,
+            "read_file",
+            &lib,
+            ContentBlock::tool_result("r2", body.clone()),
+        ));
+        assert_eq!(id, "r2", "the pointer answers the call that asked");
+        assert!(text.starts_with(UNCHANGED_MARK));
+
+        // Another tool returning the same text is not a read of that file.
+        let (_, text) = text_of(history_copy(
+            &h,
+            "bash",
+            &json!({"command": "cat src/lib.rs"}),
+            ContentBlock::tool_result("b1", body.clone()),
+        ));
+        assert_eq!(text, body);
     }
 
     #[test]

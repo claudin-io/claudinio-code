@@ -3615,7 +3615,14 @@ pub async fn run_workflow_with_profile(
                     .loop_watch
                     .record(&tool_name, &watched_input, &content.as_text());
             }
-            tool_result_blocks.push(block);
+            // After the hook and the loop watch, which are about what the tool
+            // returned; this is only about what is worth carrying twice.
+            tool_result_blocks.push(crate::agent::prune::history_copy(
+                history,
+                &tool_name,
+                &watched_input,
+                block,
+            ));
         }
 
         push_turn(

@@ -692,7 +692,12 @@ pub async fn run_subagent(
             if let ContentBlock::ToolResult { content, .. } = &block {
                 loop_watch.record(&tool_name, &watched_input, &content.as_text());
             }
-            tool_result_blocks.push(block);
+            tool_result_blocks.push(crate::agent::prune::history_copy(
+                &history,
+                &tool_name,
+                &watched_input,
+                block,
+            ));
         }
 
         history.push(Message {
@@ -1274,6 +1279,39 @@ mod context_budget_tests {
             &Arc::new(SteeringCtl::new()),
         )
         .await
+    }
+
+    /// Reading the same lines twice: the second request carries the file, the
+    /// third carries it once and a pointer — not twice.
+    #[tokio::test]
+    async fn a_repeated_read_is_carried_once() {
+        let (root, file) = workspace("repeat");
+        let read = Reply::Tool {
+            name: "read_file",
+            input: serde_json::json!({ "path": file, "start_line": 1, "end_line": 200 }),
+        };
+        let (base, _, bodies) =
+            super::scripted_model::spawn_recording(vec![read.clone(), read, Reply::Text("done")])
+                .await;
+        let result = run(&config_for(&base, None), &root).await;
+        assert_eq!(result.status, "completed", "{}", result.report);
+
+        let bodies = bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 3);
+        let file_lines = |body: &str| body.matches(&"x".repeat(76)).count();
+        assert_eq!(
+            file_lines(&bodies[1]),
+            200,
+            "the first read is there in full"
+        );
+        assert_eq!(
+            file_lines(&bodies[2]),
+            200,
+            "the repeat added no second copy"
+        );
+        assert!(bodies[2].contains(crate::agent::prune::UNCHANGED_MARK));
+        assert!(bodies[2].len() < bodies[1].len() + 1_500);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Tokens of the largest request sent, by the session's own chars/3 rule.

@@ -252,6 +252,58 @@ describe("ToolBody", () => {
     dispose();
   });
 
+  it("renders list_dir line output as a file list, folders marked", () => {
+    const call = makeCall("list_dir", { path: "/ws/src" });
+    const result = makeResult("list_dir", "/ws/src/\nagent/\nmain.rs");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.textContent).toContain("agent");
+    expect(document.body.textContent).toContain("main.rs");
+    expect(document.querySelectorAll('[data-testid="icon-folder"]').length).toBe(1);
+    expect(document.querySelectorAll('[data-testid="icon-file"]').length).toBe(1);
+    expect(document.querySelector("pre")).toBeNull();
+    dispose();
+  });
+
+  it("renders grep line output as file:line rows", () => {
+    const call = makeCall("grep", { pattern: "x" });
+    const result = makeResult("grep", "2 matches in 1 file\n\n/ws/a.rs\n12: let x = 1;\n40: let y = x;");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.textContent).toContain("/ws/a.rs:12");
+    expect(document.body.textContent).toContain("let y = x;");
+    expect(document.body.textContent).not.toContain("2 matches in 1 file");
+    dispose();
+  });
+
+  it("says No results for a search that found nothing", () => {
+    const call = makeCall("grep", { pattern: "x" });
+    const dispose = render(
+      () => <ToolBody call={call} result={makeResult("grep", "No matches.")} />,
+      document.body,
+    );
+    expect(document.body.textContent).toContain("No results");
+    dispose();
+  });
+
+  it("shows a list tool's error text as it is", () => {
+    const call = makeCall("list_dir", { path: "/ws/x" });
+    const result = makeResult("list_dir", "Error: not a directory: /ws/x");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.querySelector("pre")?.textContent).toContain("not a directory");
+    dispose();
+  });
+
+  it("shows a repeated read as a note, not as the file's content", () => {
+    const call = makeCall("read_file", { path: "src/foo.ts" });
+    const result = makeResult(
+      "read_file",
+      "[unchanged: src/foo.ts is identical to what your earlier read_file of it returned (40 lines). That result is still in this conversation and is not repeated here. If you cannot find it, call read_file again and the content is returned.]",
+    );
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.querySelector("[data-unchanged-read]")?.textContent).toContain("earlier read");
+    expect(document.querySelector("pre")).toBeNull();
+    dispose();
+  });
+
   it("renders list_dir JSON output as a file list", () => {
     const call = makeCall("list_dir", { path: "src" });
     const result = makeResult(
