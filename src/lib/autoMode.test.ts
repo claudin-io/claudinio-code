@@ -73,9 +73,14 @@ describe("createAutoMode", () => {
     expect(auto.offered()).toBe(true);
   });
 
+  // The control is three choices until the first prompt: Brain, Builder, and
+  // back to Auto, in any order. Picking Brain used to remove the Auto button.
   it("can be picked again after a mode was picked by hand", async () => {
-    const { auto } = await armed();
+    const { auto, setMode } = await armed();
     auto.disarm();
+    setMode("brain");
+    expect(auto.offered()).toBe(true);
+    expect(auto.active()).toBe(false);
     auto.select();
     expect(auto.active()).toBe(true);
     expect(auto.take()).toBe("auto");

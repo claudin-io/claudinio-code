@@ -2102,18 +2102,23 @@ async fn route_first_prompt(
         // also hand the agent the right to leave a Brain the user turned on.
         let untouched = mode_ctl.get() == chosen;
         store.try_append(&record(&verdict, !untouched));
-        if untouched && verdict.mode == SessionMode::Brain && ran_as != SessionMode::Brain {
-            // Agent origin, like `enter_plan_mode`: the flow then runs
-            // interview → plan → tasks → build without a manual flip, and the
-            // interview's final confirmation is the user's approval point.
-            mode_ctl.set(SessionMode::Brain, ModeOrigin::Agent);
+        // Auto was the last thing chosen, so the verdict is the mode, wherever
+        // the control stood before: a user can try Brain, go back to Auto, and
+        // be sent to Builder. And a Brain reached through Auto is the
+        // harness's choice even when the user had clicked Brain earlier —
+        // agent origin, like `enter_plan_mode`: the flow then runs interview →
+        // plan → tasks → build without a manual flip, and the interview's
+        // final confirmation is the user's approval point.
+        let reorigin = verdict.mode == SessionMode::Brain && chosen.1 != ModeOrigin::Agent;
+        if untouched && (verdict.mode != ran_as || reorigin) {
+            mode_ctl.set(verdict.mode, ModeOrigin::Agent);
             store.try_append(&SessionRecord::Mode {
-                mode: SessionMode::Brain.as_str().into(),
+                mode: verdict.mode.as_str().into(),
                 origin: ModeOrigin::Agent.as_str().into(),
                 ts: now_ms(),
             });
             let _ = event_tx.send(AgentEvent::ModeChanged {
-                mode: SessionMode::Brain.as_str().into(),
+                mode: verdict.mode.as_str().into(),
                 origin: ModeOrigin::Agent.as_str().into(),
                 reason: Some(verdict.reason()),
             });
@@ -7492,6 +7497,48 @@ mod route_tests {
             vec![("builder".into(), "builder".into(), "rules".into(), true)]
         );
         std::fs::remove_file(&store.path).ok();
+    }
+
+    // The control can be moved to Brain and back to Auto before the first
+    // message. Auto is then what was chosen: its verdict is the mode, in
+    // either direction, and a Brain it confirms is its own.
+    #[tokio::test]
+    async fn auto_chosen_after_brain_was_tried_decides_like_auto_always_does() {
+        let picked_brain = || Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human));
+
+        let (url, stub) = spawn_stub(200, jev_says(0.2, 0.3));
+        let (file, mode) = (store("back-to-auto"), picked_brain());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &file, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Agent));
+        assert_eq!(
+            routes(&file),
+            vec![("builder".into(), "brain".into(), "jev".into(), false)]
+        );
+        let records = crate::agent::persist::load_records(&file.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            Some(("builder".into(), "agent".into())),
+            "a reloaded session is in the mode Auto chose"
+        );
+        std::fs::remove_file(&file.path).ok();
+
+        // Auto agrees with the earlier click: still Brain, but now a Brain the
+        // agent may leave by itself once the plan and tasks exist.
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (file, mode) = (store("auto-agrees"), picked_brain());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &file, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Agent));
+        std::fs::remove_file(&file.path).ok();
+
+        // Without Auto, a Brain the user picked is left exactly as it is.
+        let (file, mode) = (store("stays-brain"), picked_brain());
+        run(&config(RouteMode::On, None), &file, &mode, true).await;
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Human));
+        std::fs::remove_file(&file.path).ok();
     }
 
     #[tokio::test]

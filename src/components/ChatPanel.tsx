@@ -271,7 +271,10 @@ export const ChatPanel: Component<{
   // (`lib/autoMode`).
   const auto = createAutoMode({
     mode,
-    sessionIsFresh: () => messages().length === 0 && activeSessionId() === null,
+    // Fresh means no prompt yet — not "no session yet": clicking Brain or
+    // Builder creates the session to record the choice, and Auto has to stay
+    // on offer after that, or trying a mode would be a one-way door.
+    sessionIsFresh: () => messages().length === 0,
     loadJev: async () => (await getConfig()).jev,
   });
   const [hasPlanBeenWritten, setHasPlanBeenWritten] = createSignal(false);

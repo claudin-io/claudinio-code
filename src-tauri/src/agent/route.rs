@@ -131,14 +131,15 @@ impl Verdict {
         }
     }
 
-    /// One line for the timeline when the router moved the session to Brain.
+    /// One line for the timeline when the router put the session in a mode.
     pub fn reason(&self) -> String {
-        match (self.p_decisions, self.p_design) {
-            (Some(d), Some(g)) => format!(
+        match (self.mode, self.p_decisions, self.p_design) {
+            (SessionMode::Brain, Some(d), Some(g)) => format!(
                 "Auto: this request has open decisions ({:.0}%) and needs a design first ({:.0}%)",
                 d * 100.0,
                 g * 100.0
             ),
+            (SessionMode::Builder, _, _) => "Auto: this request can be built directly".into(),
             _ => "Auto".into(),
         }
     }
