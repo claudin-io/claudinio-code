@@ -85,6 +85,40 @@ running commands, verifying. The handoff between them starts a fresh session
 seeded with the plan, so execution never inherits a context window full of
 exploration.
 
+You pick the mode, or let the harness pick: with **Auto** (Settings › Agent,
+off by default) the first message of a new session is routed — a request that
+needs decisions and a design starts in Brain, everything else in Builder. A
+*Shadow* setting records what Auto would have chosen next to what you chose,
+without changing anything, so you can judge it on your own sessions first.
+
+### It fits the model you chose
+
+Every limit a run is held to comes from the window of the model it is talking
+to, not from one number for all of them. A 200k model behaves as it always
+did. A 32k local model gets lines scaled to 32k — when to shed old tool
+results, when to compact, how large a single file read may be — instead of
+requests several times its size.
+
+- **Context is shed before it is summarized.** First what is a copy of
+  something newer (an older read of the same file, an older task list), then
+  what a small decision model judges no longer needed, then simply the oldest
+  tool results. In that step your words and the model's are never cut; only
+  when it is not enough does the session hand off or compact.
+- **A small window gets a small prompt.** Under 64k tokens a Builder session
+  runs a compact profile — one short prompt, ten tools, and it edits files
+  itself instead of delegating — about 3.6k tokens before the conversation
+  starts, where the full prompt and tools take 10k before a single skill or MCP
+  server.
+- **Tools per model.** Settings › Models can set a model to *Lean*, which
+  leaves out the three LSP navigation tools and the prompt lines about them.
+  Nothing is Lean by default: whether fewer tools help is a property of the
+  model, and has to be tried on it.
+
+`scripts/session-stats.py` reads your own `.claudinio/sessions/` and reports
+where the context went — which results were carried longest, how large the
+fixed prefix is, how often a file was read twice — so these choices can be
+made on what your sessions actually did.
+
 ### It actually reads your codebase
 
 Not just grep:
