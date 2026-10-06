@@ -66,6 +66,14 @@ describe("toolPresentation", () => {
     expect(toolSummary(call)).toBe("2/3 done");
   });
 
+  it("summarizes tasks_update as the task and what changed", () => {
+    expect(toolTitle("tasks_update")).toBe("Updated task");
+    expect(toolSummary(makeCall("tasks_update", { id: "t3", status: "done" }))).toBe("t3 → done");
+    expect(toolSummary(makeCall("tasks_update", { id: "t3", journal: ["found it"] }))).toBe("t3 · 1 note");
+    expect(toolSummary(makeCall("tasks_update", { id: "t3", journal: ["a", "b"] }))).toBe("t3 · 2 notes");
+    expect(toolSummary(makeCall("tasks_update", { id: "t3" }))).toBe("t3");
+  });
+
   it("summarizes ask_user with a single question inline", () => {
     const call = makeCall("ask_user", { questions: [{ question: "Proceed?", options: ["Yes", "No"] }] });
     expect(toolSummary(call)).toBe("Proceed?");

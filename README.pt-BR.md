@@ -270,7 +270,7 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `browser_inspect` | automático | Lê console, network, texto ou HTML da página aberta |
 | `browser_screenshot` | automático | Captura o viewport, a página inteira, um elemento ou uma região |
 | `ask_user` | automático | Faz uma pergunta a você, com opções |
-| `tasks_get` / `tasks_set` | automático | Lê e atualiza a lista de tarefas |
+| `tasks_get` / `tasks_set` / `tasks_update` | automático | Lê a lista de tarefas, reescreve-a ou altera uma tarefa |
 | `write_plan` / `finalize_plan` | automático | Escreve e fecha um documento de plano |
 | `enter_plan_mode` / `exit_plan_mode` | automático | Alterna entre Brain e Builder |
 | `spawn_agents` | automático | Dispara subagentes paralelos |

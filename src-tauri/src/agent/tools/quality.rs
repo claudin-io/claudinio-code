@@ -235,12 +235,12 @@ pub fn rejection_message(ctx: &ToolContext, evidence: &Evidence, task_ids: &[Str
     let goals = task_ids.join(", ");
     match evidence {
         Evidence::Missing => format!(
-            "tasks_set rejected: golden task(s) {goals} cannot be marked done without verified \
+            "Task update rejected: golden task(s) {goals} cannot be marked done without verified \
              quality evidence. Call run_quality first — the harness checks the result \
              mechanically, so claiming the tests pass is not enough."
         ),
         Evidence::Stale => format!(
-            "tasks_set rejected: golden task(s) {goals} cannot be marked done — the last \
+            "Task update rejected: golden task(s) {goals} cannot be marked done — the last \
              run_quality result is stale because files changed after it ran. Call run_quality \
              again so the evidence matches the code as it is now."
         ),
@@ -249,7 +249,7 @@ pub fn rejection_message(ctx: &ToolContext, evidence: &Evidence, task_ids: &[Str
                 .map(|r| r.failure_detail(MAX_GATE_DETAIL_CHARS))
                 .unwrap_or_default();
             format!(
-                "tasks_set rejected: golden task(s) {goals} cannot be marked done — the last \
+                "Task update rejected: golden task(s) {goals} cannot be marked done — the last \
                  quality run FAILED.\n\n{summary}\n{detail}\nFix the failures, then call \
                  run_quality again before marking the goal done."
             )

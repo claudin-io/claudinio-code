@@ -37,6 +37,9 @@ const TOOL_ALIASES: &[(&str, &[&str])] = &[
     ("web_search", &["WebSearch"]),
     ("ask_user", &["AskUserQuestion"]),
     ("tasks_set", &["TodoWrite"]),
+    // The same effect one task at a time: a `TodoWrite` guard that did not
+    // fire here would stop seeing most task changes.
+    ("tasks_update", &["TodoWrite"]),
     ("tasks_get", &["TodoRead"]),
     ("exit_plan_mode", &["ExitPlanMode"]),
 ];
@@ -210,13 +213,29 @@ mod tests {
 
     #[test]
     fn the_alias_table_has_no_duplicate_alias_and_no_duplicate_native() {
+        // One alias is shared on purpose: Claude Code has a single `TodoWrite`,
+        // and here writing the task list is two tools — the whole list, or one
+        // task. Anything else appearing twice is a copy-paste mistake.
+        const SHARED: [&str; 1] = ["TodoWrite"];
         let mut seen = std::collections::HashSet::new();
         for (native, aliases) in TOOL_ALIASES {
             assert!(seen.insert(native.to_string()), "duplicate native {native}");
             for a in *aliases {
-                assert!(seen.insert(a.to_string()), "duplicate alias {a}");
+                assert!(
+                    seen.insert(a.to_string()) || SHARED.contains(a),
+                    "duplicate alias {a}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn todowrite_selects_both_ways_of_writing_the_task_list() {
+        for native in ["tasks_set", "tasks_update"] {
+            assert!(matches(Some("TodoWrite"), native), "{native}");
+            assert_eq!(canonical_alias(native), "TodoWrite");
+        }
+        assert!(!matches(Some("TodoWrite"), "tasks_get"));
     }
 
     #[test]

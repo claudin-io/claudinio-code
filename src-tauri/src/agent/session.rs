@@ -436,9 +436,9 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 # 1. TASK SYSTEM (STRICT WORKFLOW)
 - You MUST call `tasks_get` first.
 - Call `tasks_set` to create tasks (id, title, description, journal: [], status: 'todo'). 1 logical step = 1 task.
-- Update in real time: strictly follow `todo` -> `doing` -> append to `journal` -> `done`. Never batch updates.
-- `tasks_set` is a full replacement. You must pass ALL tasks every time.
-- Before your final text response, you MUST make a final `tasks_set` call.
+- Update in real time with `tasks_update` (one task: its id, the new status, journal entries to append): strictly follow `todo` -> `doing` -> append to `journal` -> `done`. Never batch updates.
+- `tasks_set` is a full replacement — you must pass ALL tasks — so use it only to create the list or to add, remove or reword tasks. Never resend the list just to change a status.
+- Before your final text response, the task list MUST be up to date: make a final `tasks_update` (or `tasks_set`) call.
 - If the user asks about progress, guide them to the Task Panel.
 
 # 2. CODE TOOLS
@@ -501,7 +501,7 @@ const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS (MANDATORY GOALS)\n\
 Tasks whose id starts with 'golden-' are mandatory goals set by the user via <goal> tags:\n\
 - They are the success criteria of the session: work is only finished when every golden task has status='done'.\n\
 - Only mark a golden task 'done' after you VERIFIED the goal it describes is actually met — never on intention.\n\
-- Verification is MECHANICAL, not a claim: call `run_quality` (it runs this project's own tests, and coverage of the lines you changed). `tasks_set` REJECTS closing an execution goal ('golden-...-1') unless the latest run passed AND no file changed since it ran, so editing after a green run means running it again. Stating that the tests pass has no effect — only a recorded run does.\n\
+- Verification is MECHANICAL, not a claim: call `run_quality` (it runs this project's own tests, and coverage of the lines you changed). `tasks_update` and `tasks_set` REJECT closing an execution goal ('golden-...-1') unless the latest run passed AND no file changed since it ran, so editing after a green run means running it again. Stating that the tests pass has no effect — only a recorded run does.\n\
 - When a check fails, fix the cause. Weakening a test, deleting an assertion or skipping a case to get green is a defect, and the changed-line coverage check is there to catch code nothing exercises.\n\
 - If you end your turn while golden tasks are pending, the system automatically switches mode (Brain to plan, Builder to execute) and sends you back to work on them, up to a cycle limit.\n\
 - Never delete golden tasks in tasks_set; keep them in the list and update their status.";
@@ -707,7 +707,7 @@ File tools take absolute paths inside this root."
                 "the Solution Design (requirements) and the `## Low-Level Design` (the technical spec - files, symbols, ",
                 "data flow, schemas) the tasks refer to.\n",
                 "3. Execute ONE task at a time, in dependency order. BEFORE you touch any file or spawn a subagent for a task, ",
-                "call `tasks_set` to mark THAT task status='doing'. NEVER implement or edit a task that is still ",
+                "call `tasks_update` to mark THAT task status='doing'. NEVER implement or edit a task that is still ",
                 "'todo' - mark it 'doing' first, always.\n",
                 "4. Delegate: implement each task through `spawn_agents` in 'code' mode - one subagent per task, ",
                 "in ONE call when tasks are independent (parallel), in sequential waves when they depend on each other. ",
@@ -719,7 +719,7 @@ File tools take absolute paths inside this root."
                 "The subagent has empty context and cannot ask the user, so if a value is missing it WILL guess and be wrong. ",
                 "If the plan references an external asset by name/URL that isn't yet concrete data, RESOLVE it first (fetch the data) and paste the real data into the goal - ",
                 "never tell a subagent to make something 'similar to' an asset the user already specified.\n",
-                "5. When a task's work is verified, call `tasks_set` to mark THAT task status='done', with journal entries for the findings and the 'why'. ",
+                "5. When a task's work is verified, call `tasks_update` to mark THAT task status='done', with journal entries for the findings and the 'why'. ",
                 "Do this task by task, as you go - NEVER batch several tasks into a single 'done' call at the end. Then move to the next task (back to step 3).\n",
                 "6. Use the available skills whenever one matches the work.\n",
                 "7. After all tasks, verify the whole: call `run_quality` and report its result. ",
@@ -6163,6 +6163,53 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             sys.contains("code-gated"),
             "Brain prompt must state that tasks_set is gated on the LLD"
         );
+    }
+
+    /// Status changes go through the one-task tool. A prompt that still told
+    /// the model to resend the list would make the delta dead code.
+    #[test]
+    fn status_changes_are_pointed_at_tasks_update_in_both_modes() {
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            let sys = system_prompt(
+                Some(ROOT),
+                None,
+                None,
+                None,
+                mode,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+            );
+            assert!(sys.contains("Update in real time with `tasks_update`"));
+            assert!(sys.contains("Never resend the list just to change a status"));
+            assert!(!sys.contains("you MUST make a final `tasks_set` call"));
+            let names: Vec<String> =
+                api_tools(mode, PromptProfile::Standard, &[], &AgentConfig::default())
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect();
+            for tool in ["tasks_get", "tasks_set", "tasks_update"] {
+                assert!(names.contains(&tool.to_string()), "{mode:?} lacks {tool}");
+            }
+        }
+        let builder = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
+        assert!(builder.contains("call `tasks_update` to mark THAT task status='doing'"));
+        assert!(builder.contains("call `tasks_update` to mark THAT task status='done'"));
+        // The git profile has no task system at all.
+        let git = api_tools(
+            SessionMode::Builder,
+            PromptProfile::GitSync,
+            &[],
+            &AgentConfig::default(),
+        );
+        assert!(git.iter().all(|t| !t.name.starts_with("tasks_")));
     }
 
     #[test]

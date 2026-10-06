@@ -94,7 +94,7 @@ Claude Code calls its tools `Bash`, `Edit`, `Read`, `Task`. Claudinio calls them
 | `Grep` | `grep` |
 | `Task` | `spawn_agents` |
 | `WebSearch` | `web_search` |
-| `TodoWrite` / `TodoRead` | `tasks_set` / `tasks_get` |
+| `TodoWrite` / `TodoRead` | `tasks_set` and `tasks_update` / `tasks_get` |
 | `AskUserQuestion` | `ask_user` |
 | `ExitPlanMode` | `exit_plan_mode` |
 | `mcp__server__tool` | itself — Claudinio uses the same prefix |

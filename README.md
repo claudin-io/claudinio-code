@@ -266,7 +266,7 @@ resident, context used against context served, and the current token rate.
 | `browser_inspect` | auto | Read the open page's console, network, text or HTML |
 | `browser_screenshot` | auto | Capture the viewport, full page, an element or a region |
 | `ask_user` | auto | Ask you a question, with options |
-| `tasks_get` / `tasks_set` | auto | Read and update the task list |
+| `tasks_get` / `tasks_set` / `tasks_update` | auto | Read the task list, rewrite it, or change one task |
 | `write_plan` / `finalize_plan` | auto | Author and close out a plan document |
 | `enter_plan_mode` / `exit_plan_mode` | auto | Switch between Brain and Builder |
 | `spawn_agents` | auto | Launch parallel subagents |

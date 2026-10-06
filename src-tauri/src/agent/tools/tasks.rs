@@ -23,7 +23,7 @@ pub fn execute_set(
     args: SetTasksArgs,
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
-    check_brain_lld_gate(ctx)?;
+    check_brain_lld_gate(ctx, "tasks_set")?;
     let path = ctx
         .session_store_path
         .as_ref()
@@ -55,11 +55,123 @@ pub fn execute_set(
     ))
 }
 
+/// Change one task: its status, its journal, or both.
+#[derive(Deserialize)]
+pub struct UpdateTaskArgs {
+    pub id: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Entries to append to the task's journal.
+    #[serde(default)]
+    pub journal: Vec<String>,
+}
+
+const TASK_STATUSES: [&str; 3] = ["todo", "doing", "done"];
+
+/// Update a single task in place.
+///
+/// `tasks_set` is a full replacement, so moving one task from `doing` to
+/// `done` meant writing the whole list out again — every title, description
+/// and journal — twice per task. Measured on 509 sessions that was 24% of
+/// everything the main session wrote, more than its code edits. A delta says
+/// the same thing in one line.
+///
+/// The gates are the ones `tasks_set` goes through, on the list as it would be
+/// after the change: a status update is exactly how a goal gets closed, so it
+/// must not be a way around them.
+pub fn execute_update(
+    args: UpdateTaskArgs,
+    ctx: &crate::agent::tools::ToolContext,
+) -> Result<String, String> {
+    check_brain_lld_gate(ctx, "tasks_update")?;
+    let path = ctx
+        .session_store_path
+        .as_ref()
+        .ok_or("session_store_path not set")?;
+    let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
+    let id = args.id.trim();
+    let Some(index) = prev.iter().position(|t| t.id == id) else {
+        // The ids are what the model needs to recover, so they come back in
+        // the error instead of costing it a tasks_get round.
+        let ids: Vec<&str> = prev.iter().map(|t| t.id.as_str()).collect();
+        return Err(if ids.is_empty() {
+            format!(
+                "tasks_update: there is no task '{id}' — the task list is empty. Create it with tasks_set."
+            )
+        } else {
+            format!(
+                "tasks_update: there is no task '{id}'. Task ids: {}. Use tasks_set to add a task.",
+                ids.join(", ")
+            )
+        });
+    };
+    if let Some(status) = args.status.as_deref()
+        && !TASK_STATUSES.contains(&status)
+    {
+        return Err(format!(
+            "tasks_update: status must be one of todo, doing, done — got '{status}'."
+        ));
+    }
+    let journal: Vec<String> = args
+        .journal
+        .into_iter()
+        .filter(|entry| !entry.trim().is_empty())
+        .collect();
+
+    let mut merged = prev.clone();
+    let before = merged[index].status.clone();
+    if let Some(status) = args.status {
+        merged[index].status = status;
+    }
+    merged[index].journal.extend(journal.iter().cloned());
+    let after = merged[index].status.clone();
+    if before == after && journal.is_empty() {
+        return Ok(format!(
+            "No change: '{id}' is already {after}. {}",
+            board(&merged)
+        ));
+    }
+    check_quality_gate(&prev, &merged, ctx)?;
+    crate::agent::persist::append_tasks(Path::new(path), &merged)?;
+
+    let mut what = if before == after {
+        format!("'{id}' stays {after}")
+    } else {
+        format!("'{id}': {before} -> {after}")
+    };
+    if !journal.is_empty() {
+        what.push_str(&format!(
+            ", {} journal entr{} added",
+            journal.len(),
+            if journal.len() == 1 { "y" } else { "ies" }
+        ));
+    }
+    Ok(format!("Task updated — {what}. {}", board(&merged)))
+}
+
+/// Where the whole list stands, in one line: enough for the model to pick its
+/// next step without reading the list back.
+fn board(tasks: &[TaskItem]) -> String {
+    let count = |status: &str| tasks.iter().filter(|t| t.status == status).count();
+    let (done, doing, todo) = (count("done"), count("doing"), count("todo"));
+    if done == tasks.len() {
+        return format!("All {done} tasks are done.");
+    }
+    let mut out = format!("Now {done} done, {doing} doing, {todo} todo.");
+    let name = |t: &TaskItem| format!("'{}' ({})", t.id, t.title);
+    if let Some(t) = tasks.iter().find(|t| t.status == "doing") {
+        out.push_str(&format!(" In progress: {}.", name(t)));
+    } else if let Some(t) = tasks.iter().find(|t| t.status == "todo") {
+        out.push_str(&format!(" Next: {}.", name(t)));
+    }
+    out
+}
+
 /// Brain-mode gate: tasks may only be created once the most recent plan file
 /// carries a non-empty `## Low-Level Design` section, so every task can
 /// reference concrete technical detail instead of guesses. No-op in Builder
 /// mode or when no mode handle / workspace is attached (tests, aux workflows).
-fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext) -> Result<(), String> {
+fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext, tool: &str) -> Result<(), String> {
     use crate::agent::tools::write_plan::{LLD_HEADING, has_nonempty_section, latest_plan_path};
     if !ctx.is_brain() {
         return Ok(());
@@ -69,26 +181,25 @@ fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext) -> Result<(), St
         None => return Ok(()),
     };
     match latest_plan_path(root, ctx.plan_save_path.as_deref()) {
-        None => Err(
-            "tasks_set rejected: no plan file exists yet. In Brain mode tasks may only \
-                     be created after the plan is complete: write the Solution Design via \
-                     write_plan, then call write_plan again with the full content plus a \
-                     '## Low-Level Design' section, then retry tasks_set."
-                .into(),
-        ),
+        None => Err(format!(
+            "{tool} rejected: no plan file exists yet. In Brain mode tasks may only \
+             be created after the plan is complete: write the Solution Design via \
+             write_plan, then call write_plan again with the full content plus a \
+             '## Low-Level Design' section, then retry {tool}."
+        )),
         Some(path) => {
             let content = std::fs::read_to_string(&path)
-                .map_err(|e| format!("tasks_set: cannot read plan {}: {e}", path.display()))?;
+                .map_err(|e| format!("{tool}: cannot read plan {}: {e}", path.display()))?;
             if has_nonempty_section(&content, LLD_HEADING) {
                 Ok(())
             } else {
                 Err(format!(
-                    "tasks_set rejected: the most recent plan ({}) has no non-empty \
+                    "{tool} rejected: the most recent plan ({}) has no non-empty \
                      '## Low-Level Design' section. Research the codebase first (spawn_agents \
                      'explore' mode, semantic_search, file reading), then call write_plan again \
                      with the FULL plan content including a '## Low-Level Design' section \
                      (files/symbols to touch, data flow, APIs/schemas, patterns to reuse) - \
-                     then retry tasks_set.",
+                     then retry {tool}.",
                     path.display()
                 ))
             }
@@ -379,6 +490,24 @@ mod lld_gate_tests {
     }
 
     #[test]
+    fn brain_update_before_the_lld_is_rejected_and_names_itself() {
+        let (ctx, root) = ctx_for("update-nold", Some(SessionMode::Brain));
+        let err = execute_update(
+            UpdateTaskArgs {
+                id: "t1".into(),
+                status: Some("done".into()),
+                journal: vec![],
+            },
+            &ctx,
+        )
+        .unwrap_err();
+        // The retry instruction names the tool that was actually called.
+        assert!(err.contains("tasks_update rejected"), "{err}");
+        assert!(err.contains("retry tasks_update"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn builder_mode_not_gated() {
         let (ctx, root) = ctx_for("builder", Some(SessionMode::Builder));
         let res = execute_set(one_task(), &ctx);
@@ -581,6 +710,158 @@ mod quality_gate_tests {
             &ctx,
         );
         assert!(res.is_ok(), "{res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── tasks_update: the same gates, one task at a time ─────────────────────
+
+    fn update(
+        ctx: &crate::agent::tools::ToolContext,
+        id: &str,
+        status: Option<&str>,
+        journal: &[&str],
+    ) -> Result<String, String> {
+        execute_update(
+            UpdateTaskArgs {
+                id: id.into(),
+                status: status.map(str::to_string),
+                journal: journal.iter().map(|j| j.to_string()).collect(),
+            },
+            ctx,
+        )
+    }
+
+    fn stored(ctx: &crate::agent::tools::ToolContext) -> Vec<TaskItem> {
+        let store = ctx.session_store_path.clone().unwrap();
+        crate::agent::persist::load_last_tasks(std::path::Path::new(&store)).unwrap()
+    }
+
+    #[test]
+    fn an_update_changes_one_task_and_leaves_the_rest_exactly_as_they_were() {
+        let mut second = task("task-2", "todo");
+        second.title = "wire the UI".into();
+        second.description = "a long description nobody should have to resend".into();
+        second.journal = vec!["found the entry point".into()];
+        let (ctx, root) = setup("delta", "{}", &[task("task-1", "todo"), second.clone()]);
+
+        let out = update(&ctx, "task-1", Some("doing"), &[]).unwrap();
+        assert!(out.contains("'task-1': todo -> doing"), "{out}");
+        assert!(out.contains("0 done, 1 doing, 1 todo"), "{out}");
+        assert!(out.contains("In progress: 'task-1'"), "{out}");
+
+        let out = update(
+            &ctx,
+            "task-1",
+            Some("done"),
+            &["it was the cache", "added a test"],
+        )
+        .unwrap();
+        assert!(out.contains("'task-1': doing -> done"), "{out}");
+        assert!(out.contains("2 journal entries added"), "{out}");
+        // The reply names what is next, so no tasks_get is needed to go on.
+        assert!(out.contains("Next: 'task-2' (wire the UI)"), "{out}");
+
+        let tasks = stored(&ctx);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].status, "done");
+        assert_eq!(tasks[0].journal, vec!["it was the cache", "added a test"]);
+        // The task that was not named is byte-for-byte what it was.
+        assert_eq!(tasks[1].title, second.title);
+        assert_eq!(tasks[1].description, second.description);
+        assert_eq!(tasks[1].journal, second.journal);
+        assert_eq!(tasks[1].status, "todo");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn journal_entries_can_be_appended_without_touching_the_status() {
+        let (ctx, root) = setup("journal", "{}", &[task("task-1", "doing")]);
+        let out = update(&ctx, "task-1", None, &["half way", "  "]).unwrap();
+        assert!(out.contains("'task-1' stays doing"), "{out}");
+        assert!(out.contains("1 journal entry added"), "{out}");
+        assert_eq!(stored(&ctx)[0].journal, vec!["half way"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_last_task_closing_says_so() {
+        let (ctx, root) = setup(
+            "alldone",
+            "{}",
+            &[task("task-1", "done"), task("task-2", "doing")],
+        );
+        let out = update(&ctx, "task-2", Some("done"), &[]).unwrap();
+        assert!(out.contains("All 2 tasks are done."), "{out}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unknown_id_comes_back_with_the_ids_that_exist() {
+        let (ctx, root) = setup(
+            "unknown",
+            "{}",
+            &[task("task-1", "todo"), task("task-2", "todo")],
+        );
+        let err = update(&ctx, "task-9", Some("done"), &[]).unwrap_err();
+        assert!(err.contains("no task 'task-9'"), "{err}");
+        assert!(err.contains("task-1, task-2"), "{err}");
+        // Nothing was written for a call that changed nothing.
+        assert_eq!(stored(&ctx)[0].status, "todo");
+
+        let (empty, root2) = setup("unknown-empty", "{}", &[]);
+        let err = update(&empty, "task-1", Some("done"), &[]).unwrap_err();
+        assert!(err.contains("tasks_set"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&root2).ok();
+    }
+
+    #[test]
+    fn a_status_that_does_not_exist_is_refused() {
+        let (ctx, root) = setup("badstatus", "{}", &[task("task-1", "todo")]);
+        let err = update(&ctx, "task-1", Some("finished"), &[]).unwrap_err();
+        assert!(err.contains("todo, doing, done"), "{err}");
+        assert_eq!(stored(&ctx)[0].status, "todo");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_call_that_changes_nothing_writes_nothing() {
+        let (ctx, root) = setup("noop", "{}", &[task("task-1", "done")]);
+        let store = ctx.session_store_path.clone().unwrap();
+        let before = std::fs::read_to_string(&store).unwrap();
+        let out = update(&ctx, "task-1", Some("done"), &[]).unwrap();
+        assert!(out.contains("No change"), "{out}");
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), before);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A status update is exactly how a goal gets closed, so the quality gate
+    /// has to stand in front of it too — or the delta would be a way around.
+    #[test]
+    fn closing_an_execution_goal_by_update_goes_through_the_quality_gate() {
+        let (ctx, root) = setup(
+            "delta-gate",
+            "{}",
+            &[task("golden-g-0", "done"), task("golden-g-1", "doing")],
+        );
+        let err = update(&ctx, "golden-g-1", Some("done"), &[]).unwrap_err();
+        assert!(err.contains("run_quality"), "{err}");
+        assert!(err.contains("golden-g-1"), "{err}");
+        assert_eq!(
+            stored(&ctx)[1].status,
+            "doing",
+            "a refused update persists nothing"
+        );
+
+        // Journal notes on the goal are not a close and are not gated.
+        assert!(update(&ctx, "golden-g-1", None, &["tests still red"]).is_ok());
+
+        record_run(&ctx, &root, true);
+        // The journal append above did not touch the workspace, so the green
+        // run is still current.
+        let out = update(&ctx, "golden-g-1", Some("done"), &[]).unwrap();
+        assert!(out.contains("'golden-g-1': doing -> done"), "{out}");
+        assert_eq!(stored(&ctx)[1].status, "done");
         std::fs::remove_dir_all(&root).ok();
     }
 

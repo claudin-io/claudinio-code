@@ -519,7 +519,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_set".into(),
-            description: "Fully replace the task list (stateless — pass ALL tasks with updated statuses). Each task has: id (unique string), title, description, journal (array of findings/memory entries), status (todo | doing | done). Always read current tasks first with tasks_get before modifying. In Brain mode this is rejected until the current plan file contains a non-empty '## Low-Level Design' section.".into(),
+            description: "Create or rewrite the task list. A full replacement: pass ALL tasks. Each task has: id (unique string), title, description, journal (array of findings/memory entries), status (todo | doing | done). Use it to create the list and to add, remove or reword tasks — to change one task's status or journal, use tasks_update instead of resending the list. Read current tasks first with tasks_get before modifying. In Brain mode this is rejected until the current plan file contains a non-empty '## Low-Level Design' section.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -540,6 +540,19 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                     }
                 },
                 "required": ["tasks"]
+            }),
+        },
+        ToolDef {
+            name: "tasks_update".into(),
+            description: "Change ONE task without resending the list: set its status and/or append journal entries. This is how a task moves todo -> doing -> done. Returns where the whole list stands.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Id of the task to change" },
+                    "status": { "type": "string", "enum": ["todo", "doing", "done"], "description": "New status; omit to leave it as it is" },
+                    "journal": { "type": "array", "items": { "type": "string" }, "description": "Entries to APPEND to the task's journal: findings, decisions, the 'why'" }
+                },
+                "required": ["id"]
             }),
         },
         ToolDef {
@@ -888,6 +901,12 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let a: tasks::SetTasksArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             let content = tasks::execute_set(a, ctx)?;
+            Ok(ToolOutput::Text { content })
+        }
+        "tasks_update" => {
+            let a: tasks::UpdateTaskArgs =
+                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            let content = tasks::execute_update(a, ctx)?;
             Ok(ToolOutput::Text { content })
         }
         "write_plan" => {
