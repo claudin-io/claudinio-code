@@ -329,6 +329,7 @@ mod tests {
             workspace_root: Some(root.to_string_lossy().to_string()),
             embedding_model: Arc::new(tokio::sync::Mutex::new(None)),
             session_store_path: None,
+            limits: Default::default(),
             read_tracker: Arc::new(tokio::sync::Mutex::new(
                 crate::agent::tools::ReadTracker::default(),
             )),

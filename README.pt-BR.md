@@ -86,6 +86,43 @@ somente-leitura, te entrevista sobre os requisitos e escreve um plano. O
 entre eles abre uma sessão nova semeada com o plano, para a execução não herdar
 uma janela de contexto cheia de exploração.
 
+Você escolhe o modo, ou deixa o harness escolher. Uma sessão nova começa em
+**Auto** onde o modelo de decisão por trás dele (o Jev) estiver disponível: a
+primeira mensagem é roteada — um pedido que precisa de decisões e de um design
+começa em Brain, todo o resto em Builder — e você ainda pode escolher qualquer
+um dos dois na mão. O Auto envia essa primeira mensagem ao Jev; em Settings ›
+Agent dá para desligá-lo, ou passá-lo para *Shadow*, que só registra o que o
+Auto teria escolhido ao lado do que você escolheu.
+
+### Ele se ajusta ao modelo que você escolheu
+
+Todo limite de uma execução vem da janela do modelo com que ela está falando,
+e não de um número único para todos. Um modelo de 200k se comporta como sempre.
+Um modelo local de 32k recebe limites na escala de 32k — quando descartar
+resultados antigos de ferramentas, quando compactar, o tamanho máximo de uma
+leitura de arquivo — em vez de requisições várias vezes maiores que ele.
+
+- **O contexto é enxugado antes de ser resumido.** Primeiro o que é cópia de
+  algo mais novo (uma leitura anterior do mesmo arquivo, uma lista de tarefas
+  anterior), depois o que um modelo de decisão pequeno julga não ser mais
+  necessário, depois simplesmente os resultados de ferramenta mais antigos.
+  Nessa etapa nem as suas palavras nem as do modelo são cortadas; só quando ela
+  não basta a sessão faz handoff ou compacta.
+- **Janela pequena recebe prompt pequeno.** Abaixo de 64k tokens, uma sessão
+  Builder roda um perfil compacto — um prompt curto, dez ferramentas, e ela
+  mesma edita os arquivos em vez de delegar — cerca de 3,6k tokens antes de a
+  conversa começar, onde o prompt e as ferramentas completos ocupam 10k antes
+  de qualquer skill ou servidor MCP.
+- **Ferramentas por modelo.** Em Settings › Models um modelo pode ser posto em
+  *Lean*, que deixa de fora as três ferramentas de navegação por LSP e as
+  linhas do prompt sobre elas. Nada é Lean por padrão: se menos ferramentas
+  ajudam é uma propriedade do modelo, e precisa ser testado nele.
+
+`scripts/session-stats.py` lê o seu próprio `.claudinio/sessions/` e mostra
+para onde o contexto foi — quais resultados foram carregados por mais tempo, o
+tamanho do prefixo fixo, quantas vezes um arquivo foi lido duas vezes — para
+que essas escolhas sejam feitas sobre o que as suas sessões realmente fizeram.
+
 ### Ele lê o seu codebase de verdade
 
 Não é só grep:
@@ -270,7 +307,7 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `browser_inspect` | automático | Lê console, network, texto ou HTML da página aberta |
 | `browser_screenshot` | automático | Captura o viewport, a página inteira, um elemento ou uma região |
 | `ask_user` | automático | Faz uma pergunta a você, com opções |
-| `tasks_get` / `tasks_set` | automático | Lê e atualiza a lista de tarefas |
+| `tasks_get` / `tasks_set` / `tasks_update` | automático | Lê a lista de tarefas, reescreve-a ou altera uma tarefa |
 | `write_plan` / `finalize_plan` | automático | Escreve e fecha um documento de plano |
 | `enter_plan_mode` / `exit_plan_mode` | automático | Alterna entre Brain e Builder |
 | `spawn_agents` | automático | Dispara subagentes paralelos |

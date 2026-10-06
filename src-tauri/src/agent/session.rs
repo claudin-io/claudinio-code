@@ -1,3 +1,4 @@
+use crate::agent::budget::ContextBudget;
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
@@ -106,16 +107,47 @@ pub(crate) fn estimate_tokens(history: &[Message], system: &str, tools: &[ToolDe
     total
 }
 
+/// Itemize the fixed prefix of a request by the same chars/3 rule as
+/// `estimate_tokens`, so the parts add up to what the context meter counts.
+/// `system` is the whole prompt; the skills and spec sections are carved out
+/// of it because they are the parts a workspace, not the app, decides.
+pub(crate) fn prefix_breakdown(
+    system: &str,
+    skills_section: Option<&str>,
+    spec_section: Option<&str>,
+    tools: &[ToolDescription],
+) -> crate::agent::persist::PrefixBreakdown {
+    // A profile that leaves a section out of its prompt (GitSync) must not be
+    // charged for it.
+    let chars =
+        |s: Option<&str>| s.filter(|s| system.contains(*s)).map(str::len).unwrap_or(0) as u64;
+    let skills = chars(skills_section);
+    let specs = chars(spec_section);
+    let schema_chars = |mcp: bool| -> u64 {
+        tools
+            .iter()
+            .filter(|t| t.name.starts_with("mcp__") == mcp)
+            .map(|t| serde_json::to_string(t).unwrap_or_default().len() as u64)
+            .sum()
+    };
+    crate::agent::persist::PrefixBreakdown {
+        system: (system.len() as u64).saturating_sub(skills + specs) / 3,
+        skills: skills / 3,
+        specs: specs / 3,
+        tools: schema_chars(false) / 3,
+        mcp: schema_chars(true) / 3,
+    }
+}
+
 /// How many recent user↔agent exchanges stay verbatim after a compaction.
 const TAIL_USER_TURNS: usize = 2;
-/// Budget for the kept tail; if the recent exchanges alone exceed this, the
-/// tail shrinks (down to zero) so compaction still frees the context.
-const TAIL_MAX_TOKENS: u64 = 20_000;
 
 /// Number of Turn records (counted back from the end) to keep verbatim when
 /// compacting: the last `TAIL_USER_TURNS` real user exchanges, bounded by
-/// `TAIL_MAX_TOKENS`. Only looks at records after the previous compaction.
-fn compute_tail_turns(records: &[SessionRecord]) -> usize {
+/// `tail_tokens` (`ContextBudget::tail_tokens`) — if the recent exchanges alone
+/// exceed it, the tail shrinks, down to zero, so compaction still frees the
+/// context. Only looks at records after the previous compaction.
+fn compute_tail_turns(records: &[SessionRecord], tail_tokens: u64) -> usize {
     let start = records
         .iter()
         .rposition(|r| matches!(r, SessionRecord::Compacted { .. }))
@@ -131,7 +163,7 @@ fn compute_tail_turns(records: &[SessionRecord]) -> usize {
         };
         turns += 1;
         tokens += estimate_message_tokens(message);
-        if tokens > TAIL_MAX_TOKENS {
+        if tokens > tail_tokens {
             break;
         }
         if crate::agent::persist::is_real_user_turn(rec) {
@@ -160,6 +192,7 @@ pub async fn compact_history(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
     trigger: crate::agent::hooks::CompactTrigger,
+    tail_tokens: u64,
 ) -> Result<String, String> {
     // ── Hooks: PreCompact ────────────────────────────────────────────────────
     //
@@ -178,7 +211,7 @@ pub async fn compact_history(
     let jsonl_path = store.path.to_string_lossy().to_string();
     let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
         .unwrap_or_default();
-    let tail_turns = compute_tail_turns(&records);
+    let tail_turns = compute_tail_turns(&records, tail_tokens);
 
     let summary = subagent::run_summary_agent(
         config,
@@ -266,6 +299,27 @@ pub enum PromptProfile {
     Standard,
     /// Commit & push: a single-purpose git operator. Bash + ask_user only.
     GitSync,
+    /// A chat session on a window too small for `Standard`: one short prompt,
+    /// ten tools, and the session edits files itself. Never requested by a
+    /// caller — `surface::effective_profile` picks it from the model's window.
+    Compact,
+}
+
+impl PromptProfile {
+    /// True for the profiles a person is chatting through. What is theirs —
+    /// their prompt hooks, their Stop hook, the handoff that keeps a long
+    /// conversation going — applies to these and not to a single-purpose job.
+    pub fn is_chat(self) -> bool {
+        matches!(self, PromptProfile::Standard | PromptProfile::Compact)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PromptProfile::Standard => "standard",
+            PromptProfile::GitSync => "git_sync",
+            PromptProfile::Compact => "compact",
+        }
+    }
 }
 
 /// Who put the session in its current mode. The agent may only exit Brain
@@ -292,13 +346,27 @@ impl ModeOrigin {
 /// The Mutex is never held across await.
 pub struct ModeCtl {
     state: StdMutex<(SessionMode, ModeOrigin)>,
+    /// The user left the choice of phase to the harness for the next prompt.
+    /// Consumed by the run that routes it, so it applies to one prompt only.
+    auto: AtomicBool,
 }
 
 impl ModeCtl {
     pub fn new(mode: SessionMode, origin: ModeOrigin) -> Self {
         Self {
             state: StdMutex::new((mode, origin)),
+            auto: AtomicBool::new(false),
         }
+    }
+
+    /// Set by the command layer from what the mode control sent with a prompt.
+    pub fn request_auto(&self, auto: bool) {
+        self.auto.store(auto, Ordering::SeqCst);
+    }
+
+    /// Whether Auto was requested, clearing it.
+    pub fn take_auto(&self) -> bool {
+        self.auto.swap(false, Ordering::SeqCst)
     }
 
     pub fn get(&self) -> (SessionMode, ModeOrigin) {
@@ -403,9 +471,9 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 # 1. TASK SYSTEM (STRICT WORKFLOW)
 - You MUST call `tasks_get` first.
 - Call `tasks_set` to create tasks (id, title, description, journal: [], status: 'todo'). 1 logical step = 1 task.
-- Update in real time: strictly follow `todo` -> `doing` -> append to `journal` -> `done`. Never batch updates.
-- `tasks_set` is a full replacement. You must pass ALL tasks every time.
-- Before your final text response, you MUST make a final `tasks_set` call.
+- Update in real time with `tasks_update` (one task: its id, the new status, journal entries to append): strictly follow `todo` -> `doing` -> append to `journal` -> `done`. Never batch updates.
+- `tasks_set` is a full replacement — you must pass ALL tasks — so use it only to create the list or to add, remove or reword tasks. Never resend the list just to change a status.
+- Before your final text response, the task list MUST be up to date: make a final `tasks_update` (or `tasks_set`) call.
 - If the user asks about progress, guide them to the Task Panel.
 
 # 2. CODE TOOLS
@@ -468,7 +536,7 @@ const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS (MANDATORY GOALS)\n\
 Tasks whose id starts with 'golden-' are mandatory goals set by the user via <goal> tags:\n\
 - They are the success criteria of the session: work is only finished when every golden task has status='done'.\n\
 - Only mark a golden task 'done' after you VERIFIED the goal it describes is actually met — never on intention.\n\
-- Verification is MECHANICAL, not a claim: call `run_quality` (it runs this project's own tests, and coverage of the lines you changed). `tasks_set` REJECTS closing an execution goal ('golden-...-1') unless the latest run passed AND no file changed since it ran, so editing after a green run means running it again. Stating that the tests pass has no effect — only a recorded run does.\n\
+- Verification is MECHANICAL, not a claim: call `run_quality` (it runs this project's own tests, and coverage of the lines you changed). `tasks_update` and `tasks_set` REJECT closing an execution goal ('golden-...-1') unless the latest run passed AND no file changed since it ran, so editing after a green run means running it again. Stating that the tests pass has no effect — only a recorded run does.\n\
 - When a check fails, fix the cause. Weakening a test, deleting an assertion or skipping a case to get green is a defect, and the changed-line coverage check is there to catch code nothing exercises.\n\
 - If you end your turn while golden tasks are pending, the system automatically switches mode (Brain to plan, Builder to execute) and sends you back to work on them, up to a cycle limit.\n\
 - Never delete golden tasks in tasks_set; keep them in the list and update their status.";
@@ -545,6 +613,20 @@ The bash tool already runs with this directory as its working directory - run co
 (e.g. \"git status\"), use relative paths, and never cd into guessed paths."
             ),
             None => GIT_SYNC_PROMPT.to_string(),
+        };
+    }
+    if profile == PromptProfile::Compact {
+        // No skills, no specs, no mode block: on the window this profile is
+        // for, each of them is a file the model can no longer read.
+        let prompt = crate::agent::surface::COMPACT_PROMPT;
+        return match workspace_root {
+            Some(root) => format!(
+                "{prompt}\n\nProject workspace root: {root}. \
+The bash tool already runs with this directory as its working directory - run commands directly \
+(e.g. \"git status\"), use relative paths, and never cd into guessed paths. \
+File tools take absolute paths inside this root."
+            ),
+            None => prompt.to_string(),
         };
     }
     let base = match workspace_root {
@@ -674,7 +756,7 @@ File tools take absolute paths inside this root."
                 "the Solution Design (requirements) and the `## Low-Level Design` (the technical spec - files, symbols, ",
                 "data flow, schemas) the tasks refer to.\n",
                 "3. Execute ONE task at a time, in dependency order. BEFORE you touch any file or spawn a subagent for a task, ",
-                "call `tasks_set` to mark THAT task status='doing'. NEVER implement or edit a task that is still ",
+                "call `tasks_update` to mark THAT task status='doing'. NEVER implement or edit a task that is still ",
                 "'todo' - mark it 'doing' first, always.\n",
                 "4. Delegate: implement each task through `spawn_agents` in 'code' mode - one subagent per task, ",
                 "in ONE call when tasks are independent (parallel), in sequential waves when they depend on each other. ",
@@ -686,7 +768,7 @@ File tools take absolute paths inside this root."
                 "The subagent has empty context and cannot ask the user, so if a value is missing it WILL guess and be wrong. ",
                 "If the plan references an external asset by name/URL that isn't yet concrete data, RESOLVE it first (fetch the data) and paste the real data into the goal - ",
                 "never tell a subagent to make something 'similar to' an asset the user already specified.\n",
-                "5. When a task's work is verified, call `tasks_set` to mark THAT task status='done', with journal entries for the findings and the 'why'. ",
+                "5. When a task's work is verified, call `tasks_update` to mark THAT task status='done', with journal entries for the findings and the 'why'. ",
                 "Do this task by task, as you go - NEVER batch several tasks into a single 'done' call at the end. Then move to the next task (back to step 3).\n",
                 "6. Use the available skills whenever one matches the work.\n",
                 "7. After all tasks, verify the whole: call `run_quality` and report its result. ",
@@ -988,11 +1070,53 @@ pub struct UserAnswer {
 
 pub type AnswerMap = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserAnswer>>>>>;
 
+/// What a run sends ahead of the conversation in `mode`: the profile the
+/// model's window calls for, then the prompt and tools of that profile as the
+/// user's surface for the model shapes them.
+///
+/// One function for the run's start and for every mode switch, so the three
+/// can never be derived from different inputs: a prompt that names a tool the
+/// list beside it does not carry costs a failed call each time it is believed.
+#[allow(clippy::too_many_arguments)]
+fn run_prefix(
+    config: &AgentConfig,
+    ctx: &ToolContext,
+    requested: PromptProfile,
+    mode: SessionMode,
+    skills_section: Option<&str>,
+    spec_section: Option<&str>,
+    mcp_defs: &[tools::ToolDef],
+    has_golden_goals: bool,
+) -> (PromptProfile, String, Vec<ToolDescription>) {
+    let profile =
+        crate::agent::surface::effective_profile(requested, config, mode, has_golden_goals);
+    let system = system_prompt(
+        ctx.workspace_root.as_deref(),
+        skills_section,
+        spec_section,
+        ctx.plan_save_path.as_deref(),
+        mode,
+        profile,
+        subagent::effective_max_parallel(config),
+    );
+    let system = if profile == PromptProfile::Standard {
+        crate::agent::surface::prompt_for(
+            config.tool_surface_for(config.model_for_mode(mode.as_str())),
+            system,
+        )
+    } else {
+        system
+    };
+    let tools = api_tools(mode, profile, mcp_defs, config);
+    (profile, system, tools)
+}
+
 /// Tools offered to the model for a given mode/profile. `GitSync` gets only
-/// `bash` + `ask_user` — no task system, no subagents, no MCP tools. Builder
-/// gets the full registry plus enter_plan_mode; Brain drops edit_file and
-/// gains write_plan + exit_plan_mode (bash stays but is gated to read-only
-/// commands in run_workflow).
+/// `bash` + `ask_user` — no task system, no subagents, no MCP tools. `Compact`
+/// gets `surface::COMPACT_TOOLS`, `edit_file` included. Builder gets the full
+/// registry plus enter_plan_mode; Brain drops edit_file and gains write_plan +
+/// exit_plan_mode (bash stays but is gated to read-only commands in
+/// run_workflow). Under `Standard` the user's per-model surface then applies.
 fn api_tools(
     mode: SessionMode,
     profile: PromptProfile,
@@ -1011,7 +1135,21 @@ fn api_tools(
             })
             .collect();
     }
+    if profile == PromptProfile::Compact {
+        return crate::agent::surface::compact_defs(tools::get_defs(maxp))
+            .into_iter()
+            .map(|t| ToolDescription {
+                name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+            })
+            .collect();
+    }
     let mut defs = tools::get_defs(maxp);
+    crate::agent::surface::retain_for(
+        config.tool_surface_for(config.model_for_mode(mode.as_str())),
+        &mut defs,
+    );
     defs.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     // Same treatment as web_search: when the feature is off the tools leave the
     // prompt entirely rather than sitting there costing tokens.
@@ -1527,24 +1665,23 @@ async fn stream_message_with_retry(
     }
 }
 
-/// Compaction threshold adjusted so it never fires BEFORE the context-handoff
-/// threshold in Standard sessions: compaction is the fallback, not the first
-/// responder. GitSync (and any non-Standard profile) keeps the plain constant.
-fn effective_compact_threshold(config: &AgentConfig, profile: PromptProfile) -> u64 {
-    if profile == PromptProfile::Standard {
-        COMPACT_THRESHOLD.max(config.effective_handoff_threshold() + 10_000)
-    } else {
-        COMPACT_THRESHOLD
-    }
+/// False while the history is one message: the prompt that opened the session,
+/// or the handoff document a successor starts from. A handoff or a summary of
+/// that is the same text again at best — and for a successor already over its
+/// line, a handoff answered by another handoff, with nothing ever run in
+/// between. Such a run is sent as it is, or refused at the ceiling.
+fn has_something_to_compress(history: &[Message]) -> bool {
+    history.len() > 1
 }
 
 /// The context size at which a run must shed weight: the handoff line for
-/// Standard sessions, the compaction line otherwise.
-fn context_limit(config: &AgentConfig, profile: PromptProfile) -> u64 {
-    if profile == PromptProfile::Standard {
-        config.effective_handoff_threshold()
+/// chat sessions; the compaction line for the single-purpose profiles, which have no
+/// handoff to try first.
+fn shed_line(budget: &ContextBudget, profile: PromptProfile) -> u64 {
+    if profile.is_chat() {
+        budget.soft
     } else {
-        effective_compact_threshold(config, profile)
+        budget.hard
     }
 }
 
@@ -1553,23 +1690,47 @@ fn context_limit(config: &AgentConfig, profile: PromptProfile) -> u64 {
 pub(crate) const PRUNE_TARGET: f64 = 0.8;
 
 /// Take a verbatim compaction only when it frees enough and leaves room.
+/// "Room" is measured above `floor` (`ContextBudget::prune_floor`): what no
+/// prune can touch is not counted against the prune.
 pub(crate) fn accept_prune(
     outcome: &crate::agent::prune::Outcome,
     new_estimate: u64,
     limit: u64,
+    floor: u64,
 ) -> bool {
     outcome.reduction() >= crate::agent::prune::MIN_REDUCTION
-        && (new_estimate as f64) < limit as f64 * PRUNE_TARGET
+        && (new_estimate.saturating_sub(floor) as f64)
+            < limit.saturating_sub(floor) as f64 * PRUNE_TARGET
 }
 
-/// Before handing off or summarizing, try the lossless way: let Jev drop the
-/// old tool traffic and keep every word of the conversation
-/// (`agent::prune`). Returns the new context estimate and what Jev cost, or
-/// `None` — no credential, Jev failed, or not enough freed — and the caller
+/// What a prune at `limit` should free, and what it must leave alone.
+pub(crate) fn shed_options(
+    estimated: u64,
+    limit: u64,
+    budget: &ContextBudget,
+    last_resort: bool,
+) -> crate::agent::prune::ShedOptions {
+    // Halfway down to the floor, not just under the line: every prune is a
+    // cold prefix, so one deep cut is cheaper than several shallow ones.
+    let floor = budget.prune_floor.min(limit);
+    let target = floor + (limit - floor) / 2;
+    crate::agent::prune::ShedOptions {
+        free_chars: usize::try_from(estimated.saturating_sub(target) * 3).unwrap_or(usize::MAX),
+        recent_chars: usize::try_from(budget.tail_tokens * 3).unwrap_or(usize::MAX),
+        last_resort,
+    }
+}
+
+/// Before handing off or summarizing, try the verbatim way: drop old tool
+/// traffic and keep every word of the conversation (`agent::prune::shed` —
+/// what is superseded first, then what Jev says is no longer needed, or the
+/// oldest results when there is no Jev to ask). Returns the new context
+/// estimate and what Jev cost, or `None` — not enough freed — and the caller
 /// falls through to the handoff / compaction exactly as before.
 #[allow(clippy::too_many_arguments)]
 async fn try_verbatim_compaction(
     config: &AgentConfig,
+    budget: &ContextBudget,
     profile: PromptProfile,
     estimated: u64,
     history: &mut Vec<Message>,
@@ -1579,21 +1740,28 @@ async fn try_verbatim_compaction(
     ctx: &ToolContext,
     event_tx: &Channel<AgentEvent>,
 ) -> Option<(u64, f64)> {
-    let limit = context_limit(config, profile);
+    let limit = shed_line(budget, profile);
     if estimated < limit {
         return None;
     }
-    let backend = crate::agent::jev::backend(config)?;
-    let outcome = crate::agent::prune::plan(history, &backend).await?;
-    let pruned = crate::agent::prune::apply(
+    let backend = crate::agent::jev::backend(config);
+    // What Jev chose to keep stays kept: when its pass is not enough, the
+    // handoff is gentler on a main session than cutting by age over its head.
+    let (outcome, pruned) = crate::agent::prune::shed(
         history,
-        &outcome.decision,
-        crate::agent::prune::TRUNCATE_HEAD_CHARS,
-    );
-    let new_estimate = estimate_tokens(&pruned, system, tools);
-    if !accept_prune(&outcome, new_estimate, limit) {
-        return None;
-    }
+        backend.as_ref(),
+        shed_options(estimated, limit, budget, false),
+        |outcome, pruned| {
+            accept_prune(
+                outcome,
+                estimate_tokens(pruned, system, tools),
+                limit,
+                budget.prune_floor,
+            )
+        },
+    )
+    .await
+    .accepted?;
 
     // The transcript is about to lose content: PreCompact's contract.
     let mut hook_note = None;
@@ -1611,7 +1779,7 @@ async fn try_verbatim_compaction(
         text: format!(
             "__compact_start__:{}/{}",
             estimated / 1000,
-            MAX_CONTEXT_TOKENS / 1000
+            budget.ceiling / 1000
         ),
     });
     store
@@ -1624,12 +1792,13 @@ async fn try_verbatim_compaction(
         })
         .ok()?;
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-    // Rebuild exactly as a reload would, so the live run and a resumed one
-    // see the same conversation.
-    *history = crate::agent::persist::history_from_records(
-        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
-            .unwrap_or_default(),
-    );
+    // The decision applied to the history in memory, not a rebuild from the
+    // file: `push_user_blocks` merges into the last user turn without writing
+    // a record, so the file does not hold everything the model is about to be
+    // shown — the prompt just typed after a run that ended on tool results, a
+    // hook's feedback, a loop nudge. A reload applies the same decision to the
+    // same turns and differs only by those merges, as it already did.
+    *history = pruned;
     if let Some(note) = hook_note {
         push_user_blocks(history, store, ctx, vec![ContentBlock::text(note)]);
     }
@@ -1653,6 +1822,7 @@ async fn try_verbatim_compaction(
 #[allow(clippy::too_many_arguments)]
 async fn maybe_context_handoff(
     config: &AgentConfig,
+    budget: &ContextBudget,
     profile: PromptProfile,
     estimated: u64,
     history: &mut Vec<Message>,
@@ -1665,18 +1835,19 @@ async fn maybe_context_handoff(
     mode_ctl: &Arc<ModeCtl>,
     run_in: u32,
     run_out: u32,
+    run_cache: u32,
 ) -> Option<RunOutcome> {
-    if profile != PromptProfile::Standard {
+    if !profile.is_chat() {
         return None;
     }
-    if estimated < config.effective_handoff_threshold() {
+    if estimated < budget.soft || !has_something_to_compress(history) {
         return None;
     }
     let _ = event_tx.send(AgentEvent::TextStep {
         text: format!(
             "__handoff_start__:{}/{}",
             estimated / 1000,
-            MAX_CONTEXT_TOKENS / 1000
+            budget.ceiling / 1000
         ),
     });
 
@@ -1731,6 +1902,7 @@ async fn maybe_context_handoff(
     let net_detail = format!("{resolved_model} · handoff");
     let mut gen_in: u32 = 0;
     let mut gen_out: u32 = 0;
+    let mut gen_cache: u32 = 0;
     let mut handoff_text = String::new();
     for attempt in 0..2 {
         let mut assistant_text = String::new();
@@ -1764,6 +1936,7 @@ async fn maybe_context_handoff(
         if let Some(u) = &out.usage {
             gen_in += u.input_tokens;
             gen_out += u.output_tokens;
+            gen_cache += u.cache_read_input_tokens;
         }
         let trimmed = assistant_text.trim();
         // Sanity check: a usable handoff has real substance and the requested
@@ -1810,6 +1983,7 @@ async fn maybe_context_handoff(
     store.try_append(&SessionRecord::Done {
         input_tokens: run_in + gen_in,
         output_tokens: run_out + gen_out,
+        cache_read_tokens: Some(run_cache + gen_cache),
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -1832,7 +2006,7 @@ async fn maybe_context_handoff(
         text: format!(
             "__handoff_done__:{}/{}",
             estimated / 1000,
-            MAX_CONTEXT_TOKENS / 1000
+            budget.ceiling / 1000
         ),
     });
 
@@ -1860,6 +2034,124 @@ async fn maybe_context_handoff(
         golden_stalls: linked_stalls,
         golden_last_pending: linked_pending,
     })))
+}
+
+/// Route the first prompt of a fresh session (`agent::route`): record what the
+/// router would start it as, and — when the router is on and the user left the
+/// choice to it — start it that way. Returns what an awaited verdict cost.
+///
+/// Called before the user's message becomes a turn, which is what makes
+/// "fresh" checkable: no history, and no record that this session continues
+/// another one or already has work lined up.
+#[allow(clippy::too_many_arguments)]
+async fn route_first_prompt(
+    config: &AgentConfig,
+    profile: PromptProfile,
+    fresh: bool,
+    prompt: &str,
+    store: &SessionStore,
+    ctx: &ToolContext,
+    mode_ctl: &Arc<ModeCtl>,
+    event_tx: &Channel<AgentEvent>,
+) -> f64 {
+    use crate::agent::route::{self, RouteMode};
+    // Read unconditionally: an Auto request is for this prompt and must not
+    // survive to route a later one.
+    let auto = mode_ctl.take_auto();
+    let route_mode = config.jev.route;
+    if profile != PromptProfile::Standard || route_mode == RouteMode::Off || !fresh {
+        return 0.0;
+    }
+    // Brain always runs the Standard profile. On a window that small it has
+    // nowhere to go but the refusal, and routing would trade a Builder session
+    // that works (the Compact profile) for one that cannot start.
+    if config.context_window_for(&config.brain_model) < crate::agent::surface::COMPACT_BELOW {
+        return 0.0;
+    }
+    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+        .unwrap_or_default();
+    // A successor session carries a plan; a session with tasks (golden goals
+    // create them before the run) already has a loop that flips its mode.
+    let has_work = records.iter().any(|r| {
+        matches!(
+            r,
+            SessionRecord::LinkedFrom { .. } | SessionRecord::Tasks { .. }
+        )
+    });
+    if has_work {
+        return 0.0;
+    }
+    let chosen = mode_ctl.get();
+    let (ran_as, _) = chosen;
+    let backend = crate::agent::jev::backend(config);
+    let record = move |v: &route::Verdict, shadow: bool| SessionRecord::ModeRoute {
+        verdict: v.mode.as_str().into(),
+        ran_as: ran_as.as_str().into(),
+        source: v.source.into(),
+        shadow,
+        p_decisions: v.p_decisions,
+        p_design: v.p_design,
+        cost: v.cost,
+        ts: now_ms(),
+    };
+
+    if route_mode == RouteMode::On && auto {
+        let verdict = route::route(prompt, backend.as_ref()).await;
+        // The verdict was awaited, and the mode toggle works meanwhile. A
+        // choice the user made in that time is theirs: writing over it would
+        // also hand the agent the right to leave a Brain the user turned on.
+        let untouched = mode_ctl.get() == chosen;
+        store.try_append(&record(&verdict, !untouched));
+        // Auto was the last thing chosen, so the verdict is the mode, wherever
+        // the control stood before: a user can try Brain, go back to Auto, and
+        // be sent to Builder. And a Brain reached through Auto is the
+        // harness's choice even when the user had clicked Brain earlier —
+        // agent origin, like `enter_plan_mode`: the flow then runs interview →
+        // plan → tasks → build without a manual flip, and the interview's
+        // final confirmation is the user's approval point.
+        let reorigin = verdict.mode == SessionMode::Brain && chosen.1 != ModeOrigin::Agent;
+        if untouched && (verdict.mode != ran_as || reorigin) {
+            mode_ctl.set(verdict.mode, ModeOrigin::Agent);
+            store.try_append(&SessionRecord::Mode {
+                mode: verdict.mode.as_str().into(),
+                origin: ModeOrigin::Agent.as_str().into(),
+                ts: now_ms(),
+            });
+            let _ = event_tx.send(AgentEvent::ModeChanged {
+                mode: verdict.mode.as_str().into(),
+                origin: ModeOrigin::Agent.as_str().into(),
+                reason: Some(verdict.reason()),
+            });
+        }
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        return verdict.cost;
+    }
+
+    // Shadow, or the user chose a mode themselves: the verdict is only worth
+    // having next to that choice, and must not cost the first request a wait.
+    // What the rules decide costs none, so it is written here, in order with
+    // everything else this run writes.
+    if route::rules(prompt).is_some() {
+        let verdict = route::route(prompt, None).await;
+        store.try_append(&record(&verdict, true));
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        return 0.0;
+    }
+    let prompt = prompt.to_string();
+    let path = store.path.clone();
+    let cache = ctx.records_cache.clone();
+    tokio::spawn(async move {
+        let verdict = route::route(&prompt, backend.as_ref()).await;
+        // Nobody answered: there is nothing to compare with the user's choice.
+        // And a session deleted while Jev was thinking is not brought back as
+        // a file holding one verdict.
+        if verdict.source == route::SOURCE_UNAVAILABLE || !path.exists() {
+            return;
+        }
+        SessionStore { path: path.clone() }.try_append(&record(&verdict, true));
+        crate::agent::persist::invalidate_cache(&path, &cache);
+    });
+    0.0
 }
 
 /// Run a single continuous provider→tool loop for one user input, until the
@@ -1944,7 +2236,7 @@ pub async fn run_workflow_with_profile(
         // Not for GitSync: commit & push has no user prompt to submit, and a
         // hook that reads `.prompt` would be handed a git instruction the user
         // never typed.
-        let out = if profile == PromptProfile::Standard {
+        let out = if profile.is_chat() {
             crate::agent::hooks::fire_user_prompt_submit(hooks, &user_message, Some(event_tx)).await
         } else {
             crate::agent::hooks::BatchOutcome::default()
@@ -1972,6 +2264,18 @@ pub async fn run_workflow_with_profile(
         }
     }
 
+    let route_cost = route_first_prompt(
+        config,
+        profile,
+        history.is_empty(),
+        &user_message,
+        store,
+        ctx,
+        mode_ctl,
+        event_tx,
+    )
+    .await;
+
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
         ts: now_ms(),
@@ -1998,15 +2302,6 @@ pub async fn run_workflow_with_profile(
     // them an input to planning rather than a document nobody opens.
     let spec_section = build_spec_prompt_section(ctx);
     let (mut cur_mode, _) = mode_ctl.get();
-    let mut system = system_prompt(
-        ctx.workspace_root.as_deref(),
-        skills_section.as_deref(),
-        spec_section.as_deref(),
-        ctx.plan_save_path.as_deref(),
-        cur_mode,
-        profile,
-        subagent::effective_max_parallel(config),
-    );
     // MCP tool discovery already happened before `run_workflow` was called
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
     // snapshot read, not a fresh connection attempt.
@@ -2015,7 +2310,73 @@ pub async fn run_workflow_with_profile(
         .as_ref()
         .map(|m| m.cached_defs())
         .unwrap_or_default();
-    let mut tools = api_tools(cur_mode, profile, &mcp_defs, config);
+    // Read once: goals are written before the run starts and never minted
+    // inside it, and a profile that moved mid-run would move the cached prefix.
+    let has_golden_goals = ctx
+        .session_store_path
+        .as_deref()
+        .and_then(|p| crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok())
+        .is_some_and(|t| t.iter().any(crate::agent::tools::tasks::is_golden));
+    // From here on `profile` is the one the run actually uses; what the caller
+    // asked for is kept to derive it again when the mode — and with it the
+    // model and its window — changes.
+    let requested_profile = profile;
+    let (mut profile, mut system, mut tools) = run_prefix(
+        config,
+        ctx,
+        requested_profile,
+        cur_mode,
+        skills_section.as_deref(),
+        spec_section.as_deref(),
+        &mcp_defs,
+        has_golden_goals,
+    );
+    ctx.limits
+        .set_writes_files(profile == PromptProfile::Compact);
+    // Every line the run is held to comes from the model it is about to talk
+    // to, and is re-derived whenever a mode switch changes that model.
+    let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
+    let mut budget = ContextBudget::for_model(
+        config,
+        config.model_for_mode(cur_mode.as_str()),
+        prefix_tokens,
+    );
+    ctx.limits.apply(&budget);
+    // Before anything else is tried: no handoff and no summary can shrink
+    // what is sent ahead of the conversation, and each would cost a request —
+    // and the user's message, replaced by a summary of it — to find that out.
+    if budget.prefix_overflows(prefix_tokens) {
+        return Err(budget.refusal(prefix_tokens));
+    }
+
+    {
+        let model = config.model_for_mode(cur_mode.as_str());
+        store.try_append(&SessionRecord::RunConfig {
+            model: model.to_string(),
+            mode: cur_mode.as_str().into(),
+            context_window: budget.window,
+            regime: budget.regime.as_str().into(),
+            soft: budget.soft,
+            hard: budget.hard,
+            ceiling: budget.ceiling,
+            prefix: prefix_breakdown(
+                &system,
+                skills_section.as_deref(),
+                spec_section.as_deref(),
+                &tools,
+            ),
+            profile: profile.as_str().into(),
+            // The surface is a Standard-profile setting; elsewhere it was not
+            // applied, and saying "lean" would describe a prefix that is not.
+            surface: if profile == PromptProfile::Standard {
+                config.tool_surface_for(model).as_str().into()
+            } else {
+                String::new()
+            },
+            ts: now_ms(),
+        });
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+    }
 
     // Auto-compact when the context exceeds the threshold. Prefer the real
     // input_tokens the API reported for the last request; the char-based
@@ -2027,32 +2388,32 @@ pub async fn run_workflow_with_profile(
     // Lossless first: Jev drops old tool traffic, every word stays. Only when
     // that is unavailable or not enough does the handoff / summary run.
     let mut estimated = estimated;
-    let mut pre_run_jev_cost = 0.0;
+    let mut pre_run_jev_cost = route_cost;
     if let Some((new_estimate, cost)) = try_verbatim_compaction(
-        config, profile, estimated, history, &system, &tools, store, ctx, event_tx,
+        config, &budget, profile, estimated, history, &system, &tools, store, ctx, event_tx,
     )
     .await
     {
         estimated = new_estimate;
-        pre_run_jev_cost = cost;
+        pre_run_jev_cost += cost;
     }
     // Context-handoff next (Standard sessions): the model compresses its own
     // context and the run continues in a fresh linked session. Compaction
     // below stays as the safety net when generation fails or doesn't apply.
     if let Some(outcome) = maybe_context_handoff(
-        config, profile, estimated, history, &system, store, ctx, event_tx, session_id, steering,
-        mode_ctl, 0, 0,
+        config, &budget, profile, estimated, history, &system, store, ctx, event_tx, session_id,
+        steering, mode_ctl, 0, 0, 0,
     )
     .await
     {
         return Ok(outcome);
     }
-    if estimated >= effective_compact_threshold(config, profile) {
+    if estimated >= budget.hard && has_something_to_compress(history) {
         let _ = event_tx.send(AgentEvent::TextStep {
             text: format!(
                 "__compact_start__:{}/{}",
                 estimated / 1000,
-                MAX_CONTEXT_TOKENS / 1000
+                budget.ceiling / 1000
             ),
         });
         match compact_history(
@@ -2065,6 +2426,7 @@ pub async fn run_workflow_with_profile(
             session_id,
             steering,
             crate::agent::hooks::CompactTrigger::Auto,
+            budget.tail_tokens,
         )
         .await
         {
@@ -2101,8 +2463,8 @@ pub async fn run_workflow_with_profile(
                     cost_output: cco,
                     cost_cache_read: ccc,
                     context_tokens: new_context,
-                    max_context_tokens: MAX_CONTEXT_TOKENS,
-                    compact_threshold: COMPACT_THRESHOLD,
+                    max_context_tokens: budget.ceiling,
+                    compact_threshold: budget.hard,
                 });
                 let _ = event_tx.send(AgentEvent::TextStep {
                     text: format!(
@@ -2131,12 +2493,8 @@ pub async fn run_workflow_with_profile(
             )
             .unwrap_or(0),
         );
-        if post_compact >= MAX_CONTEXT_TOKENS {
-            return Err(
-                "A mensagem excede o limite de contexto do modelo (200k tokens). \
-                 Reduza os anexos ou inicie uma nova sessão para continuar."
-                    .into(),
-            );
+        if post_compact >= budget.ceiling {
+            return Err(budget.refusal(prefix_tokens));
         }
     }
 
@@ -2147,7 +2505,7 @@ pub async fn run_workflow_with_profile(
     );
     let mut ledger = CostLedger::resuming(cumul);
     ledger.jev_cost += pre_run_jev_cost;
-    let emit_final_stats = |ledger: &CostLedger, last_context: u64| {
+    let emit_final_stats = |ledger: &CostLedger, last_context: u64, budget: &ContextBudget| {
         let _ = event_tx.send(AgentEvent::SessionStats {
             input_tokens: ledger.cumul_in as u32,
             output_tokens: ledger.cumul_out as u32,
@@ -2156,8 +2514,8 @@ pub async fn run_workflow_with_profile(
             cost_output: ledger.cumul_cost_output,
             cost_cache_read: ledger.cumul_cost_cache,
             context_tokens: last_context,
-            max_context_tokens: MAX_CONTEXT_TOKENS,
-            compact_threshold: COMPACT_THRESHOLD,
+            max_context_tokens: budget.ceiling,
+            compact_threshold: budget.hard,
         });
     };
     let mut last_text = String::new();
@@ -2220,23 +2578,37 @@ pub async fn run_workflow_with_profile(
         let (mode_now, _) = mode_ctl.get();
         if mode_now != cur_mode {
             cur_mode = mode_now;
-            system = system_prompt(
-                ctx.workspace_root.as_deref(),
+            (profile, system, tools) = run_prefix(
+                config,
+                ctx,
+                requested_profile,
+                cur_mode,
                 skills_section.as_deref(),
                 spec_section.as_deref(),
-                ctx.plan_save_path.as_deref(),
-                cur_mode,
-                profile,
-                subagent::effective_max_parallel(config),
+                &mcp_defs,
+                has_golden_goals,
             );
-            tools = api_tools(cur_mode, profile, &mcp_defs, config);
+            ctx.limits
+                .set_writes_files(profile == PromptProfile::Compact);
+            // A mode switch is also a model switch (brain_model vs
+            // builder_model), and the two need not share a window.
+            prefix_tokens = estimate_tokens(&[], &system, &tools);
+            budget = ContextBudget::for_model(
+                config,
+                config.model_for_mode(cur_mode.as_str()),
+                prefix_tokens,
+            );
+            ctx.limits.apply(&budget);
+            if budget.prefix_overflows(prefix_tokens) {
+                return Err(budget.refusal(prefix_tokens));
+            }
         }
 
         // Per-round context re-check: tool_results from the previous round may
         // the next LLM call so we never feed an oversized context.
         let mut pre_tokens = estimate_tokens(history, &system, &tools);
         if let Some((new_estimate, cost)) = try_verbatim_compaction(
-            config, profile, pre_tokens, history, &system, &tools, store, ctx, event_tx,
+            config, &budget, profile, pre_tokens, history, &system, &tools, store, ctx, event_tx,
         )
         .await
         {
@@ -2245,6 +2617,7 @@ pub async fn run_workflow_with_profile(
         }
         if let Some(outcome) = maybe_context_handoff(
             config,
+            &budget,
             profile,
             pre_tokens,
             history,
@@ -2257,17 +2630,18 @@ pub async fn run_workflow_with_profile(
             mode_ctl,
             ledger.total_in,
             ledger.total_out,
+            ledger.total_cache,
         )
         .await
         {
             return Ok(outcome);
         }
-        if pre_tokens >= effective_compact_threshold(config, profile) {
+        if pre_tokens >= budget.hard && has_something_to_compress(history) {
             let _ = event_tx.send(AgentEvent::TextStep {
                 text: format!(
                     "__compact_start__:{}/{}",
                     pre_tokens / 1000,
-                    MAX_CONTEXT_TOKENS / 1000
+                    budget.ceiling / 1000
                 ),
             });
             match compact_history(
@@ -2280,6 +2654,7 @@ pub async fn run_workflow_with_profile(
                 session_id,
                 steering,
                 crate::agent::hooks::CompactTrigger::Auto,
+                budget.tail_tokens,
             )
             .await
             {
@@ -2295,16 +2670,28 @@ pub async fn run_workflow_with_profile(
                     let (mode_now2, _) = mode_ctl.get();
                     if mode_now2 != cur_mode {
                         cur_mode = mode_now2;
-                        system = system_prompt(
-                            ctx.workspace_root.as_deref(),
+                        (profile, system, tools) = run_prefix(
+                            config,
+                            ctx,
+                            requested_profile,
+                            cur_mode,
                             skills_section.as_deref(),
                             spec_section.as_deref(),
-                            ctx.plan_save_path.as_deref(),
-                            cur_mode,
-                            profile,
-                            subagent::effective_max_parallel(config),
+                            &mcp_defs,
+                            has_golden_goals,
                         );
-                        tools = api_tools(cur_mode, profile, &mcp_defs, config);
+                        ctx.limits
+                            .set_writes_files(profile == PromptProfile::Compact);
+                        prefix_tokens = estimate_tokens(&[], &system, &tools);
+                        budget = ContextBudget::for_model(
+                            config,
+                            config.model_for_mode(cur_mode.as_str()),
+                            prefix_tokens,
+                        );
+                        ctx.limits.apply(&budget);
+                        if budget.prefix_overflows(prefix_tokens) {
+                            return Err(budget.refusal(prefix_tokens));
+                        }
                     }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
@@ -2334,8 +2721,8 @@ pub async fn run_workflow_with_profile(
                         cost_output: cco,
                         cost_cache_read: ccc,
                         context_tokens: new_ctx,
-                        max_context_tokens: MAX_CONTEXT_TOKENS,
-                        compact_threshold: COMPACT_THRESHOLD,
+                        max_context_tokens: budget.ceiling,
+                        compact_threshold: budget.hard,
                     });
                     let _ = event_tx.send(AgentEvent::TextStep {
                         text: format!("__compact_done__:{}/{}", pre_tokens / 1000, new_ctx / 1000),
@@ -2359,12 +2746,8 @@ pub async fn run_workflow_with_profile(
                 )
                 .unwrap_or(0),
             );
-            if cur_ctx >= MAX_CONTEXT_TOKENS {
-                return Err(
-                    "A mensagem excede o limite de contexto do modelo (200k tokens). \
-                     Reduza os anexos ou inicie uma nova sessão para continuar."
-                        .into(),
-                );
+            if cur_ctx >= budget.ceiling {
+                return Err(budget.refusal(prefix_tokens));
             }
         }
 
@@ -2450,8 +2833,8 @@ pub async fn run_workflow_with_profile(
             cost_output: Some(live_cost_output),
             cost_cache_read: Some(live_cost_cache),
             context_tokens: last_context,
-            max_context_tokens: MAX_CONTEXT_TOKENS,
-            compact_threshold: COMPACT_THRESHOLD,
+            max_context_tokens: budget.ceiling,
+            compact_threshold: budget.hard,
         });
 
         // Interrupted mid-stream: persist any partial text, reset the flag,
@@ -2482,12 +2865,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -2550,12 +2934,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "max_tokens".into(),
                 text_output: last_text,
@@ -2719,6 +3104,7 @@ pub async fn run_workflow_with_profile(
                     store.try_append(&SessionRecord::Done {
                         input_tokens: ledger.total_in,
                         output_tokens: ledger.total_out,
+                        cache_read_tokens: Some(ledger.total_cache),
                         ts: now_ms(),
                     });
                     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -2931,7 +3317,7 @@ pub async fn run_workflow_with_profile(
             // hook in a fight with the harness's own continuation logic and
             // produce two nudges for one unfinished turn.
             if let Some(h) = &ctx.hooks
-                && profile == PromptProfile::Standard
+                && profile.is_chat()
                 && guards.stop_hook_blocks < MAX_STOP_HOOK_BLOCKS
             {
                 let out =
@@ -2973,12 +3359,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: stop_reason.into(),
                 text_output: last_text,
@@ -3092,6 +3479,14 @@ pub async fn run_workflow_with_profile(
             }
 
             let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
+            // The Compact profile has no subagents to delegate an edit to: its
+            // session changes files itself. Each change is asked about — an
+            // `edit_file` as always, and a shell command that writes a file
+            // even when its prefix is allowlisted (`run_tool`, through
+            // `RunLimits::writes_files`). Brain's read-only gates are
+            // untouched — Compact never runs in Brain, and a toggle mid-round
+            // is caught by `in_brain` below before this is.
+            let direct_edit = profile == PromptProfile::Compact && !in_brain;
             // A denial short-circuits everything downstream, including the mode
             // gates — there is nothing left to decide once the tool will not
             // run. An `allow` or `ask` does NOT short-circuit: the mode gates
@@ -3104,6 +3499,24 @@ pub async fn run_workflow_with_profile(
                     &tool_use_id,
                     &tool_input,
                     reason,
+                    event_tx,
+                    session_id,
+                )
+            } else if direct_edit
+                && !crate::agent::surface::COMPACT_TOOLS.contains(&tool_name.as_str())
+            {
+                // The profile exists because this model's window cannot hold
+                // more than these: a call to anything else — a subagent, a
+                // plan, an MCP server — is one it was never offered, and would
+                // spend the window the profile was protecting.
+                deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    &format!(
+                        "{tool_name} is not available in this session. Your tools are: {}.",
+                        crate::agent::surface::COMPACT_TOOLS.join(", ")
+                    ),
                     event_tx,
                     session_id,
                 )
@@ -3142,9 +3555,9 @@ pub async fn run_workflow_with_profile(
                 ledger.total_out += sub_out;
                 ledger.subagent_cost += sub_cost;
                 block
-            } else if tool_name == "edit_file" {
-                // Not offered to the main session in any mode; deny defensively
-                // in case the model hallucinates the tool.
+            } else if tool_name == "edit_file" && !direct_edit {
+                // Not offered to a Standard main session in any mode; deny
+                // defensively in case the model hallucinates the tool.
                 deny_tool(
                     &tool_name,
                     &tool_use_id,
@@ -3160,6 +3573,7 @@ pub async fn run_workflow_with_profile(
                     session_id,
                 )
             } else if !in_brain
+                && !direct_edit
                 && tool_name == "bash"
                 && permissions::bash_writes_files(
                     tool_input
@@ -3280,7 +3694,14 @@ pub async fn run_workflow_with_profile(
                     .loop_watch
                     .record(&tool_name, &watched_input, &content.as_text());
             }
-            tool_result_blocks.push(block);
+            // After the hook and the loop watch, which are about what the tool
+            // returned; this is only about what is worth carrying twice.
+            tool_result_blocks.push(crate::agent::prune::history_copy(
+                history,
+                &tool_name,
+                &watched_input,
+                block,
+            ));
         }
 
         push_turn(
@@ -3292,6 +3713,9 @@ pub async fn run_workflow_with_profile(
                 content: tool_assistant_blocks,
             },
         );
+        // `history` now ends with the assistant turn these results answer.
+        let calls = history.last().map_or(&[][..], |m| m.content.as_slice());
+        fit_round(&mut tool_result_blocks, calls, budget.round_chars);
         push_turn(
             history,
             store,
@@ -3328,6 +3752,7 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
@@ -3339,12 +3764,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             // No AgentEvent::Done: the conversation continues in the linked
             // successor session — SessionLinked (emitted by link_session) is
             // what the UI reacts to.
@@ -3369,12 +3795,13 @@ pub async fn run_workflow_with_profile(
                 store.try_append(&SessionRecord::Done {
                     input_tokens: ledger.total_in,
                     output_tokens: ledger.total_out,
+                    cache_read_tokens: Some(ledger.total_cache),
                     ts: now_ms(),
                 });
                 crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
                 ledger.roll(resolved_model);
                 ledger.write_status(store, ctx, session_id, Some(last_context));
-                emit_final_stats(&ledger, last_context);
+                emit_final_stats(&ledger, last_context, &budget);
                 let _ = event_tx.send(AgentEvent::Done {
                     stop_reason: "tool_loop".into(),
                     text_output: msg,
@@ -3448,12 +3875,13 @@ pub async fn run_workflow_with_profile(
             store.try_append(&SessionRecord::Done {
                 input_tokens: ledger.total_in,
                 output_tokens: ledger.total_out,
+                cache_read_tokens: Some(ledger.total_cache),
                 ts: now_ms(),
             });
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
             ledger.roll(resolved_model);
             ledger.write_status(store, ctx, session_id, Some(last_context));
-            emit_final_stats(&ledger, last_context);
+            emit_final_stats(&ledger, last_context, &budget);
             let _ = event_tx.send(AgentEvent::Done {
                 stop_reason: "interrupted".into(),
                 text_output: last_text,
@@ -3477,12 +3905,13 @@ pub async fn run_workflow_with_profile(
     store.try_append(&SessionRecord::Done {
         input_tokens: ledger.total_in,
         output_tokens: ledger.total_out,
+        cache_read_tokens: Some(ledger.total_cache),
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
     ledger.roll(config.model_for_mode(cur_mode.as_str()));
     ledger.write_status(store, ctx, session_id, Some(last_context));
-    emit_final_stats(&ledger, last_context);
+    emit_final_stats(&ledger, last_context, &budget);
     let _ = event_tx.send(AgentEvent::Done {
         stop_reason: "max_rounds".into(),
         text_output: capped_text,
@@ -3634,11 +4063,16 @@ async fn execute_and_report(
                 output: truncated,
                 error: None,
             });
-            tool_result_block(tool_use_id, &content)
+            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
         }
-        Ok(ToolOutput::Rich { content, images }) => {
-            rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-        }
+        Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+            tool_use_id,
+            tool_name,
+            &content,
+            images,
+            event_tx,
+            ctx.limits.tool_result_chars(),
+        ),
         Ok(ToolOutput::EditProposal {
             path,
             old_string,
@@ -3807,7 +4241,12 @@ pub(crate) async fn run_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            match permissions::bash_permission(command, ctx.auto_approve_git) {
+            let resolved = if ctx.limits.writes_files() {
+                permissions::bash_permission_writing(command, ctx.auto_approve_git)
+            } else {
+                permissions::bash_permission(command, ctx.auto_approve_git)
+            };
+            match resolved {
                 permissions::PermissionLevel::Denied => {
                     let msg = format!("Command blocked by security policy: {command}");
                     let _ = event_tx.send(AgentEvent::ToolCall {
@@ -3844,7 +4283,7 @@ pub(crate) async fn run_tool(
                                 output: truncated,
                                 error: None,
                             });
-                            tool_result_block(tool_use_id, &content)
+                            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
                         }
                         _ => {
                             let err = "unexpected output type from bash".to_string();
@@ -3893,7 +4332,11 @@ pub(crate) async fn run_tool(
                                         output: truncated,
                                         error: None,
                                     });
-                                    tool_result_block(tool_use_id, &content)
+                                    tool_result_block(
+                                        tool_use_id,
+                                        &content,
+                                        ctx.limits.tool_result_chars(),
+                                    )
                                 }
                                 Ok(_) => {
                                     let err_msg: String =
@@ -4059,11 +4502,16 @@ pub(crate) async fn run_tool(
                             output: truncated,
                             error: None,
                         });
-                        tool_result_block(tool_use_id, &content)
+                        tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
                     }
-                    Ok(ToolOutput::Rich { content, images }) => {
-                        rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-                    }
+                    Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+                        tool_use_id,
+                        tool_name,
+                        &content,
+                        images,
+                        event_tx,
+                        ctx.limits.tool_result_chars(),
+                    ),
                     Ok(ToolOutput::EditProposal { .. }) => {
                         let err_msg = "MCP tools should not produce edit proposals".to_string();
                         let _ = event_tx.send(AgentEvent::ToolResult {
@@ -4106,11 +4554,16 @@ pub(crate) async fn run_tool(
                         output: content.clone(),
                         error: None,
                     });
-                    tool_result_block(tool_use_id, &content)
+                    tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
                 }
-                Ok(ToolOutput::Rich { content, images }) => {
-                    rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-                }
+                Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+                    tool_use_id,
+                    tool_name,
+                    &content,
+                    images,
+                    event_tx,
+                    ctx.limits.tool_result_chars(),
+                ),
                 Ok(ToolOutput::EditProposal {
                     path,
                     old_string,
@@ -4628,10 +5081,6 @@ async fn ask_user(
     ContentBlock::tool_result(tool_use_id, &compiled)
 }
 
-/// Maximum chars for a tool_result stored in the conversation history.
-/// Prevents a large subagent report or file read from blowing up the context.
-const MAX_TOOL_RESULT_CHARS: usize = 24_000;
-
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
         // Respect char boundaries so we never slice mid-codepoint.
@@ -4684,11 +5133,16 @@ async fn run_and_report(
                 output: truncate(&content, 2000),
                 error: None,
             });
-            tool_result_block(tool_use_id, &content)
+            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
         }
-        Ok(ToolOutput::Rich { content, images }) => {
-            rich_result_block(tool_use_id, tool_name, &content, images, event_tx)
-        }
+        Ok(ToolOutput::Rich { content, images }) => rich_result_block(
+            tool_use_id,
+            tool_name,
+            &content,
+            images,
+            event_tx,
+            ctx.limits.tool_result_chars(),
+        ),
         Ok(ToolOutput::EditProposal { .. }) => {
             let msg = format!("{tool_name} should not produce edit proposals");
             let _ = event_tx.send(AgentEvent::ToolResult {
@@ -4711,8 +5165,107 @@ async fn run_and_report(
     }
 }
 
-fn tool_result_block(tool_use_id: &str, content: &str) -> ContentBlock {
-    ContentBlock::tool_result(tool_use_id, truncate(content, MAX_TOOL_RESULT_CHARS))
+/// The history copy of a tool result, cut to `max_chars`
+/// (`ContextBudget::tool_result_chars`) so one large report, file read or
+/// search cannot take the context — a cap that follows the model's window.
+fn tool_result_block(tool_use_id: &str, content: &str, max_chars: usize) -> ContentBlock {
+    ContentBlock::tool_result(tool_use_id, truncate(content, max_chars))
+}
+
+/// What `truncate` appends, split around the size it reports.
+const CAP_NOTE: (&str, &str) = ("...(truncated, ", " chars total)");
+
+/// A result's text without the note an earlier cap left on it, and the size
+/// the result had before any cap.
+fn uncapped(text: &str) -> (&str, usize) {
+    let (open, close) = CAP_NOTE;
+    if let Some(at) = text.rfind(open)
+        && let Some(total) = text[at + open.len()..]
+            .strip_suffix(close)
+            .and_then(|n| n.parse::<usize>().ok())
+    {
+        return (&text[..at], total);
+    }
+    (text, text.len())
+}
+
+/// The least a result is cut to: below this it says nothing but its own note.
+const MIN_ROUND_SHARE: usize = 200;
+
+/// Hold the results of one round to `round_chars` together
+/// (`ContextBudget::round_chars`). The cap per result does not bound a round:
+/// a model that reads four files in one turn gets four results, and the round
+/// just read is the one thing no prune will cut.
+///
+/// The room is shared the way water fills glasses: a small result keeps all of
+/// itself, and what it does not use goes to the larger ones. A result the cap
+/// per result already cut is cut from its text, not from text plus note, and
+/// still reports the size it really had — that note is the only way the model
+/// learns how much of a file it has not seen. The user's answers (`ask_user`,
+/// looked up in `calls`, the assistant turn these results answer) are never
+/// cut.
+pub(crate) fn fit_round(blocks: &mut [ContentBlock], calls: &[ContentBlock], round_chars: usize) {
+    use crate::agent::provider::ToolResultContent;
+    if round_chars == usize::MAX {
+        return;
+    }
+    let answers: std::collections::HashSet<&str> = calls
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, .. } if name == "ask_user" => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut kept_whole = 0usize;
+    let mut bodies: Vec<usize> = Vec::new();
+    for b in blocks.iter() {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content: ToolResultContent::Text(text),
+            ..
+        } = b
+        {
+            if answers.contains(tool_use_id.as_str()) {
+                kept_whole += text.len();
+            } else {
+                bodies.push(uncapped(text).0.len());
+            }
+        }
+    }
+    let mut room = round_chars.saturating_sub(kept_whole);
+    if bodies.iter().sum::<usize>() <= room {
+        return;
+    }
+    // The level every larger result is cut to.
+    bodies.sort_unstable();
+    let mut level = 0;
+    for (i, len) in bodies.iter().enumerate() {
+        let share = room / (bodies.len() - i);
+        if *len > share {
+            level = share;
+            break;
+        }
+        room -= len;
+    }
+    let level = level.max(MIN_ROUND_SHARE);
+    for b in blocks.iter_mut() {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content: ToolResultContent::Text(text),
+            ..
+        } = b
+            && !answers.contains(tool_use_id.as_str())
+        {
+            let (body, total) = uncapped(text);
+            if body.len() > level {
+                let mut end = level;
+                while end < body.len() && !body.is_char_boundary(end) {
+                    end += 1;
+                }
+                *text = format!("{}{}{total}{}", &body[..end], CAP_NOTE.0, CAP_NOTE.1);
+            }
+        }
+    }
 }
 
 /// Build the tool_result block for a `ToolOutput::Rich`, emitting both the
@@ -4727,6 +5280,7 @@ fn rich_result_block(
     content: &str,
     images: Vec<crate::imageutil::ImageAttachment>,
     event_tx: &Channel<AgentEvent>,
+    max_chars: usize,
 ) -> ContentBlock {
     let _ = event_tx.send(AgentEvent::ToolResult {
         tool_id: tool_use_id.to_string(),
@@ -4735,14 +5289,14 @@ fn rich_result_block(
         error: None,
     });
     if images.is_empty() {
-        return tool_result_block(tool_use_id, content);
+        return tool_result_block(tool_use_id, content, max_chars);
     }
     let _ = event_tx.send(AgentEvent::ToolResultImages {
         tool_id: tool_use_id.to_string(),
         images: images.clone(),
     });
 
-    let text = truncate(content, MAX_TOOL_RESULT_CHARS);
+    let text = truncate(content, max_chars);
     let mut blocks = Vec::with_capacity(images.len() + 1);
     // Anthropic rejects empty text blocks, and a tool that returns only an
     // image (a bare screenshot) is a normal case, not an error.
@@ -4939,6 +5493,7 @@ mod tests {
             workspace_root: None,
             embedding_model: Default::default(),
             session_store_path: None,
+            limits: Default::default(),
             read_tracker: Default::default(),
             browser: None,
             interrupt: None,
@@ -5568,12 +6123,17 @@ mod tests {
             asst("a3"),
         ];
         // Last 2 exchanges = q2..a3 = 4 Turn records
-        assert_eq!(compute_tail_turns(&recs), 4);
+        let tail = crate::agent::budget::TAIL_TOKENS;
+        assert_eq!(compute_tail_turns(&recs, tail), 4);
+        // A budget too small for even the last exchange keeps nothing verbatim,
+        // which is what a small-window model gets instead of an overflow.
+        assert_eq!(compute_tail_turns(&recs, 0), 0);
     }
 
     #[test]
     fn compute_tail_turns_shrinks_when_over_budget() {
-        let big = "x".repeat((TAIL_MAX_TOKENS as usize) * 4); // way over budget alone
+        let tail = crate::agent::budget::TAIL_TOKENS;
+        let big = "x".repeat((tail as usize) * 4); // way over budget alone
         let recs = vec![
             SessionRecord::Turn {
                 message: Message {
@@ -5591,7 +6151,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            compute_tail_turns(&recs),
+            compute_tail_turns(&recs, tail),
             0,
             "oversized tail must be dropped"
         );
@@ -6023,6 +6583,53 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             sys.contains("code-gated"),
             "Brain prompt must state that tasks_set is gated on the LLD"
         );
+    }
+
+    /// Status changes go through the one-task tool. A prompt that still told
+    /// the model to resend the list would make the delta dead code.
+    #[test]
+    fn status_changes_are_pointed_at_tasks_update_in_both_modes() {
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            let sys = system_prompt(
+                Some(ROOT),
+                None,
+                None,
+                None,
+                mode,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+            );
+            assert!(sys.contains("Update in real time with `tasks_update`"));
+            assert!(sys.contains("Never resend the list just to change a status"));
+            assert!(!sys.contains("you MUST make a final `tasks_set` call"));
+            let names: Vec<String> =
+                api_tools(mode, PromptProfile::Standard, &[], &AgentConfig::default())
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect();
+            for tool in ["tasks_get", "tasks_set", "tasks_update"] {
+                assert!(names.contains(&tool.to_string()), "{mode:?} lacks {tool}");
+            }
+        }
+        let builder = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+        );
+        assert!(builder.contains("call `tasks_update` to mark THAT task status='doing'"));
+        assert!(builder.contains("call `tasks_update` to mark THAT task status='done'"));
+        // The git profile has no task system at all.
+        let git = api_tools(
+            SessionMode::Builder,
+            PromptProfile::GitSync,
+            &[],
+            &AgentConfig::default(),
+        );
+        assert!(git.iter().all(|t| !t.name.starts_with("tasks_")));
     }
 
     #[test]
@@ -6461,32 +7068,110 @@ mod verbatim_compaction_tests {
 
     #[test]
     fn a_prune_that_frees_enough_and_lands_well_under_the_limit_is_taken() {
-        assert!(accept_prune(&outcome(100, 40), 60_000, 120_000));
+        assert!(accept_prune(&outcome(100, 40), 60_000, 120_000, 0));
     }
 
     #[test]
     fn a_prune_that_frees_too_little_falls_back() {
         // 20% < MIN_REDUCTION: not worth a cold prefix; the handoff decides.
-        assert!(!accept_prune(&outcome(100, 80), 60_000, 120_000));
+        assert!(!accept_prune(&outcome(100, 80), 60_000, 120_000, 0));
     }
 
     #[test]
     fn a_prune_that_stays_near_the_limit_falls_back() {
         // Freed half, but would cross the limit again a few rounds later.
-        assert!(!accept_prune(&outcome(100, 50), 110_000, 120_000));
+        assert!(!accept_prune(&outcome(100, 50), 110_000, 120_000, 0));
+    }
+
+    /// On a small window the prefix is most of the context. Measured from
+    /// zero, the target would sit below the prefix itself and no prune could
+    /// ever be taken; measured above the prefix, a real one is.
+    #[test]
+    fn room_is_measured_above_what_no_prune_can_touch() {
+        // 10k of prefix, a soft line at 18k: 8k of conversation, pruned to 5k.
+        assert!(!accept_prune(&outcome(100, 40), 15_000, 18_000, 0));
+        assert!(accept_prune(&outcome(100, 40), 15_000, 18_000, 10_000));
+        // Still refused when the conversation stays near the line.
+        assert!(!accept_prune(&outcome(100, 40), 17_000, 18_000, 10_000));
+    }
+
+    #[test]
+    fn a_prune_aims_halfway_between_the_floor_and_the_line() {
+        let full = ContextBudget::new(200_000, 120_000, None, 30_000);
+        let o = shed_options(130_000, full.soft, &full, false);
+        // Floor 0: land at 60k, so free 70k tokens of history.
+        assert_eq!(o.free_chars, 70_000 * 3);
+        assert_eq!(o.recent_chars, 20_000 * 3);
+        assert!(!o.last_resort);
+
+        let small = ContextBudget::new(32_768, 120_000, Some(8_192), 4_576);
+        let o = shed_options(17_000, small.soft, &small, true);
+        // Floor 4_576, line 16_576: land at 10_576.
+        assert_eq!(o.free_chars, (17_000 - 10_576) * 3);
+        assert_eq!(o.recent_chars, 6_000 * 3);
+        assert!(o.last_resort);
     }
 
     #[test]
     fn the_limit_is_the_handoff_line_for_standard_sessions() {
         let cfg = AgentConfig::default();
+        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 30_000);
         assert_eq!(
-            context_limit(&cfg, PromptProfile::Standard),
+            shed_line(&budget, PromptProfile::Standard),
             cfg.effective_handoff_threshold()
         );
+        // The lean profiles have no handoff: their first line is the compaction.
         assert_eq!(
-            context_limit(&cfg, PromptProfile::GitSync),
-            effective_compact_threshold(&cfg, PromptProfile::GitSync)
+            shed_line(&budget, PromptProfile::GitSync),
+            COMPACT_THRESHOLD
         );
+    }
+
+    /// The default config against the default models is the contract with
+    /// every existing session: nothing about its three lines may move.
+    #[test]
+    fn the_default_models_run_on_the_lines_they_always_had() {
+        let cfg = AgentConfig::default();
+        for model in [cfg.brain_model.as_str(), cfg.builder_model.as_str()] {
+            let b = ContextBudget::for_model(&cfg, model, 33_000);
+            assert_eq!(
+                (b.soft, b.hard, b.ceiling),
+                (120_000, COMPACT_THRESHOLD, MAX_CONTEXT_TOKENS),
+                "{model}"
+            );
+        }
+    }
+
+    /// A catalog model with a 64k window used to be driven by the 200k lines,
+    /// so it overflowed at the provider before any of them was reached.
+    #[test]
+    fn a_small_catalog_model_gets_lines_inside_its_own_window() {
+        let mut cfg = AgentConfig::default();
+        cfg.providers.insert(
+            "deepseek".into(),
+            crate::agent::provider::ProviderEntry {
+                api_key: "k".into(),
+                base_url: "https://api.deepseek.com".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("deepseek-chat".to_string(), 8_192u32)]
+                    .into_iter()
+                    .collect(),
+                custom: false,
+                custom_models: vec![],
+                model_context_limits: [("deepseek-chat".to_string(), 65_536u32)]
+                    .into_iter()
+                    .collect(),
+                context_window: None,
+            },
+        );
+        let b = ContextBudget::for_model(&cfg, "deepseek/deepseek-chat", 10_000);
+        assert_eq!(b.window, 65_536);
+        assert!(b.soft < b.hard && b.hard < b.ceiling, "{b:?}");
+        assert!(b.ceiling < 65_536);
+        assert!(b.soft > 10_000, "the soft line is past the prefix: {b:?}");
     }
 }
 
@@ -6572,5 +7257,1183 @@ mod finish_line_tests {
         assert!(report.verdict.pass);
         assert_eq!(recorded_runs(&ctx), 1);
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::agent::jev::test_support::spawn_stub;
+    use crate::agent::route::RouteMode;
+
+    const FEATURE: &str = "I want users to be able to share a session with a teammate. \
+                           Not sure yet whether it should be a link or an invite.";
+
+    fn store(tag: &str) -> SessionStore {
+        let path = std::env::temp_dir().join(format!(
+            "claudinio_route_{tag}_{}_{}.jsonl",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::write(&path, "").unwrap();
+        SessionStore { path }
+    }
+
+    /// A Claudinio account whose plan endpoint is the stub: the one Jev backend
+    /// whose address comes from the config rather than from a constant.
+    fn config(route: RouteMode, jev_url: Option<&str>) -> AgentConfig {
+        let mut cfg = AgentConfig::default();
+        cfg.jev.route = route;
+        if let Some(url) = jev_url {
+            // Unique per test: a refused key is remembered process-wide.
+            cfg.api_key = format!("sk-route-{}", now_ms());
+            cfg.services_url = url.trim_end_matches("/v1/systemone").to_string();
+        }
+        cfg
+    }
+
+    fn jev_says(decisions: f64, design: f64) -> &'static str {
+        Box::leak(
+            serde_json::json!({
+                "answers": {
+                    "decisions": {"type": "noul", "noul": decisions},
+                    "design": {"type": "noul", "noul": design},
+                },
+                "usage": {"input_tokens": 200, "cost": 2e-6},
+            })
+            .to_string()
+            .into_boxed_str(),
+        )
+    }
+
+    async fn run(
+        cfg: &AgentConfig,
+        store: &SessionStore,
+        mode_ctl: &Arc<ModeCtl>,
+        fresh: bool,
+    ) -> f64 {
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        route_first_prompt(
+            cfg,
+            PromptProfile::Standard,
+            fresh,
+            FEATURE,
+            store,
+            &ctx,
+            mode_ctl,
+            &events,
+        )
+        .await
+    }
+
+    fn routes(store: &SessionStore) -> Vec<(String, String, String, bool)> {
+        crate::agent::persist::load_records(&store.path)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                SessionRecord::ModeRoute {
+                    verdict,
+                    ran_as,
+                    source,
+                    shadow,
+                    ..
+                } => Some((verdict, ran_as, source, shadow)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The shadow verdict is written by a background task.
+    async fn wait_for_route(store: &SessionStore) -> Vec<(String, String, String, bool)> {
+        for _ in 0..100 {
+            let found = routes(store);
+            if !found.is_empty() {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        Vec::new()
+    }
+
+    fn builder() -> Arc<ModeCtl> {
+        Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human))
+    }
+
+    #[tokio::test]
+    async fn in_shadow_the_verdict_is_recorded_and_nothing_changes() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (store, mode) = (store("shadow"), builder());
+        // Even with Auto requested: shadow never acts.
+        mode.request_auto(true);
+        let cost = run(&config(RouteMode::Shadow, Some(&url)), &store, &mode, true).await;
+        assert_eq!(cost, 0.0, "nothing was awaited");
+        assert_eq!(
+            wait_for_route(&store).await,
+            vec![("brain".into(), "builder".into(), "jev".into(), true)]
+        );
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn on_auto_a_planning_request_starts_in_brain_as_the_agents_own_choice() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (store, mode) = (store("on"), builder());
+        mode.request_auto(true);
+        let cost = run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        stub.join().unwrap();
+        assert!(cost > 0.0, "an awaited verdict is charged to the run");
+        // Agent origin: it may exit Brain itself once the plan and tasks exist.
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Agent));
+        assert_eq!(
+            routes(&store),
+            vec![("brain".into(), "builder".into(), "jev".into(), false)]
+        );
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            Some(("brain".into(), "agent".into())),
+            "a reloaded session is in the mode the router chose"
+        );
+        assert!(!mode.take_auto(), "Auto is for one prompt");
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // The verdict is awaited for up to two seconds, and the mode toggle works
+    // in the meantime. What the user picks then is their choice — and a Brain
+    // they turned on must stay one the agent cannot leave by itself.
+    #[tokio::test]
+    async fn a_mode_the_user_picks_while_auto_is_deciding_is_kept_as_theirs() {
+        let (url, stub) = crate::agent::jev::test_support::spawn_stub_after(
+            std::time::Duration::from_millis(400),
+            200,
+            jev_says(0.95, 0.9),
+        );
+        let (store, mode) = (store("race"), builder());
+        mode.request_auto(true);
+        let toggle = mode.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            toggle.set(SessionMode::Brain, ModeOrigin::Human);
+        });
+        run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        stub.join().unwrap();
+
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Human));
+        // Recorded as a verdict that decided nothing.
+        assert_eq!(
+            routes(&store),
+            vec![("brain".into(), "builder".into(), "jev".into(), true)]
+        );
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            None,
+            "no mode record of ours"
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // Brain always runs the Standard profile. Where the Brain model's window
+    // is too small for that, Auto would turn a Builder session that works —
+    // on the Compact profile — into one that is refused on its first message.
+    #[tokio::test]
+    async fn auto_does_not_send_a_session_to_a_brain_that_cannot_run() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let mut cfg = config(RouteMode::On, Some(&url));
+        cfg.brain_model = "tiny/m".into();
+        cfg.providers.insert(
+            "tiny".into(),
+            crate::agent::provider::ProviderEntry {
+                api_key: "k".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: Default::default(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window: Some(32_768),
+            },
+        );
+        let (store, mode) = (store("tinybrain"), builder());
+        mode.request_auto(true);
+        let cost = run(&cfg, &store, &mode, true).await;
+        // Nobody was asked: the stub is left waiting and gives up.
+        drop(stub);
+
+        assert_eq!(cost, 0.0);
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        assert!(routes(&store).is_empty());
+        assert!(!mode.take_auto(), "Auto is still for one prompt only");
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // What the rules decide needs no wait, so it is written in line — not by a
+    // background task racing the run for the same file.
+    #[tokio::test]
+    async fn in_shadow_a_verdict_the_rules_reach_is_recorded_before_the_run_goes_on() {
+        let (store, mode) = (store("inline"), builder());
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        route_first_prompt(
+            &config(RouteMode::Shadow, None),
+            PromptProfile::Standard,
+            true,
+            "fix the typo",
+            &store,
+            &ctx,
+            &mode,
+            &events,
+        )
+        .await;
+        // No waiting: it is there by the time the call returns.
+        assert_eq!(
+            routes(&store),
+            vec![("builder".into(), "builder".into(), "rules".into(), true)]
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // The control can be moved to Brain and back to Auto before the first
+    // message. Auto is then what was chosen: its verdict is the mode, in
+    // either direction, and a Brain it confirms is its own.
+    #[tokio::test]
+    async fn auto_chosen_after_brain_was_tried_decides_like_auto_always_does() {
+        let picked_brain = || Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human));
+
+        let (url, stub) = spawn_stub(200, jev_says(0.2, 0.3));
+        let (file, mode) = (store("back-to-auto"), picked_brain());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &file, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Agent));
+        assert_eq!(
+            routes(&file),
+            vec![("builder".into(), "brain".into(), "jev".into(), false)]
+        );
+        let records = crate::agent::persist::load_records(&file.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            Some(("builder".into(), "agent".into())),
+            "a reloaded session is in the mode Auto chose"
+        );
+        std::fs::remove_file(&file.path).ok();
+
+        // Auto agrees with the earlier click: still Brain, but now a Brain the
+        // agent may leave by itself once the plan and tasks exist.
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (file, mode) = (store("auto-agrees"), picked_brain());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &file, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Agent));
+        std::fs::remove_file(&file.path).ok();
+
+        // Without Auto, a Brain the user picked is left exactly as it is.
+        let (file, mode) = (store("stays-brain"), picked_brain());
+        run(&config(RouteMode::On, None), &file, &mode, true).await;
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Human));
+        std::fs::remove_file(&file.path).ok();
+    }
+
+    #[tokio::test]
+    async fn on_auto_an_ordinary_request_stays_in_builder() {
+        let (url, stub) = spawn_stub(200, jev_says(0.3, 0.9));
+        let (store, mode) = (store("stay"), builder());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        assert_eq!(
+            routes(&store),
+            vec![("builder".into(), "builder".into(), "jev".into(), false)]
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn on_without_jev_auto_is_builder_and_says_nobody_decided() {
+        let (store, mode) = (store("nojev"), builder());
+        mode.request_auto(true);
+        let cost = run(&config(RouteMode::On, None), &store, &mode, true).await;
+        assert_eq!(cost, 0.0);
+        assert_eq!(mode.get().0, SessionMode::Builder);
+        assert_eq!(
+            routes(&store),
+            vec![(
+                "builder".into(),
+                "builder".into(),
+                "unavailable".into(),
+                false
+            )]
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn a_mode_the_user_picked_is_never_overridden() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (store, mode) = (store("explicit"), builder());
+        // Router on, but the user chose Builder by hand: no Auto request.
+        run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        assert_eq!(
+            wait_for_route(&store).await,
+            vec![("brain".into(), "builder".into(), "jev".into(), true)],
+            "recorded next to the user's choice, as in shadow"
+        );
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn only_the_first_prompt_of_a_fresh_session_is_routed() {
+        // The backend points nowhere: asking it would be the failure.
+        let cfg = config(RouteMode::On, Some("http://127.0.0.1:9/v1/systemone"));
+
+        // Not fresh: the session already has history.
+        let (s1, mode) = (store("history"), builder());
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &s1, &mode, false).await, 0.0);
+        assert!(
+            !mode.take_auto(),
+            "the request does not survive to a later prompt"
+        );
+
+        // A successor session: it carries a plan to execute.
+        let s2 = store("successor");
+        s2.try_append(&SessionRecord::LinkedFrom {
+            prev_session_id: "p".into(),
+            reason: "plan_execution".into(),
+            golden_cycle: 0,
+            golden_stalls: 0,
+            golden_last_pending: vec![],
+            ts: 1,
+        });
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &s2, &mode, true).await, 0.0);
+
+        // Golden goals created tasks before the run: their loop owns the mode.
+        let s3 = store("goals");
+        crate::agent::persist::append_tasks(&s3.path, &[]).unwrap();
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &s3, &mode, true).await, 0.0);
+
+        for s in [&s1, &s2, &s3] {
+            assert!(routes(s).is_empty());
+            std::fs::remove_file(&s.path).ok();
+        }
+        assert_eq!(mode.get().0, SessionMode::Builder);
+    }
+
+    #[tokio::test]
+    async fn off_asks_nothing_and_records_nothing() {
+        let cfg = config(RouteMode::Off, Some("http://127.0.0.1:9/v1/systemone"));
+        let (store, mode) = (store("off"), builder());
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &store, &mode, true).await, 0.0);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(routes(&store).is_empty());
+        std::fs::remove_file(&store.path).ok();
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::agent::provider::ProviderEntry;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+    use crate::agent::surface::{COMPACT_TOOLS, LEAN_DROPPED, ToolSurface, prompt_for};
+
+    const SKILLS: &str = "## SKILLS\n- deploy: ship the thing";
+    const SPECS: &str = "## SPECIFICATION\n- Scenario: it works";
+
+    /// A provider "stub" serving model "m" as the builder, with the window the
+    /// user typed for it.
+    pub(super) fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
+        let mut config = AgentConfig {
+            builder_model: "stub/m".into(),
+            // Edits are approved without a person, so a run can finish.
+            yolo_mode: true,
+            ..AgentConfig::default()
+        };
+        config.providers.insert(
+            "stub".into(),
+            ProviderEntry {
+                api_key: "k".into(),
+                base_url: base_url.into(),
+                protocol: "anthropic".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("m".to_string(), 4_096u32)].into_iter().collect(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window,
+            },
+        );
+        config
+    }
+
+    fn names(tools: &[ToolDescription]) -> Vec<&str> {
+        tools.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    fn standard(mode: SessionMode) -> String {
+        system_prompt(
+            Some("/ws"),
+            Some(SKILLS),
+            Some(SPECS),
+            None,
+            mode,
+            PromptProfile::Standard,
+            4,
+        )
+    }
+
+    // A prompt that still steered toward a tool the model was not given would
+    // cost a failed call every time the model believed it.
+    #[test]
+    fn a_lean_prompt_names_none_of_the_tools_lean_drops() {
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            let full = standard(mode);
+            assert!(
+                LEAN_DROPPED.iter().any(|t| full.contains(t)) || full.contains("LSP"),
+                "{mode:?}: the full prompt steers toward the LSP tools"
+            );
+            let lean = prompt_for(ToolSurface::Lean, full.clone());
+            for tool in LEAN_DROPPED {
+                assert!(!lean.contains(tool), "{mode:?} still names {tool}");
+            }
+            assert!(!lean.contains("LSP"), "{mode:?} still ranks LSP first");
+            // Everything else is the same prompt.
+            assert!(lean.contains("`semantic_search`") && lean.contains(SKILLS));
+            assert!(lean.len() < full.len() && lean.len() > full.len() - 400);
+        }
+    }
+
+    #[test]
+    fn the_surface_is_set_per_model_so_brain_and_builder_can_differ() {
+        let mut cfg = AgentConfig::default();
+        cfg.tool_surface
+            .insert(cfg.builder_model.clone(), "lean".into());
+
+        let builder = api_tools(SessionMode::Builder, PromptProfile::Standard, &[], &cfg);
+        let brain = api_tools(SessionMode::Brain, PromptProfile::Standard, &[], &cfg);
+        for tool in LEAN_DROPPED {
+            assert!(!names(&builder).contains(&tool), "builder is lean: {tool}");
+            assert!(names(&brain).contains(&tool), "brain was not set: {tool}");
+        }
+        assert_eq!(builder.len() + LEAN_DROPPED.len(), brain.len());
+
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let prefix = |mode| {
+            run_prefix(
+                &cfg,
+                &ctx,
+                PromptProfile::Standard,
+                mode,
+                None,
+                None,
+                &[],
+                false,
+            )
+        };
+        let (profile, system, tools) = prefix(SessionMode::Builder);
+        assert_eq!(profile, PromptProfile::Standard);
+        assert!(!system.contains("symbol_lookup") && !names(&tools).contains(&"symbol_lookup"));
+        let (_, system, tools) = prefix(SessionMode::Brain);
+        assert!(system.contains("symbol_lookup") && names(&tools).contains(&"symbol_lookup"));
+    }
+
+    // With nothing set, nothing moves: the prefix every existing session
+    // caches is the one it had.
+    #[test]
+    fn with_no_surface_set_the_prefix_is_what_it_was() {
+        let cfg = AgentConfig::default();
+        let ctx = ToolContext {
+            workspace_root: Some("/ws".into()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            let (profile, system, tools) = run_prefix(
+                &cfg,
+                &ctx,
+                PromptProfile::Standard,
+                mode,
+                Some(SKILLS),
+                Some(SPECS),
+                &[],
+                false,
+            );
+            assert_eq!(profile, PromptProfile::Standard);
+            assert_eq!(system, standard(mode));
+            assert_eq!(
+                names(&tools),
+                names(&api_tools(mode, PromptProfile::Standard, &[], &cfg))
+            );
+            assert!(names(&tools).contains(&"go_to_definition"));
+        }
+    }
+
+    #[test]
+    fn the_compact_prefix_is_one_prompt_and_ten_tools() {
+        let cfg = config_for("http://127.0.0.1:1", Some(32_768));
+        let mcp = vec![tools::ToolDef {
+            name: "mcp__db__query".into(),
+            description: "Run a query".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let ctx = ToolContext {
+            workspace_root: Some("/ws".into()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let (profile, system, tools) = run_prefix(
+            &cfg,
+            &ctx,
+            PromptProfile::Standard,
+            SessionMode::Builder,
+            Some(SKILLS),
+            Some(SPECS),
+            &mcp,
+            false,
+        );
+        assert_eq!(profile, PromptProfile::Compact);
+        let mut offered = names(&tools);
+        offered.sort_unstable();
+        let mut expected = COMPACT_TOOLS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(offered, expected);
+
+        assert!(system.starts_with(crate::agent::surface::COMPACT_PROMPT));
+        assert!(system.contains("Project workspace root: /ws."));
+        for absent in [SKILLS, SPECS, "CURRENT MODE", "spawn_agents", "golden"] {
+            assert!(!system.contains(absent), "{absent}");
+        }
+        assert!(!system.contains("{max_parallel}") && !system.contains("{plans_subdir}"));
+
+        // The point of the profile: what a 32k model is sent before the first
+        // word of the conversation. 12% of the window, where the Standard
+        // prompt and tools — before any skill or MCP schema — took 30%.
+        let compact = estimate_tokens(&[], &system, &tools);
+        let full_tools = api_tools(SessionMode::Builder, PromptProfile::Standard, &mcp, &cfg);
+        let full = estimate_tokens(&[], &standard(SessionMode::Builder), &full_tools);
+        assert!(compact < 4_000, "compact prefix: {compact} tokens");
+        assert!(full > 2 * compact, "standard {full} vs compact {compact}");
+    }
+
+    // The same session in Brain keeps the Standard profile: a toggle must hand
+    // the model Brain's read-only protocol, not Compact's edit tools.
+    #[test]
+    fn switching_a_compact_session_to_brain_restores_the_standard_prefix() {
+        let mut cfg = config_for("http://127.0.0.1:1", Some(32_768));
+        cfg.brain_model = "stub/m".into();
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let (profile, system, tools) = run_prefix(
+            &cfg,
+            &ctx,
+            PromptProfile::Standard,
+            SessionMode::Brain,
+            None,
+            None,
+            &[],
+            false,
+        );
+        assert_eq!(profile, PromptProfile::Standard);
+        assert!(system.contains("CURRENT MODE: BRAIN"));
+        assert!(!names(&tools).contains(&"edit_file"));
+        assert!(names(&tools).contains(&"write_plan"));
+    }
+
+    #[test]
+    fn a_compact_session_is_still_a_chat_session() {
+        // Its hooks fire and its long conversations hand off, like Standard's.
+        assert!(PromptProfile::Compact.is_chat() && PromptProfile::Standard.is_chat());
+        assert!(!PromptProfile::GitSync.is_chat());
+        let cfg = config_for("http://127.0.0.1:1", Some(32_768));
+        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 3_600);
+        assert_eq!(shed_line(&budget, PromptProfile::Compact), budget.soft);
+    }
+
+    struct Run {
+        outcome: Result<RunOutcome, String>,
+        file: std::path::PathBuf,
+        store: SessionStore,
+        bodies: Vec<String>,
+        root: std::path::PathBuf,
+    }
+
+    /// One user message against a model that reads a file, edits it, and says
+    /// it is done.
+    async fn read_edit_answer(tag: &str, context_window: Option<u32>) -> Run {
+        run_script(tag, context_window, None, |path| {
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": path }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "hello", "new_string": "goodbye",
+                    }),
+                },
+                Reply::Text("changed the greeting"),
+            ]
+        })
+        .await
+    }
+
+    /// One user message against a model that follows `script` (built from the
+    /// path of `greet.txt`, the one file in its workspace). With `answer`,
+    /// approvals are switched on and every prompt gets that answer; without
+    /// it they are off (`yolo_mode`).
+    async fn run_script(
+        tag: &str,
+        context_window: Option<u32>,
+        answer: Option<bool>,
+        script: impl FnOnce(&str) -> Vec<Reply>,
+    ) -> Run {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-surface-{tag}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("greet.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+        let path = file.to_string_lossy().to_string();
+        let store = SessionStore {
+            path: root.join("session.jsonl"),
+        };
+        std::fs::write(&store.path, "").unwrap();
+
+        let (base, _, bodies) = spawn_recording(script(&path)).await;
+        let mut config = config_for(&base, context_window);
+        config.yolo_mode = answer.is_none();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let approvals = ApprovalMap::default();
+        // The person at the other end of every approval prompt.
+        let user = answer.map(|answer| {
+            let approvals = approvals.clone();
+            tokio::spawn(async move {
+                loop {
+                    let pending: Vec<_> = approvals.lock().await.drain().collect();
+                    for (_, reply) in pending {
+                        let _ = reply.send(answer);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        });
+        let mut history = Vec::new();
+        let outcome = run_workflow(
+            &config,
+            &mut history,
+            "say goodbye instead".into(),
+            Vec::new(),
+            &events,
+            &approvals,
+            &AnswerMap::default(),
+            "surface-test",
+            &ctx,
+            &store,
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+        )
+        .await;
+        if let Some(user) = user {
+            user.abort();
+        }
+        let bodies = bodies.lock().unwrap().clone();
+        Run {
+            outcome,
+            file,
+            store,
+            bodies,
+            root,
+        }
+    }
+
+    // In every other profile a shell command that writes a file never reaches
+    // the tool, so the allowlist could afford to be a list of prefixes. In
+    // Compact it does reach it — and `echo …` being harmless to run is no
+    // reason for `echo … > file` to be written without anyone being asked.
+    #[tokio::test]
+    async fn a_compact_session_asks_before_a_shell_command_writes_a_file() {
+        let write = |path: &str| {
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("echo goodbye > {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        };
+
+        let refused = run_script("bash-no", Some(32_768), Some(false), write).await;
+        assert!(matches!(refused.outcome, Ok(RunOutcome::Completed)));
+        assert_eq!(
+            std::fs::read_to_string(&refused.file).unwrap(),
+            "hello world\n"
+        );
+        assert!(
+            refused.bodies[1].contains("rejected by user"),
+            "the model is told"
+        );
+
+        let approved = run_script("bash-yes", Some(32_768), Some(true), write).await;
+        assert_eq!(
+            std::fs::read_to_string(&approved.file).unwrap(),
+            "goodbye\n"
+        );
+
+        // A command that only reads is still not worth a prompt: with every
+        // prompt answered "no", it runs.
+        let reads = run_script("bash-read", Some(32_768), Some(false), |path| {
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("cat {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(reads.bodies[1].contains("hello world"));
+        for run in [refused, approved, reads] {
+            std::fs::remove_dir_all(&run.root).ok();
+        }
+    }
+
+    // What the model is not offered it cannot run, whatever it asks for.
+    #[tokio::test]
+    async fn a_compact_session_runs_only_the_tools_it_was_offered() {
+        let run = run_script("offered", Some(32_768), None, |_| {
+            vec![
+                Reply::Tool {
+                    name: "spawn_agents",
+                    input: serde_json::json!({
+                        "agents": [{"name": "a", "goal": "look around", "mode": "explore"}],
+                    }),
+                },
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(matches!(run.outcome, Ok(RunOutcome::Completed)));
+        // Two requests: the call, and the answer to its refusal. A subagent
+        // would have made more against the same stub.
+        assert_eq!(run.bodies.len(), 2);
+        assert!(run.bodies[1].contains("spawn_agents is not available in this session"));
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    fn run_config(store: &SessionStore) -> (String, u64) {
+        crate::agent::persist::load_records(&store.path)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r {
+                SessionRecord::RunConfig {
+                    profile, prefix, ..
+                } => Some((
+                    profile,
+                    prefix.system + prefix.skills + prefix.specs + prefix.tools + prefix.mcp,
+                )),
+                _ => None,
+            })
+            .expect("a run_config record")
+    }
+
+    /// The whole reason the profile exists, end to end: a 32k model is sent a
+    /// request it can hold, and gets the change made without a second agent.
+    #[tokio::test]
+    async fn on_a_small_window_the_session_edits_the_file_itself() {
+        let run = read_edit_answer("compact", Some(32_768)).await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&run.file).unwrap(),
+            "goodbye world\n"
+        );
+
+        let (profile, prefix) = run_config(&run.store);
+        assert_eq!(profile, "compact");
+        assert!(prefix < 4_000, "prefix: {prefix} tokens");
+
+        let first: serde_json::Value = serde_json::from_str(&run.bodies[0]).unwrap();
+        let sent: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(sent.len(), COMPACT_TOOLS.len(), "{sent:?}");
+        assert!(sent.contains(&"edit_file") && !sent.contains(&"spawn_agents"));
+        // Every request of the run stays well inside the window.
+        let largest = run.bodies.iter().map(String::len).max().unwrap() / 3;
+        assert!(largest < 8_000, "largest request: {largest} tokens");
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    /// The counterpart: on a window that fits the Standard profile nothing was
+    /// relaxed. The Builder session still may not edit, even when a model asks.
+    #[tokio::test]
+    async fn on_a_large_window_the_builder_session_still_cannot_edit() {
+        let run = read_edit_answer("standard", None).await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(std::fs::read_to_string(&run.file).unwrap(), "hello world\n");
+        assert_eq!(run_config(&run.store).0, "standard");
+
+        let first: serde_json::Value = serde_json::from_str(&run.bodies[0]).unwrap();
+        let sent: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(sent.contains(&"spawn_agents") && !sent.contains(&"edit_file"));
+        // The model was told why, in the request that followed its attempt.
+        assert!(
+            run.bodies[2].contains("delegate"),
+            "the denial reaches the model"
+        );
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+}
+
+/// What a run does at its context lines when there is nothing to shed.
+#[cfg(test)]
+mod context_line_tests {
+    use super::surface_tests::config_for;
+    use super::*;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+
+    fn store(tag: &str) -> SessionStore {
+        let path = std::env::temp_dir().join(format!(
+            "claudinio_lines_{tag}_{}_{}.jsonl",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::write(&path, "").unwrap();
+        SessionStore { path }
+    }
+
+    /// One opening message of `message_chars` against a model that just answers.
+    async fn open_with(
+        tag: &str,
+        window: u32,
+        message_chars: usize,
+    ) -> (Result<RunOutcome, String>, usize, Vec<SessionRecord>) {
+        let (base, _, bodies) = spawn_recording(vec![Reply::Text("on it")]).await;
+        let config = config_for(&base, Some(window));
+        let store = store(tag);
+        let ctx = ToolContext {
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let mut history = Vec::new();
+        let outcome = run_workflow(
+            &config,
+            &mut history,
+            "x ".repeat(message_chars / 2),
+            Vec::new(),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "lines-test",
+            &ctx,
+            &store,
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+        )
+        .await;
+        let requests = bodies.lock().unwrap().len();
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        let _ = std::fs::remove_file(&store.path);
+        (outcome, requests, records)
+    }
+
+    /// The lines a Compact run on a `window`-sized stub model is held to.
+    fn lines(window: u32) -> (ContextBudget, u64) {
+        let config = config_for("http://127.0.0.1:1", Some(window));
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let (_, system, tools) = run_prefix(
+            &config,
+            &ctx,
+            PromptProfile::Standard,
+            SessionMode::Builder,
+            None,
+            None,
+            &[],
+            false,
+        );
+        let prefix = estimate_tokens(&[], &system, &tools);
+        (
+            ContextBudget::for_model(&config, &config.builder_model, prefix),
+            prefix,
+        )
+    }
+
+    #[test]
+    fn a_round_of_results_is_held_to_its_share_together() {
+        let text = |b: &ContentBlock| match b {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            _ => panic!("a tool result"),
+        };
+        let round = |sizes: &[usize]| -> Vec<ContentBlock> {
+            sizes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| ContentBlock::tool_result(format!("t{i}"), "x".repeat(*n)))
+                .collect()
+        };
+
+        // Under the cap, or where there is none: untouched.
+        let mut fits = round(&[10_000, 10_000]);
+        fit_round(&mut fits, &[], 30_000);
+        assert!(fits.iter().all(|b| text(b).len() == 10_000));
+        let mut unbounded = round(&[24_000; 6]);
+        fit_round(&mut unbounded, &[], usize::MAX);
+        assert!(unbounded.iter().all(|b| text(b).len() == 24_000));
+
+        // Over it: the small result keeps all of itself, and the room it does
+        // not use goes to the others — (30_000 - 400) / 3 each.
+        let mut over = round(&[15_000, 15_000, 15_000, 400]);
+        fit_round(&mut over, &[], 30_000);
+        for b in &over[..3] {
+            assert!(text(b).starts_with(&"x".repeat(9_866)));
+            assert!(text(b).ends_with("...(truncated, 15000 chars total)"));
+        }
+        assert_eq!(text(&over[3]).len(), 400);
+        let bodies: usize = over.iter().map(|b| uncapped(&text(b)).0.len()).sum();
+        assert!(bodies <= 30_000, "{bodies}");
+    }
+
+    // The cap per result runs first and leaves its note. A round of two such
+    // results is exactly the round's room plus two notes — not "over" — and a
+    // result cut twice must still say how large the file was, not how large
+    // the first cut left it.
+    #[test]
+    fn a_result_cut_twice_still_reports_the_size_it_really_had() {
+        let text = |b: &ContentBlock| match b {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            _ => panic!("a tool result"),
+        };
+        let capped = |id: &str, total: usize| tool_result_block(id, &"x".repeat(total), 15_000);
+
+        let mut two = vec![capped("a", 60_000), capped("b", 48_213)];
+        let before: Vec<String> = two.iter().map(&text).collect();
+        fit_round(&mut two, &[], 30_000);
+        assert_eq!(two.iter().map(&text).collect::<Vec<_>>(), before);
+
+        let mut four = vec![
+            capped("a", 60_000),
+            capped("b", 48_213),
+            capped("c", 20_000),
+            capped("d", 16_000),
+        ];
+        fit_round(&mut four, &[], 30_000);
+        for (b, total) in four.iter().zip([60_000, 48_213, 20_000, 16_000]) {
+            let t = text(b);
+            assert!(t.starts_with(&"x".repeat(7_500)) && !t.starts_with(&"x".repeat(7_501)));
+            assert!(
+                t.ends_with(&format!("...(truncated, {total} chars total)")),
+                "{}",
+                &t[7_490..]
+            );
+        }
+    }
+
+    // What the user answered is not a file that can be read again.
+    #[test]
+    fn a_round_never_cuts_what_the_user_answered() {
+        let text = |b: &ContentBlock| match b {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            _ => panic!("a tool result"),
+        };
+        let calls = vec![
+            ContentBlock::tool_use("ask", "ask_user", serde_json::json!({})),
+            ContentBlock::tool_use("r1", "read_file", serde_json::json!({})),
+            ContentBlock::tool_use("r2", "read_file", serde_json::json!({})),
+        ];
+        let answer = format!(
+            "Question: which?\nAnswer: {}",
+            "the second one. ".repeat(90)
+        );
+        let mut round = vec![
+            ContentBlock::tool_result("ask", answer.clone()),
+            ContentBlock::tool_result("r1", "x".repeat(2_000)),
+            ContentBlock::tool_result("r2", "y".repeat(2_000)),
+        ];
+        fit_round(&mut round, &calls, 3_864);
+        assert_eq!(text(&round[0]), answer);
+        // The reads share what the answer left.
+        let room = (3_864 - answer.len()) / 2;
+        assert!(text(&round[1]).starts_with(&"x".repeat(room)));
+        assert!(text(&round[1]).ends_with("...(truncated, 2000 chars total)"));
+        assert!(uncapped(&text(&round[2])).0.len() <= room);
+    }
+
+    fn rewrites(records: &[SessionRecord]) -> usize {
+        records
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    SessionRecord::Compacted { .. }
+                        | SessionRecord::Pruned { .. }
+                        | SessionRecord::HandoffTo { .. }
+                )
+            })
+            .count()
+    }
+
+    // The prompt and tools alone are more than this model can be sent. That
+    // used to be found out after a handoff request and a summarizing run, the
+    // second of which replaced the user's message with a summary of it.
+    #[tokio::test]
+    async fn a_prefix_the_window_cannot_hold_is_refused_before_anything_is_tried() {
+        let (budget, prefix) = lines(4_096);
+        assert!(budget.prefix_overflows(prefix), "{budget:?} / {prefix}");
+
+        let (outcome, requests, records) = open_with("overflow", 4_096, 200).await;
+        let err = outcome.err().expect("refused");
+        assert!(err.contains("too small for the"), "{err}");
+        assert_eq!(requests, 0, "nothing was sent to find that out");
+        assert_eq!(rewrites(&records), 0);
+    }
+
+    // A session that opens over its handoff line — a successor whose handoff
+    // document is large, or simply a long first prompt — has nothing to hand
+    // off: the only thing in it is the message. Handing that off produced a
+    // successor in the same state, with no round ever run in between.
+    #[tokio::test]
+    async fn an_opening_message_over_the_line_is_sent_not_handed_off_or_summarized() {
+        let (budget, prefix) = lines(32_768);
+        assert!(budget.soft < budget.hard && budget.hard < budget.ceiling);
+        for (tag, total) in [
+            ("soft", (budget.soft + budget.hard) / 2),
+            ("hard", (budget.hard + budget.ceiling) / 2),
+        ] {
+            let chars = usize::try_from((total - prefix) * 3).unwrap();
+            let (outcome, requests, records) = open_with(tag, 32_768, chars).await;
+            assert!(
+                matches!(outcome, Ok(RunOutcome::Completed)),
+                "{tag}: {:?}",
+                outcome.err()
+            );
+            assert_eq!(requests, 1, "{tag}: the message itself, and nothing else");
+            assert_eq!(rewrites(&records), 0, "{tag}");
+        }
+
+        // Past the ceiling there is still nothing to try: it is refused as
+        // what it is, a message too long for the model.
+        let chars = usize::try_from((budget.ceiling + 500 - prefix) * 3).unwrap();
+        let (outcome, requests, records) = open_with("ceiling", 32_768, chars).await;
+        assert!(
+            outcome
+                .err()
+                .unwrap()
+                .contains("exceeds the model's context limit")
+        );
+        assert_eq!((requests, rewrites(&records)), (0, 0));
+    }
+
+    // `push_user_blocks` merges into the last user turn without writing a
+    // record. A prune that rebuilt the history from the file dropped whatever
+    // had been merged — the prompt typed after a run that ended on tool
+    // results, a hook's correction — just before the model was to read it.
+    #[tokio::test]
+    async fn what_was_merged_into_the_last_turn_survives_a_prune() {
+        let config = AgentConfig::default();
+        let store = store("merge");
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let system = "You are a test.".to_string();
+        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+
+        let mut history = vec![Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text("Refactor the parser.")],
+        }];
+        for i in 0..30 {
+            let id = format!("r{i}");
+            history.push(Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::tool_use(
+                    &id,
+                    "read_file",
+                    serde_json::json!({ "path": format!("/ws/src/f{i}.rs") }),
+                )],
+            });
+            history.push(Message {
+                role: "user".into(),
+                content: vec![ContentBlock::tool_result(
+                    &id,
+                    format!("// {i}\n").repeat(3_000),
+                )],
+            });
+        }
+        // In memory only: no record of it exists in the store.
+        history
+            .last_mut()
+            .unwrap()
+            .content
+            .push(ContentBlock::text("ONLY TOUCH THE LEXER"));
+
+        let estimated = estimate_tokens(&history, &system, &[]);
+        assert!(estimated >= budget.soft, "{estimated}");
+        let (new_estimate, _) = try_verbatim_compaction(
+            &config,
+            &budget,
+            PromptProfile::Standard,
+            estimated,
+            &mut history,
+            &system,
+            &[],
+            &store,
+            &ctx,
+            &events,
+        )
+        .await
+        .expect("thirty old reads are worth cutting");
+        assert!(new_estimate < estimated * 8 / 10);
+
+        let last = history.last().unwrap();
+        assert_eq!(last.role, "user");
+        assert!(
+            last.content
+                .iter()
+                .any(|b| b.get_text() == Some("ONLY TOUCH THE LEXER")),
+            "the instruction is still the last thing the model reads"
+        );
+        assert_eq!(
+            history[0].content[0].get_text(),
+            Some("Refactor the parser.")
+        );
+        // And the cut is on record, so a reload makes the same one.
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        assert_eq!(rewrites(&records), 1);
+        let _ = std::fs::remove_file(&store.path);
     }
 }

@@ -51,6 +51,8 @@ import {
   type SessionRecord,
   type UserAnswer,
 } from "../lib/ipc";
+import { createAutoMode } from "../lib/autoMode";
+import type { ModeChoice } from "../lib/modeChoice";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
 import { renderMarkdown, renderLiveMarkdown } from "../lib/markdown";
@@ -264,11 +266,27 @@ export const ChatPanel: Component<{
   const [isCompacting, setIsCompacting] = createSignal(false);
   const [mode, setMode] = createSignal<SessionMode>("builder");
   const [modeOrigin, setModeOrigin] = createSignal<ModeOrigin>("human");
+  // Auto: the choice of starting phase is left to the harness. Only a state of
+  // the control before a session's first prompt — never a mode a session is in
+  // (`lib/autoMode`).
+  const auto = createAutoMode({
+    mode,
+    // Fresh means no prompt yet — not "no session yet": clicking Brain or
+    // Builder creates the session to record the choice, and Auto has to stay
+    // on offer after that, or trying a mode would be a one-way door.
+    sessionIsFresh: () => messages().length === 0,
+    loadJev: async () => (await getConfig()).jev,
+  });
   const [hasPlanBeenWritten, setHasPlanBeenWritten] = createSignal(false);
 
   // Human toggle: persists a Mode record in the session JSONL immediately so
   // the mode survives reloads; a running workflow picks it up next round.
   const switchMode = async (m: SessionMode) => {
+    // Picking a mode by hand takes the choice back from the harness, even
+    // when it is the mode the session is already in — and from a message
+    // waiting behind the sign-in card, which is then sent in this mode.
+    auto.disarm();
+    setPendingChoice(null);
     if (m === mode()) return;
     setHasPlanBeenWritten(false);
     setMode(m);
@@ -590,6 +608,7 @@ export const ChatPanel: Component<{
         if (cfg.compactThreshold) setCompactThreshold(cfg.compactThreshold);
       })
       .catch(() => {});
+    void auto.arm();
 
     // Listen for native file drop events via Tauri window API. Every mounted
     // panel receives these, so only the visible one may react.
@@ -670,6 +689,9 @@ export const ChatPanel: Component<{
   let historyButtonRef: HTMLButtonElement | undefined;
   let plansButtonRef: HTMLButtonElement | undefined;
   const [pendingMessage, setPendingMessage] = createSignal<string | null>(null);
+  // The mode choice that message was sent with, so signing in sends it again
+  // as it was — Auto included, which by then is spent.
+  const [pendingChoice, setPendingChoice] = createSignal<ModeChoice | null>(null);
   const [authSigningIn, setAuthSigningIn] = createSignal(false);
 
   // Smart scroll: only auto-follow new content while the user is at the
@@ -1234,12 +1256,14 @@ export const ChatPanel: Component<{
         setStatus("thinking");
         scrollToBottom(true);
         try {
+          const choice = pendingChoice() ?? mode();
+          setPendingChoice(null);
           const result = await sendMessage(
             props.workspace,
             pending,
             [],
             handleEvent,
-            mode(),
+            choice,
           );
           setActiveSessionId(result.sessionId);
         } catch (e) {
@@ -1367,6 +1391,9 @@ export const ChatPanel: Component<{
     // isn't lost or double-rendered once the new run's events start.
     flushPendingDone();
 
+    // Auto is for one prompt: whatever the harness picks, the session is in a
+    // real mode from here on and the control shows that.
+    const choice = auto.take();
     setMessages((prev) => [
       ...prev,
       {
@@ -1392,13 +1419,14 @@ export const ChatPanel: Component<{
         text,
         atts.map((a) => ({ path: a.path })),
         handleEvent,
-        mode(),
+        choice,
       );
       setActiveSessionId(result.sessionId);
       setAttachments([]);
     } catch (e) {
       if (String(e).includes("API key not configured")) {
         setPendingMessage(text);
+        setPendingChoice(choice);
         setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
         setStatus("idle");
       } else {
@@ -1462,6 +1490,7 @@ export const ChatPanel: Component<{
     setMode("builder");
     setStatus("idle");
     setShowSessions(false);
+    void auto.arm();
   };
 
   const handleConfirmNew = async () => {
@@ -1481,6 +1510,7 @@ export const ChatPanel: Component<{
     setMode("builder");
     setStatus("idle");
     setShowSessions(false);
+    void auto.arm();
   };
 
   const toggleSessions = async () => {
@@ -1543,6 +1573,8 @@ export const ChatPanel: Component<{
         setMode("builder");
       }
       setActiveSessionId(id);
+      // A session with a past is in the mode it was left in, not on Auto.
+      auto.disarm();
       setCurrentSteps([]);
       setThinkingStart(0);
       setStatus("idle");
@@ -2216,10 +2248,25 @@ export const ChatPanel: Component<{
                   <Icon name="notebook-pen" class="h-4 w-4" stroke />
                 </button>
                 <div class="flex shrink-0 items-center rounded-md border border-border-subtle bg-surface-0 p-0.5">
+                  <Show when={auto.offered()}>
+                    <button
+                      data-mode-choice="auto"
+                      aria-pressed={auto.active()}
+                      onClick={() => auto.select()}
+                      class={`flex h-7 items-center justify-center rounded px-2 text-[11px] font-medium ${
+                        auto.active()
+                          ? "bg-accent/15 text-accent"
+                          : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
+                      }`}
+                      title={"Auto: plans first when the request needs decisions or a design, builds otherwise"}
+                    >
+                      {"Auto"}
+                    </button>
+                  </Show>
                   <button
                     onClick={() => switchMode("brain")}
                     class={`flex h-7 w-7 items-center justify-center rounded ${
-                      mode() === "brain"
+                      mode() === "brain" && !auto.active()
                         ? "bg-accent/15 text-accent"
                         : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
                     }`}
@@ -2230,7 +2277,7 @@ export const ChatPanel: Component<{
                   <button
                     onClick={() => switchMode("builder")}
                     class={`flex h-7 w-7 items-center justify-center rounded ${
-                      mode() === "builder"
+                      mode() === "builder" && !auto.active()
                         ? "bg-accent/15 text-accent"
                         : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
                     }`}

@@ -54,6 +54,9 @@ export interface SubagentDoneInput {
 export function mapSubagentDoneStatus(raw: string): SubagentStatus {
   switch (raw) {
     case "failed":
+    // Ran out of context window before finishing: not a completion. Its
+    // report says so, and the parent is told to split the goal.
+    case "context_full":
       return "failed";
     case "interrupted":
       return "interrupted";

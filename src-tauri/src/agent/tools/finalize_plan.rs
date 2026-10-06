@@ -314,6 +314,7 @@ mod tests {
             workspace_root: Some(root.to_string()),
             embedding_model: Arc::new(Mutex::new(None)),
             session_store_path: None,
+            limits: Default::default(),
             read_tracker: Arc::new(Mutex::new(crate::agent::tools::ReadTracker::default())),
             browser: None,
             interrupt: None,

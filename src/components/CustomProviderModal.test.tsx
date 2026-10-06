@@ -19,7 +19,13 @@ vi.mock("./Icon", () => ({
   ),
 }));
 
-import { CustomProviderModal, parseModelList, requestUrlPreview } from "./CustomProviderModal";
+import {
+  CustomProviderModal,
+  parseContextWindow,
+  parseModelList,
+  readContextWindow,
+  requestUrlPreview,
+} from "./CustomProviderModal";
 
 function flush() {
   return new Promise((r) => setTimeout(r, 10));
@@ -43,6 +49,59 @@ describe("parseModelList", () => {
       "qwen3",
     ]);
     expect(parseModelList("  \n ")).toEqual([]);
+  });
+});
+
+describe("parseContextWindow", () => {
+  it("reads plain token counts and the k shorthand", () => {
+    expect(parseContextWindow("32768")).toBe(32768);
+    expect(parseContextWindow(" 128k ")).toBe(128000);
+    expect(parseContextWindow("32 K")).toBe(32000);
+    expect(parseContextWindow("65,536")).toBe(65536);
+  });
+
+  it("is null for blank, zero and anything that is not a number", () => {
+    expect(parseContextWindow("")).toBeNull();
+    expect(parseContextWindow("0")).toBeNull();
+    expect(parseContextWindow("big")).toBeNull();
+    expect(parseContextWindow("-4096")).toBeNull();
+  });
+
+  // "32.768" is how most of the world writes thirty-two thousand. Read as a
+  // decimal it was saved as 33 tokens, and every request was then refused.
+  it("reads digit groups with either separator as the same number", () => {
+    expect(parseContextWindow("32.768")).toBe(32768);
+    expect(parseContextWindow("32,768")).toBe(32768);
+    expect(parseContextWindow("128.000")).toBe(128000);
+    expect(parseContextWindow("1.048.576")).toBe(1048576);
+    expect(parseContextWindow("1_048_576")).toBe(1048576);
+  });
+
+  it("reads a decimal before the k with either separator", () => {
+    expect(parseContextWindow("32.5k")).toBe(32500);
+    expect(parseContextWindow("32,5k")).toBe(32500);
+    expect(parseContextWindow("8k")).toBe(8000);
+  });
+});
+
+describe("readContextWindow", () => {
+  it("tells a blank field from one it cannot read", () => {
+    expect(readContextWindow("  ")).toEqual({ tokens: null });
+    for (const typo of ["32k tokens", "32kb", "2^15", "1e5", "big", "-4096", "32.76", "3,2768"]) {
+      expect(readContextWindow(typo), typo).toHaveProperty("error");
+    }
+  });
+
+  it("refuses a window too small to be one, and says what was probably meant", () => {
+    const read = readContextWindow("32");
+    expect(read).toHaveProperty("error");
+    expect((read as { error: string }).error).toContain("32k");
+    expect(readContextWindow("0")).toHaveProperty("error");
+    expect(readContextWindow("1024")).toEqual({ tokens: 1024 });
+  });
+
+  it("refuses a number no model has", () => {
+    expect(readContextWindow("99999999999")).toHaveProperty("error");
   });
 });
 
@@ -136,6 +195,7 @@ describe("CustomProviderModal", () => {
       protocol: "openai",
       apiKey: "sk-test",
       models: ["gpt-4o", "claude-sonnet"],
+      contextWindow: null,
     });
     expect(onChanged).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
@@ -232,7 +292,49 @@ describe("CustomProviderModal", () => {
       protocol: "anthropic",
       apiKey: null,
       models: ["claude-sonnet"],
+      contextWindow: null,
     });
+  });
+
+  it("sends a typed context window, and reopens with the saved one", async () => {
+    __test.mockSaveCustomProvider.mockResolvedValue({ providerId: "ollama", models: ["qwen3"] });
+    mount();
+    type(field("name"), "Ollama");
+    type(field("base-url"), "http://localhost:11434/v1");
+    type(field("context-window"), "32k");
+    await flush();
+    button("Add provider").click();
+    await flush();
+    expect(__test.mockSaveCustomProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ contextWindow: 32000 }),
+    );
+    dispose?.();
+    container.remove();
+
+    mount("litellm", { litellm: { ...LITELLM, contextWindow: 16384 } });
+    expect(field("context-window").value).toBe("16384");
+  });
+
+  // A window the field cannot read used to be sent as "not set": the dialog
+  // closed without a word and a saved window was cleared.
+  it("does not save a context window it cannot read, and says why", async () => {
+    mount("litellm", { litellm: { ...LITELLM, contextWindow: 16384 } });
+    type(field("context-window"), "32k tokens");
+    await flush();
+    expect(container.querySelector("[data-context-error]")?.textContent).toContain("like 32768 or 32k");
+    expect(button("Save changes").disabled).toBe(true);
+    button("Save changes").click();
+    await flush();
+    expect(__test.mockSaveCustomProvider).not.toHaveBeenCalled();
+
+    type(field("context-window"), "32.768");
+    await flush();
+    expect(container.querySelector("[data-context-error]")).toBeNull();
+    button("Save changes").click();
+    await flush();
+    expect(__test.mockSaveCustomProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ contextWindow: 32768 }),
+    );
   });
 
   it("fetching while editing passes the id so the saved key is reused", async () => {

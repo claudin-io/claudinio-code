@@ -192,6 +192,7 @@ describe("mapSubagentDoneStatus", () => {
     expect(mapSubagentDoneStatus("failed")).toBe("failed");
     expect(mapSubagentDoneStatus("interrupted")).toBe("interrupted");
     expect(mapSubagentDoneStatus("max_rounds")).toBe("max_rounds");
+    expect(mapSubagentDoneStatus("context_full")).toBe("failed");
   });
 
   it("treats unknown/empty status as completed so it never stays running", () => {

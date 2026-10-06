@@ -254,6 +254,10 @@ pub struct AgentConfig {
     /// for its own judgements — see `crate::agent::jev`.
     #[serde(default)]
     pub jev: crate::agent::jev::JevPrefs,
+    /// Tool surface per model id ("lean"); a model that is not here gets the
+    /// full catalog — see `crate::agent::surface`.
+    #[serde(default)]
+    pub tool_surface: std::collections::HashMap<String, String>,
 }
 
 /// A connected external provider. Credentials follow the existing plaintext
@@ -291,6 +295,17 @@ pub struct ProviderEntry {
     /// so the pickers never wait on a server that is switched off.
     #[serde(default)]
     pub custom_models: Vec<String>,
+    /// Context window per model, in tokens: snapshotted from models.dev
+    /// `limit.context`, or read from a custom endpoint's `/models` when it
+    /// reports one. A model missing here is "unknown", and the session keeps
+    /// the 200k it has always assumed.
+    #[serde(default)]
+    pub model_context_limits: std::collections::HashMap<String, u32>,
+    /// A window the user typed for a custom provider. It wins over anything
+    /// the endpoint reports, because a local server advertises what the
+    /// weights were trained for, not the `-c` it was started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 fn default_openai_protocol() -> String {
@@ -358,6 +373,96 @@ impl AgentConfig {
         self.handoff_context_tokens
             .unwrap_or(120_000)
             .clamp(120_000, 256_000)
+    }
+
+    /// The context window, in tokens, of the model behind `model` — when there
+    /// is a reason to believe a number. `None` means unknown, not small.
+    ///
+    /// Pure: unlike `resolve_provider_live` it never starts a local server, so
+    /// it can be asked before a run decides anything.
+    pub fn known_context_window(&self, model: &str) -> Option<u64> {
+        if let Some(rest) = model.strip_prefix(&format!("{}/", crate::llama::LOCAL_PROVIDER_ID)) {
+            return local_window(self, rest).map(u64::from);
+        }
+        let (prefix, rest) = model.split_once('/')?;
+        let entry = self.providers.get(prefix)?;
+        entry
+            .context_window
+            .or_else(|| entry.model_context_limits.get(rest).copied())
+            .filter(|w| *w > 0)
+            .map(u64::from)
+    }
+
+    /// The window a session against `model` is run in: the known one, or the
+    /// 200k every model was assumed to have before windows were tracked — and
+    /// never more than that, because the handoff and compaction lines above it
+    /// are tuned for cost, not for what a 1M-token model would tolerate.
+    pub fn context_window_for(&self, model: &str) -> u64 {
+        let ceiling = crate::agent::session::MAX_CONTEXT_TOKENS;
+        self.known_context_window(model)
+            .map_or(ceiling, |w| w.min(ceiling))
+    }
+
+    /// The most output tokens a request to `model` will ask for, when the
+    /// provider entry (or the local server's window) pins one.
+    pub fn known_output_limit(&self, model: &str) -> Option<u64> {
+        if let Some(rest) = model.strip_prefix(&format!("{}/", crate::llama::LOCAL_PROVIDER_ID)) {
+            return local_window(self, rest).map(|ctx| u64::from(local_reply_cap(ctx)));
+        }
+        let (prefix, rest) = model.split_once('/')?;
+        self.providers
+            .get(prefix)?
+            .model_output_limits
+            .get(rest)
+            .map(|l| u64::from(*l))
+    }
+}
+
+impl AgentConfig {
+    /// The `max_tokens` a request to `model` carries, when anything pins it:
+    /// the model's own limit, held to what its window leaves a prompt
+    /// (`budget::reply_tokens` — the same number the context budget reserves).
+    /// `None` when neither is known, which sends the default.
+    pub fn max_output_for(&self, model: &str) -> Option<u32> {
+        let limit = self.known_output_limit(model);
+        let tokens = match self.known_context_window(model) {
+            Some(window) => Some(crate::agent::budget::reply_tokens(window, limit)),
+            None => limit,
+        };
+        tokens.map(|t| u32::try_from(t).unwrap_or(u32::MAX))
+    }
+}
+
+/// The window a local model is served with: what `effective_ctx` will start
+/// the server at, or what the weights declare when that is left to them.
+fn local_window(config: &AgentConfig, wire_model: &str) -> Option<u32> {
+    // Sized from the raw slider, never from a line derived from the window —
+    // the window must not depend on something computed from itself.
+    let ctx_budget = u32::try_from(config.effective_handoff_threshold()).unwrap_or(u32::MAX);
+    let model_ctx = crate::llama::catalog::find(wire_model)
+        .ok()
+        .and_then(|m| m.context_length);
+    let served = crate::llama::effective_ctx(&config.local, model_ctx, ctx_budget);
+    if served > 0 { Some(served) } else { model_ctx }
+}
+
+/// A 4k-context model 400s on the 32k default. Half the served window is a
+/// safe ceiling for a reply: the prompt has to fit in the other half.
+fn local_reply_cap(window: u32) -> u32 {
+    (window / 2).clamp(512, 8192)
+}
+
+/// Fill in context windows for catalog providers connected before they were
+/// snapshotted. `lookup` answers from the catalog cache on disk; a provider it
+/// knows nothing about stays unknown.
+pub fn backfill_context_limits(
+    cfg: &mut AgentConfig,
+    lookup: impl Fn(&str) -> std::collections::HashMap<String, u32>,
+) {
+    for (id, entry) in cfg.providers.iter_mut() {
+        if !entry.custom && entry.model_context_limits.is_empty() {
+            entry.model_context_limits = lookup(id);
+        }
     }
 }
 
@@ -464,6 +569,7 @@ impl Default for AgentConfig {
             providers: std::collections::HashMap::new(),
             jev: crate::agent::jev::JevPrefs::default(),
             local: crate::llama::LocalPrefs::default(),
+            tool_surface: std::collections::HashMap::new(),
         }
     }
 }
@@ -543,7 +649,7 @@ impl AgentConfig {
                 model: rest.to_string(),
                 provider_id: prefix.to_string(),
                 pricing: entry.model_pricing.get(rest).copied(),
-                max_output_tokens: entry.model_output_limits.get(rest).copied(),
+                max_output_tokens: self.max_output_for(model),
             };
         }
         ResolvedProvider {
@@ -592,14 +698,7 @@ pub async fn resolve_provider_live(
             crate::llama::supervisor::ensure_serving(&rp.model, &config.local, ctx_budget).await?;
         rp.base_url = endpoint.base_url;
         rp.api_key = endpoint.api_key;
-        // A 4k-context model 400s on the 32k default. Half the served window is
-        // a safe ceiling for a reply: the prompt has to fit in the other half.
-        let model_ctx = crate::llama::catalog::find(&rp.model)
-            .ok()
-            .and_then(|m| m.context_length);
-        let served = crate::llama::effective_ctx(&config.local, model_ctx, ctx_budget);
-        let window = if served > 0 { Some(served) } else { model_ctx };
-        rp.max_output_tokens = window.map(|ctx| (ctx / 2).clamp(512, 8192));
+        rp.max_output_tokens = config.max_output_for(model);
     }
     Ok(rp)
 }
@@ -642,7 +741,9 @@ pub fn load_config() -> AgentConfig {
             cfg["builder_model"] = serde_json::json!(legacy);
         }
     }
-    serde_json::from_value(cfg).unwrap_or_default()
+    let mut cfg: AgentConfig = serde_json::from_value(cfg).unwrap_or_default();
+    backfill_context_limits(&mut cfg, catalog::cached_context_limits);
+    cfg
 }
 
 pub fn save_config(config: &AgentConfig) {
@@ -1285,7 +1386,11 @@ pub async fn stream_message(
             Some(tools.to_vec())
         },
         system: system.map(|s| s.to_string()),
-        thinking: Some(ThinkingConfig {
+        // A reply this small has no room for thinking and an answer both: the
+        // API refuses a thinking budget that is not below `max_tokens`, and
+        // the smallest budget it takes is 1024. Reachable since `max_tokens`
+        // follows the model's window (`max_output_for`).
+        thinking: (budget_tokens < max_tokens).then_some(ThinkingConfig {
             kind: "enabled",
             budget_tokens,
         }),
@@ -1892,6 +1997,8 @@ mod tests {
                 model_output_limits: Default::default(),
                 custom: true,
                 custom_models: vec!["team/gpt-4o".into()],
+                model_context_limits: Default::default(),
+                context_window: None,
             },
         );
         // Split at the first slash only: the wire id keeps its own.
@@ -1902,6 +2009,128 @@ mod tests {
         assert_eq!(rp.provider_id, "litellm");
         assert!(rp.api_key.is_empty());
         assert!(rp.pricing.is_none());
+    }
+
+    fn entry_with_windows(custom: bool, windows: &[(&str, u32)]) -> ProviderEntry {
+        ProviderEntry {
+            api_key: String::new(),
+            base_url: "http://localhost:4000/v1".into(),
+            protocol: "openai".into(),
+            enabled_models: vec![],
+            label: None,
+            model_pricing: Default::default(),
+            model_output_limits: Default::default(),
+            custom,
+            custom_models: vec![],
+            model_context_limits: windows.iter().map(|(m, w)| (m.to_string(), *w)).collect(),
+            context_window: None,
+        }
+    }
+
+    #[test]
+    fn a_context_window_is_known_only_where_something_reported_it() {
+        let mut cfg = AgentConfig::default();
+        cfg.providers.insert(
+            "deepseek".into(),
+            entry_with_windows(false, &[("deepseek-chat", 65_536)]),
+        );
+        assert_eq!(
+            cfg.known_context_window("deepseek/deepseek-chat"),
+            Some(65_536)
+        );
+        // A model the snapshot does not list, the Claudinio models, and an
+        // unknown prefix are all "unknown" — the caller keeps its default.
+        assert_eq!(cfg.known_context_window("deepseek/other"), None);
+        assert_eq!(cfg.known_context_window("claudinio"), None);
+        assert_eq!(cfg.known_context_window("nobody/model"), None);
+    }
+
+    // A custom endpoint has a window the user typed and no output limit at
+    // all. Sent the 32k default, a server that checks prompt + max_tokens
+    // against its context refuses every request.
+    #[test]
+    fn the_reply_a_request_asks_for_fits_the_window_it_is_sent_to() {
+        let mut cfg = AgentConfig::default();
+        let mut local = entry_with_windows(true, &[]);
+        local.context_window = Some(32_768);
+        cfg.providers.insert("vllm".into(), local);
+        assert_eq!(cfg.max_output_for("vllm/qwen"), Some(8_192));
+        assert_eq!(
+            cfg.resolve_provider("vllm/qwen").max_output_tokens,
+            Some(8_192)
+        );
+
+        // A catalog entry claiming as much output as it has context.
+        let mut greedy = entry_with_windows(false, &[("m", 65_536)]);
+        greedy.model_output_limits.insert("m".into(), 65_536);
+        cfg.providers.insert("cat".into(), greedy);
+        assert_eq!(cfg.max_output_for("cat/m"), Some(16_384));
+
+        // With no window known, the entry's limit is taken as it is; with
+        // nothing known, the request keeps its default.
+        let mut plain = entry_with_windows(false, &[]);
+        plain.model_output_limits.insert("m".into(), 16_384);
+        cfg.providers.insert("plain".into(), plain);
+        assert_eq!(cfg.max_output_for("plain/m"), Some(16_384));
+        assert_eq!(cfg.max_output_for("plain/other"), None);
+        assert_eq!(cfg.max_output_for("claudinio"), None);
+
+        // And it is the number the context budget set aside.
+        let budget = crate::agent::budget::ContextBudget::for_model(&cfg, "vllm/qwen", 0);
+        assert_eq!(budget.ceiling, 32_768 - 8_192);
+    }
+
+    #[test]
+    fn a_typed_window_wins_over_what_a_custom_endpoint_reports() {
+        let mut cfg = AgentConfig::default();
+        let mut entry = entry_with_windows(true, &[("qwen3", 131_072)]);
+        entry.context_window = Some(16_384);
+        cfg.providers.insert("ollama".into(), entry);
+        // The endpoint advertises what the weights were trained for; the user
+        // knows what the server was started with.
+        assert_eq!(cfg.known_context_window("ollama/qwen3"), Some(16_384));
+        // And it covers the models the endpoint said nothing about.
+        assert_eq!(cfg.known_context_window("ollama/llama3"), Some(16_384));
+    }
+
+    #[test]
+    fn backfill_fills_only_catalog_entries_that_have_no_windows() {
+        let mut cfg = AgentConfig::default();
+        cfg.providers
+            .insert("deepseek".into(), entry_with_windows(false, &[]));
+        cfg.providers
+            .insert("kept".into(), entry_with_windows(false, &[("m", 8_192)]));
+        cfg.providers
+            .insert("mine".into(), entry_with_windows(true, &[]));
+        backfill_context_limits(&mut cfg, |id| {
+            [(format!("{id}-model"), 65_536u32)].into_iter().collect()
+        });
+        assert_eq!(
+            cfg.providers["deepseek"]
+                .model_context_limits
+                .get("deepseek-model"),
+            Some(&65_536)
+        );
+        // Already snapshotted: left exactly as it was.
+        assert_eq!(cfg.providers["kept"].model_context_limits.len(), 1);
+        assert_eq!(
+            cfg.providers["kept"].model_context_limits.get("m"),
+            Some(&8_192)
+        );
+        // A custom provider has no catalog entry to take anything from.
+        assert!(cfg.providers["mine"].model_context_limits.is_empty());
+    }
+
+    #[test]
+    fn an_entry_saved_before_windows_existed_still_loads() {
+        let entry: ProviderEntry = serde_json::from_value(serde_json::json!({
+            "api_key": "k",
+            "base_url": "https://api.deepseek.com",
+            "protocol": "openai",
+        }))
+        .expect("pre-context-window entry must deserialize");
+        assert!(entry.model_context_limits.is_empty());
+        assert!(entry.context_window.is_none());
     }
 
     fn cfg_with_openrouter() -> AgentConfig {
@@ -1925,6 +2154,8 @@ mod tests {
                     .collect(),
                 custom: false,
                 custom_models: Vec::new(),
+                model_context_limits: Default::default(),
+                context_window: None,
             },
         );
         cfg
@@ -2024,6 +2255,8 @@ mod tests {
                 model_output_limits: Default::default(),
                 custom: false,
                 custom_models: Vec::new(),
+                model_context_limits: Default::default(),
+                context_window: None,
             },
         );
         let rp = cfg.resolve_provider("local/abc");
@@ -2083,6 +2316,8 @@ mod tests {
                 model_output_limits: Default::default(),
                 custom: false,
                 custom_models: Vec::new(),
+                model_context_limits: Default::default(),
+                context_window: None,
             },
         );
         let rp = cfg.resolve_provider("anthropic/claude-sonnet-4-5");

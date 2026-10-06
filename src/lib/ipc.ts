@@ -118,13 +118,27 @@ export interface AgentConfig {
   providers?: Record<string, ConnectedProviderInfo>;
   /** Jev, the cheap decision model — which credential it uses, never the key. */
   jev?: JevStatus;
+  /** Models set to something other than the full tool catalog, by model id. */
+  toolSurface?: Record<string, ToolSurface>;
+  /** "compact" when the builder model's window is too small for the full
+   *  prompt and tools; its sessions then run a short prompt and ten tools. */
+  builderProfile?: "standard" | "compact";
   workspaceConfig?: Record<string, unknown> | null;
 }
+
+/** Which tools a model is offered. "lean" leaves out the three LSP navigation
+ *  tools (go_to_definition, find_references, symbol_lookup). */
+export type ToolSurface = "full" | "lean";
+
+/** How much say Jev has over the phase a new session starts in. */
+export type JevRoute = "off" | "shadow" | "on";
 
 export interface JevStatus {
   enabled: boolean;
   hasApiKey: boolean;
   backend: "typesafe" | "claudinio" | "openrouter" | null;
+  /** Absent in a config written before the setting existed. */
+  route?: JevRoute;
 }
 
 /** A connected external provider as reported by get_config — never the key. */
@@ -139,6 +153,8 @@ export interface ConnectedProviderInfo {
   custom?: boolean;
   /** A custom provider's saved model ids (unqualified). */
   models?: string[];
+  /** A custom provider's context window in tokens, when the user set one. */
+  contextWindow?: number | null;
   hasApiKey?: boolean;
 }
 
@@ -167,8 +183,11 @@ export interface SetConfigArgs {
   browser?: BrowserPrefs;
   local?: LocalPrefs;
   jevEnabled?: boolean;
+  jevRoute?: JevRoute;
   /** A TypeSafe API key; an empty string removes it. */
   jevApiKey?: string;
+  /** Set one model's tool surface; "full" clears it. */
+  toolSurface?: { model: string; surface: ToolSurface };
 }
 
 export interface ApproveArgs {
@@ -455,7 +474,9 @@ export function sendMessage(
   message: string,
   attachments: AttachmentInput[],
   onEvent: (event: AgentEvent) => void,
-  mode?: SessionMode,
+  // "auto" leaves the session's mode alone and lets the harness pick the
+  // starting phase of a fresh session — see lib/modeChoice.
+  mode?: SessionMode | "auto",
 ): Promise<SessionStarted> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
@@ -529,7 +550,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust";
+  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust" | "run_config" | "subagent_run" | "mode_route";
   [key: string]: unknown;
 };
 
@@ -1206,6 +1227,9 @@ export interface CustomProviderInput {
   apiKey?: string | null;
   /** Unqualified model ids; empty = take whatever the endpoint lists. */
   models: string[];
+  /** Context window in tokens for this provider's models; null = whatever the
+   *  endpoint reports, or the app's default. */
+  contextWindow?: number | null;
 }
 
 /** Create or update a custom provider; resolves with its id and model list. */

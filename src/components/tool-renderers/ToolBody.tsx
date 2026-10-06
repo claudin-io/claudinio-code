@@ -25,6 +25,7 @@ import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
 import { renderMarkdown, escapeHtml } from "../../lib/markdown";
 import { detectLanguageFromPath } from "./toolPresentation";
+import { parseLineList, UNCHANGED_MARK, type ListRow } from "./lineResults";
 
 // The result goes straight to `innerHTML`, and both inputs are untrusted: the
 // command comes from the model, the file content from the workspace. hljs
@@ -86,6 +87,15 @@ const ReadFileBody: Component<{ path: string; startLine?: number; result?: ToolR
     <Show when={props.result}>
       {(result) => {
         const content = result().output.slice(0, 20000);
+        // A repeat of a read the conversation already held: the model was
+        // pointed back at it, and this is that note, not the file.
+        if (content.startsWith(UNCHANGED_MARK)) {
+          return (
+            <div class="text-[11px] text-ink-faint" data-unchanged-read>
+              {"Same content as an earlier read in this conversation. The model was pointed back to it instead of being sent the file again."}
+            </div>
+          );
+        }
         const lang = detectLanguageFromPath(props.path);
         return (
           <div>
@@ -271,13 +281,6 @@ const SpawnAgentsBody: Component<{ agents: AgentSpec[] }> = (props) => (
 
 // ── list_dir / grep / code_search / symbol_lookup / file_outline /
 //    find_references / go_to_definition / semantic_search / web_search ──
-interface ListRow {
-  title: string;
-  badge?: string;
-  sub?: string;
-  isDir?: boolean;
-}
-
 function pickRow(obj: Record<string, unknown>): ListRow {
   // Symbol result (code_search / semantic_search / symbol_lookup / file_outline):
   // lead with the symbol name, kind as badge, location as the muted tail.
@@ -370,11 +373,19 @@ function salvageObjects(text: string, from: number): unknown[] {
   return list;
 }
 
-const JsonListBody: Component<{ result?: ToolResultData }> = (props) => {
-  const parsed = createMemo(() => {
+const JsonListBody: Component<{ toolName: string; result?: ToolResultData }> = (props) => {
+  // JSON is what sessions recorded before list results became lines hold, and
+  // what `web_search` and the LSP tools still return; lines are everything else.
+  const parsed = createMemo<ListRow[] | null>(() => {
     const output = props.result?.output;
     if (props.result?.error || !output) return null;
-    return parseJsonList(output)?.list ?? null;
+    const json = parseJsonList(output)?.list;
+    if (json) {
+      return json.map((item) =>
+        typeof item === "string" ? { title: item } : pickRow(item as Record<string, unknown>),
+      );
+    }
+    return parseLineList(props.toolName, output);
   });
 
   return (
@@ -396,21 +407,18 @@ const JsonListBody: Component<{ result?: ToolResultData }> = (props) => {
         <Show when={list().length > 0} fallback={<div class="text-[11px] text-ink-faint">{"No results"}</div>}>
           <div class="flex flex-col gap-0.5">
             <For each={list().slice(0, 60)}>
-              {(item) => {
-                const row = typeof item === "string" ? { title: item } : pickRow(item as Record<string, unknown>);
-                return (
-                  <div class="flex items-center gap-2 truncate text-[11px]">
-                    <Icon name={row.isDir ? "folder" : "file"} class="h-3 w-3 shrink-0 text-ink-faint" />
-                    <span class="truncate font-mono text-ink-muted">{row.title}</span>
-                    <Show when={row.badge}>
-                      <span class="shrink-0 rounded bg-surface-2 px-1 text-[10px] text-ink-faint">{row.badge}</span>
-                    </Show>
-                    <Show when={row.sub}>
-                      <span class="min-w-0 flex-1 truncate font-mono text-ink-faint">{row.sub}</span>
-                    </Show>
-                  </div>
-                );
-              }}
+              {(row) => (
+                <div class="flex items-center gap-2 truncate text-[11px]">
+                  <Icon name={row.isDir ? "folder" : "file"} class="h-3 w-3 shrink-0 text-ink-faint" />
+                  <span class="truncate font-mono text-ink-muted">{row.title}</span>
+                  <Show when={row.badge}>
+                    <span class="shrink-0 rounded bg-surface-2 px-1 text-[10px] text-ink-faint">{row.badge}</span>
+                  </Show>
+                  <Show when={row.sub}>
+                    <span class="min-w-0 flex-1 truncate font-mono text-ink-faint">{row.sub}</span>
+                  </Show>
+                </div>
+              )}
             </For>
             <Show when={list().length > 60}>
               <div class="text-[11px] text-ink-faint">+{list().length - 60} {"more"}</div>
@@ -519,7 +527,7 @@ export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }
         <SpawnAgentsBody agents={(props.call.args.agents as AgentSpec[]) ?? []} />
       </Match>
       <Match when={JSON_LIST_TOOLS.has(name())}>
-        <JsonListBody result={props.result} />
+        <JsonListBody toolName={name()} result={props.result} />
       </Match>
     </Switch>
     <ToolImagesBody images={props.result?.images} />

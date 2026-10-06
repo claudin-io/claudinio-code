@@ -198,16 +198,21 @@ pub fn find_provider<'a>(trimmed: &'a Value, provider_id: &str) -> Option<&'a Va
         .find(|p| p.get("id").and_then(|i| i.as_str()) == Some(provider_id))
 }
 
-/// Extract the pricing/output-limit snapshots stored on a `ProviderEntry` at
-/// connect time, keyed by wire model id.
-pub fn model_snapshots(
-    provider: &Value,
-) -> (
-    std::collections::HashMap<String, (f64, f64)>,
-    std::collections::HashMap<String, u32>,
-) {
-    let mut pricing = std::collections::HashMap::new();
-    let mut limits = std::collections::HashMap::new();
+/// What a `ProviderEntry` keeps about each model, keyed by wire model id.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelSnapshots {
+    /// (input, output) USD per million tokens.
+    pub pricing: std::collections::HashMap<String, (f64, f64)>,
+    pub output_limits: std::collections::HashMap<String, u32>,
+    /// The context window. The session sizes its handoff and compaction lines
+    /// from it, so a 64k model is not driven as if it had 200k.
+    pub context_limits: std::collections::HashMap<String, u32>,
+}
+
+/// Extract the per-model snapshots stored on a `ProviderEntry` at connect
+/// time.
+pub fn model_snapshots(provider: &Value) -> ModelSnapshots {
+    let mut out = ModelSnapshots::default();
     if let Some(models) = provider.get("models").and_then(|m| m.as_array()) {
         for m in models {
             let Some(id) = m.get("id").and_then(|i| i.as_str()) else {
@@ -217,14 +222,31 @@ pub fn model_snapshots(
                 m.get("costInput").and_then(|c| c.as_f64()),
                 m.get("costOutput").and_then(|c| c.as_f64()),
             ) {
-                pricing.insert(id.to_string(), (ci, co));
+                out.pricing.insert(id.to_string(), (ci, co));
             }
             if let Some(limit) = m.get("outputLimit").and_then(|l| l.as_u64()) {
-                limits.insert(id.to_string(), limit as u32);
+                out.output_limits.insert(id.to_string(), limit as u32);
+            }
+            if let Some(ctx) = m.get("context").and_then(|c| c.as_u64()).filter(|c| *c > 0) {
+                out.context_limits
+                    .insert(id.to_string(), u32::try_from(ctx).unwrap_or(u32::MAX));
             }
         }
     }
-    (pricing, limits)
+    out
+}
+
+/// Context windows of one provider's models from the catalog as last cached,
+/// without touching the network. Empty when the catalog was never fetched.
+///
+/// For entries connected before windows were snapshotted: their config has no
+/// `model_context_limits`, and reconnecting every provider by hand is not a
+/// migration.
+pub fn cached_context_limits(provider_id: &str) -> std::collections::HashMap<String, u32> {
+    read_cache()
+        .and_then(|(_, data)| find_provider(&data, provider_id).map(model_snapshots))
+        .map(|s| s.context_limits)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -298,9 +320,10 @@ mod tests {
     fn test_find_provider_and_model_snapshots() {
         let trimmed = trim_catalog(&raw_fixture());
         let p = find_provider(&trimmed, "deepseek").unwrap();
-        let (pricing, limits) = model_snapshots(p);
-        assert_eq!(pricing.get("deepseek-chat"), Some(&(0.27, 1.1)));
-        assert_eq!(limits.get("deepseek-chat"), Some(&8192));
+        let snap = model_snapshots(p);
+        assert_eq!(snap.pricing.get("deepseek-chat"), Some(&(0.27, 1.1)));
+        assert_eq!(snap.output_limits.get("deepseek-chat"), Some(&8192));
+        assert_eq!(snap.context_limits.get("deepseek-chat"), Some(&65_536));
         assert!(find_provider(&trimmed, "nonexistent").is_none());
     }
 

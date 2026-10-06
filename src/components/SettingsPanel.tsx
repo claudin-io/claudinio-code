@@ -6,6 +6,7 @@ import { SettingsModels } from "./settings/SettingsModels";
 import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsJev } from "./settings/SettingsJev";
+import { SettingsToolSurface } from "./settings/SettingsToolSurface";
 import { SettingsMcp } from "./settings/SettingsMcp";
 import { SettingsPlugins } from "./settings/SettingsPlugins";
 import { SettingsBrowser } from "./settings/SettingsBrowser";
@@ -99,10 +100,10 @@ interface Category {
 
 const CATEGORIES: Category[] = [
   { id: 'general', icon: 'sliders', searchTerms: ["Language","Theme","Keep awake while working","Plan save path","Preferred IDE","Auto-commit plan on finalize","Code intelligence"] },
-  { id: 'models', icon: 'brain', searchTerms: ["Brain Model","Builder Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override"] },
+  { id: 'models', icon: 'brain', searchTerms: ["Brain Model","Builder Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override","Tools offered to each model","Lean","Tool surface"] },
   { id: 'local', icon: 'monitor', searchTerms: ["Local models","llama.cpp","GGUF","Hugging Face","Quantization","Offline","VRAM","Backend","Vulkan","Download a model","Runtime"] },
   { id: 'account', icon: 'key', searchTerms: ["Account","Sign in with claudin.io","Sign out","API Key","Support","Providers","More providers\u2026","Add custom provider\u2026","Custom","LiteLLM","Ollama","localhost","Base URL","Connect","Access hundreds of models through one account, via OAuth."] },
-  { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)","Jev decisions (TypeSafe)","TypeSafe API key (optional)","Jev","TypeSafe"] },
+  { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)","Jev decisions (TypeSafe)","TypeSafe API key (optional)","Jev","TypeSafe","Auto mode for new sessions","Auto","Shadow"] },
   { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
   { id: 'browser', icon: 'globe', searchTerms: ["Browser","Chromium","Screenshot","Console","Network","Headless","Viewport","Download","Install a browser"] },
@@ -301,6 +302,10 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   overrideApiKey={props.configOverrideApiKey}
                   setOverrideApiKey={props.setConfigOverrideApiKey}
                   modelGroups={props.modelGroups}
+                />
+                <SettingsToolSurface
+                  brainModel={props.configBrainModel}
+                  builderModel={props.configBuilderModel}
                 />
               </Show>
 

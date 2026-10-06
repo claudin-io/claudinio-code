@@ -314,7 +314,7 @@ export function toolIcon(name: string): IconName {
   }
   if (name === "file_outline") return "file-outline-scan";
   if (name === "ask_user") return "speech-balloon";
-  if (name === "tasks_get" || name === "tasks_set") return "layers";
+  if (name === "tasks_get" || name === "tasks_set" || name === "tasks_update") return "layers";
   if (name === "run_quality") return "check-circle";
   if (name === "write_plan" || name === "finalize_plan") return "notebook-pen";
   if (name === "spawn_agents") return "spawn-swarm";

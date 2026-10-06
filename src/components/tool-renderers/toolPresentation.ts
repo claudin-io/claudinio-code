@@ -35,6 +35,7 @@ const TITLES: Record<string, string> = {
   ask_user: "Asked you",
   tasks_get: "Checked tasks",
   tasks_set: "Updated tasks",
+  tasks_update: "Updated task",
   run_quality: "Ran the checks",
   spawn_agents: "Spawned agents",
   write_plan: "Wrote plan",
@@ -173,6 +174,14 @@ export function toolSummary(call: ToolCallData): string {
       const tasks = (args.tasks as { status: string }[] | undefined) ?? [];
       const done = tasks.filter((task) => task.status === "done").length;
       return `${done}/${tasks.length} done`;
+    }
+    case "tasks_update": {
+      // One task changed: say which, and to what. A journal-only update has no
+      // status to show, so it says how much was noted instead.
+      const id = String(args.id ?? "");
+      const notes = (args.journal as string[] | undefined)?.length ?? 0;
+      if (args.status) return `${id} → ${String(args.status)}`;
+      return notes > 0 ? `${id} · ${notes} note${notes === 1 ? "" : "s"}` : id;
     }
     case "spawn_agents": {
       const agents = (args.agents as { name: string }[] | undefined) ?? [];

@@ -240,7 +240,9 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         .agent_config
         .as_ref()
         .and_then(crate::agent::jev::backend);
-    let (text, _jev_cost) = crate::agent::output_trim::fit(&args.command, text, jev.as_ref()).await;
+    let (text, _jev_cost) =
+        crate::agent::output_trim::fit(&args.command, text, jev.as_ref(), ctx.limits.trim_chars())
+            .await;
 
     Ok(text)
 }
@@ -301,6 +303,7 @@ mod tests {
                 workspace_root: None,
                 embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                 session_store_path: None,
+                limits: Default::default(),
                 read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
                     crate::agent::tools::ReadTracker::default(),
                 )),
@@ -355,6 +358,7 @@ mod tests {
             workspace_root: None,
             embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             session_store_path: None,
+            limits: Default::default(),
             read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
                 crate::agent::tools::ReadTracker::default(),
             )),
@@ -402,6 +406,7 @@ mod tests {
             workspace_root: None,
             embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             session_store_path: None,
+            limits: Default::default(),
             read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
                 crate::agent::tools::ReadTracker::default(),
             )),
@@ -448,6 +453,7 @@ mod tests {
             workspace_root: None,
             embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             session_store_path: None,
+            limits: Default::default(),
             read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
                 crate::agent::tools::ReadTracker::default(),
             )),

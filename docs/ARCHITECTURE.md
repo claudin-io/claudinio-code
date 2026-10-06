@@ -49,8 +49,10 @@ the shapes that tempt you back:
 ```
 send_message (commands/agent.rs)
    └─ agent/session.rs :: run_workflow
-        ├─ system_prompt(mode, profile) + api_tools()
-        ├─ compaction / context handoff if the window is close to full
+        ├─ route_first_prompt          (Auto: Brain or Builder, fresh sessions only)
+        ├─ run_prefix                  (profile for the model's window → prompt + tools)
+        ├─ ContextBudget::for_model    (the lines this run is held to)
+        ├─ shed / handoff / compaction if the context is over a line
         └─ loop, per round:
              ├─ provider::stream_message   (SSE → AgentEvent over a Channel)
              ├─ no tool calls? → judge_terminal_turn, then done
@@ -74,6 +76,48 @@ Brain is read-only and must produce a plan; Builder executes. The handoff
 (`agent/transition.rs`) starts a *new* session seeded with the plan rather than
 continuing the old one, so execution never inherits a context window full of
 exploration. The same machinery handles the token-threshold handoff.
+
+### Context
+
+A run never compares its context against a constant. `agent/budget.rs` turns
+the model's window (catalog snapshot, a custom provider's probe or typed value,
+the local engine's setting; 200k when unknown) into a `ContextBudget`: a soft
+line where a chat session hands off, a hard line where it compacts, a ceiling
+past which nothing is sent, and the caps a single tool result is held to. At
+200k these are the numbers the app always used; below that they scale with the
+window, after the reply reserve and the fixed prefix are taken out. A mode
+switch changes the model, so the budget is derived again.
+
+The reply reserve is the request's `max_tokens`, by construction
+(`budget::reply_tokens` feeds both): a server that checks prompt plus
+`max_tokens` against its context rejects a request that asks for more reply
+than the budget set aside, whatever the prompt's size. On a scaled window the
+results of one round are also capped together, not only one by one — the round
+just read is the one thing no prune cuts, so it has to fit by itself. And a
+prefix that does not fit the window at all is refused before anything is tried:
+no handoff or summary makes a system prompt smaller.
+
+Crossing a line sheds weight in three stages (`agent/prune.rs`), cheapest
+first: copies a newer result supersedes; what Jev judges disposable; then the
+oldest tool results by age. Text is never touched, nor are the user's answers
+to `ask_user` or the current task list. A stage is accepted only if
+it frees enough to be worth the cache it invalidates — which is also why
+nothing is pruned early: on a caching provider the history is cheap to resend
+and expensive to rewrite.
+
+What is sent ahead of the conversation is chosen once per run
+(`agent/surface.rs`): the profile the window calls for (`Standard`, or
+`Compact` under 64k in Builder), then the tool surface the user set for that
+model. Prompt, tool list and the write gates are derived together and never
+change between turns of the same mode, because they are the cached prefix.
+A Compact session edits files itself, so two things hold there that hold
+nowhere else: a shell command that writes a file is asked about like an
+`edit_file` even when its prefix is allowlisted, and a call to any tool outside
+the profile's ten is refused rather than run.
+
+Each run writes a `run_config` record (model, window, lines, prefix by part,
+profile), each subagent a `subagent_run`, each routing decision a `mode_route`.
+`scripts/session-stats.py` aggregates them.
 
 ## Trust boundaries
 
@@ -262,6 +306,18 @@ in Rust, which is why the CSP can keep `connect-src` closed.
   changes how archived sessions reload. `ToolResultContent` is untagged for the
   same reason: it lets a `tool_result` carry either a bare string (what every
   tool wrote before images existed) or an array of blocks, with no migration.
+- **List results are lines, not JSON.** `list_dir`, `grep`, the symbol searches
+  and `file_outline` answer as `path:line kind signature` rows
+  (`agent/tools/lines.rs`). A result is carried on every later request, and
+  the JSON these replaced cost about three times as much for the same rows.
+  `tool-renderers/lineResults.ts` parses the same formats back for the chat;
+  the two files change together. Sessions recorded earlier still hold JSON,
+  and the renderer reads both.
+- **A `read_file` result in history can be a one-line pointer.** When the last
+  read of the same file and range is still in the conversation and identical,
+  the new result enters history as `[unchanged: …]` instead of a second copy.
+  The live tool card shows the file; a reloaded session shows the note,
+  because the note is what the model was given.
 - **Images in session files live in `media/`, not in the JSONL.** A screenshot
   is ~200 KB of base64 and the session file is re-read on every message, so
   `persist.rs` swaps oversized payloads for a content-addressed reference on

@@ -69,4 +69,32 @@ describe("SettingsJev", () => {
     await flush();
     expect(setConfig).toHaveBeenCalledWith({ jevEnabled: false });
   });
+
+  it("shows Auto mode off for a config from before the setting existed", async () => {
+    const el = await mount({ enabled: true, hasApiKey: false, backend: "claudinio" });
+    expect(el.querySelector('button[data-jev-route="off"]')!.getAttribute("aria-pressed")).toBe("true");
+    expect(el.querySelector("[data-jev-route-hint]")!.textContent).toContain("Nothing is asked");
+  });
+
+  it("shadow says it records without changing anything", async () => {
+    const el = await mount({ enabled: true, hasApiKey: false, backend: "claudinio", route: "shadow" });
+    expect(el.querySelector('button[data-jev-route="shadow"]')!.getAttribute("aria-pressed")).toBe("true");
+    expect(el.querySelector("[data-jev-route-hint]")!.textContent).toContain("changes nothing");
+  });
+
+  it("switching Auto mode on saves it and explains what it does", async () => {
+    const el = await mount({ enabled: true, hasApiKey: false, backend: "claudinio", route: "shadow" });
+    el.querySelector<HTMLButtonElement>('button[data-jev-route="on"]')!.click();
+    await flush();
+    expect(setConfig).toHaveBeenCalledWith({ jevRoute: "on" });
+    expect(el.querySelector('button[data-jev-route="on"]')!.getAttribute("aria-pressed")).toBe("true");
+    expect(el.querySelector("[data-jev-route-hint]")!.textContent).toContain("start on Auto");
+    // The privacy line is there whichever position is selected.
+    expect(el.querySelector("[data-jev-route-hint]")!.textContent).toContain("first message of each new session");
+  });
+
+  it("cannot be changed while Jev itself is off", async () => {
+    const el = await mount({ enabled: false, hasApiKey: false, backend: null, route: "off" });
+    expect(el.querySelector<HTMLButtonElement>('button[data-jev-route="on"]')!.disabled).toBe(true);
+  });
 });

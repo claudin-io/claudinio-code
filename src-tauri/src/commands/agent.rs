@@ -208,7 +208,10 @@ pub async fn send_message(
 
     // Sync the session's mode with what the UI toggle sent: a human-set value
     // that differs from the current one is persisted before the run starts.
+    // "auto" is not a mode: it leaves the session as it is and tells the run
+    // that the choice of phase was left to the harness (`agent::route`).
     let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
+    mode_ctl.request_auto(mode.as_deref() == Some("auto"));
     if let Some(m) = mode.as_deref().and_then(session::SessionMode::parse)
         && mode_ctl.get().0 != m
     {
@@ -279,6 +282,7 @@ pub async fn send_message(
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
+        limits: Default::default(),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
@@ -764,6 +768,17 @@ pub struct SetConfigArgs {
     pub jev_enabled: Option<bool>,
     /// A TypeSafe API key; an empty string removes it.
     pub jev_api_key: Option<String>,
+    /// "off" | "shadow" | "on" — see `agent::route::RouteMode`.
+    pub jev_route: Option<String>,
+    /// One model's tool surface — see `agent::surface`.
+    pub tool_surface: Option<ToolSurfaceArg>,
+}
+
+#[derive(Deserialize)]
+pub struct ToolSurfaceArg {
+    pub model: String,
+    /// "full" | "lean".
+    pub surface: String,
 }
 
 #[tauri::command]
@@ -844,7 +859,10 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(mcp) = args.mcp {
         cfg.mcp = mcp;
     }
-    crate::agent::jev::apply_settings(&mut cfg, args.jev_enabled, args.jev_api_key);
+    crate::agent::jev::apply_settings(&mut cfg, args.jev_enabled, args.jev_api_key, args.jev_route);
+    if let Some(choice) = args.tool_surface {
+        crate::agent::surface::set_for(&mut cfg, &choice.model, &choice.surface);
+    }
     if let Some(code_intel_enabled) = args.code_intel_enabled {
         cfg.code_intel_enabled = code_intel_enabled;
     }
@@ -887,13 +905,19 @@ pub async fn get_config(
         crate::agent::provider::merge_workspace_config(&mut cfg, ws);
     }
 
+    // What the context meter shows before any run has reported its own
+    // numbers: the lines the builder model will be held to. The prefix is not
+    // built here, so on a small window this is a little generous until the
+    // first `SessionStats` event corrects it.
+    let budget = crate::agent::budget::ContextBudget::for_model(&cfg, &cfg.builder_model, 0);
+
     Ok(serde_json::json!({
         "baseUrl": cfg.base_url,
         "brainModel": cfg.brain_model,
         "builderModel": cfg.builder_model,
         "hasApiKey": !cfg.api_key.is_empty(),
-        "maxContextTokens": session::MAX_CONTEXT_TOKENS,
-        "compactThreshold": session::COMPACT_THRESHOLD,
+        "maxContextTokens": budget.ceiling,
+        "compactThreshold": budget.hard,
         "maxRounds": cfg.max_rounds,
         "subMaxRounds": cfg.sub_max_rounds,
         "yoloMode": cfg.yolo_mode,
@@ -917,6 +941,17 @@ pub async fn get_config(
         "local": cfg.local,
         // Which credential Jev uses — never the key.
         "jev": crate::agent::jev::status_json(&cfg),
+        // Models set to something other than the full tool catalog.
+        "toolSurface": cfg.tool_surface,
+        // "compact" when the builder model's window is too small for the
+        // Standard prompt — Settings says so rather than offering a surface
+        // that would not apply.
+        "builderProfile": crate::agent::surface::effective_profile(
+            session::PromptProfile::Standard,
+            &cfg,
+            session::SessionMode::Builder,
+            false,
+        ).as_str(),
         // Connected external providers — never the keys (hasApiKey precedent).
         "providers": cfg.providers.iter().map(|(id, p)| {
             (id.clone(), serde_json::json!({
@@ -928,6 +963,7 @@ pub async fn get_config(
                 // What the custom-provider form needs to reopen an entry.
                 "custom": p.custom,
                 "models": p.custom_models,
+                "contextWindow": p.context_window,
                 "hasApiKey": !p.api_key.is_empty(),
             }))
         }).collect::<serde_json::Map<String, Value>>(),
@@ -1086,6 +1122,7 @@ pub async fn compact_session(
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(handle.store_path.to_string_lossy().to_string()),
+        limits: Default::default(),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
@@ -1100,6 +1137,7 @@ pub async fn compact_session(
         records_cache: state.records_cache.clone(),
     };
 
+    let mode = state.mode_for(&handle.id, &handle.store_path).await.get().0;
     let summary = session::compact_history(
         &config,
         &store,
@@ -1110,6 +1148,15 @@ pub async fn compact_session(
         &handle.id,
         &steering,
         crate::agent::hooks::CompactTrigger::Manual,
+        // No run is in flight, so the prompt and tools that make up the prefix
+        // are not built here. Without them the tail budget errs slightly
+        // generous on a small window and is exact on every other.
+        crate::agent::budget::ContextBudget::for_model(
+            &config,
+            config.model_for_mode(mode.as_str()),
+            0,
+        )
+        .tail_tokens,
     )
     .await?;
 
@@ -1258,6 +1305,7 @@ pub async fn continue_with_builder(
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(new_handle.store_path.to_string_lossy().to_string()),
+        limits: Default::default(),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
@@ -1516,6 +1564,7 @@ pub async fn commit_and_push(
         workspace_root,
         embedding_model: state.embedding_model.clone(),
         session_store_path: Some(store.path.to_string_lossy().to_string()),
+        limits: Default::default(),
         read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
         browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),

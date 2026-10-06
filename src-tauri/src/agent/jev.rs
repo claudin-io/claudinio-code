@@ -51,6 +51,10 @@ pub struct JevPrefs {
     /// A TypeSafe API key. Wins over the OpenRouter connection when both exist.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Whether Jev picks the phase a new session starts in — see
+    /// `crate::agent::route`. On unless the user turns it off.
+    #[serde(default)]
+    pub route: crate::agent::route::RouteMode,
 }
 
 fn default_true() -> bool {
@@ -62,6 +66,7 @@ impl Default for JevPrefs {
         Self {
             enabled: true,
             api_key: None,
+            route: Default::default(),
         }
     }
 }
@@ -137,13 +142,25 @@ pub fn status_json(config: &AgentConfig) -> Value {
         "enabled": config.jev.enabled,
         "hasApiKey": config.jev.api_key.as_deref().is_some_and(|k| !k.trim().is_empty()),
         "backend": backend,
+        "route": config.jev.route.as_str(),
     })
 }
 
-/// Apply a Settings change. A blank key clears it.
-pub fn apply_settings(config: &mut AgentConfig, enabled: Option<bool>, api_key: Option<String>) {
+/// Apply a Settings change. A blank key clears it; an unknown route is ignored.
+pub fn apply_settings(
+    config: &mut AgentConfig,
+    enabled: Option<bool>,
+    api_key: Option<String>,
+    route: Option<String>,
+) {
     if let Some(e) = enabled {
         config.jev.enabled = e;
+    }
+    if let Some(r) = route
+        .as_deref()
+        .and_then(crate::agent::route::RouteMode::parse)
+    {
+        config.jev.route = r;
     }
     if let Some(k) = api_key {
         let k = k.trim();
@@ -305,6 +322,8 @@ mod tests {
             model_output_limits: Default::default(),
             custom: false,
             custom_models: Vec::new(),
+            model_context_limits: Default::default(),
+            context_window: None,
         }
     }
 
@@ -469,13 +488,37 @@ mod tests {
     #[test]
     fn setting_a_blank_key_clears_it_and_keys_are_trimmed() {
         let mut cfg = AgentConfig::default();
-        apply_settings(&mut cfg, None, Some("  ts-key \n".into()));
+        apply_settings(&mut cfg, None, Some("  ts-key \n".into()), None);
         assert_eq!(cfg.jev.api_key.as_deref(), Some("ts-key"));
-        apply_settings(&mut cfg, Some(false), None);
+        apply_settings(&mut cfg, Some(false), None, None);
         assert!(!cfg.jev.enabled);
         assert_eq!(cfg.jev.api_key.as_deref(), Some("ts-key"));
-        apply_settings(&mut cfg, None, Some("   ".into()));
+        apply_settings(&mut cfg, None, Some("   ".into()), None);
         assert!(cfg.jev.api_key.is_none());
+    }
+
+    #[test]
+    fn the_route_setting_is_on_until_changed_and_ignores_nonsense() {
+        use crate::agent::route::RouteMode;
+        let mut cfg = AgentConfig::default();
+        assert_eq!(cfg.jev.route, RouteMode::On);
+        assert_eq!(status_json(&cfg)["route"], "on");
+        apply_settings(&mut cfg, None, None, Some("off".into()));
+        assert_eq!(cfg.jev.route, RouteMode::Off);
+        apply_settings(&mut cfg, None, None, Some("sometimes".into()));
+        assert_eq!(
+            cfg.jev.route,
+            RouteMode::Off,
+            "an unknown value changes nothing"
+        );
+        // A config saved before the setting existed loads with the default,
+        // like a new one: Auto is on for whoever has a Jev to ask.
+        let old: JevPrefs = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(old.route, RouteMode::On);
+        // And a choice to switch it off is kept across a save and a load.
+        let saved = serde_json::to_string(&cfg.jev).unwrap();
+        let back: JevPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.route, RouteMode::Off);
     }
 
     #[test]
@@ -613,6 +656,16 @@ pub(crate) mod test_support {
         status: u16,
         body: &'static str,
     ) -> (String, std::thread::JoinHandle<String>) {
+        spawn_stub_after(std::time::Duration::ZERO, status, body)
+    }
+
+    /// `spawn_stub`, answering only after `delay`: a backend that takes its
+    /// time, for what can happen while the caller waits.
+    pub(crate) fn spawn_stub_after(
+        delay: std::time::Duration,
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
@@ -652,6 +705,7 @@ pub(crate) mod test_support {
                     break;
                 }
             }
+            std::thread::sleep(delay);
             let resp = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()

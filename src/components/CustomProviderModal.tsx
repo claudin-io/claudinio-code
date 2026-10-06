@@ -50,6 +50,51 @@ export function requestUrlPreview(baseUrl: string, protocol: ProviderProtocol): 
   return `${base}/chat/completions`;
 }
 
+/** The smallest window worth saving. Below it the system prompt alone does not
+ * fit, and a value this low is far more often a typo ("32" for 32k) than a
+ * real server. */
+const MIN_CONTEXT_WINDOW = 1024;
+const MAX_CONTEXT_WINDOW = 10_000_000;
+
+/** What a typed context window means: a token count, nothing (`null`, the
+ * field left blank — the backend reads that as "not set"), or a mistake to
+ * show instead of saving.
+ *
+ * Accepts what people actually type: `32768`, `32k`, `128 K`, `32.5k`, and
+ * digit groups with either separator — `32,768` and `32.768` are the same
+ * number, the second being how most of the world outside the US writes it.
+ * Anything it cannot read is an error rather than a silent "not set": a typo
+ * that cleared a saved window would put the model back on the 200k default,
+ * and the first sign of it would be a request the server rejects. */
+export function readContextWindow(text: string): { tokens: number | null } | { error: string } {
+  const typed = text.trim().replace(/[\s_]/g, "");
+  if (!typed) return { tokens: null };
+  const invalid = { error: "Type a number of tokens, like 32768 or 32k." };
+  let tokens: number;
+  if (/^\d+$/.test(typed)) {
+    tokens = Number(typed);
+  } else if (/^\d{1,3}([.,]\d{3})+$/.test(typed)) {
+    tokens = Number(typed.replace(/[.,]/g, ""));
+  } else {
+    const k = /^(\d+)(?:[.,](\d+))?k$/i.exec(typed);
+    if (!k) return invalid;
+    tokens = Math.round(Number(`${k[1]}.${k[2] ?? "0"}`) * 1000);
+  }
+  if (!Number.isFinite(tokens)) return invalid;
+  if (tokens < MIN_CONTEXT_WINDOW) {
+    return { error: `That is ${tokens} tokens. A context window is at least ${MIN_CONTEXT_WINDOW} — did you mean ${tokens}k?` };
+  }
+  if (tokens > MAX_CONTEXT_WINDOW) return { error: "That is more tokens than any model accepts." };
+  return { tokens };
+}
+
+/** The token count of a typed context window, or null when the field is blank
+ * or cannot be read (`readContextWindow` says which). */
+export function parseContextWindow(text: string): number | null {
+  const read = readContextWindow(text);
+  return "tokens" in read ? read.tokens : null;
+}
+
 const inputClass =
   "w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent";
 
@@ -68,6 +113,9 @@ export const CustomProviderModal: Component<CustomProviderModalProps> = (props) 
   const [baseUrl, setBaseUrl] = createSignal(existing?.baseUrl ?? "");
   const [apiKey, setApiKey] = createSignal("");
   const [modelsText, setModelsText] = createSignal((existing?.models ?? []).join("\n"));
+  const [contextText, setContextText] = createSignal(
+    existing?.contextWindow ? String(existing.contextWindow) : "",
+  );
   const [saving, setSaving] = createSignal(false);
   const [fetching, setFetching] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -82,7 +130,12 @@ export const CustomProviderModal: Component<CustomProviderModalProps> = (props) 
   });
 
   const preview = createMemo(() => requestUrlPreview(baseUrl(), protocol()));
-  const canSubmit = () => Boolean(name().trim() && baseUrl().trim()) && !saving();
+  const contextError = () => {
+    const read = readContextWindow(contextText());
+    return "error" in read ? read.error : null;
+  };
+  const canSubmit = () =>
+    Boolean(name().trim() && baseUrl().trim()) && !saving() && contextError() === null;
 
   const doFetchModels = async () => {
     setFetching(true);
@@ -111,6 +164,7 @@ export const CustomProviderModal: Component<CustomProviderModalProps> = (props) 
         protocol: protocol(),
         apiKey: apiKey().trim() || null,
         models: parseModelList(modelsText()),
+        contextWindow: parseContextWindow(contextText()),
       });
       await props.onChanged();
       props.onClose();
@@ -228,6 +282,26 @@ export const CustomProviderModal: Component<CustomProviderModalProps> = (props) 
           <Show when={fetchedCount() !== null}>
             <p class="mb-2 text-xs text-green-500">{`Found ${String(fetchedCount())} models.`}</p>
           </Show>
+
+          <label class="mb-1 mt-2 block text-xs text-ink-muted">{"Context window (optional)"}</label>
+          <input
+            type="text"
+            inputmode="numeric"
+            data-field="context-window"
+            value={contextText()}
+            onInput={(e) => setContextText(e.currentTarget.value)}
+            placeholder={"32768"}
+            aria-invalid={contextError() !== null}
+            class={`mb-1 ${inputClass}`}
+          />
+          <Show when={contextError()}>
+            <p class="mb-1 text-xs text-red-400" data-context-error>
+              {contextError()}
+            </p>
+          </Show>
+          <p class="mb-3 text-[11px] text-ink-faint">
+            {"Tokens the server accepts per request. A session hands off and compacts relative to it; left blank, it assumes 200k unless the server reports otherwise."}
+          </p>
           <Show when={error()}>
             <p class="mb-2 text-sm text-red-400">{error()}</p>
           </Show>

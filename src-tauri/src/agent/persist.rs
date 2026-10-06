@@ -28,6 +28,24 @@ pub struct AttachmentMeta {
     pub size: u64,
 }
 
+/// The fixed part of every request — everything sent before any conversation
+/// — itemized, in tokens by the same chars/3 rule as the context meter.
+///
+/// Kept on the run rather than recomputed from the JSONL because none of it is
+/// in the JSONL: the system prompt, the skills index and the tool schemas are
+/// rebuilt on every run and never persisted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixBreakdown {
+    /// The built-in system prompt and mode block.
+    pub system: u64,
+    pub skills: u64,
+    pub specs: u64,
+    /// Built-in tool schemas.
+    pub tools: u64,
+    /// MCP tool schemas.
+    pub mcp: u64,
+}
+
 /// One line of a session JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -68,6 +86,12 @@ pub enum SessionRecord {
     Done {
         input_tokens: u32,
         output_tokens: u32,
+        /// Input tokens the provider served from its prefix cache during the
+        /// run. Separate from `input_tokens`, which a caching provider reports
+        /// as cache misses only — so without this the share of a run that was
+        /// cached cannot be read back. Absent in older sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u32>,
         ts: u64,
     },
     /// A run failed.
@@ -262,6 +286,64 @@ pub enum SessionRecord {
         status: String,
         hash: String,
         commands: Vec<String>,
+        ts: u64,
+    },
+    /// What a run started with: the model, the window the harness believes it
+    /// has, and the fixed prefix itemized. Written once per run, never read by
+    /// the app — it exists so "where does the context go" is answered from the
+    /// session file instead of estimated after the fact.
+    RunConfig {
+        model: String,
+        mode: String,
+        context_window: u64,
+        /// `full` | `sized` | `scaled` — see `agent::budget`.
+        regime: String,
+        /// The three lines the run was held to, in tokens.
+        soft: u64,
+        hard: u64,
+        ceiling: u64,
+        prefix: PrefixBreakdown,
+        /// `standard` | `compact` | `git_sync`, and `full` | `lean` — which
+        /// prompt and tool catalog the prefix above was built from
+        /// (`agent::surface`). Empty on records written before they existed.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        profile: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        surface: String,
+        ts: u64,
+    },
+    /// The router's verdict on a session's first prompt (`agent::route`).
+    /// `verdict` is what it would start the session as; `ran_as` is what the
+    /// session actually started as. In shadow the two are independent, and
+    /// comparing them is the whole point of recording this.
+    ModeRoute {
+        verdict: String,
+        ran_as: String,
+        /// `rules` | `jev` | `unavailable`.
+        source: String,
+        /// True when the verdict was only recorded, not acted on.
+        shadow: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_decisions: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p_design: Option<f64>,
+        #[serde(default)]
+        cost: f64,
+        ts: u64,
+    },
+    /// One subagent, finished. A subagent keeps no transcript of its own, so
+    /// this is the only trace of what it did: without it the tool usage of the
+    /// agents that do all the editing is invisible.
+    SubagentRun {
+        name: String,
+        mode: String,
+        status: String,
+        rounds: u32,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost: f64,
+        /// Tool name → number of calls.
+        tools: std::collections::BTreeMap<String, u32>,
         ts: u64,
     },
 }
@@ -462,7 +544,12 @@ impl SessionStore {
             .append(true)
             .open(&self.path)
             .map_err(|e| format!("open session file: {e}"))?;
-        writeln!(file, "{line}").map_err(|e| format!("write session file: {e}"))?;
+        // One write, newline included. `writeln!` issues the line and its
+        // newline as two, and this file has more than one writer — parallel
+        // subagents record their runs, a background verdict records itself —
+        // so two records could land on one line and both be lost on reload.
+        file.write_all(format!("{line}\n").as_bytes())
+            .map_err(|e| format!("write session file: {e}"))?;
         Ok(())
     }
 
@@ -810,12 +897,20 @@ pub fn last_mode(records: &[SessionRecord]) -> Option<(String, String)> {
     })
 }
 
-/// The context size recorded by the most recent Status record, if any.
+/// The context size recorded by the most recent Status record, if it still
+/// describes the conversation: a prune or a compaction written after it made
+/// the history smaller, and the number is then the size of something that no
+/// longer exists. A run that compared it against its limits refused to send a
+/// context it had just successfully shrunk.
 pub fn last_context_tokens(records: &[SessionRecord]) -> Option<u64> {
-    records.iter().rev().find_map(|r| match r {
-        SessionRecord::Status { context_tokens, .. } => *context_tokens,
-        _ => None,
-    })
+    for r in records.iter().rev() {
+        match r {
+            SessionRecord::Status { context_tokens, .. } => return *context_tokens,
+            SessionRecord::Pruned { .. } | SessionRecord::Compacted { .. } => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Compute cumulative token/cost stats from Status records.
@@ -1022,6 +1117,9 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Hook { ts, .. }
                 | SessionRecord::HookContext { ts, .. }
                 | SessionRecord::HookTrust { ts, .. }
+                | SessionRecord::RunConfig { ts, .. }
+                | SessionRecord::ModeRoute { ts, .. }
+                | SessionRecord::SubagentRun { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
@@ -1724,6 +1822,38 @@ mod tests {
         ];
         assert_eq!(last_context_tokens(&recs), Some(1500));
         assert_eq!(last_context_tokens(&[]), None);
+
+        // A history rewrite after the last Status makes its number the size
+        // of a conversation that no longer exists.
+        let mut pruned = recs.clone();
+        pruned.push(SessionRecord::Pruned {
+            drop_calls: vec![],
+            truncate_results: vec!["t1".into()],
+            head_chars: 300,
+            stats: None,
+            ts: 3,
+        });
+        assert_eq!(last_context_tokens(&pruned), None);
+        let mut compacted = recs.clone();
+        compacted.push(SessionRecord::Compacted {
+            summary: "…".into(),
+            tail_turns: 0,
+            ts: 3,
+        });
+        assert_eq!(last_context_tokens(&compacted), None);
+        // …until the next Status measures the new one.
+        compacted.push(SessionRecord::Status {
+            session_id: "s1".into(),
+            total_input_tokens: 30,
+            total_output_tokens: 12,
+            total_cost: None,
+            total_cost_input: None,
+            total_cost_output: None,
+            total_cost_cache_read: None,
+            context_tokens: Some(700),
+            ts: 4,
+        });
+        assert_eq!(last_context_tokens(&compacted), Some(700));
     }
 
     fn user_turn(text: &str, ts: u64) -> SessionRecord {
