@@ -220,11 +220,14 @@ it refuses anyway, it gets three tries and then the run ends.
 Every run is in the timeline and is a line in the session JSONL, including runs
 that were skipped for lack of approval.
 
-A hook that ran and had nothing to report is an icon, and hooks that fired
-together share a line — a `PreToolUse` guard on every call would otherwise put a
-row under every tool in the thread. Hover the icon for the event, status, exit
-code, duration and source; click it for the command and what it printed. While
-it runs it shows its `statusMessage`.
+A hook that ran and had nothing to report takes no line of its own. A
+`PreToolUse` or `PostToolUse` hook sits on its tool call's line, behind one hook
+icon ahead of the title — a guard on every call would otherwise put a row under
+every tool in the thread. Hover the icon for every hook of that call: event,
+status, exit code, duration, source and command; click it for each command and
+what it printed. Hooks with no tool call to join (`SessionStart`, `Stop`, …)
+share one line, which reads the same way. While a hook runs, its line shows its
+`statusMessage`.
 
 A hook that failed, timed out, blocked something, was skipped for lack of
 approval or left a `systemMessage` keeps a full row: a failure the size of an

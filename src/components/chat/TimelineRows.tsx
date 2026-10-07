@@ -6,7 +6,7 @@
 // local UI state (expanded, hovered). The timeline state itself lives in
 // ChatPanel.
 
-import { createEffect, createSignal, onCleanup, onMount, For, Index, Show, type Component } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, For, Index, Show, type Component } from "solid-js";
 import { Icon, type IconName } from "../Icon";
 import { ProseContent } from "../ProseContent";
 import { DiffViewer } from "../DiffViewer";
@@ -270,6 +270,8 @@ export const TimelineSteps: Component<{
   /// agent run only (not passed by the subagent-detail-panel call sites).
   liveThinkingDisplay?: () => string;
 }> = (props) => {
+  const quietHooks = createMemo(() => layoutQuietHooks(props.steps));
+
   return (
     <For each={props.steps}>
       {(step, i) => (
@@ -299,6 +301,7 @@ export const TimelineSteps: Component<{
           <Show when={step.type === "tool" && step.tool}>
             <ToolRow
               tool={step.tool!}
+              hooks={quietHooks().byTool.get(step.tool!.call.toolId)}
               isExpanded={props.expandedStep === i()}
               onToggle={() => props.onToggle(i())}
             />
@@ -368,8 +371,9 @@ export const TimelineSteps: Component<{
           </Show>
           <Show when={step.type === "hook" && step.hook}>
             <Show when={isQuietHook(step.hook!)} fallback={<HookRow hook={step.hook!} />}>
-              {/* Only the first of a run renders; it draws the whole run. */}
-              <Show when={quietHookRun(props.steps, i())}>
+              {/* A hook on its tool call's line renders there, not here. Of a
+                  run left on its own, only the first renders: it draws them all. */}
+              <Show when={quietHooks().runs.get(i())}>
                 {(run) => <HookStrip hooks={run()} />}
               </Show>
             </Show>
@@ -487,18 +491,39 @@ export function isQuietHook(hook: HookItem): boolean {
   return hook.status === "ok" || hook.status === "running";
 }
 
-/// The run of consecutive quiet hooks that starts at `index`, or null when
-/// `index` is not the start of one. Hooks that fire together (a tool's
-/// PreToolUse and PostToolUse, or several hooks on one event) share a line.
-export function quietHookRun(steps: TimelineItem[], index: number): HookItem[] | null {
-  const quietAt = (i: number): HookItem | null => {
-    const hook = steps[i]?.type === "hook" ? steps[i].hook : undefined;
-    return hook && isQuietHook(hook) ? hook : null;
-  };
-  if (!quietAt(index) || quietAt(index - 1)) return null;
-  const run: HookItem[] = [];
-  for (let i = index, hook = quietAt(i); hook; hook = quietAt(++i)) run.push(hook);
-  return run;
+/// Where each quiet hook of a timeline is drawn.
+export interface QuietHookLayout {
+  /// Hooks that fired around a tool call, by that call's id. They sit on the
+  /// call's own line, behind one icon ahead of its title: a line of their own
+  /// under every call doubled the height of the thread.
+  byTool: Map<string, HookItem[]>;
+  /// The rest, as runs of consecutive hooks keyed by the step that starts the
+  /// run: SessionStart, Stop, a tool hook whose call is not on screen (yet).
+  /// There is no row for these to join, so each run keeps one line.
+  runs: Map<number, HookItem[]>;
+}
+
+export function layoutQuietHooks(steps: TimelineItem[]): QuietHookLayout {
+  const toolIds = new Set<string>();
+  for (const step of steps) {
+    if (step.type === "tool" && step.tool?.call.toolId) toolIds.add(step.tool.call.toolId);
+  }
+  const byTool = new Map<string, HookItem[]>();
+  const runs = new Map<number, HookItem[]>();
+  let run: HookItem[] | null = null;
+  for (let i = 0; i < steps.length; i++) {
+    const hook = steps[i].type === "hook" ? steps[i].hook : undefined;
+    if (!hook || !isQuietHook(hook)) {
+      run = null;
+    } else if (hook.toolId && toolIds.has(hook.toolId)) {
+      byTool.set(hook.toolId, [...(byTool.get(hook.toolId) ?? []), hook]);
+      run = null;
+    } else {
+      if (!run) runs.set(i, (run = []));
+      run.push(hook);
+    }
+  }
+  return { byTool, runs };
 }
 
 /// What each event is, in the words of docs/HOOKS.md. An icon carries no
@@ -526,146 +551,247 @@ function hookOutcome(hook: HookItem): string {
   return bits.join(" · ");
 }
 
-/// One quiet hook as an icon. Hovering explains it; clicking asks the strip to
-/// open its command and output.
-const HookChip: Component<{
-  hook: HookItem;
+/// "PostToolUse hook" for one, "3 hooks" for several.
+function hooksTitle(hooks: HookItem[]): string {
+  return hooks.length === 1 ? `${hooks[0].event} hook` : `${String(hooks.length)} hooks`;
+}
+
+/// The same facts for a group. Every hook here is quiet, so the only two ways
+/// it can read are "still going" and "all fine"; the time is the sum, which is
+/// what the hooks cost the call they are attached to.
+function hooksOutcome(hooks: HookItem[]): string {
+  if (hooks.length === 1) return hookOutcome(hooks[0]);
+  const running = hooks.filter((h) => h.status === "running").length;
+  const bits = [running > 0 ? `${String(running)} running` : "ok"];
+  const total = hooks.reduce((ms, h) => ms + (h.durationMs ?? 0), 0);
+  if (total) bits.push(formatDuration(total));
+  return bits.join(" · ");
+}
+
+/// The label the config author wrote for a hook that is still running, if any.
+function runningHookLabel(hooks: HookItem[]): string | undefined {
+  return hooks.find((h) => h.status === "running" && h.statusMessage)?.statusMessage ?? undefined;
+}
+
+/// Hover and keyboard focus, as one flag: whatever explains an icon to a
+/// pointer has to explain it to a keyboard too.
+function createHover() {
+  const [hovered, setHovered] = createSignal(false);
+  return {
+    hovered,
+    setHovered,
+    handlers: {
+      onMouseEnter: () => setHovered(true),
+      onMouseLeave: () => setHovered(false),
+      onFocus: () => setHovered(true),
+      onBlur: () => setHovered(false),
+    },
+  };
+}
+
+/// What hovering a hook icon shows: every hook behind it, and how each went.
+const HooksTooltip: Component<{
+  hooks: HookItem[];
+  triggerRef: () => HTMLElement | undefined;
+  onClose: () => void;
+}> = (props) => (
+  <Popover
+    open
+    onClose={props.onClose}
+    triggerRef={props.triggerRef}
+    gap={{ y: 6 }}
+    showBackdrop={false}
+    class="pointer-events-none w-80 rounded-lg border border-border-subtle bg-surface-1 p-3 shadow-modal"
+  >
+    <Show when={props.hooks.length > 1}>
+      <div class="mb-2 flex items-baseline justify-between gap-3 border-b border-border-subtle pb-2">
+        <span class="text-[12px] font-medium text-ink">{hooksTitle(props.hooks)}</span>
+        <span class="shrink-0 text-[11px] text-ink-muted">{hooksOutcome(props.hooks)}</span>
+      </div>
+    </Show>
+    <div class="flex flex-col gap-2.5">
+      <Index each={props.hooks}>
+        {(hook) => (
+          <div>
+            <div class="flex items-baseline justify-between gap-3">
+              <span class="text-[12px] font-medium text-ink">{`${hook().event} hook`}</span>
+              <span class="shrink-0 text-[11px] text-ink-muted">{hookOutcome(hook())}</span>
+            </div>
+            <Show when={HOOK_EVENT_FIRES[hook().event]}>
+              <p class="text-[11px] leading-snug text-ink-faint">{HOOK_EVENT_FIRES[hook().event]}</p>
+            </Show>
+            <dl class="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+              <Show when={hook().status === "running" && hook().statusMessage}>
+                <dt class="text-ink-faint">{"Doing"}</dt>
+                <dd class="text-accent">{hook().statusMessage}</dd>
+              </Show>
+              <Show when={hook().decision}>
+                <dt class="text-ink-faint">{"Decision"}</dt>
+                <dd class="text-ink-muted">{hook().decision}</dd>
+              </Show>
+              <Show when={hook().source}>
+                <dt class="text-ink-faint">{"From"}</dt>
+                <dd class="break-words text-ink-muted">{hook().source}</dd>
+              </Show>
+              <Show when={hook().command}>
+                <dt class="text-ink-faint">{"Command"}</dt>
+                <dd class="line-clamp-2 break-all font-mono text-ink-muted">{hook().command}</dd>
+              </Show>
+            </dl>
+          </div>
+        )}
+      </Index>
+    </div>
+    <p class="mt-2 text-[10px] text-ink-faint">
+      {props.hooks.length > 1
+        ? "Click to see each command and its output."
+        : "Click to see the command and its output."}
+    </p>
+  </Popover>
+);
+
+/// What clicking a hook icon opens: each hook's command and what it printed.
+const HookDetails: Component<{ hooks: HookItem[] }> = (props) => (
+  <div class="mb-1 ml-6 flex flex-col gap-2 rounded-md bg-surface-1 p-2 text-left text-xs">
+    {/* Index, not For: a hook is replaced by its finished self, and the panel
+        under the pointer should update rather than be rebuilt. */}
+    <Index each={props.hooks}>
+      {(hook, i) => (
+        <div classList={{ "border-t border-border-subtle pt-2": i > 0 }}>
+          <div class="mb-2 flex flex-wrap items-baseline gap-x-2 text-[11px]">
+            <span class="font-medium text-ink-muted">{`${hook().event} hook`}</span>
+            <span class="text-ink-faint">{hookOutcome(hook())}</span>
+            <Show when={hook().source}>
+              <span class="text-ink-faint">{hook().source}</span>
+            </Show>
+          </div>
+          <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{"Command"}</div>
+          <pre class="mb-2 overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+            {hook().command}
+          </pre>
+          <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{"Output"}</div>
+          <Show
+            when={hook().output}
+            fallback={
+              <p class="text-[11px] text-ink-faint">
+                {hook().status === "running" ? "Still running." : "No output to show."}
+              </p>
+            }
+          >
+            <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+              {hook().output}
+            </pre>
+          </Show>
+          {/* On a quiet hook this is only ever stderr read back from the
+              session file: a live run reports an error only when it failed. */}
+          <Show when={hook().error}>
+            <div class="mb-1 mt-2 font-mono text-[11px] font-medium text-ink-muted">{"Stderr"}</div>
+            <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
+              {hook().error}
+            </pre>
+          </Show>
+        </div>
+      )}
+    </Index>
+  </div>
+);
+
+/// A tool call's quiet hooks, as the one icon ahead of its title. Hovering
+/// lists them; clicking asks the row to open them all underneath.
+const ToolHooksButton: Component<{
+  hooks: HookItem[];
   isOpen: boolean;
   onToggle: () => void;
 }> = (props) => {
   let buttonRef: HTMLButtonElement | undefined;
-  const [hovered, setHovered] = createSignal(false);
-  const running = () => props.hook.status === "running";
+  const hover = createHover();
+  const running = () => props.hooks.some((h) => h.status === "running");
 
   return (
     <>
       <button
         ref={buttonRef}
         type="button"
-        class="flex h-5 items-center gap-1 rounded px-1 text-neutral-500 hover:bg-surface-2 hover:text-ink-muted"
-        classList={{ "bg-surface-2 text-ink-muted": props.isOpen }}
-        aria-label={`${props.hook.event} hook · ${hookOutcome(props.hook)}`}
+        class="-mx-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
+        classList={{ "bg-surface-3 text-ink-muted": props.isOpen }}
+        aria-label={`${hooksTitle(props.hooks)} · ${hooksOutcome(props.hooks)}`}
         aria-expanded={props.isOpen}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        onFocus={() => setHovered(true)}
-        onBlur={() => setHovered(false)}
-        onClick={() => props.onToggle()}
+        {...hover.handlers}
+        onClick={(e) => {
+          // The row around this icon opens the tool call; this opens the hooks.
+          e.stopPropagation();
+          props.onToggle();
+        }}
       >
-        <Icon
-          name={running() ? "loader" : "check-circle"}
-          class={`h-3 w-3 ${running() ? "animate-spin-slow text-accent" : ""}`}
-        />
-        {/* The label the config author wrote, for as long as it is true. */}
-        <Show when={running() && props.hook.statusMessage}>
-          <span class="text-[11px] text-accent">{props.hook.statusMessage}</span>
-        </Show>
+        <Icon name="hook" class={`h-[13px] w-[13px] ${running() ? "animate-pulse-soft text-accent" : ""}`} />
       </button>
-      {/* Not while its panel is open: the panel already says all of this. */}
-      <Show when={hovered() && !props.isOpen}>
-        <Popover
-          open
-          onClose={() => setHovered(false)}
+      {/* Not while the panel is open: the panel already says all of this. */}
+      <Show when={hover.hovered() && !props.isOpen}>
+        <HooksTooltip
+          hooks={props.hooks}
           triggerRef={() => buttonRef}
-          gap={{ y: 6 }}
-          showBackdrop={false}
-          class="pointer-events-none w-72 rounded-lg border border-border-subtle bg-surface-1 p-3 shadow-modal"
-        >
-          <p class="text-[12px] font-medium text-ink">{`${props.hook.event} hook`}</p>
-          <Show when={HOOK_EVENT_FIRES[props.hook.event]}>
-            <p class="text-[11px] leading-snug text-ink-faint">{HOOK_EVENT_FIRES[props.hook.event]}</p>
-          </Show>
-          <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
-            <dt class="text-ink-faint">{"Status"}</dt>
-            <dd class="text-ink-muted">{props.hook.status}</dd>
-            <Show when={props.hook.exitCode !== null && props.hook.exitCode !== undefined}>
-              <dt class="text-ink-faint">{"Exit code"}</dt>
-              <dd class="text-ink-muted">{String(props.hook.exitCode)}</dd>
-            </Show>
-            <Show when={props.hook.durationMs}>
-              <dt class="text-ink-faint">{"Took"}</dt>
-              <dd class="text-ink-muted">{formatDuration(props.hook.durationMs!)}</dd>
-            </Show>
-            <Show when={props.hook.decision}>
-              <dt class="text-ink-faint">{"Decision"}</dt>
-              <dd class="text-ink-muted">{props.hook.decision}</dd>
-            </Show>
-            <Show when={props.hook.source}>
-              <dt class="text-ink-faint">{"From"}</dt>
-              <dd class="break-words text-ink-muted">{props.hook.source}</dd>
-            </Show>
-            <Show when={props.hook.command}>
-              <dt class="text-ink-faint">{"Command"}</dt>
-              <dd class="line-clamp-2 break-all font-mono text-ink-muted">{props.hook.command}</dd>
-            </Show>
-          </dl>
-          <p class="mt-2 text-[10px] text-ink-faint">{"Click to see the command and its output."}</p>
-        </Popover>
+          onClose={() => hover.setHovered(false)}
+        />
       </Show>
     </>
   );
 };
 
-/// A run of quiet hooks on one line, and the one the user opened underneath.
+/// A run of quiet hooks that belongs to no tool call on screen, as one line:
+/// the icon, what it stands for, and how it went.
 export const HookStrip: Component<{ hooks: HookItem[] }> = (props) => {
-  const [open, setOpen] = createSignal<number | null>(null);
-  const openHook = () => {
-    const i = open();
-    return i === null ? undefined : props.hooks[i];
-  };
+  let buttonRef: HTMLButtonElement | undefined;
+  const [open, setOpen] = createSignal(false);
+  const hover = createHover();
+  const running = () => props.hooks.some((h) => h.status === "running");
 
   return (
-    <div class="ml-6 flex flex-col gap-1">
-      <div class="flex flex-wrap items-center gap-0.5">
-        {/* Index, not For: a hook is replaced by its finished self, and the
-            icon under the pointer should update rather than be rebuilt. */}
-        <Index each={props.hooks}>
-          {(hook, i) => (
-            <HookChip
-              hook={hook()}
-              isOpen={open() === i}
-              onToggle={() => setOpen((o) => (o === i ? null : i))}
-            />
-          )}
-        </Index>
-      </div>
-      <Show when={openHook()}>
-        {(hook) => (
-          <div class="mb-1 rounded-md bg-surface-1 p-2 text-left text-xs">
-            <div class="mb-2 flex flex-wrap items-baseline gap-x-2 text-[11px]">
-              <span class="font-medium text-ink-muted">{`${hook().event} hook`}</span>
-              <span class="text-ink-faint">{hookOutcome(hook())}</span>
-              <Show when={hook().source}>
-                <span class="text-ink-faint">{hook().source}</span>
-              </Show>
-            </div>
-            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{"Command"}</div>
-            <pre class="mb-2 overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
-              {hook().command}
-            </pre>
-            <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{"Output"}</div>
-            <Show
-              when={hook().output}
-              fallback={
-                <p class="text-[11px] text-ink-faint">
-                  {hook().status === "running" ? "Still running." : "No output to show."}
-                </p>
-              }
-            >
-              <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
-                {hook().output}
-              </pre>
-            </Show>
-            {/* On a quiet hook this is only ever stderr read back from the
-                session file: a live run reports an error only when it failed. */}
-            <Show when={hook().error}>
-              <div class="mb-1 mt-2 font-mono text-[11px] font-medium text-ink-muted">{"Stderr"}</div>
-              <pre class="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-faint">
-                {hook().error}
-              </pre>
-            </Show>
-          </div>
-        )}
+    <div>
+      <button
+        ref={buttonRef}
+        type="button"
+        class="flex h-7 w-full items-center gap-2 rounded px-1 text-xs hover:bg-surface-2"
+        aria-label={`${hooksTitle(props.hooks)} · ${hooksOutcome(props.hooks)}`}
+        aria-expanded={open()}
+        {...hover.handlers}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
+          <Icon
+            name="hook"
+            class={`h-[14px] w-[14px] ${running() ? "animate-pulse-soft text-accent" : "text-ink-faint"}`}
+          />
+        </span>
+        {/* The label the config author wrote, for as long as it is true. */}
+        <Show
+          when={runningHookLabel(props.hooks)}
+          fallback={
+            <>
+              <span class="shrink-0 whitespace-nowrap text-[12px] text-ink-faint">{hooksTitle(props.hooks)}</span>
+              <span class="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-ink-faint opacity-70">
+                {hooksOutcome(props.hooks)}
+              </span>
+            </>
+          }
+        >
+          <span class="min-w-0 flex-1 truncate text-left text-[12px] text-accent">
+            {runningHookLabel(props.hooks)}
+          </span>
+        </Show>
+        <Icon
+          name="chevron-right"
+          class={`ml-auto h-3 w-3 shrink-0 text-ink-faint transition-transform duration-120 ${open() ? "rotate-90" : ""}`}
+        />
+      </button>
+      <Show when={hover.hovered() && !open()}>
+        <HooksTooltip
+          hooks={props.hooks}
+          triggerRef={() => buttonRef}
+          onClose={() => hover.setHovered(false)}
+        />
+      </Show>
+      <Show when={open()}>
+        <HookDetails hooks={props.hooks} />
       </Show>
     </div>
   );
@@ -1146,6 +1272,8 @@ export const ThinkingRow: Component<{
 
 export const ToolRow: Component<{
   tool: { call: ToolCallData; result?: ToolResultData; status: string };
+  /// The quiet hooks that fired around this call. They share its line.
+  hooks?: HookItem[];
   isExpanded: boolean;
   onToggle: () => void;
 }> = (props) => {
@@ -1155,6 +1283,8 @@ export const ToolRow: Component<{
   const summary = () => toolSummary(props.tool.call);
   const alwaysShown = () => alwaysShowsBody(props.tool.call.toolName);
   const [showRaw, setShowRaw] = createSignal(false);
+  const hooks = () => props.hooks ?? [];
+  const [hooksOpen, setHooksOpen] = createSignal(false);
 
   const statusIcon = () => {
     if (props.tool.status === "running") return "loader";
@@ -1170,26 +1300,49 @@ export const ToolRow: Component<{
 
   return (
     <div>
-      <button
+      {/* A div, not a button: the hooks icon is a button of its own, and a
+          button cannot hold another. Clicks anywhere on the line still reach
+          the toggle here; the inner button is what a keyboard lands on. */}
+      <div
         onClick={alwaysShown() ? undefined : props.onToggle}
         class="flex h-7 w-full items-center gap-2 rounded px-1 text-xs hover:bg-surface-2"
-        classList={{ "cursor-default": alwaysShown() }}
       >
         <span class="trajectory-node flex h-5 w-5 shrink-0 items-center justify-center">
           <Icon name={icon()} class="h-[14px] w-[14px] text-ink-muted" />
         </span>
-        <span class="shrink-0 whitespace-nowrap text-[12px] text-ink-muted">{title()}</span>
-        <span class="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-ink-faint">{summary()}</span>
-        <div class="ml-auto flex items-center gap-1">
-          <Icon name={statusIcon() as IconName} class={`h-3 w-3 ${statusClass()}`} />
-          <Show when={!alwaysShown()}>
-            <Icon
-              name="chevron-right"
-              class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${props.isExpanded ? "rotate-90" : ""}`}
-            />
-          </Show>
-        </div>
-      </button>
+        <Show when={hooks().length > 0}>
+          <ToolHooksButton
+            hooks={hooks()}
+            isOpen={hooksOpen()}
+            onToggle={() => setHooksOpen((v) => !v)}
+          />
+        </Show>
+        <button
+          type="button"
+          class="flex h-full min-w-0 flex-1 items-center gap-2"
+          classList={{ "cursor-default": alwaysShown() }}
+          aria-expanded={alwaysShown() ? undefined : props.isExpanded}
+        >
+          <span class="shrink-0 whitespace-nowrap text-[12px] text-ink-muted">{title()}</span>
+          <span class="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-ink-faint">{summary()}</span>
+          <div class="ml-auto flex items-center gap-1">
+            {/* The label the config author wrote, for as long as it is true. */}
+            <Show when={runningHookLabel(hooks())}>
+              <span class="max-w-48 truncate text-[11px] text-accent">{runningHookLabel(hooks())}</span>
+            </Show>
+            <Icon name={statusIcon() as IconName} class={`h-3 w-3 ${statusClass()}`} />
+            <Show when={!alwaysShown()}>
+              <Icon
+                name="chevron-right"
+                class={`h-3 w-3 text-ink-faint transition-transform duration-120 ${props.isExpanded ? "rotate-90" : ""}`}
+              />
+            </Show>
+          </div>
+        </button>
+      </div>
+      <Show when={hooksOpen() && hooks().length > 0}>
+        <HookDetails hooks={hooks()} />
+      </Show>
       <Show when={alwaysShown() || props.isExpanded}>
         <div class="ml-6 rounded-md bg-surface-1 p-2 text-left text-xs">
           <ToolBody call={props.tool.call} result={props.tool.result} />

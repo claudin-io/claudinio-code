@@ -186,14 +186,17 @@ describe("HookRow", () => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// Quiet hooks — an icon each, a line per run
+// Quiet hooks — on their tool call's line, or one line per run
 // ─────────────────────────────────────────────────────────────
 
-function mountSteps(steps: () => TimelineItem[]): HTMLDivElement {
+function mountSteps(
+  steps: () => TimelineItem[],
+  onToggle: (index: number) => void = () => {},
+): HTMLDivElement {
   host = document.createElement("div");
   document.body.appendChild(host);
   dispose = render(
-    () => <TimelineSteps steps={steps()} expandedStep={null} onToggle={() => {}} isLive={false} />,
+    () => <TimelineSteps steps={steps()} expandedStep={null} onToggle={onToggle} isLive={false} />,
     host,
   );
   return host;
@@ -204,59 +207,137 @@ const hookStep = (over: Partial<NonNullable<TimelineItem["hook"]>> = {}): Timeli
   hook: hookItem(over),
 });
 
-const toolStep = (toolId: string): TimelineItem => ({
+const pre = (toolId: string, over: Partial<NonNullable<TimelineItem["hook"]>> = {}): TimelineItem =>
+  hookStep({ toolId, ...over });
+
+const post = (toolId: string, over: Partial<NonNullable<TimelineItem["hook"]>> = {}): TimelineItem =>
+  hookStep({ hookId: "s:PostToolUse:1", event: "PostToolUse", durationMs: 7, toolId, ...over });
+
+const toolStep = (toolId: string, command = "git status"): TimelineItem => ({
   type: "tool",
   tool: {
-    call: { sessionId: "s", toolId, toolName: "bash", args: { command: "git status" }, permission: "allow" },
+    call: { sessionId: "s", toolId, toolName: "bash", args: { command }, permission: "allow" },
     status: "ok",
   },
 });
 
-const chips = (el: HTMLElement): HTMLButtonElement[] =>
-  Array.from(el.querySelectorAll<HTMLButtonElement>('button[aria-label*=" hook · "]'));
+/// The hook icons: one per tool call that has hooks, one per line of hooks.
+const hookButtons = (el: HTMLElement): HTMLButtonElement[] =>
+  Array.from(el.querySelectorAll<HTMLButtonElement>('button[aria-label*=" hook"]'));
+
+/// The line a button sits on, as the text a user reads across it.
+const lineOf = (button: HTMLElement): string => button.closest(".h-7")?.textContent ?? "";
 
 describe("quiet hooks in the timeline", () => {
-  it("a hook with nothing to report is an icon, not a row of text", () => {
-    // The point of the change: a PreToolUse hook on every call used to put
-    // "PreToolUse hook · exit 0 · 42ms" under every tool in the thread.
-    const el = mountSteps(() => [hookStep()]);
-    expect(chips(el)).toHaveLength(1);
+  it("a tool call's hooks sit on its own line, behind one icon", () => {
+    // The point of the change: the hooks used to take a line of their own
+    // under every tool call, which doubled the height of the thread.
+    const el = mountSteps(() => [pre("t1"), toolStep("t1"), post("t1")]);
+    const found = hookButtons(el);
+    expect(found).toHaveLength(1);
+    expect(lineOf(found[0])).toContain("git status");
+    expect(el.querySelectorAll(".h-7")).toHaveLength(1);
     expect(el.textContent).not.toContain("PreToolUse hook");
     expect(el.textContent).not.toContain("exit 0");
   });
 
-  it("the icon still names what ran, for whoever cannot hover", () => {
-    const el = mountSteps(() => [hookStep()]);
-    expect(chips(el)[0].getAttribute("aria-label")).toBe("PreToolUse hook · ok · exit 0 · 42ms");
+  it("the icon comes before the tool call's title", () => {
+    const el = mountSteps(() => [pre("t1"), toolStep("t1")]);
+    const line = hookButtons(el)[0].closest(".h-7")!;
+    const title = Array.from(line.querySelectorAll("button")).find((b) => b.textContent?.includes("git status"))!;
+    expect(
+      hookButtons(el)[0].compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
-  it("hooks that fired together share one line", () => {
-    const el = mountSteps(() => [
-      hookStep(),
-      hookStep({ hookId: "s:PostToolUse:1", event: "PostToolUse" }),
-    ]);
-    const found = chips(el);
-    expect(found).toHaveLength(2);
-    expect(found[0].parentElement).toBe(found[1].parentElement);
+  it("the icon still names what ran, for whoever cannot hover", () => {
+    const one = mountSteps(() => [pre("t1"), toolStep("t1")]);
+    expect(hookButtons(one)[0].getAttribute("aria-label")).toBe("PreToolUse hook · ok · exit 0 · 42ms");
+    dispose?.();
+    host?.remove();
+
+    const two = mountSteps(() => [pre("t1"), toolStep("t1"), post("t1")]);
+    expect(hookButtons(two)[0].getAttribute("aria-label")).toBe("2 hooks · ok · 49ms");
   });
 
   it("hooks around different tool calls stay with their own call", () => {
-    const el = mountSteps(() => [hookStep(), toolStep("t1"), hookStep(), toolStep("t2")]);
-    const found = chips(el);
+    // Live order: one call's PostToolUse is followed at once by the next
+    // call's PreToolUse. They are neighbours in the list and not in meaning.
+    const el = mountSteps(() => [
+      pre("t1"),
+      toolStep("t1", "git status"),
+      post("t1"),
+      pre("t2"),
+      toolStep("t2", "git log"),
+      post("t2"),
+    ]);
+    const found = hookButtons(el);
     expect(found).toHaveLength(2);
-    expect(found[0].parentElement).not.toBe(found[1].parentElement);
+    expect(lineOf(found[0])).toContain("git status");
+    expect(lineOf(found[1])).toContain("git log");
   });
 
-  it("a failure among quiet hooks keeps its full row", () => {
+  it("finds its call by id, wherever a reopened session put the hook", () => {
+    // On disk the hooks of a round are written before the assistant turn that
+    // holds its tool calls, so position says nothing about which is whose.
+    const el = mountSteps(() => [
+      pre("t1"),
+      post("t1"),
+      post("t2"),
+      toolStep("t1", "git status"),
+      toolStep("t2", "git log"),
+    ]);
+    const found = hookButtons(el);
+    expect(found.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "2 hooks · ok · 49ms",
+      "PostToolUse hook · ok · exit 0 · 7ms",
+    ]);
+    expect(lineOf(found[0])).toContain("git status");
+    expect(lineOf(found[1])).toContain("git log");
+  });
+
+  it("a tool call without hooks has no icon", () => {
+    const el = mountSteps(() => [pre("t1"), toolStep("t1"), toolStep("t2", "git log")]);
+    expect(hookButtons(el)).toHaveLength(1);
+    expect(lineOf(hookButtons(el)[0])).toContain("git status");
+  });
+
+  it("hooks that belong to no tool call share one line, icon and text", () => {
+    const el = mountSteps(() => [
+      hookStep({ event: "SessionStart" }),
+      hookStep({ event: "UserPromptSubmit", durationMs: 8 }),
+    ]);
+    const found = hookButtons(el);
+    expect(found).toHaveLength(1);
+    expect(lineOf(found[0])).toContain("2 hooks");
+    expect(lineOf(found[0])).toContain("ok · 50ms");
+  });
+
+  it("a lone hook's line says which hook it was", () => {
+    const el = mountSteps(() => [hookStep({ event: "Stop" })]);
+    expect(lineOf(hookButtons(el)[0])).toContain("Stop hook");
+    expect(lineOf(hookButtons(el)[0])).toContain("ok · exit 0 · 42ms");
+  });
+
+  it("a session recorded before hooks named their call keeps them on one line", () => {
+    const el = mountSteps(() => [hookStep(), hookStep({ event: "PostToolUse" }), toolStep("t1")]);
+    const found = hookButtons(el);
+    expect(found).toHaveLength(1);
+    expect(lineOf(found[0])).toContain("2 hooks");
+    expect(lineOf(found[0])).not.toContain("git status");
+  });
+
+  it("a failure among a call's hooks keeps its full row", () => {
     // Shrinking this one would make a broken hook look like a working one.
     const el = mountSteps(() => [
-      hookStep(),
-      hookStep({ status: "error", exitCode: 127, error: "brain: not found" }),
-      hookStep(),
+      pre("t1"),
+      pre("t1", { status: "error", exitCode: 127, error: "brain: not found" }),
+      toolStep("t1"),
     ]);
     expect(el.textContent).toContain("PreToolUse hook failed");
     expect(el.textContent).toContain("brain: not found");
-    expect(chips(el)).toHaveLength(2);
+    expect(hookButtons(el)).toHaveLength(1);
+    expect(hookButtons(el)[0].getAttribute("aria-label")).toBe("PreToolUse hook · ok · exit 0 · 42ms");
   });
 
   it.each([
@@ -264,15 +345,15 @@ describe("quiet hooks in the timeline", () => {
     ["timeout", "timed out"],
     ["skipped_untrusted", "waiting for your approval"],
   ])("a %s hook keeps its full row", (status, text) => {
-    const el = mountSteps(() => [hookStep({ status, exitCode: null })]);
+    const el = mountSteps(() => [pre("t1", { status, exitCode: null }), toolStep("t1")]);
     expect(el.textContent).toContain(text);
-    expect(chips(el)).toHaveLength(0);
+    expect(hookButtons(el)).toHaveLength(0);
   });
 
   it("a hook that left a message for the user keeps its full row", () => {
-    const el = mountSteps(() => [hookStep({ systemMessage: "formatted 3 files" })]);
+    const el = mountSteps(() => [post("t1", { systemMessage: "formatted 3 files" }), toolStep("t1")]);
     expect(el.textContent).toContain("formatted 3 files");
-    expect(chips(el)).toHaveLength(0);
+    expect(hookButtons(el)).toHaveLength(0);
   });
 
   it("context a hook injected keeps its full row", () => {
@@ -284,104 +365,168 @@ describe("quiet hooks in the timeline", () => {
   });
 
   it("a running hook shows the label its author wrote", () => {
-    const el = mountSteps(() => [
+    const alone = mountSteps(() => [
       hookStep({ status: "running", statusMessage: "Reading this project's brain" }),
     ]);
-    expect(el.textContent).toContain("Reading this project's brain");
+    expect(lineOf(hookButtons(alone)[0])).toContain("Reading this project's brain");
+    dispose?.();
+    host?.remove();
+
+    // On a tool call's line too: PostToolUse runs while its call is on screen.
+    const onCall = mountSteps(() => [
+      toolStep("t1"),
+      post("t1", { status: "running", statusMessage: "Formatting what changed" }),
+    ]);
+    expect(lineOf(hookButtons(onCall)[0])).toContain("Formatting what changed");
+    expect(hookButtons(onCall)[0].getAttribute("aria-label")).toBe("PostToolUse hook · running");
   });
 
-  it("hovering explains the hook: what fired, how it ended, how long it took", () => {
-    const el = mountSteps(() => [hookStep({ decision: "allow" })]);
-    const chip = chips(el)[0];
-    chip.dispatchEvent(new MouseEvent("mouseenter"));
+  it("hovering explains every hook of the call: what fired, how it ended, how long it took", () => {
+    const el = mountSteps(() => [
+      pre("t1", { decision: "allow" }),
+      toolStep("t1"),
+      post("t1", { command: "/ws/format.sh", source: "project" }),
+    ]);
+    const button = hookButtons(el)[0];
+    button.dispatchEvent(new MouseEvent("mouseenter"));
     const page = () => document.body.textContent ?? "";
-    expect(page()).toContain("PreToolUse hook");
+    expect(page()).toContain("2 hooksok · 49ms");
+    expect(page()).toContain("PreToolUse hookok · exit 0 · 42ms");
     expect(page()).toContain("Fires before a tool call is dispatched.");
-    expect(page()).toContain("Exit code0");
-    expect(page()).toContain("Took42ms");
     expect(page()).toContain("Decisionallow");
     expect(page()).toContain("plugin: claudinio-brain");
     expect(page()).toContain("/ws/guard.sh");
+    expect(page()).toContain("PostToolUse hookok · exit 0 · 7ms");
+    expect(page()).toContain("Fires after a tool returns.");
+    expect(page()).toContain("/ws/format.sh");
 
-    chip.dispatchEvent(new MouseEvent("mouseleave"));
+    button.dispatchEvent(new MouseEvent("mouseleave"));
     expect(page()).not.toContain("Fires before a tool call is dispatched.");
   });
 
+  it("hovering a line of hooks explains them the same way", () => {
+    const el = mountSteps(() => [hookStep({ event: "Stop" })]);
+    hookButtons(el)[0].dispatchEvent(new MouseEvent("mouseenter"));
+    expect(document.body.textContent).toContain("Fires when the run is about to end.");
+  });
+
   it("keyboard focus explains it too", () => {
-    const el = mountSteps(() => [hookStep()]);
-    const chip = chips(el)[0];
-    chip.dispatchEvent(new FocusEvent("focus"));
+    const el = mountSteps(() => [pre("t1"), toolStep("t1")]);
+    const button = hookButtons(el)[0];
+    button.dispatchEvent(new FocusEvent("focus"));
     expect(document.body.textContent).toContain("Fires before a tool call is dispatched.");
-    chip.dispatchEvent(new FocusEvent("blur"));
+    button.dispatchEvent(new FocusEvent("blur"));
     expect(document.body.textContent).not.toContain("Fires before a tool call is dispatched.");
   });
 
-  it("clicking shows the command that ran and what it printed", () => {
-    const el = mountSteps(() => [hookStep({ output: "lint: 0 problems" })]);
-    const chip = chips(el)[0];
+  it("clicking opens every hook of the call: the command that ran and what it printed", () => {
+    const onToggle = vi.fn();
+    const el = mountSteps(
+      () => [
+        pre("t1", { output: "lint: 0 problems" }),
+        toolStep("t1"),
+        post("t1", { command: "/ws/format.sh", output: "formatted 2 files" }),
+      ],
+      onToggle,
+    );
+    const button = hookButtons(el)[0];
     expect(el.textContent).not.toContain("/ws/guard.sh");
 
-    chip.click();
-    expect(chip.getAttribute("aria-expanded")).toBe("true");
+    button.click();
+    expect(button.getAttribute("aria-expanded")).toBe("true");
     expect(el.textContent).toContain("/ws/guard.sh");
     expect(el.textContent).toContain("lint: 0 problems");
+    expect(el.textContent).toContain("/ws/format.sh");
+    expect(el.textContent).toContain("formatted 2 files");
 
-    chip.click();
-    expect(chip.getAttribute("aria-expanded")).toBe("false");
+    button.click();
+    expect(button.getAttribute("aria-expanded")).toBe("false");
     expect(el.textContent).not.toContain("/ws/guard.sh");
+
+    // The icon opens the hooks. It is not another way to open the tool call.
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it("the rest of the line still opens the tool call, and only that", () => {
+    const onToggle = vi.fn();
+    const el = mountSteps(() => [pre("t1"), toolStep("t1")], onToggle);
+    const line = hookButtons(el)[0].closest(".h-7")!;
+    Array.from(line.querySelectorAll("button"))
+      .find((b) => b.textContent?.includes("git status"))!
+      .click();
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenCalledWith(1);
+    expect(hookButtons(el)[0].getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("clicking a line of hooks opens them all", () => {
+    const el = mountSteps(() => [
+      hookStep({ event: "SessionStart", command: "/ws/first.sh" }),
+      hookStep({ event: "UserPromptSubmit", command: "/ws/second.sh" }),
+    ]);
+    hookButtons(el)[0].click();
+    expect(el.textContent).toContain("/ws/first.sh");
+    expect(el.textContent).toContain("/ws/second.sh");
   });
 
   it("says so when a hook printed nothing, rather than showing an empty box", () => {
-    const el = mountSteps(() => [hookStep({ output: "" })]);
-    chips(el)[0].click();
+    const el = mountSteps(() => [pre("t1", { output: "" }), toolStep("t1")]);
+    hookButtons(el)[0].click();
     expect(el.textContent).toContain("No output to show.");
   });
 
   it("shows stderr read back from a reopened session", () => {
     // chatRecords maps the record's stderr onto `error`; an ok hook that only
     // warned must not turn into a failure row, and must not lose the warning.
-    const el = mountSteps(() => [hookStep({ error: "warning: cache is stale" })]);
+    const el = mountSteps(() => [pre("t1", { error: "warning: cache is stale" }), toolStep("t1")]);
     expect(el.textContent).not.toContain("warning: cache is stale");
-    chips(el)[0].click();
+    hookButtons(el)[0].click();
     expect(el.textContent).toContain("warning: cache is stale");
   });
 
-  it("opening one hook closes the one that was open", () => {
-    const el = mountSteps(() => [
-      hookStep({ command: "/ws/first.sh" }),
-      hookStep({ command: "/ws/second.sh" }),
-    ]);
-    const [first, second] = chips(el);
-    first.click();
-    second.click();
-    expect(el.textContent).toContain("/ws/second.sh");
-    expect(el.textContent).not.toContain("/ws/first.sh");
-  });
-
-  it("the tooltip stands down while the hook's panel is open", () => {
-    const el = mountSteps(() => [hookStep()]);
-    const chip = chips(el)[0];
-    chip.dispatchEvent(new MouseEvent("mouseenter"));
-    chip.click();
+  it("the tooltip stands down while the hooks' panel is open", () => {
+    const el = mountSteps(() => [pre("t1"), toolStep("t1")]);
+    const button = hookButtons(el)[0];
+    button.dispatchEvent(new MouseEvent("mouseenter"));
+    button.click();
     expect(document.body.textContent).not.toContain("Click to see the command and its output.");
   });
 
-  it("follows a live run: the next hook joins the line, the running one settles", () => {
-    const pre = hookStep({ status: "running", exitCode: null, durationMs: undefined });
-    const [steps, setSteps] = createSignal<TimelineItem[]>([toolStep("t1"), pre]);
+  it("follows a live run: a hook waits on its own line, then joins its call", () => {
+    // PreToolUse fires before the call is announced, so for a moment there is
+    // no line for it to join. Its label is the only sign of what the wait is.
+    const running = pre("t1", {
+      status: "running",
+      exitCode: null,
+      durationMs: undefined,
+      statusMessage: "Checking the command",
+    });
+    const [steps, setSteps] = createSignal<TimelineItem[]>([running]);
     const el = mountSteps(steps);
-    expect(chips(el)[0].getAttribute("aria-label")).toBe("PreToolUse hook · running");
+    expect(lineOf(hookButtons(el)[0])).toContain("Checking the command");
 
     // ChatPanel replaces the step object when HookFinished lands, then appends.
-    const done = hookStep();
-    const post = hookStep({ hookId: "s:PostToolUse:1", event: "PostToolUse", durationMs: 7 });
-    setSteps([toolStep("t1"), done, post]);
+    const done = pre("t1");
+    const tool = toolStep("t1");
+    setSteps([done, tool]);
+    expect(hookButtons(el)).toHaveLength(1);
+    expect(lineOf(hookButtons(el)[0])).toContain("git status");
+    expect(el.textContent).not.toContain("Checking the command");
 
-    const found = chips(el);
-    expect(found.map((c) => c.getAttribute("aria-label"))).toEqual([
-      "PreToolUse hook · ok · exit 0 · 42ms",
-      "PostToolUse hook · ok · exit 0 · 7ms",
-    ]);
-    expect(found[0].parentElement).toBe(found[1].parentElement);
+    setSteps([done, tool, post("t1")]);
+    expect(hookButtons(el)).toHaveLength(1);
+    expect(hookButtons(el)[0].getAttribute("aria-label")).toBe("2 hooks · ok · 49ms");
+  });
+
+  it("the open panel survives the next hook landing on the same call", () => {
+    const done = pre("t1");
+    const tool = toolStep("t1");
+    const [steps, setSteps] = createSignal<TimelineItem[]>([done, tool]);
+    const el = mountSteps(steps);
+    hookButtons(el)[0].click();
+    setSteps([done, tool, post("t1", { command: "/ws/format.sh" })]);
+    expect(hookButtons(el)[0].getAttribute("aria-expanded")).toBe("true");
+    expect(el.textContent).toContain("/ws/guard.sh");
+    expect(el.textContent).toContain("/ws/format.sh");
   });
 });

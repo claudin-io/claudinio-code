@@ -94,6 +94,10 @@ export interface TimelineItem {
     systemMessage?: string | null;
     /// Context the hook added to the conversation, from a `hook_context` record.
     context?: string;
+    /// The tool call a PreToolUse/PostToolUse hook fired around. It is what
+    /// puts the hook on that call's line instead of on one of its own; absent
+    /// for every other event, and for sessions recorded before it was written.
+    toolId?: string;
   };
   /// Chain divider: this conversation continued in a new linked session.
   /// `firstMessage` (when present) is the successor's kickoff prompt / handoff
@@ -296,12 +300,18 @@ export function segmentMessage(
 // these, so one of them arriving after an answer (a `FinalText`) means the run
 // went on past that answer. Harness notes after an answer — the quality gate, a
 // Stop hook — are not in the list: they belong to the answer they follow.
+//
+// A PreToolUse hook is in it. It fires before its call is announced, so a round
+// that opens with a tool call reaches here hook first; left with the answer, the
+// hook would sit under it, a message away from the call whose line it belongs on.
+// `recordsToMessages` draws the same line for a reopened session.
 export function startsNewRound(event: AgentEvent): boolean {
   return (
     event.event === "TextDelta" ||
     event.event === "ToolCall" ||
     event.event === "SubagentStarted" ||
-    (event.event === "Thinking" && !!event.data)
+    (event.event === "Thinking" && !!event.data) ||
+    (event.event === "HookStarted" && event.data.event === "PreToolUse")
   );
 }
 
@@ -558,6 +568,7 @@ export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
           output: String(rec.stdout ?? ""),
           error: (rec.stderr as string) || null,
           decision: (rec.decision as string | null) ?? null,
+          ...(rec.tool_id ? { toolId: String(rec.tool_id) } : {}),
         },
       });
     } else if (kind === "hook_context") {

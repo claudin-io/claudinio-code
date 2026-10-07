@@ -287,6 +287,8 @@ export interface HookStartedData {
   command: string;
   source: string;
   statusMessage: string | null;
+  /** The tool call this hook fired around (PreToolUse/PostToolUse only). */
+  toolId?: string | null;
 }
 
 export interface HookFinishedData {

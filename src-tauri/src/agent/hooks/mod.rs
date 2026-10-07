@@ -177,11 +177,16 @@ fn clip(s: &str) -> String {
 /// This is the only path that spawns anything, which is what makes the trust
 /// check here rather than at a dozen call sites a correctness property and not
 /// just a convenience.
+///
+/// `tool_id` is the call a tool hook fired around, and `None` for every other
+/// event. It rides on the event and the record so the timeline can show the
+/// hook on that call's line.
 async fn run(
     ctx: &HookCtx,
     event: HookEvent,
     selected: Vec<&ResolvedHook>,
     input: Value,
+    tool_id: Option<&str>,
     event_tx: Option<&Channel<AgentEvent>>,
 ) -> BatchOutcome {
     if selected.is_empty() {
@@ -208,6 +213,7 @@ async fn run(
                 command: h.display_command(),
                 source: h.source.label(),
                 status_message: h.status_message.clone(),
+                tool_id: tool_id.map(str::to_string),
             });
         }
     }
@@ -223,6 +229,7 @@ async fn run(
             &r.stderr,
             r.duration_ms,
             r.effect.decision.clone(),
+            tool_id,
         ));
         if let Some(tx) = event_tx {
             let _ = tx.send(finished_event(ctx, r));
@@ -286,6 +293,7 @@ fn finished_event(ctx: &HookCtx, r: &HookRun) -> AgentEvent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hook_record(
     h: &ResolvedHook,
     status: HookStatus,
@@ -294,6 +302,7 @@ fn hook_record(
     stderr: &str,
     duration_ms: u64,
     decision: Option<String>,
+    tool_id: Option<&str>,
 ) -> SessionRecord {
     SessionRecord::Hook {
         event: h.event.as_str().to_string(),
@@ -306,6 +315,7 @@ fn hook_record(
         stdout: clip(stdout),
         stderr: clip(stderr),
         decision,
+        tool_id: tool_id.map(str::to_string),
         ts: now_ms(),
     }
 }
@@ -331,6 +341,7 @@ fn announce_awaiting(ctx: &HookCtx, event_tx: Option<&Channel<AgentEvent>>) {
             "",
             0,
             None,
+            None,
         ));
     }
     if let Some(tx) = event_tx {
@@ -348,6 +359,7 @@ fn announce_awaiting(ctx: &HookCtx, event_tx: Option<&Channel<AgentEvent>>) {
 pub async fn fire_pre_tool_use(
     ctx: &HookCtx,
     native_tool: &str,
+    tool_use_id: &str,
     tool_input: &Value,
     event_tx: Option<&Channel<AgentEvent>>,
 ) -> BatchOutcome {
@@ -356,12 +368,21 @@ pub async fn fire_pre_tool_use(
         return BatchOutcome::default();
     }
     let input = payload::pre_tool_use(&ctx.base(), native_tool, tool_input);
-    run(ctx, HookEvent::PreToolUse, selected, input, event_tx).await
+    run(
+        ctx,
+        HookEvent::PreToolUse,
+        selected,
+        input,
+        Some(tool_use_id),
+        event_tx,
+    )
+    .await
 }
 
 pub async fn fire_post_tool_use(
     ctx: &HookCtx,
     native_tool: &str,
+    tool_use_id: &str,
     tool_input: &Value,
     tool_response: &Value,
     event_tx: Option<&Channel<AgentEvent>>,
@@ -371,7 +392,15 @@ pub async fn fire_post_tool_use(
         return BatchOutcome::default();
     }
     let input = payload::post_tool_use(&ctx.base(), native_tool, tool_input, tool_response);
-    run(ctx, HookEvent::PostToolUse, selected, input, event_tx).await
+    run(
+        ctx,
+        HookEvent::PostToolUse,
+        selected,
+        input,
+        Some(tool_use_id),
+        event_tx,
+    )
+    .await
 }
 
 pub async fn fire_user_prompt_submit(
@@ -384,7 +413,15 @@ pub async fn fire_user_prompt_submit(
         return BatchOutcome::default();
     }
     let input = payload::user_prompt_submit(&ctx.base(), prompt);
-    run(ctx, HookEvent::UserPromptSubmit, selected, input, event_tx).await
+    run(
+        ctx,
+        HookEvent::UserPromptSubmit,
+        selected,
+        input,
+        None,
+        event_tx,
+    )
+    .await
 }
 
 pub async fn fire_session_start(
@@ -399,7 +436,15 @@ pub async fn fire_session_start(
         return BatchOutcome::default();
     }
     let input = payload::session_start(&ctx.base(), source);
-    run(ctx, HookEvent::SessionStart, selected, input, event_tx).await
+    run(
+        ctx,
+        HookEvent::SessionStart,
+        selected,
+        input,
+        None,
+        event_tx,
+    )
+    .await
 }
 
 pub async fn fire_session_end(
@@ -412,7 +457,7 @@ pub async fn fire_session_end(
         return BatchOutcome::default();
     }
     let input = payload::session_end(&ctx.base(), reason);
-    run(ctx, HookEvent::SessionEnd, selected, input, event_tx).await
+    run(ctx, HookEvent::SessionEnd, selected, input, None, event_tx).await
 }
 
 pub async fn fire_pre_compact(
@@ -427,7 +472,7 @@ pub async fn fire_pre_compact(
         return BatchOutcome::default();
     }
     let input = payload::pre_compact(&ctx.base(), trigger, "");
-    run(ctx, HookEvent::PreCompact, selected, input, event_tx).await
+    run(ctx, HookEvent::PreCompact, selected, input, None, event_tx).await
 }
 
 pub async fn fire_stop(
@@ -440,7 +485,7 @@ pub async fn fire_stop(
         return BatchOutcome::default();
     }
     let input = payload::stop(&ctx.base(), stop_hook_active);
-    run(ctx, HookEvent::Stop, selected, input, event_tx).await
+    run(ctx, HookEvent::Stop, selected, input, None, event_tx).await
 }
 
 pub async fn fire_subagent_stop(
@@ -454,7 +499,15 @@ pub async fn fire_subagent_stop(
         return BatchOutcome::default();
     }
     let input = payload::subagent_stop(&ctx.base(), stop_hook_active, subagent_id);
-    run(ctx, HookEvent::SubagentStop, selected, input, event_tx).await
+    run(
+        ctx,
+        HookEvent::SubagentStop,
+        selected,
+        input,
+        None,
+        event_tx,
+    )
+    .await
 }
 
 /// Notification is spawned and never awaited.
@@ -473,7 +526,15 @@ pub fn fire_notification(ctx: &HookCtx, message: &str, event_tx: Option<&Channel
     tokio::spawn(async move {
         let selected = ctx.set.select(HookEvent::Notification);
         let input = payload::notification(&ctx.base(), &message);
-        run(&ctx, HookEvent::Notification, selected, input, tx.as_ref()).await;
+        run(
+            &ctx,
+            HookEvent::Notification,
+            selected,
+            input,
+            None,
+            tx.as_ref(),
+        )
+        .await;
     });
 }
 
@@ -606,7 +667,7 @@ mod tests {
         // Recorded once for the session, not once per event: firing again must
         // not add a second round of skip lines to a file re-read every message.
         let before = std::fs::read_to_string(&store.path).unwrap();
-        fire_pre_tool_use(&ctx, "bash", &serde_json::json!({}), None).await;
+        fire_pre_tool_use(&ctx, "bash", "t1", &serde_json::json!({}), None).await;
         assert_eq!(std::fs::read_to_string(&store.path).unwrap(), before);
         assert_eq!(before.matches("skipped_untrusted").count(), 3);
 
@@ -638,7 +699,7 @@ mod tests {
         // Events the config says nothing about stay silent and cost nothing.
         assert!(fire_stop(&ctx, false, None).await.context().is_none());
         assert!(
-            fire_pre_tool_use(&ctx, "bash", &serde_json::json!({}), None)
+            fire_pre_tool_use(&ctx, "bash", "t1", &serde_json::json!({}), None)
                 .await
                 .context()
                 .is_none()
@@ -683,8 +744,14 @@ mod tests {
             .unwrap();
         let ctx = HookCtx::new(set, trust, "s-1", ws.join("s.jsonl"), ws.clone());
 
-        let denied =
-            fire_pre_tool_use(&ctx, "edit_file", &serde_json::json!({"path": "a"}), None).await;
+        let denied = fire_pre_tool_use(
+            &ctx,
+            "edit_file",
+            "t1",
+            &serde_json::json!({"path": "a"}),
+            None,
+        )
+        .await;
         assert_eq!(
             denied.verdict,
             PreToolVerdict::Deny {
@@ -693,8 +760,66 @@ mod tests {
         );
 
         // The matcher is what scopes it: bash is untouched.
-        let allowed = fire_pre_tool_use(&ctx, "bash", &serde_json::json!({}), None).await;
+        let allowed = fire_pre_tool_use(&ctx, "bash", "t1", &serde_json::json!({}), None).await;
         assert_eq!(allowed.verdict, PreToolVerdict::None);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tool_hooks_record_names_the_call_it_fired_around() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = tmp("toolid");
+        let script = ws.join("ok.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let group = format!(
+            r#"[{{"hooks":[{{"type":"command","command":"{}"}}]}}]"#,
+            script.display()
+        );
+        write(
+            &ws.join(".claudinio.json"),
+            &format!(r#"{{"hooks":{{"PostToolUse":{group},"Stop":{group}}}}}"#),
+        );
+
+        let cfg = crate::agent::provider::AgentConfig {
+            hooks_enabled: true,
+            ..Default::default()
+        };
+        let set = Arc::new(discovery::resolve_with_home(
+            Some(&ws),
+            &cfg,
+            Some(&ws.join("_home")),
+        ));
+        let trust = Arc::new(TrustStore::with_path(ws.join("trust.json")));
+        trust
+            .approve(&ws.display().to_string(), &set.fingerprint, vec![], 1)
+            .unwrap();
+        let store = SessionStore {
+            path: ws.join("s.jsonl"),
+        };
+        let ctx = HookCtx::new(set, trust, "s-1", store.path.clone(), ws.clone())
+            .with_store(store.clone());
+
+        fire_post_tool_use(
+            &ctx,
+            "bash",
+            "toolu_42",
+            &serde_json::json!({}),
+            &serde_json::json!({}),
+            None,
+        )
+        .await;
+        fire_stop(&ctx, false, None).await;
+
+        // The timeline puts a tool hook on its call's line by this id: on
+        // reload the hooks of a round come before the turn holding the calls.
+        let text = std::fs::read_to_string(&store.path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].contains(r#""tool_id":"toolu_42""#), "{}", lines[0]);
+        // Any other event has no call to name, and says nothing rather than null.
+        assert!(!lines[1].contains("tool_id"), "{}", lines[1]);
         std::fs::remove_dir_all(&ws).ok();
     }
 
