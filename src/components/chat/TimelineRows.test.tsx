@@ -404,6 +404,33 @@ describe("quiet hooks in the timeline", () => {
     expect(page()).not.toContain("Fires before a tool call is dispatched.");
   });
 
+  it("the tooltip grows with its text up to a limit, and a long path wraps inside it", () => {
+    // A settings path and a script path ran out of the right edge of a
+    // fixed-width box. jsdom lays nothing out, so this pins what makes the
+    // text wrap rather than the wrapping itself: a width cap instead of a
+    // width, a value column allowed to be narrower than its longest word, and
+    // somewhere to break inside a path.
+    const source = "/Users/me/.claude/settings.json";
+    const command = "/Users/me/.claude/hooks/rtk-rewrite.sh";
+    const el = mountSteps(() => [pre("t1", { source, command }), toolStep("t1")]);
+    hookButtons(el)[0].dispatchEvent(new MouseEvent("mouseenter"));
+
+    const tip = document.body.querySelector<HTMLElement>(".shadow-modal")!;
+    expect(tip.className).toContain("w-max");
+    expect(tip.className).toMatch(/max-w-\[min\(\d+px,calc\(100vw-/);
+    expect(tip.className).not.toMatch(/(^|\s)w-\d+(\s|$)/);
+    expect(tip.querySelector("dl")!.className).toContain("grid-cols-[auto_minmax(0,1fr)]");
+
+    const value = (text: string) =>
+      Array.from(tip.querySelectorAll("dd")).find((dd) => dd.textContent === text)!;
+    for (const text of [source, command]) {
+      // The text itself is untouched: the break points are elements, not characters.
+      expect(value(text)).toBeTruthy();
+      expect(value(text).className).toContain("break-words");
+      expect(value(text).querySelectorAll("wbr")).toHaveLength(text.split("/").length - 1);
+    }
+  });
+
   it("hovering a line of hooks explains them the same way", () => {
     const el = mountSteps(() => [hookStep({ event: "Stop" })]);
     hookButtons(el)[0].dispatchEvent(new MouseEvent("mouseenter"));

@@ -589,7 +589,34 @@ function createHover() {
   };
 }
 
+/// A path or a command line, with a place to wrap after every slash.
+///
+/// A path is one word to the line breaker, so on its own it either runs out of
+/// its box or, told to break anywhere, breaks mid-name ("hoo" / "ks"). The
+/// `<wbr>`s give it somewhere better to break; `break-words` on the element
+/// around it is still what catches a segment too long to fit.
+const Wrappable: Component<{ text: string }> = (props) => {
+  const parts = () => props.text.split("/");
+  return (
+    <Index each={parts()}>
+      {(part, i) => (
+        <>
+          {part()}
+          <Show when={i < parts().length - 1}>
+            {"/"}
+            <wbr />
+          </Show>
+        </>
+      )}
+    </Index>
+  );
+};
+
 /// What hovering a hook icon shows: every hook behind it, and how each went.
+///
+/// As wide as what it has to say, up to a limit, and never wider than the
+/// window: past that the text wraps inside it. A fixed width could not hold a
+/// settings path or a script path on one line, and they ran out of the box.
 const HooksTooltip: Component<{
   hooks: HookItem[];
   triggerRef: () => HTMLElement | undefined;
@@ -601,11 +628,11 @@ const HooksTooltip: Component<{
     triggerRef={props.triggerRef}
     gap={{ y: 6 }}
     showBackdrop={false}
-    class="pointer-events-none w-80 rounded-lg border border-border-subtle bg-surface-1 p-3 shadow-modal"
+    class="pointer-events-none w-max min-w-56 max-w-[min(520px,calc(100vw-16px))] rounded-lg border border-border-subtle bg-surface-1 p-3 shadow-modal"
   >
     <Show when={props.hooks.length > 1}>
       <div class="mb-2 flex items-baseline justify-between gap-3 border-b border-border-subtle pb-2">
-        <span class="text-[12px] font-medium text-ink">{hooksTitle(props.hooks)}</span>
+        <span class="min-w-0 text-[12px] font-medium text-ink">{hooksTitle(props.hooks)}</span>
         <span class="shrink-0 text-[11px] text-ink-muted">{hooksOutcome(props.hooks)}</span>
       </div>
     </Show>
@@ -614,28 +641,37 @@ const HooksTooltip: Component<{
         {(hook) => (
           <div>
             <div class="flex items-baseline justify-between gap-3">
-              <span class="text-[12px] font-medium text-ink">{`${hook().event} hook`}</span>
+              <span class="min-w-0 text-[12px] font-medium text-ink break-words">
+                {`${hook().event} hook`}
+              </span>
               <span class="shrink-0 text-[11px] text-ink-muted">{hookOutcome(hook())}</span>
             </div>
             <Show when={HOOK_EVENT_FIRES[hook().event]}>
               <p class="text-[11px] leading-snug text-ink-faint">{HOOK_EVENT_FIRES[hook().event]}</p>
             </Show>
-            <dl class="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+            {/* minmax(0, 1fr), not 1fr: a bare 1fr track is never narrower
+                than its longest word, and a path is one word. That is what let
+                the values push past the edge of the box. */}
+            <dl class="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-[11px]">
               <Show when={hook().status === "running" && hook().statusMessage}>
                 <dt class="text-ink-faint">{"Doing"}</dt>
-                <dd class="text-accent">{hook().statusMessage}</dd>
+                <dd class="text-accent break-words">{hook().statusMessage}</dd>
               </Show>
               <Show when={hook().decision}>
                 <dt class="text-ink-faint">{"Decision"}</dt>
-                <dd class="text-ink-muted">{hook().decision}</dd>
+                <dd class="text-ink-muted break-words">{hook().decision}</dd>
               </Show>
               <Show when={hook().source}>
                 <dt class="text-ink-faint">{"From"}</dt>
-                <dd class="break-words text-ink-muted">{hook().source}</dd>
+                <dd class="text-ink-muted break-words">
+                  <Wrappable text={hook().source} />
+                </dd>
               </Show>
               <Show when={hook().command}>
                 <dt class="text-ink-faint">{"Command"}</dt>
-                <dd class="line-clamp-2 break-all font-mono text-ink-muted">{hook().command}</dd>
+                <dd class="line-clamp-3 font-mono text-ink-muted break-words">
+                  <Wrappable text={hook().command} />
+                </dd>
               </Show>
             </dl>
           </div>
@@ -662,7 +698,9 @@ const HookDetails: Component<{ hooks: HookItem[] }> = (props) => (
             <span class="font-medium text-ink-muted">{`${hook().event} hook`}</span>
             <span class="text-ink-faint">{hookOutcome(hook())}</span>
             <Show when={hook().source}>
-              <span class="text-ink-faint">{hook().source}</span>
+              <span class="min-w-0 text-ink-faint break-words">
+                <Wrappable text={hook().source} />
+              </span>
             </Show>
           </div>
           <div class="mb-1 font-mono text-[11px] font-medium text-ink-muted">{"Command"}</div>
