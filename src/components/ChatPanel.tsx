@@ -980,6 +980,7 @@ export const ChatPanel: Component<{
             source: data.source,
             statusMessage: data.statusMessage,
             status: "running",
+            ...(data.toolId ? { toolId: data.toolId } : {}),
           },
         } as TimelineItem,
       ]);

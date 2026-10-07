@@ -265,6 +265,12 @@ pub enum SessionRecord {
         stdout: String,
         stderr: String,
         decision: Option<String>,
+        /// The tool call a `PreToolUse`/`PostToolUse` hook fired around. The
+        /// hooks of a round are written before the assistant turn that holds
+        /// its tool calls, so on reload position says nothing about which hook
+        /// was whose; this does. Absent for every other event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_id: Option<String>,
         ts: u64,
     },
     /// Context a hook injected into the conversation.

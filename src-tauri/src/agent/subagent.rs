@@ -632,6 +632,7 @@ pub async fn run_subagent(
                     crate::agent::hooks::fire_pre_tool_use(
                         h,
                         &tool_name,
+                        &tool_use_id,
                         &hook_input,
                         Some(event_tx),
                     )
@@ -678,6 +679,7 @@ pub async fn run_subagent(
                 let out = crate::agent::hooks::fire_post_tool_use(
                     h,
                     &tool_name,
+                    &tool_use_id,
                     &hook_input,
                     &response,
                     Some(event_tx),

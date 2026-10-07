@@ -173,6 +173,12 @@ const PATHS: Record<string, string[]> = {
     "M8 10.75v3.5",
     "M8 1.75v3.5",
   ],
+  // A fish hook (24×24, stroke): eye, shank, bend and barb. Lifecycle hooks.
+  hook: [
+    "M17 4.5a2 2 0 1 1-4 0a2 2 0 0 1 4 0",
+    "M15 6.5V15a5 5 0 0 1-10 0v-4",
+    "M5 11l3.5 3.5",
+  ],
   diff: [
     // bi:file-earmark-diff
     "M8 5a.5.5 0 0 1 .5.5V7H10a.5.5 0 0 1 0 1H8.5v1.5a.5.5 0 0 1-1 0V8H6a.5.5 0 0 1 0-1h1.5V5.5A.5.5 0 0 1 8 5m-2.5 6.5A.5.5 0 0 1 6 11h4a.5.5 0 0 1 0 1H6a.5.5 0 0 1-.5-.5",
@@ -273,6 +279,7 @@ const STROKE_ICONS: Partial<Record<IconName, boolean>> = {
   "notebook-pen": true,
   sliders: true,
   globe: true,
+  hook: true,
 };
 
 export const Icon: Component<{ name: IconName; class?: string; stroke?: boolean }> = (props) => {

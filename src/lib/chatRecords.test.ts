@@ -198,6 +198,22 @@ describe("recordsToMessages — what does not split", () => {
     expect(m[2].steps!.map((s) => s.type)).toEqual(["hook", "tool"]);
   });
 
+  it("a tool hook keeps the id of the call it fired around", () => {
+    // The hooks of a round are written before the turn that holds its tool
+    // calls, so the id is the only thing that says which hook was whose.
+    const m = recordsToMessages([
+      ...user("hi"),
+      { kind: "hook", event: "PreToolUse", command: "guard.sh", status: "ok", tool_id: "t1", ts: 7 },
+      { kind: "hook", event: "PostToolUse", command: "fmt.sh", status: "ok", tool_id: "t1", ts: 8 },
+      { kind: "hook", event: "Stop", command: "notify.sh", status: "ok", ts: 9 },
+      ...toolRound("t1", "bash", "ok"),
+      answer("Done."),
+    ]);
+    const hooks = m[1].steps!.filter((s) => s.type === "hook").map((s) => s.hook!);
+    expect(hooks.map((h) => h.toolId)).toEqual(["t1", "t1", undefined]);
+    expect("toolId" in hooks[2]).toBe(false);
+  });
+
   it("an ask_user that got no answer stays a tool row", () => {
     const m = recordsToMessages([
       ...user("hi"),
@@ -323,12 +339,18 @@ describe("the live run — when an answer closes its message", () => {
     expect(startsNewRound(ev("SubagentStarted"))).toBe(true);
   });
 
+  it("a PreToolUse hook is the next round starting: it fires before its call is announced", () => {
+    // Left with the answer it would sit under it, a message away from the tool
+    // call whose line it belongs on.
+    expect(startsNewRound(ev("HookStarted", { event: "PreToolUse" }))).toBe(true);
+  });
+
   it("what the harness does after an answer stays with that answer", () => {
     // The gate's "Verifying the goal…" note, its verdict and the Stop hook
     // all come between the final answer and Done.
     expect(startsNewRound(ev("TextStep", { text: "Verifying the goal…" }))).toBe(false);
     expect(startsNewRound(ev("QualityVerdict"))).toBe(false);
-    expect(startsNewRound(ev("HookStarted"))).toBe(false);
+    expect(startsNewRound(ev("HookStarted", { event: "Stop" }))).toBe(false);
     expect(startsNewRound(ev("SessionStats"))).toBe(false);
     expect(startsNewRound(ev("Thinking", ""))).toBe(false);
     expect(startsNewRound(ev("Done"))).toBe(false);

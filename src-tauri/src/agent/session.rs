@@ -995,6 +995,11 @@ pub enum AgentEvent {
         source: String,
         #[serde(rename = "statusMessage")]
         status_message: Option<String>,
+        /// The tool call a `PreToolUse`/`PostToolUse` hook fired around, so the
+        /// timeline can put it on that call's line instead of on one of its
+        /// own. `HookFinished` does not repeat it: it updates the same row.
+        #[serde(rename = "toolId", default, skip_serializing_if = "Option::is_none")]
+        tool_id: Option<String>,
     },
     #[serde(rename = "HookFinished")]
     HookFinished {
@@ -3462,6 +3467,7 @@ pub async fn run_workflow_with_profile(
                     crate::agent::hooks::fire_pre_tool_use(
                         h,
                         &tool_name,
+                        &tool_use_id,
                         &hook_input,
                         Some(event_tx),
                     )
@@ -3673,6 +3679,7 @@ pub async fn run_workflow_with_profile(
                 let out = crate::agent::hooks::fire_post_tool_use(
                     h,
                     &tool_name,
+                    &tool_use_id,
                     &hook_input,
                     &response,
                     Some(event_tx),
