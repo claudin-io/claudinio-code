@@ -49,6 +49,26 @@ jobs:
             echo "⏭️  $VER is not newer than the floor ($FLOOR) — skipping release."
           fi
 
+      # The build stamps the version from the tag, the binaries from the
+      # manifests. 0.7.1 was tagged without the bump, so it shipped binaries
+      # that called themselves 0.7.0 under a feed announcing 0.7.1. Refuse that
+      # before building anything: tag the `chore(release): X.Y.Z` commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.check.outputs.proceed == 'true'
+      - name: Tag matches the version in every manifest
+        if: steps.check.outputs.proceed == 'true'
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          fail=0
+          for f in package.json src-tauri/tauri.conf.json; do
+            v="$(node -p "require('./$f').version")"
+            [ "$v" = "$TAG" ] || { echo "::error file=$f::tag $TAG but $f says $v"; fail=1; }
+          done
+          v="$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -1)"
+          [ "$v" = "$TAG" ] || { echo "::error file=src-tauri/Cargo.toml::tag $TAG but src-tauri/Cargo.toml says $v"; fail=1; }
+          exit $fail
+
   build:
     name: Build ${{ matrix.platform }}
     needs: guard
