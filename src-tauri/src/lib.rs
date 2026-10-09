@@ -244,3 +244,49 @@ mod architecture_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod release_version_tests {
+    use std::path::Path;
+
+    fn json_version(rel: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let body = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        json["version"].as_str().unwrap_or_default().to_string()
+    }
+
+    /// The app reports the version in Cargo.toml (and tauri.conf.json to the
+    /// updater), the frontend the one in package.json. A release bumps all of
+    /// them together, or an installed build disagrees with the update feed.
+    #[test]
+    fn every_manifest_carries_the_same_version() {
+        let cargo = env!("CARGO_PKG_VERSION");
+        assert_eq!(json_version("tauri.conf.json"), cargo, "tauri.conf.json");
+        assert_eq!(json_version("../package.json"), cargo, "package.json");
+    }
+
+    /// The release takes its version from the tag. 0.7.1 was tagged on a
+    /// commit whose manifests still said 0.7.0, so every binary it shipped
+    /// called itself 0.7.0 while latest.json announced 0.7.1. The guard job
+    /// must refuse such a tag before anything is built.
+    #[test]
+    fn the_release_refuses_a_tag_that_differs_from_the_manifests() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/release.yml");
+        let workflow = std::fs::read_to_string(path).unwrap();
+        let guard = workflow
+            .split("\n  build:")
+            .next()
+            .expect("release.yml has a guard job before build");
+        for manifest in [
+            "package.json",
+            "src-tauri/tauri.conf.json",
+            "src-tauri/Cargo.toml",
+        ] {
+            assert!(
+                guard.contains(manifest),
+                "the guard job must compare the tag with {manifest}"
+            );
+        }
+    }
+}
