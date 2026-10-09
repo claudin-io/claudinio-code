@@ -36,7 +36,7 @@ jobs:
 
       # Prebuilt binary. `cargo install cargo-audit` would dominate the runtime
       # of a job whose actual work takes a couple of seconds.
-      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-audit
 
