@@ -28,7 +28,7 @@ fn resolve_model_dir(
     workspace_root: &Path,
 ) -> Option<std::path::PathBuf> {
     let subdir = format!("models/{}", embeddings::model_cache_dirname());
-    let model_file = embeddings::model_filename();
+    let model_file = embeddings::model_marker_filename();
     if let Ok(r) = app_handle.path().resource_dir() {
         let p = r.join(&subdir);
         if p.join(model_file).exists() {
@@ -226,7 +226,15 @@ pub async fn open_workspace(
     // Download model to cache if not bundled
     if resolve_model_dir(&app_handle, ws_root).is_none() {
         let cache = cache_model_dir(&app_handle);
-        if let Err(e) = embeddings::ensure_model_downloaded(&cache).await {
+        let observer: crate::code_intel::download::DownloadObserver = Arc::new(|label: &str| {
+            let guard = crate::net_activity::NetGuard::begin(
+                crate::net_activity::NetSource::EmbeddingModelDownload,
+                label,
+            );
+            Box::new(move |n: u64| guard.add_bytes(n))
+        });
+        if let Err(e) = embeddings::ensure_model_downloaded_observed(&cache, Some(&observer)).await
+        {
             eprintln!("[open_workspace] failed to download embedding model: {e}");
             let _ = app_handle.emit(
                 "index-progress",
@@ -257,12 +265,15 @@ pub async fn open_workspace(
         let shared_progress = index_progress.clone();
         move || {
             let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
+            let progress = |p: indexer::IndexProgress| {
+                let _ = app_handle.emit("index-progress", p.clone());
+                let _ = progress_channel.send(p);
+            };
             indexer::scan_workspace(
                 db.as_ref(),
                 &path,
-                Some(&app_handle),
+                Some(&progress),
                 None, // no embedder yet
-                Some(&progress_channel),
                 Some(&shared_progress),
             )
         }
@@ -357,7 +368,10 @@ pub async fn open_workspace(
         let ws_path = path.clone();
         let join = spawn_blocking(move || {
             let _prio = crate::code_intel::thread_priority::BackgroundPriority::begin();
-            indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&emit_handle), &ws_path)
+            let progress = |p: indexer::IndexProgress| {
+                let _ = emit_handle.emit("index-progress", p);
+            };
+            indexer::generate_all_embeddings(db2.as_ref(), &shared, Some(&progress), &ws_path)
         });
         let emit_handle = app_handle.clone();
         let db3 = db.clone();
@@ -395,24 +409,45 @@ pub async fn open_workspace(
         });
     }
 
-    let (watcher, watcher_warning): (Option<FileWatcher>, Option<String>) =
-        match FileWatcher::start(&path, &db_path, app_handle.clone()) {
-            Ok(w) => (Some(w), None),
-            Err(e) => {
-                eprintln!("[open_workspace] file watcher failed (workspace still usable): {e}");
-                let _ = app_handle.emit(
-                    "index-progress",
-                    indexer::IndexProgress {
-                        status: "watcher_warning".into(),
-                        files_indexed: files_count,
-                        symbols_indexed: symbols_count,
-                        total_files: files_count,
-                        workspace: path.clone(),
-                    },
-                );
-                (None, Some(format!("Live file watching unavailable: {e}")))
-            }
-        };
+    let (watcher, watcher_warning): (Option<FileWatcher>, Option<String>) = match FileWatcher::start(
+        &path,
+        &db_path,
+        {
+            // Asked at every batch: the model may finish loading after the
+            // watcher starts.
+            let handle = app_handle.clone();
+            Arc::new(move || {
+                handle
+                    .state::<AppState>()
+                    .embedding_model
+                    .blocking_lock()
+                    .clone()
+            })
+        },
+        {
+            let handle = app_handle.clone();
+            let ws = path.clone();
+            Arc::new(move |event| {
+                let _ = handle.emit("index-progress", watch_event_payload(&event, &ws));
+            })
+        },
+    ) {
+        Ok(w) => (Some(w), None),
+        Err(e) => {
+            eprintln!("[open_workspace] file watcher failed (workspace still usable): {e}");
+            let _ = app_handle.emit(
+                "index-progress",
+                indexer::IndexProgress {
+                    status: "watcher_warning".into(),
+                    files_indexed: files_count,
+                    symbols_indexed: symbols_count,
+                    total_files: files_count,
+                    workspace: path.clone(),
+                },
+            );
+            (None, Some(format!("Live file watching unavailable: {e}")))
+        }
+    };
 
     // Update watcher and watcher_warning on the already-inserted workspace
     {
@@ -484,4 +519,76 @@ pub async fn file_outline(
 ) -> Result<Vec<SymbolRecord>, String> {
     let ws = state.workspace(&workspace).await?;
     ws.index_db.symbols_in_file(&file_path)
+}
+
+/// The `index-progress` payload for one live re-index. The frontend routes it
+/// to a workspace by its `workspace` field, which the watcher's own event does
+/// not carry.
+fn watch_event_payload(
+    event: &crate::code_intel::watcher::WatchEvent,
+    workspace: &str,
+) -> serde_json::Value {
+    use crate::code_intel::watcher::WatchEvent;
+    match event {
+        WatchEvent::Reindexing { file } => serde_json::json!({
+            "status": "reindexing",
+            "file": file,
+            "workspace": workspace,
+        }),
+        WatchEvent::Reindexed { file, symbols } => serde_json::json!({
+            "status": "reindexed",
+            "file": file,
+            "symbols": symbols,
+            "workspace": workspace,
+        }),
+        WatchEvent::ReindexError { file, error } => serde_json::json!({
+            "status": "reindex_error",
+            "file": file,
+            "error": error,
+            "workspace": workspace,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_intel::watcher::WatchEvent;
+    use serde_json::json;
+
+    /// These are the shapes the frontend has always received on
+    /// `index-progress` for a file the watcher re-indexed.
+    #[test]
+    fn watch_events_reach_the_frontend_in_their_original_shape() {
+        let ws = "/repo";
+        assert_eq!(
+            watch_event_payload(
+                &WatchEvent::Reindexing {
+                    file: "a.rs".into()
+                },
+                ws
+            ),
+            json!({"status": "reindexing", "file": "a.rs", "workspace": ws})
+        );
+        assert_eq!(
+            watch_event_payload(
+                &WatchEvent::Reindexed {
+                    file: "a.rs".into(),
+                    symbols: 3
+                },
+                ws
+            ),
+            json!({"status": "reindexed", "file": "a.rs", "symbols": 3, "workspace": ws})
+        );
+        assert_eq!(
+            watch_event_payload(
+                &WatchEvent::ReindexError {
+                    file: "a.rs".into(),
+                    error: "boom".into()
+                },
+                ws
+            ),
+            json!({"status": "reindex_error", "file": "a.rs", "error": "boom", "workspace": ws})
+        );
+    }
 }

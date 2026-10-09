@@ -777,10 +777,8 @@ name = "claudinio-code"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
- "candle-core",
- "candle-nn",
- "candle-transformers",
  "chrono",
+ "claudinio-code-intel",
  "csv",
  "diffy",
  "dirs",
@@ -793,9 +791,6 @@ dependencies = [
  "keepawake",
  "lru",
  "machine-uid",
- "notify",
- "notify-debouncer-mini",
- "ort",
  "regex",
  "reqwest",
  "rmcp",
@@ -815,9 +810,37 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tiktoken-rs",
- "tokenizers 0.23.1",
  "tokio",
  "tokio-tungstenite",
+ "tree-sitter",
+ "uuid",
+ "windows-sys 0.59.0",
+ "xxhash-rust",
+ "zip 4.6.1",
+]
+
+[[package]]
+name = "claudinio-code-intel"
+version = "0.1.1"
+source = "git+https://github.com/claudin-io/code-intel?branch=feat%2Fdownload-observer#526db9690946486c9142139e686f590f0083901c"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
+ "futures",
+ "ignore",
+ "notify",
+ "notify-debouncer-mini",
+ "ort",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokenizers 0.23.1",
+ "tokio",
  "tree-sitter",
  "tree-sitter-ada",
  "tree-sitter-agda",
@@ -896,10 +919,8 @@ dependencies = [
  "tree-sitter-yaml",
  "tree-sitter-zig",
  "tree-sitter-zsh",
- "uuid",
  "windows-sys 0.59.0",
  "xxhash-rust",
- "zip 4.6.1",
 ]
 
 [[package]]

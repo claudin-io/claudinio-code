@@ -210,6 +210,24 @@ mod architecture_tests {
         );
     }
 
+    /// Code intelligence lives in one place, the `claudinio-code-intel` crate
+    /// the MCP plugin is also built from. `src/code_intel/` is only the seam
+    /// that re-exports it: a second copy of the indexer here drifts from the
+    /// plugin's, and a fix lands in one of them.
+    #[test]
+    fn code_intel_is_the_shared_crate_not_a_copy() {
+        let mut copies = Vec::new();
+        visit(Path::new("src/code_intel"), &mut |path, _| {
+            if path.file_name().is_none_or(|n| n != "mod.rs") {
+                copies.push(path.display().to_string());
+            }
+        });
+        assert!(
+            copies.is_empty(),
+            "src/code_intel must only re-export claudinio-code-intel, found {copies:?}"
+        );
+    }
+
     fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;

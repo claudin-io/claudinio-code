@@ -1,15 +1,10 @@
-pub mod db;
-pub mod embeddings;
-pub mod fallback;
-pub mod indexer;
-pub mod parser;
-pub mod text;
-pub mod thread_priority;
-pub mod watcher;
+//! Code intelligence is the `claudinio-code-intel` crate, the same code the
+//! code-intel MCP plugin ships (github.com/claudin-io/code-intel). This module
+//! only re-exports it, so the app keeps addressing it as `crate::code_intel::…`.
+//! Tauri stays out of it: `commands::code_intel` turns the crate's progress and
+//! watch callbacks into `index-progress` events.
 
-/// Only one workspace indexes at a time. Restoring several workspaces at
-/// startup used to launch parallel scans + embedding runs that together pegged
-/// every core (and hammered slow/network drives). Lives here rather than with
-/// the IPC command that first acquires it, so the file watcher can respect the
-/// same limit without `code_intel` depending on `commands`.
-pub static INDEX_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+pub use claudinio_code_intel::{
+    INDEX_SEMAPHORE, db, download, embeddings, fallback, indexer, parser, text, thread_priority,
+    watcher,
+};
