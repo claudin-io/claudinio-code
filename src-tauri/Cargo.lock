@@ -822,7 +822,7 @@ dependencies = [
 [[package]]
 name = "claudinio-code-intel"
 version = "0.1.1"
-source = "git+https://github.com/claudin-io/code-intel?branch=feat%2Fdownload-observer#526db9690946486c9142139e686f590f0083901c"
+source = "git+https://github.com/claudin-io/code-intel?rev=03c0b0fbebcf7edbc8791b9704a89e9aeb8c7ada#03c0b0fbebcf7edbc8791b9704a89e9aeb8c7ada"
 dependencies = [
  "candle-core",
  "candle-nn",

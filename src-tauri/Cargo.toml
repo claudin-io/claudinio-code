@@ -61,7 +61,7 @@ tempfile = "3"
 # shared crate the code-intel MCP plugin is built from, so a fix lands in both.
 # Its grammars, ort/candle and tokenizers come in through it. tree-sitter is
 # still named here for quality/metrics, and must stay the version it uses.
-claudinio-code-intel = { git = "https://github.com/claudin-io/code-intel", branch = "feat/download-observer", default-features = false }
+claudinio-code-intel = { git = "https://github.com/claudin-io/code-intel", rev = "03c0b0fbebcf7edbc8791b9704a89e9aeb8c7ada", default-features = false }
 tree-sitter = "0.25"
 rusqlite = { version = "0.32", features = ["bundled"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
