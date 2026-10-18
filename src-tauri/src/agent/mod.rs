@@ -2,6 +2,9 @@ pub mod app_sign;
 pub mod budget;
 pub mod deferred;
 pub mod delegation;
+// Wired into the session by the commits that follow (doc_session).
+#[allow(dead_code)]
+pub mod document;
 pub mod events;
 pub mod handoff;
 pub mod hooks;
