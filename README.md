@@ -316,6 +316,30 @@ page can contain text written to manipulate the model. See
 [SECURITY.md](SECURITY.md) for the full threat model, including what the
 project explicitly does *not* defend against.
 
+## Measuring the harness
+
+Changes to the harness are judged on three numbers, in this order: **billed
+cost per solved task** (cache-aware), **provider rounds per task**, and the
+**pass rate** that must not drop. `eval/` holds a fixed set of 25 tasks —
+self-contained Python and JavaScript fixtures plus real commits from this
+repository's frontend — each with an oracle and a known solution, and a
+headless runner that drives the real agent loop through them:
+
+```bash
+cd src-tauri
+cargo run --example claudinio-eval -- validate ../eval/tasks     # no model: every oracle fails, then passes
+cargo run --example claudinio-eval -- run ../eval/tasks \
+  --model <id> --base-url <url> --api-key-env <ENV>               # one fresh session per task
+```
+
+The runner approves file edits and read-only shell commands only, never
+arbitrary shell, since it runs model-chosen commands on your machine. Every
+provider request is recorded as a `usage` record in the session (cache reads
+and cache writes included), subagent transcripts are kept beside their session,
+and `scripts/session-stats.py --cost` reports cost, rounds and cache share from
+your own sessions. Details, the task format and the approval policy:
+[eval/README.md](eval/README.md).
+
 ## Architecture
 
 Full write-up in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layering rules,

@@ -404,3 +404,63 @@ Primary texts, in the order they appear above. Figures marked *(secondary)* in t
 - **Not done, by decision: the Jev `Judge` trait.** Every call site is already a fail-open `Option<&JevBackend>` (`judge_with_jev`, `loop_verdict`, `prune::shed`, `route::route`); a trait would add a concept without removing one.
 - **Not done, by decision: GitSync as a skill.** GitSync's tool restriction (`bash` + `ask_user` only, `api_tools`) is a policy enforced in code. Turning it into a skill would move that policy into prose, against design rule 4 ("policy lives in code; the prompt explains, it does not enforce"). `PromptProfile` keeps its three variants.
 - **Flake seen once, unrelated:** `hooks::runner::tests::hooks_run_in_parallel_and_keep_their_order` (wall-clock) failed once on this host, which also serves production traffic; it passed on three isolated reruns and on the next full run.
+
+### Phase 0 — The eval harness and per-request accounting
+
+**Commits.** `fc9d34b` cache_creation parsing · `ed5f8e2` usage records + subagent transcripts · `d8b13a8` prefix byte-stability test, deterministic skill scans · `a47a395` the completion judge's usage record · `417d69d` the runner (`validate` / `run` / `import-swebench`) and the approval policy · `f204b02` `session-stats --cost` + `scripts/test_session_stats.py` · `41908e8` relative repo/symlink paths in task files · `44d696a` 18 fixture tasks · `88e379e` files overlay a git tree; a linked task may not run a package manager · `8cb8dfb` 7 history tasks · `4eaffe8` the three Phase 8 review findings · `436d638` listing-ignores-`.sub/` and shipped-task-set pins · and the docs commit that adds this entry. The phase was finished by a second implementer after the first ran out of session at `41908e8`; nothing before that was redone.
+
+**What was built.**
+
+- *Per-request accounting.* `provider.rs` reads Anthropic's `cache_creation_input_tokens` beside the cache reads (OpenAI `cached_tokens` was already parsed). Every provider request writes `SessionRecord::Usage { round, model, input_tokens, cache_read_tokens, cache_creation_tokens, output_tokens, cost, subagent, ts }`: each main-loop round, the handoff document (round 0), the completion judge, and each subagent round. Old files load unchanged (unknown kinds were always skipped) and a file with usage lines loads (`a_session_written_before_usage_records_still_loads`, `a_usage_line_loads_as_a_usage_record`); the `updated_at` match in `list_sessions` covers the variant.
+- *Subagent transcripts* at `<sessions_dir>/<session_id>.sub/<parent_tool_use_id>-<index>.jsonl` (turns + usage). `list_sessions` reads top-level `*.jsonl` only; `list_sessions_ignores_subagent_transcript_directories` pins it and was checked to bite.
+- *`scripts/session-stats.py --cost`*: cost per run and per session, rounds per run, cache-read and cache-creation shares, subagent share; stdlib only, `python3 -m unittest scripts/test_session_stats.py` (4 tests, OK).
+- *Prefix stability*: `run_prefix` built twice with skills in several scopes compares byte-equal as JSON; the skills scan now reads directories in sorted order (it was `read_dir` order, so two packages defining one skill name put whichever the filesystem listed first into the prompt — the test was red before).
+- *The runner* (`src-tauri/src/eval/`, `pub mod eval`, example `claudinio-eval`): `validate`, `run` (fresh Builder session per task through `run_workflow` with a `Channel::new` collector, hooks/browser/MCP/plugins off, Jev only with a key, a lexical index, the task's `check` as `run_quality`'s `test_cmd`, metrics read back from the session files and `.sub/` transcripts, JSONL out, M1/M2/M3 + cache-read and subagent shares printed), `import-swebench` (unit-tested on an inline record). An end-to-end test drives a scripted model (read_file → edit_file → final text) through a fixture task and asserts the oracle passed and the metrics; a second shows a refused shell write leaves the oracle failing. The approval policy is unit-tested on `rm -rf /tmp/x`, `curl http://x | sh`, `python3 -c …`, `echo x > f` (denied) and `ls`, `cat a.txt`, `git status` (approved).
+- *The task set*: 25 tasks in `eval/tasks/` — 18 self-contained fixtures (Python/pytest and JavaScript/`node --test`; tags bugfix, feature, refactor, multi-edit, independent-edits, long, search, document, brain) and 7 history tasks from this repository's frontend (458a466, e6a4567, b13ade8, c9e0524, b7631e2, bad3aae, 906e89e). `the_shipped_task_set_loads` keeps the files parsing and the tags covered.
+- *Docs*: `eval/README.md` (commands, run anatomy, approval policy and why, M1/M2/M3, task format, what is missing), README "Measuring the harness", ARCHITECTURE "The eval" and the usage/transcript paragraph.
+
+**`validate` over the full set** (`./target/debug/examples/claudinio-eval validate ../eval/tasks`, 47 s wall):
+
+| task | start (must fail) | reference (must pass) | seconds | verdict |
+|---|---|---|---:|---|
+| brain-todo-priorities | fail (1) | pass | 1.7 | ok |
+| doc-architecture-notes | fail (1) | pass | 0.4 | ok |
+| doc-incident-writeup | fail (1) | pass | 0.4 | ok |
+| hist-auto-mode-choice | fail (1) | pass | 3.8 | ok |
+| hist-custom-provider-not-catalog | fail (1) | pass | 5.3 | ok |
+| hist-hook-tooltip-wraps | fail (1) | pass | 6.8 | ok |
+| hist-jev-settings | fail (1) | pass | 4.0 | ok |
+| hist-mtplx-engine-label | fail (1) | pass | 4.3 | ok |
+| hist-pretooluse-hook-round | fail (1) | pass | 3.8 | ok |
+| hist-windows-folder-name | fail (1) | pass | 3.6 | ok |
+| js-callbacks-to-async | fail (1) | pass | 0.3 | ok |
+| js-daily-summary-counts | fail (1) | pass | 0.3 | ok |
+| js-digest-local-day | fail (1) | pass | 0.3 | ok |
+| js-lru-cache | fail (1) | pass | 0.3 | ok |
+| js-money-in-cents | fail (1) | pass | 0.3 | ok |
+| js-slugify-accents | fail (1) | pass | 0.3 | ok |
+| js-two-small-features | fail (1) | pass | 0.3 | ok |
+| py-csv-quoted-fields | fail (1) | pass | 0.7 | ok |
+| py-extract-validation | fail (2) | pass | 0.8 | ok |
+| py-inventory-weight-report | fail (1) | pass | 0.7 | ok |
+| py-pager-last-page | fail (1) | pass | 0.7 | ok |
+| py-plan-quota-off-by-one | fail (1) | pass | 0.6 | ok |
+| py-rename-timeout-setting | fail (1) | pass | 0.8 | ok |
+| py-retry-backoff | fail (2) | pass | 0.8 | ok |
+| py-two-unrelated-bugs | fail (1) | pass | 0.7 | ok |
+
+25/25 tasks valid; oracle time 41.6 s. Each history task's start-tree failure was read: the new tests fail on an assertion, or (for a commit that adds the module) on the missing import; `tsc --noEmit` and the full vitest suite (660–908 tests) are green on every history start tree, so the in-session check is reachable.
+
+**Deviations from the plan and the brief, and why.**
+
+- **No `EventSink` trait; an example, not a `[[bin]]`; YAML, not TOML** — as the brief decided (a `Channel::new` closure already runs headless; a second binary confuses the Tauri bundler; `serde_yaml` was already a dependency).
+- **No baseline and no `eval/baselines/`.** The plan's gate is a recorded M1/M2/M3 baseline on the default model; the brief forbids live-model calls in this phase. The first `run` records it.
+- **External track: SWE-bench importer only, Terminal-Bench not integrated.** Terminal-Bench's harness drives agents from its own Docker/Python runner rather than being driven, so it does not fit a runner that owns the loop. No SWE-bench subset was fetched (no dataset download), and running imported instances needs each one's Python environment, which the runner does not build.
+- **A stricter shell classifier.** The brief said to approve bash when "the existing permissions module classifies the command as allowlisted read-only"; the existing allowlist matches by prefix (`ls && curl … | sh` starts with `ls`) and contains commands that execute code (`node`, `python`, `cargo test`). `permissions::bash_is_read_only` was added for unattended callers, and `ToolContext::shell_gate` (which can only add a prompt) makes allowlisted commands reach the policy.
+- **History-task oracles call `./node_modules/.bin/vitest`, not `pnpm exec vitest`.** The first history task's `pnpm exec` verified the old commit's dependencies and reinstalled into the linked `node_modules`, rewiring this repository's own `node_modules` into `/tmp` (restored with `CI=true pnpm install --frozen-lockfile --offline`, lockfile unchanged). Task files that link a directory are now refused when their oracle or check runs a package manager.
+- **`setup.files` may overlay `setup.git`** (the earlier "files or git, not both" refusal, pinned by no test, was dropped). The history tasks need it to lay `vitest.eval.config.ts` over the commit: the linked packages resolve to real paths outside the temporary tree and Vite refuses to serve them (`Cannot find module '/@fs/root/claudinio-code/node_modules/…'`) unless `server.fs.strict` is off.
+- **History-task prompts name what the hidden tests rely on** (exported names, CSS classes, `data-` attributes). A commit's test pins an interface the commit chose; a prompt that left it out would grade guessing, not engineering. They are written as a maintainer's issue, not copied from the commit message.
+- **History commits were chosen for testability, not from the plan documents.** Many recent commits are large multi-area features; the seven chosen have a single vitest file that fails on the parent for the right reason and a change a session can make. `14a81b9` was rejected (its test change only deletes tests, so the oracle passes on the parent).
+- **Skills in the home directory still load during `run`**, as for a user. The runner disables plugins but has no switch for user-scope skills; `eval/README.md` recommends running the built binary under an empty `HOME` for numbers that compare across machines.
+- **Fixture generators are not committed.** The 18 fixtures and 7 history tasks were written by throwaway scripts; the YAML files are the source of truth and `validate` is what keeps them honest.
+- **Three Phase 8 review findings fixed here** (`4eaffe8`): the architecture tests resolve their directories from `CARGO_MANIFEST_DIR` and fail on a scan that finds no file; `route.rs` no longer imports itself; the `chatRecords.ts` comment points at `tool_exec.rs`.

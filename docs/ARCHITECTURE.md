@@ -127,8 +127,14 @@ nowhere else: a shell command that writes a file is asked about like an
 the profile's ten is refused rather than run.
 
 Each run writes a `run_config` record (model, window, lines, prefix by part,
-profile), each subagent a `subagent_run`, each routing decision a `mode_route`.
-`scripts/session-stats.py` aggregates them.
+profile), each subagent a `subagent_run`, each routing decision a `mode_route`,
+and every provider request a `usage` record (round, model, input, cache-read,
+cache-creation and output tokens, the provider's cost when it reports one, and
+which subagent asked). A subagent's own turns and usage go to
+`<session>.sub/<parent_tool_use_id>-<n>.jsonl` beside the session file, not
+into it: the session file is the model's history and is replayed into the next
+request. `scripts/session-stats.py` aggregates them (`--cost` for cost, rounds
+and cache share per run).
 
 ## Trust boundaries
 
@@ -298,6 +304,24 @@ SolidJS, no store library — signals and props.
 
 The frontend makes no network requests of its own. Every provider call happens
 in Rust, which is why the CSP can keep `connect-src` closed.
+
+## The eval
+
+`src-tauri/src/eval/` is a headless runner over the real agent loop, exposed as
+the `claudinio-eval` Cargo example (not a `[[bin]]`, which the Tauri bundler
+would pick up). It lives in the crate because it drives the private `agent`
+module, and nothing in it is reachable from the IPC surface. A task (YAML under
+`eval/tasks/`) is materialized into a fresh directory outside any repository,
+given one `start` commit and a `.claudinio.json` whose quality `test_cmd` is the
+task's check; then `run_workflow` runs a fresh Builder session with a
+`Channel::new` closure as the event sink, so no Tauri window is involved, and
+the task's oracle decides pass or fail. Approvals and `ask_user` are answered
+by `eval::policy`: edits yes, read-only shell yes, every other shell command no
+(the runner turns on `ToolContext::shell_gate`, which only ever adds a prompt,
+so allowlisted commands reach the policy too). Metrics are read back from the
+session files the run wrote — the same `usage` records and `.sub/` transcripts
+a user's sessions have. `validate` needs no model: each oracle must fail on the
+start tree and pass on the reference. See `eval/README.md`.
 
 ## Things that look odd and are deliberate
 
