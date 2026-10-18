@@ -8,7 +8,7 @@ vi.mock("monaco-editor", () => ({
   editor: { create: vi.fn(), createDiffEditor: vi.fn(), defineTheme: vi.fn() },
 }));
 
-import { HookRow, QualityRow, TimelineSteps } from "./TimelineRows";
+import { HookRow, LinkedRow, QualityRow, TimelineSteps } from "./TimelineRows";
 import type { TimelineItem } from "../../lib/chatRecords";
 import type { QualityVerdictData } from "../../lib/ipc";
 
@@ -555,5 +555,15 @@ describe("quiet hooks in the timeline", () => {
     expect(hookButtons(el)[0].getAttribute("aria-expanded")).toBe("true");
     expect(el.textContent).toContain("/ws/guard.sh");
     expect(el.textContent).toContain("/ws/format.sh");
+  });
+});
+
+describe("LinkedRow", () => {
+  it("a new document's handoff says a new topic began, not that the context ran out", () => {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    dispose = render(() => <LinkedRow linked={{ reason: "new_document" }} />, host);
+    expect(host.textContent).toContain("New topic");
+    expect(host.textContent).not.toContain("Context limit");
   });
 });

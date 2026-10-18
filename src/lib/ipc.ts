@@ -270,7 +270,10 @@ export type HandoffReason =
   | "plan_execution"
   | "golden_flip"
   | "context_handoff"
-  | "manual_builder";
+  | "manual_builder"
+  // doc_create in a session that already has a document: a new top-level
+  // topic continues in a new session that owns the new document.
+  | "new_document";
 
 export interface SessionLinkedData {
   prevSessionId: string;

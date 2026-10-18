@@ -901,6 +901,7 @@ export const LinkedRow: Component<{
       case "golden_flip": return "Golden loop — continuing in a fresh session";
       case "context_handoff": return "Context limit reached — continued in a fresh session";
       case "manual_builder": return "Continuing with Builder in a new session";
+      case "new_document": return "New topic — continued in a new session with its own document";
       default: return "Context limit reached — continued in a fresh session";
     }
   };
