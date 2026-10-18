@@ -296,6 +296,33 @@ pub fn slug(title: &str) -> String {
     }
 }
 
+/// `<workspace>/.claudinio/docs`, made one folder at a time, refusing a
+/// component that is a link or a file. `doc_create` runs without approval
+/// in a workspace that may be a cloned repo: a `.claudinio` that links out
+/// would otherwise take the scaffold (and `create_dir_all` the folders)
+/// wherever it points — the same escape [`document_path`] refuses on the
+/// read and rewrite path.
+fn docs_dir(workspace: &Path) -> Result<PathBuf, String> {
+    let mut dir = workspace.to_path_buf();
+    for component in DOCS_DIR.split('/') {
+        dir.push(component);
+        match std::fs::symlink_metadata(&dir) {
+            // A link's own metadata is never `is_dir`.
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{DOCS_DIR} must be a plain folder inside the workspace; {} is a link or a file",
+                    dir.display()
+                ));
+            }
+            Err(_) => {
+                std::fs::create_dir(&dir).map_err(|e| format!("cannot create {DOCS_DIR}: {e}"))?
+            }
+        }
+    }
+    Ok(dir)
+}
+
 /// Write a new document for `title` with one placeholder per topic under
 /// `<workspace>/.claudinio/docs/`, never over an existing file, and start its
 /// memory beside `memory_of` (a session file) when given. Returns the
@@ -324,18 +351,29 @@ pub fn create(
                 .into(),
         );
     }
-    let dir = workspace.join(DOCS_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {DOCS_DIR}: {e}"))?;
+    let dir = docs_dir(workspace)?;
     let base = slug(title);
+    // `symlink_metadata`, not `exists`: `exists` follows a link and calls a
+    // dangling one free, and writing through it would create its target.
     let name = (1..)
         .map(|n| match n {
             1 => format!("{base}.md"),
             n => format!("{base}-{n}.md"),
         })
-        .find(|name| !dir.join(name).exists())
+        .find(|name| std::fs::symlink_metadata(dir.join(name)).is_err())
         .unwrap_or_default();
     let text = document::render(&doc);
-    std::fs::write(dir.join(&name), &text).map_err(|e| format!("cannot write {name}: {e}"))?;
+    // `create_new` refuses any entry already there, a link included, so a
+    // link planted between the check above and this write is not followed.
+    {
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(&name))
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .map_err(|e| format!("cannot write {name}: {e}"))?;
+    }
     let rel = format!("{DOCS_DIR}/{name}");
     let Some(store_path) = memory_of else {
         return Ok((rel, doc));
@@ -1025,6 +1063,66 @@ mod tests {
         assert_eq!(again, ".claudinio/docs/pudim-de-leite-2.md");
         assert!(create(&ws.root, Some(&ws.store()), " ", &topics).is_err());
         assert!(create(&ws.root, Some(&ws.store()), "T", &[]).is_err());
+    }
+
+    /// `doc_create` runs without approval and its file name comes from the
+    /// model's title, so a link a cloned repo planted in its path must not
+    /// make the harness write outside the workspace: a dangling link where
+    /// the scaffold would go is a taken name, never followed (following it
+    /// would create its target), and a `.claudinio` or `.claudinio/docs`
+    /// that is a link is refused before anything is written.
+    #[cfg(unix)]
+    #[test]
+    fn create_never_writes_through_a_planted_symlink() {
+        let outside = std::env::temp_dir().join(format!(
+            "claudinio-doc-planted-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        let topics = vec!["origem".to_string()];
+
+        // A dangling link at the slug's name.
+        let ws = Ws::new("planted-file");
+        std::fs::create_dir_all(ws.root.join(DOCS_DIR)).unwrap();
+        let target = outside.join("created.md");
+        std::os::unix::fs::symlink(&target, ws.root.join(DOCS_DIR).join("pudim.md")).unwrap();
+        let made = create(&ws.root, Some(&ws.store()), "Pudim", &topics);
+        assert!(!target.exists(), "the link's target was created");
+        if let Ok((rel, _)) = made {
+            assert_eq!(rel, ".claudinio/docs/pudim-2.md");
+        }
+
+        // The docs folder itself, and `.claudinio`, as links out (a bare
+        // workspace with no session folder, so `.claudinio` is free).
+        for linked in [DOCS_DIR, ".claudinio"] {
+            let root = outside.join(format!("ws-{}", linked.replace('/', "-")));
+            let away = outside.join(format!("away-{}", linked.replace('/', "-")));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&away).unwrap();
+            if linked == DOCS_DIR {
+                std::fs::create_dir_all(root.join(".claudinio")).unwrap();
+            }
+            std::os::unix::fs::symlink(&away, root.join(linked)).unwrap();
+            assert!(create(&root, None, "Pudim", &topics).is_err(), "{linked}");
+            let written: Vec<_> = walk(&away);
+            assert!(written.is_empty(), "{linked}: wrote {written:?}");
+        }
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[cfg(unix)]
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
     }
 
     /// The session file is workspace data, and the harness rewrites the
