@@ -72,14 +72,30 @@ pub fn apply_cache_breakpoints(body: &mut Value) {
     }
 }
 
-fn strip_cache_control(v: &mut Value) {
-    match v {
-        Value::Object(map) => {
-            map.remove("cache_control");
-            map.values_mut().for_each(strip_cache_control);
+/// Removes the breakpoints a request can carry, and only those: the top level
+/// of each `system` block, each message content block and each tool
+/// definition. It never recurses. `cache_control` is a legal name inside a
+/// tool's `input_schema`, a `tool_use` input or a `tool_result` body (an HTTP
+/// tool exposing the Cache-Control header), and deleting it there would show
+/// the model a different schema than the server expects and rewrite its own
+/// past calls on the wire, while the unmarked fallback still sent them intact.
+fn strip_cache_control(body: &mut Value) {
+    fn unmark(blocks: Option<&mut Value>) {
+        for block in blocks.and_then(Value::as_array_mut).into_iter().flatten() {
+            if let Some(obj) = block.as_object_mut() {
+                obj.remove("cache_control");
+            }
         }
-        Value::Array(items) => items.iter_mut().for_each(strip_cache_control),
-        _ => {}
+    }
+    unmark(body.get_mut("system"));
+    unmark(body.get_mut("tools"));
+    for message in body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        unmark(message.get_mut("content"));
     }
 }
 
@@ -467,19 +483,70 @@ mod tests {
         let before = body_with_history();
         let mut after = before.clone();
         apply_cache_breakpoints(&mut after);
-        fn strip(v: &mut Value) {
-            match v {
-                Value::Object(map) => {
-                    map.remove("cache_control");
-                    map.values_mut().for_each(strip);
-                }
-                Value::Array(items) => items.iter_mut().for_each(strip),
-                _ => {}
-            }
+        // Remove exactly the marks at the positions a breakpoint may sit; a
+        // recursive strip here would hide a marker leaking anywhere else.
+        for path in marked_paths(&after) {
+            let pointer = format!("/{}", path.replace(['[', '.'], "/").replace(']', ""));
+            after
+                .pointer_mut(&pointer)
+                .and_then(Value::as_object_mut)
+                .expect("a marked block")
+                .remove("cache_control");
         }
-        strip(&mut after);
         after["system"] = after["system"][0]["text"].clone();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn a_tool_schema_property_or_a_tool_input_named_cache_control_survives_marking() {
+        // `cache_control` is a legal name for a tool parameter (an HTTP tool
+        // exposing the Cache-Control header). Only the breakpoints this module
+        // places are its to remove: the schema the model is shown and the
+        // arguments of its own past calls must reach the wire unchanged.
+        let schema = json!({
+            "type": "object",
+            "properties": {"cache_control": {"type": "string"}},
+            "required": ["cache_control"]
+        });
+        let input = json!({"url": "https://x", "cache_control": "no-store"});
+        let mut body = json!({
+            "system": "s",
+            "tools": [{"name": "fetch", "description": "d", "input_schema": schema.clone()}],
+            "messages": [
+                {"role": "user", "content": [text("fetch it")]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "fetch", "input": input.clone()}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1",
+                     "content": [{"type": "text", "text": "ok", "cache_control": "kept"}]}
+                ]}
+            ]
+        });
+        apply_cache_breakpoints(&mut body);
+        apply_cache_breakpoints(&mut body);
+        assert_eq!(body["tools"][0]["input_schema"], schema);
+        assert_eq!(body["messages"][1]["content"][0]["input"], input);
+        assert_eq!(
+            body["messages"][2]["content"][0]["content"][0]["cache_control"],
+            json!("kept")
+        );
+        assert_eq!(
+            marked_paths(&body),
+            vec![
+                "system[0]",
+                "messages[0].content[0]",
+                "messages[2].content[0]"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stray_marker_on_a_tool_definition_is_removed() {
+        let mut body = body_with_history();
+        body["tools"][1]["cache_control"] = marker();
+        apply_cache_breakpoints(&mut body);
+        assert!(body["tools"][1].get("cache_control").is_none());
     }
 
     fn resolved(protocol: Protocol, provider_id: &str, base_url: &str) -> ResolvedProvider {
