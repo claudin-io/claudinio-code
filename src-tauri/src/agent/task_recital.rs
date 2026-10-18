@@ -465,6 +465,28 @@ mod loop_tests {
         assert_eq!(texts.last(), tasks_block(&tasks).as_ref());
     }
 
+    // A context handoff from a session with no list: the successor's first
+    // message is the kickoff alone, and the kickoff says that is how a
+    // session without a list looks, so nothing sends the model looking.
+    #[tokio::test]
+    async fn a_successor_without_tasks_is_told_no_block_means_no_list() {
+        let ws = workspace("successor-no-tasks", &[]);
+        let kickoff = crate::agent::transition::compose_context_handoff_message(
+            "## Purpose of next session\nfinish it",
+            None,
+        );
+        let (_, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            &kickoff,
+            vec![Reply::Text("done")],
+        )
+        .await;
+        let texts = last_message_texts(&bodies[0]);
+        assert_eq!(texts, [kickoff.clone()]);
+        assert!(kickoff.contains("no `<tasks>` block means"), "{kickoff}");
+    }
+
     fn doing(id: &str, title: &str) -> TaskItem {
         TaskItem {
             status: "doing".into(),

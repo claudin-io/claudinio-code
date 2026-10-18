@@ -184,8 +184,9 @@ pub fn resolve_first_message(
 pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&str>) -> String {
     let mut msg = String::from(
         "[system] You are in Builder mode, in a fresh session that continues a \
-         planning session. The plan below and the carried-over task list (the \
-         `<tasks>` block that ends this message) are your worklist - execute them exactly:\n\n\
+         planning session. The plan below and the carried-over task list (a \
+         `<tasks>` block at the end of this message; no `<tasks>` block means there \
+         is no list) are your worklist - execute them exactly:\n\n\
          1. Follow the plan (Solution Design + Low-Level Design).\n\
          2. Take the tasks in dependency order:\n\
            - Mark one 'doing' in the same round as your first tool call for it.\n\
@@ -209,13 +210,16 @@ pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&st
 
 /// Wraps the model-generated handoff document as the first user message of
 /// the successor session. Tells the model to read the handoff and the task
-/// list the run appends after it (`agent::task_recital`), and continue.
+/// list the run appends after it (`agent::task_recital`), and continue. The
+/// run appends one only when the session has a list, so the text says what
+/// its absence means instead of promising it.
 pub fn compose_context_handoff_message(handoff_text: &str, plan_file: Option<&str>) -> String {
     let mut msg = String::from(
         "[system] This is a fresh session that continues previous work whose context \
-         reached its limit. The predecessor wrote the handoff document below; the \
-         current task list is the `<tasks>` block that ends this message. Read both and \
-         continue the in-flight work exactly where it stopped.\n\n",
+         reached its limit. The predecessor wrote the handoff document below; any \
+         current task list follows it as a `<tasks>` block at the end of this message \
+         (no `<tasks>` block means there is no list). Read them and continue the \
+         in-flight work exactly where it stopped.\n\n",
     );
     if let Some(path) = plan_file {
         msg.push_str(&format!("Plan file: {path}\n\n"));
@@ -315,5 +319,23 @@ mod tests {
         assert!(msg.contains("/p/plan.md"));
         assert!(!msg.contains("tasks_get"), "{msg}");
         assert!(msg.contains("`<tasks>` block"), "{msg}");
+    }
+
+    // The run appends a `<tasks>` block only when the session has a list
+    // (single-step work has none). A kickoff written before the successor's
+    // first run cannot know, so it must not promise a block that may not
+    // come: a model told a list "ends this message" that finds none goes
+    // looking for it with `tasks_get`, which is deferred — a load and a
+    // prefix rewrite (Phase 4 review). It says that no block means no list.
+    #[test]
+    fn handoff_kickoffs_do_not_promise_a_task_list_the_session_may_not_have() {
+        for msg in [
+            compose_context_handoff_message("## Purpose\nfinish it", None),
+            compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X")),
+            compose_builder_kickoff(None, None),
+        ] {
+            assert!(!msg.contains("block that ends this message"), "{msg}");
+            assert!(msg.contains("no `<tasks>` block means"), "{msg}");
+        }
     }
 }
