@@ -10,6 +10,15 @@ interface FileEditorModalProps {
   rootPath: string;
   onClose: () => void;
   onCursorLineChange?: (line: number) => void;
+  /** 1-based line to open at (a living document's section). */
+  initialLine?: number;
+  /**
+   * Save through the owner instead of writing the file: called with the text
+   * the editor loaded and the text being saved, it returns what the file
+   * holds afterwards (the living document merges a person's edit with what
+   * agents wrote meanwhile), which the editor then shows.
+   */
+  onSave?: (base: string, content: string) => Promise<string | void>;
 }
 
 export function detectLanguage(filePath: string): string {
@@ -62,8 +71,14 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
   const handleSave = async () => {
     if (!editor) return;
     const content = editor.getValue();
-    await writeFile(props.filePath, content);
-    setOriginalContent(content);
+    if (props.onSave) {
+      const after = (await props.onSave(originalContent(), content)) ?? content;
+      setOriginalContent(after);
+      if (after !== content) editor?.setValue(after);
+    } else {
+      await writeFile(props.filePath, content);
+      setOriginalContent(content);
+    }
     setIsDirty(false);
   };
 
@@ -110,6 +125,10 @@ const FileEditorModal: Component<FileEditorModalProps> = (props) => {
     });
 
     editor.focus();
+    if (props.initialLine && props.initialLine > 1) {
+      editor.revealLineInCenter(props.initialLine);
+      editor.setPosition({ lineNumber: props.initialLine, column: 1 });
+    }
 
     const disposable = editor.onDidChangeModelContent(() => {
       setIsDirty(editor!.getValue() !== originalContent());

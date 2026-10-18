@@ -313,6 +313,26 @@ export interface HooksAwaitingApprovalData {
   commands: string[];
 }
 
+/** One section of a session's living document, as the panel shows it. */
+export interface DocSectionView {
+  id: string;
+  topic: string;
+  /** todo | doing | done | human (last edited by the user). */
+  status: string;
+  /** "main", or "sub:<name>" for a subagent. */
+  owner?: string | null;
+  /** 1-based line of the section in the file. */
+  line: number;
+}
+
+/** A session's living document (lean-harness Phase 4b). */
+export interface DocView {
+  /** Relative to the workspace. */
+  path: string;
+  title: string;
+  sections: DocSectionView[];
+}
+
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
   | { event: "TextDelta"; data: { text: string } }
@@ -336,6 +356,7 @@ export type AgentEvent =
   | { event: "SubagentStarted"; data: SubagentStartedData }
   | { event: "SubagentDone"; data: SubagentDoneData }
   | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } }
+  | { event: "DocumentUpdated"; data: { sessionId: string; document: DocView } }
   | { event: "HookStarted"; data: HookStartedData }
   | { event: "HookFinished"; data: HookFinishedData }
   | { event: "HooksAwaitingApproval"; data: HooksAwaitingApprovalData }
@@ -1436,6 +1457,25 @@ export interface TaskItem {
 
 export function getTasks(workspace: string): Promise<TaskItem[]> {
   return invoke<TaskItem[]>("get_tasks", { workspace });
+}
+
+/** The session's living document, or null when it has none. */
+export function getDocument(workspace: string, sessionId?: string): Promise<DocView | null> {
+  return invoke<DocView | null>("get_document", { workspace, sessionId: sessionId ?? null });
+}
+
+/**
+ * Save the person's edit of the document: `base` is the text the editor
+ * loaded, `content` what they saved. The backend keeps what agents wrote
+ * meanwhile and marks the sections the person changed.
+ */
+export function saveDocument(
+  workspace: string,
+  base: string,
+  content: string,
+  sessionId?: string,
+): Promise<DocView> {
+  return invoke<DocView>("save_document", { workspace, sessionId: sessionId ?? null, base, content });
 }
 
 export function setTasks(workspace: string, tasks: TaskItem[]): Promise<void> {

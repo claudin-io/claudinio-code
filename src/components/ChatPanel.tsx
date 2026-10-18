@@ -79,6 +79,14 @@ import ContentViewerModal from "./ContentViewerModal";
 import { Popover } from "./Popover";
 import { NewSessionPopover } from "./NewSessionPopover";
 import QuestionCard from "./QuestionCard";
+import {
+  clearSubagentRequest,
+  documentFromEvent,
+  invalidateDocument,
+  pendingSubagentRequest,
+  publishDocument,
+  subagentForOwner,
+} from "../lib/documentStore";
 
 import {
   askUserAnswerMessages,
@@ -193,6 +201,21 @@ export const ChatPanel: Component<{
     const findIn = (steps: TimelineItem[] | undefined) =>
       steps?.find((s) => s.type === "subagent" && s.subagent?.id === id)?.subagent;
     return findIn(currentSteps()) ?? messages().map((m) => findIn(m.steps)).find((s) => s);
+  });
+  // The document panel's owner chip opens that subagent's timeline: the
+  // latest subagent of that name, live or in the conversation so far.
+  createEffect(() => {
+    const req = pendingSubagentRequest();
+    if (!req || req.workspace !== props.workspace) return;
+    clearSubagentRequest();
+    const subs = [
+      ...messages().flatMap((m) => m.steps ?? []),
+      ...currentSteps(),
+    ]
+      .filter((s) => s.type === "subagent" && s.subagent)
+      .map((s) => ({ id: s.subagent!.id, name: s.subagent!.name }));
+    const id = subagentForOwner(req.owner, subs);
+    if (id) setOpenSubagentId(id);
   });
   const [thinkingStart, setThinkingStart] = createSignal(0);
   const [liveExpandedStep, setLiveExpandedStep] = createSignal<number | null>(null);
@@ -848,6 +871,11 @@ export const ChatPanel: Component<{
   };
 
   const handleEvent = (event: AgentEvent) => {
+    // The living document's outline goes to the panel beside the chat
+    // (lean-harness Phase 4b), also when a subagent wrote its section.
+    const doc = documentFromEvent(event);
+    if (doc) publishDocument(props.workspace, doc);
+    if (event.event === "SessionLinked") invalidateDocument(props.workspace);
     // Any event other than Retrying means the connection is alive again —
     // drop the reconnecting banner.
     if (event.event !== "Retrying" && retryingInfo() !== null) {
