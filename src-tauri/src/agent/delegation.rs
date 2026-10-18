@@ -241,7 +241,19 @@ mod tests {
             "the marker counts exactly what is missing"
         );
         // Cut on line boundaries, so no finding is left half-written.
-        assert!(head.ends_with('\n'), "{:?}", &head[head.len() - 40..]);
+        // `head` ends with the separator `cap_report` adds, so the check is
+        // on the text before it: a whole line of the report, ending where
+        // that line ended.
+        let kept = head
+            .strip_suffix('\n')
+            .expect("the separator before the marker");
+        assert!(
+            kept.ends_with("a finding the subagent wrote down")
+                && report.starts_with(kept)
+                && report[kept.len()..].starts_with('\n'),
+            "{:?}",
+            &kept[kept.len() - 40..]
+        );
         assert!(
             tail.trim_start_matches('\n').starts_with("line "),
             "{:?}",
