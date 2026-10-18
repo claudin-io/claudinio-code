@@ -26,6 +26,7 @@ use crate::agent::session::{
     push_user_blocks, write_status,
 };
 use crate::agent::subagent;
+use crate::agent::tool_batch;
 use crate::agent::tool_exec::{
     MAX_STOP_HOOK_BLOCKS, deny_tool, fit_round, force_explore_mode, handle_mode_switch, run_tool,
     tool_response_for_hook,
@@ -1348,35 +1349,38 @@ pub async fn run_workflow_with_profile(
         // A hook asked for the run to end (`continue: false`).
         let mut hook_stop_request: Option<String> = None;
 
+        // Results of read-only calls run ahead of the loop, by call index.
+        let mut ready: Vec<Option<ContentBlock>> = vec![None; tool_uses.len()];
         for (ti, tool_use) in tool_uses.iter().enumerate() {
+            // At the head of a run of read-only, unprompted, unhooked calls,
+            // run the whole run at once (`tool_batch`). Each result is then
+            // taken below in the model's order, as if the call ran here.
+            if ready[ti].is_none() && !steering.interrupt.load(Ordering::SeqCst) {
+                let compact = profile == PromptProfile::Compact
+                    && !matches!(mode_ctl.get().0, SessionMode::Brain);
+                tool_batch::run_ahead(
+                    &tool_uses,
+                    ti,
+                    &mut ready,
+                    |name, input| tool_batch::runs_in_parallel(name, input, config, ctx, compact),
+                    tool_batch::executor(event_tx, session_id, ctx),
+                    &steering.interrupt,
+                    event_tx,
+                )
+                .await;
+            }
             // C — Entre tools: checar interrupt. Se setado, sintetizar
-            // tool_result "interrompido" para este e todos os tool_uses restantes.
+            // tool_result "interrompido" para este e todos os tool_uses restantes
+            // (a call a parallel run already finished keeps its result).
             if steering.interrupt.load(Ordering::SeqCst) {
-                for remaining in tool_uses.iter().skip(ti) {
-                    let tid = remaining
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let tname = remaining
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    tool_assistant_blocks.push(ContentBlock::tool_use(
-                        &tid,
-                        &tname,
-                        remaining.get("input").cloned().unwrap_or(Value::Null),
-                    ));
-                    let msg = "Interrupted by the user — the tool was not run.";
-                    let _ = event_tx.send(AgentEvent::ToolResult {
-                        tool_id: tid.clone(),
-                        tool_name: tname,
-                        output: msg.into(),
-                        error: None,
-                    });
-                    tool_result_blocks.push(ContentBlock::tool_result(&tid, msg));
-                }
+                tool_batch::answer_unrun(
+                    &tool_uses[ti..],
+                    &mut ready[ti..],
+                    tool_batch::INTERRUPTED,
+                    event_tx,
+                    &mut tool_assistant_blocks,
+                    &mut tool_result_blocks,
+                );
                 break;
             }
 
@@ -1443,8 +1447,9 @@ pub async fn run_workflow_with_profile(
             // run. An `allow` or `ask` does NOT short-circuit: the mode gates
             // still apply. Hooks may relax a prompt; they may never relax a
             // policy.
-            let block = if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_verdict
-            {
+            let block = if let Some(block) = ready[ti].take() {
+                block
+            } else if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_verdict {
                 deny_tool(
                     &tool_name,
                     &tool_use_id,
@@ -2187,6 +2192,8 @@ pub(crate) mod surface_tests {
         store: SessionStore,
         bodies: Vec<String>,
         root: std::path::PathBuf,
+        /// Every event the run streamed, in the order it was sent.
+        events: Vec<AgentEvent>,
     }
 
     /// One user message against a model that reads a file, edits it, and says
@@ -2242,7 +2249,20 @@ pub(crate) mod surface_tests {
             session_store_path: Some(store.path.to_string_lossy().to_string()),
             ..crate::agent::tools::tests_support::ctx()
         };
-        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events: Channel<AgentEvent> = {
+            let seen = seen.clone();
+            Channel::new(
+                move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
+                    if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                        && let Ok(event) = serde_json::from_str::<AgentEvent>(json)
+                    {
+                        seen.lock().unwrap().push(event);
+                    }
+                    Ok(())
+                },
+            )
+        };
         let approvals = ApprovalMap::default();
         // The person at the other end of every approval prompt.
         let user = answer.map(|answer| {
@@ -2277,13 +2297,144 @@ pub(crate) mod surface_tests {
             user.abort();
         }
         let bodies = bodies.lock().unwrap().clone();
+        let events = seen.lock().unwrap().clone();
         Run {
             outcome,
             file,
             store,
             bodies,
             root,
+            events,
         }
+    }
+
+    /// Where in `run.events` the first `ToolCall` (`call`) or the `ToolResult`
+    /// of `tool_id` was sent. A call is answered by exactly one `ToolResult`;
+    /// it may be announced twice, since an edit sends a second `ToolCall`
+    /// carrying its proposal.
+    fn event_at(run: &Run, call: bool, tool_id: &str) -> usize {
+        let at: Vec<usize> = run
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| match e {
+                AgentEvent::ToolCall { tool_id: id, .. } => call && id == tool_id,
+                AgentEvent::ToolResult { tool_id: id, .. } => !call && id == tool_id,
+                _ => false,
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!at.is_empty(), "no event for {tool_id}");
+        assert!(call || at.len() == 1, "{} results for {tool_id}", at.len());
+        at[0]
+    }
+
+    /// The `tool_use_id`s of the tool results the request `body` ends with.
+    fn answered_ids(body: &str) -> Vec<String> {
+        let body: Value = serde_json::from_str(body).unwrap();
+        let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+        last["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["tool_use_id"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    // Read-only calls next to each other run together; a call that is not one
+    // of them waits for the run before it and holds back the run after it, and
+    // the model gets every result back in the order it asked.
+    #[tokio::test]
+    async fn a_round_runs_its_reads_together_and_everything_else_in_order() {
+        let run = run_script("batch", None, None, |path| {
+            let root = std::path::Path::new(path)
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            vec![
+                Reply::Tools(vec![
+                    ("read_file", serde_json::json!({ "path": path })),
+                    ("list_dir", serde_json::json!({ "path": root })),
+                    ("bash", serde_json::json!({ "command": "echo between" })),
+                    (
+                        "grep",
+                        serde_json::json!({ "pattern": "hello", "path": root }),
+                    ),
+                    ("read_file", serde_json::json!({ "path": path })),
+                ]),
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        let (call, result) = (
+            |id: &str| event_at(&run, true, id),
+            |id: &str| event_at(&run, false, id),
+        );
+        // Both reads of the first run were under way before either answered.
+        assert!(call("tu_0_1") < result("tu_0_0"), "{:#?}", run.events);
+        // The shell command started only once that run was over…
+        assert!(result("tu_0_0") < call("tu_0_2") && result("tu_0_1") < call("tu_0_2"));
+        // …and the second run only once the command was.
+        assert!(result("tu_0_2") < call("tu_0_3"));
+        assert!(call("tu_0_4") < result("tu_0_3"));
+        assert_eq!(
+            answered_ids(&run.bodies[1]),
+            ["tu_0_0", "tu_0_1", "tu_0_2", "tu_0_3", "tu_0_4"]
+        );
+        assert!(
+            run.bodies[1].contains("between"),
+            "the command's output came back"
+        );
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    // read-before-edit holds inside one round: the reads finish (and are on
+    // record) before the edit that depends on them is tried.
+    #[tokio::test]
+    async fn an_edit_after_parallel_reads_in_the_same_round_sees_them() {
+        let run = run_script("batch-edit", Some(32_768), None, |path| {
+            let root = std::path::Path::new(path)
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            vec![
+                Reply::Tools(vec![
+                    (
+                        "read_file",
+                        serde_json::json!({ "path": path, "start_line": 1, "end_line": 1 }),
+                    ),
+                    ("list_dir", serde_json::json!({ "path": root })),
+                    (
+                        "edit_file",
+                        serde_json::json!({
+                            "path": path, "old_string": "hello", "new_string": "goodbye",
+                        }),
+                    ),
+                ]),
+                Reply::Text("changed the greeting"),
+            ]
+        })
+        .await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&run.file).unwrap(),
+            "goodbye world\n"
+        );
+        assert!(event_at(&run, true, "tu_0_1") < event_at(&run, false, "tu_0_0"));
+        assert!(event_at(&run, false, "tu_0_1") < event_at(&run, true, "tu_0_2"));
+        assert_eq!(answered_ids(&run.bodies[1]), ["tu_0_0", "tu_0_1", "tu_0_2"]);
+        std::fs::remove_dir_all(&run.root).ok();
     }
 
     // In every other profile a shell command that writes a file never reaches

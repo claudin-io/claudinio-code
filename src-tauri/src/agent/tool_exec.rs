@@ -29,7 +29,7 @@ use tokio::sync::oneshot;
 ///   `bash`'s deny-list and `browser`'s scheme check still refuse.
 /// - **`ask` can only tighten.** It promotes an automatic tool into a prompt.
 ///   It cannot un-deny anything.
-fn effective_permission(
+pub(super) fn effective_permission(
     perm: PermissionLevel,
     tool_name: &str,
     tool_input: &Value,
@@ -148,7 +148,33 @@ async fn execute_and_report(
         permission: permission_label.into(),
         edit_proposal: None,
     });
+    execute_reported(
+        tool_name,
+        tool_use_id,
+        tool_input,
+        permission_label,
+        event_tx,
+        session_id,
+        ctx,
+    )
+    .await
+}
 
+/// The second half of [`execute_and_report`]: run the tool and send its
+/// `ToolResult`, the `ToolCall` having been sent already. Split out for
+/// `tool_batch`, which announces every call of a parallel run in the model's
+/// order before any of them starts, so the timeline lists them in that order
+/// however they finish.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_reported(
+    tool_name: &str,
+    tool_use_id: &str,
+    tool_input: Value,
+    permission_label: &str,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+    ctx: &ToolContext,
+) -> ContentBlock {
     match tools::execute(tool_name, tool_input, ctx).await {
         Ok(ToolOutput::Text { content }) => {
             let truncated = truncate(&content, 2000);

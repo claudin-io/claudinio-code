@@ -247,6 +247,40 @@ pub enum ToolOutput {
     },
 }
 
+/// The tools whose calls may run side by side within one round.
+///
+/// Each of them only reads — the workspace, the code index, the language
+/// server, the web, the session's task list — so two of them can never change
+/// what the other sees, and the order their results are appended in is the
+/// only order that matters (the loop keeps the model's). Everything else runs
+/// one call at a time, as it always did: anything that writes (`edit_file`,
+/// the task and plan mutators), runs a command (`bash`, `run_quality`), drives
+/// the shared browser page, waits on the user (`ask_user`), starts agents or
+/// switches modes.
+///
+/// MCP tools are not here, whatever the server says about them: `connect_one`
+/// does not keep a tool's `readOnlyHint` annotation, an MCP call needs approval
+/// unless YOLO is on, and `McpManager::call` holds the connection list's lock
+/// for the whole call, so two of them would queue behind each other anyway.
+pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "grep",
+    "code_search",
+    "semantic_search",
+    "symbol_lookup",
+    "file_outline",
+    "go_to_definition",
+    "find_references",
+    "web_search",
+    "tasks_get",
+];
+
+/// Whether `name` is one of [`PARALLEL_SAFE_TOOLS`].
+pub fn is_parallel_safe(name: &str) -> bool {
+    PARALLEL_SAFE_TOOLS.contains(&name)
+}
+
 pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     vec![
         ToolDef {
@@ -1282,6 +1316,64 @@ mod tests {
         let lines: Vec<String> = (1..=20).map(|i| format!("line{i}")).collect();
         std::fs::write(&p, lines.join("\n")).unwrap();
         p
+    }
+
+    // The read-only tools a round may run concurrently, exactly: adding one is
+    // a decision about shared state, not a typo fix.
+    #[test]
+    fn the_read_only_tools_are_the_ones_that_may_run_side_by_side() {
+        let mut listed: Vec<&str> = PARALLEL_SAFE_TOOLS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(
+            listed,
+            [
+                "code_search",
+                "file_outline",
+                "find_references",
+                "go_to_definition",
+                "grep",
+                "list_dir",
+                "read_file",
+                "semantic_search",
+                "symbol_lookup",
+                "tasks_get",
+                "web_search",
+            ]
+        );
+    }
+
+    // A name in the list that no tool answers to would be a rule about
+    // nothing; one that needs approval would run before the user said yes.
+    #[test]
+    fn every_parallel_safe_tool_exists_and_runs_without_a_prompt() {
+        let defined: Vec<String> = get_defs(4).into_iter().map(|d| d.name).collect();
+        for name in PARALLEL_SAFE_TOOLS {
+            assert!(defined.iter().any(|d| d == name), "{name} is not a tool");
+            assert_eq!(
+                crate::agent::permissions::tool_permission(name),
+                crate::agent::permissions::PermissionLevel::Auto,
+                "{name}"
+            );
+        }
+        for name in [
+            "edit_file",
+            "bash",
+            "run_quality",
+            "ask_user",
+            "spawn_agents",
+            "tasks_set",
+            "tasks_update",
+            "write_plan",
+            "finalize_plan",
+            "enter_plan_mode",
+            "exit_plan_mode",
+            "browser",
+            "browser_inspect",
+            "browser_screenshot",
+            "mcp__github__search",
+        ] {
+            assert!(!is_parallel_safe(name), "{name} must run on its own");
+        }
     }
 
     #[test]
