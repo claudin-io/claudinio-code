@@ -261,10 +261,18 @@ wins). `document.rs` is the format and nothing else: a placeholder is a line
 whose trimmed content is `[topic]`; the harness tags each section with an HTML
 comment it owns (`<!-- claudinio: id=s2 status=doing by=sub:x -->`, status
 `todo | doing | done | human`); a written section is `## topic`, the comment,
-and its body up to the next section or level-1/2 heading (a body cannot open
-one: such lines are demoted or escaped on write); everything else is carried
+its body and the end marker `<!-- claudinio: end -->` the harness writes after
+it, so prose a person typed under a placeholder stays prose once that
+placeholder is written (a file without the marker — older, or a person removed
+it — reads the body up to the next section or level-1/2 heading, and the next
+write adds it); a body cannot open or end a section (such lines are demoted or
+escaped on write); everything else is carried
 byte for byte, so `parse` then `render` is the file. Ids are never reused, not
-even a deleted section's. `doc_session.rs` owns the file: one process-wide
+even a deleted section's. `doc_session.rs` owns the file — only a relative, plain-component `.md` path
+under `.claudinio/docs/` that does not resolve outside it through a link: the
+session JSONL is workspace data, and any other linked path leaves the session
+with no document rather than letting the harness rewrite, say, `Cargo.toml` at
+a run start. One process-wide
 lock around every read-modify-write (parallel subagents and the app's save
 share the file), and a memory beside the session (`<session>.doc.json`: the
 text last seen, the sections a person changed that no agent has read since,
@@ -284,7 +292,10 @@ same round (one cache break) or seeded as loaded when a session starts with a
 document (a successor's `tools_loaded` record). `doc_create` in a session that
 already has a document hands off (`HandoffReason::NewDocument`,
 `HandoffSpec.document`): the successor owns the new file and starts its memory
-at its first read (the old session's `<session>.doc.json` is left alone), and
+at its first read (the old session's `<session>.doc.json` is left alone; its
+first run — the one the handoff starts — may not hand off again, since the app
+follows every handoff and the successor's first message repeats the request),
+and
 of the old task list it keeps only the golden tasks, with the golden loop's
 counters (`transition::tasks_for_successor`); any other successor carries the
 predecessor's document and its memory. A subagent spawned with `section` gets that section claimed for it
@@ -298,7 +309,9 @@ outlives the run that spawned it, so a run's start frees any section still
 agent's edit would read as the person's and lock the agent out of its own
 section. The UI hears of
 every write and every detected edit through `AgentEvent::DocumentUpdated`
-and loads the panel with `get_document`; `save_document` merges a person's
+and loads the panel with `get_document` (polled every 5 s; it finds the link
+with `persist::linked_document_at`, which parses only the `document_linked`
+lines, not the whole session); `save_document` merges a person's
 save from the app with what agents wrote while the editor was open
 (`document::merge_human_save`) — every app save of that file, however the
 editor was opened on it (App decides with `isLinkedDocument` from the

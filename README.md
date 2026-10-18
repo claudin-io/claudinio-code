@@ -230,8 +230,10 @@ and then fills each placeholder with `doc_write`, in order or in parallel: an
 explore subagent spawned with `"section": "s2"` writes that section itself,
 and only that one, so its report back can be two lines. The harness tags each
 section with an HTML comment it owns (`<!-- claudinio: id=s2 status=doing
-by=sub:ingredientes -->`), invisible when the file is rendered; everything else
-in the file is yours and is kept byte for byte.
+by=sub:ingredientes -->`), invisible when the file is rendered, and closes a
+section it wrote with `<!-- claudinio: end -->`, so a note you type between two
+sections stays yours however often the agent rewrites the one above it;
+everything else in the file is yours and is kept byte for byte.
 
 - **You can edit it at any time, in the app or any editor, and your edit
   wins.** A section whose text you changed is marked *Edited by you*; an agent
@@ -248,8 +250,9 @@ in the file is yours and is kept byte for byte.
 - **A new top-level topic is a new document, and a new session.** Asking for
   one while the session already has a document opens a linked session that
   owns the new file; the old one keeps its own (and its memory of who edited
-  what). Your golden goals go along: a new topic is not a way out of them. A
-  context handoff carries the document along.
+  what). Your golden goals go along: a new topic is not a way out of them. The
+  new session fills its document before it may open another (a further topic
+  waits for your next message). A context handoff carries the document along.
 
 ### Nothing is a black box
 
