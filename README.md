@@ -108,23 +108,23 @@ requests several times its size.
 - **A small window gets a small prompt.** Under 64k tokens a Builder session
   runs a compact profile — one short prompt, ten tools, and it edits files
   itself instead of delegating — about 2.3k tokens before the conversation
-  starts, where the Standard prompt and tools take about 4.7k.
-- **Tools and skills arrive when they are needed.** A Standard session sends
-  eleven core tools; the rest — the index and LSP searches, the web and browser
-  tools, the plan-mode switches and every MCP tool — are listed in the prompt
+  starts, where the Standard prompt and tools take about 5.0k.
+- **Tools and skills arrive when they are needed.** A Standard Builder
+  session sends thirteen core tools; the rest — the index and LSP searches, the web and browser
+  tools, the switch to plan mode and every MCP tool — are listed in the prompt
   one line each, and the model loads the ones a task needs (`load_tools`, or
   simply by calling one). A loaded tool is appended and stays for the session,
   so the cached prefix only ever grows at its end. Skills are listed the same
   way, one line each, and read with the `skills` tool. With ten skills and a
-  twenty-tool MCP server the prefix is about 6.2k tokens, where it used to be
+  twenty-tool MCP server the prefix is about 6.4k tokens, where it used to be
   17k.
-- **The context is cached where the provider has to be told.** On an
-  Anthropic-protocol provider (Anthropic itself, OpenRouter's Claude routes, a
-  company proxy in front of either) a prefix is cached only up to an explicit
+- **The context is cached where the provider has to be told.** On a provider
+  configured with the Anthropic protocol (Anthropic itself, a company proxy in
+  front of it) a prefix is cached only up to an explicit
   breakpoint, so each request marks the system prompt and the end of the
   conversation; the next round reads all of it from the cache instead of
-  paying full price again. claudin.io and OpenAI-protocol servers cache on
-  their own and are sent no markers; a server that refuses them gets one
+  paying full price again. claudin.io and OpenAI-protocol servers — the
+  built-in OpenRouter sign-in among them — are sent no markers; a server that refuses them gets one
   retry without, and none after that.
 - **Tools per model.** Settings › Models can set a model to *Lean*, which
   leaves out the three LSP navigation tools and the prompt lines about them.

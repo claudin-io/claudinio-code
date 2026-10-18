@@ -112,16 +112,16 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   Builder roda um perfil compacto — um prompt curto, dez ferramentas, e ela
   mesma edita os arquivos em vez de delegar — cerca de 2,3k tokens antes de a
   conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
-  cerca de 4,7k.
-- **Ferramentas e skills chegam quando são necessárias.** Uma sessão Standard
-  envia onze ferramentas centrais; as demais — as buscas do índice e do LSP, as
-  ferramentas de web e browser, as trocas de modo de plano e toda ferramenta
+  cerca de 5,0k.
+- **Ferramentas e skills chegam quando são necessárias.** Uma sessão Builder
+  Standard envia treze ferramentas centrais; as demais — as buscas do índice e do LSP, as
+  ferramentas de web e browser, a troca para o modo de plano e toda ferramenta
   MCP — aparecem no prompt em uma linha cada, e o modelo carrega as que a
   tarefa pede (`load_tools`, ou simplesmente chamando uma). Uma ferramenta
   carregada é acrescentada ao fim e fica pela sessão, então o prefixo em cache
   só cresce no final. As skills são listadas do mesmo jeito, uma linha cada, e
   lidas com a ferramenta `skills`. Com dez skills e um servidor MCP de vinte
-  ferramentas o prefixo fica em cerca de 6,2k tokens, onde antes passava de 17k.
+  ferramentas o prefixo fica em cerca de 6,4k tokens, onde antes passava de 17k.
 - **Ferramentas por modelo.** Em Settings › Models um modelo pode ser posto em
   *Lean*, que deixa de fora as três ferramentas de navegação por LSP e as
   linhas do prompt sobre elas. Nada é Lean por padrão: se menos ferramentas

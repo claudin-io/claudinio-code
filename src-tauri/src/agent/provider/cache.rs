@@ -5,9 +5,10 @@
 //! context at the full input price, every round. The 2026-10-06 measurement
 //! (509 sessions) found $33.01 of input against $1.06 of cache reads, while the
 //! claudin.io proxy, whose upstreams cache implicitly, reports ~96% of input as
-//! cache reads. This module is the difference for everyone else speaking the
-//! Anthropic protocol: direct Anthropic, OpenRouter's Anthropic routes, a
-//! company proxy in front of either.
+//! cache reads. This module is the difference for every provider configured
+//! with the Anthropic protocol: direct Anthropic, or a company proxy in front of
+//! it. The built-in OpenRouter sign-in (`commands/providers.rs`) stores its
+//! provider with the OpenAI protocol, so it is not marked here.
 //!
 //! The markers are added to the *serialized* request, never to `Message` or
 //! `ContentBlock`: those types are also the session JSONL format, and a

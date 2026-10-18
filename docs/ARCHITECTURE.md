@@ -85,7 +85,12 @@ The loop is split by responsibility, one file each under `agent/`: `prompt.rs`
 (the prompt text and the tool list beside it), `run_loop.rs` (the loop above),
 `tool_exec.rs` (one tool call, from permission to `tool_result`), `judge.rs`
 (is a terminal turn finished, is the loop stuck), `handoff.rs` (what happens at
-a context line), `retry.rs`, and `events.rs` (`AgentEvent`). `session.rs` keeps
+a context line), `retry.rs`, `nudges.rs` (every text the harness itself puts in
+front of the model) and `events.rs` (`AgentEvent`). A refused request becomes
+`API error: HTTP <status> — <the provider's message>`
+(`provider/http_error.rs`: the error object's `message`, or the start of the
+body, one line, the API key redacted); `retry.rs` classifies by the status
+alone, so the message never changes whether a request is retried. `session.rs` keeps
 the controls a session shares with the UI — mode, steering, approvals, answers —
 and re-exports the loop's public names, so `agent::session::run_workflow` still
 resolves. `architecture_tests` fails the build when any file under `agent/`
@@ -131,7 +136,11 @@ no handoff or summary makes a system prompt smaller.
 Crossing a line sheds weight in three stages (`agent/prune.rs`), cheapest
 first: copies a newer result supersedes; what Jev judges disposable; then the
 oldest tool results by age. Text is never touched, nor are the user's answers
-to `ask_user` or the current task list. A stage is accepted only if
+to `ask_user` or the current task list. A dropped call is stubbed, never
+removed: its `tool_use` block stays with input `{}` and its result becomes a
+one-line note, because DeepSeek's thinking mode re-attaches its reasoning by the
+tool_use blocks of earlier assistant messages and refuses a history that lost
+one (HTTP 400, first live eval, 2026-10-18). A stage is accepted only if
 it frees enough to be worth the cache it invalidates — which is also why
 nothing is pruned early: on a caching provider the history is cheap to resend
 and expensive to rewrite.
@@ -151,10 +160,10 @@ the profile's ten is refused rather than run.
 **Deferred tools and skills by reference** (`agent/deferred.rs`,
 `agent/skills.rs`). A Standard main session sends a core set — `read_file`,
 `list_dir`, `grep`, `bash`, `run_quality`, `ask_user`, `tasks_get`,
-`tasks_set`, `tasks_update`, `spawn_agents`, `skills`, `load_tools`, and
-`write_plan` / `exit_plan_mode` in Brain — and names everything else in a
-`DEFERRED TOOLS` section of the system prompt, one line each: the index and
-LSP searches, `web_search`, the browser tools, `finalize_plan`,
+`tasks_set`, `tasks_update`, `spawn_agents`, `skills`, `load_tools`,
+`finalize_plan` in Builder and `write_plan` / `exit_plan_mode` in Brain — and
+names everything else in a `DEFERRED TOOLS` section of the system prompt, one
+line each: the index and LSP searches, `web_search`, the browser tools,
 `enter_plan_mode`, and every MCP tool (its own description cut to 100
 characters, at most 60 lines, the rest counted by server). `load_tools`
 appends definitions to the end of the tool list in load order, and a call to a
@@ -173,11 +182,14 @@ instructions come from the `skills` tool (`list` / `read`), which is also what
 the catalog tells the model to do with a `<skill>name</skill>` mention.
 Subagents defer nothing — a fresh context has no earlier load to build on —
 and leave out only the three LSP tools. Compact and GitSync defer nothing
-either. No Standard prompt line makes a deferred tool a first or mandatory
-call (pinned by test) — that is why `tasks_get`, the Builder's and every
-handoff's first call, stays core. The default Builder prefix measures 4,822
-tokens on the harness's meter (12,337 before), and 6,299 with ten skills and a
-twenty-tool MCP server
+either. No Standard prompt line makes a deferred tool a first, last or
+mandatory call, and no text the harness injects (`agent/nudges.rs`, the handoff
+kickoffs in `agent/transition.rs`) names one — both pinned by tests, because the
+model loads a tool to obey, and a load late in a session rewrites the cached
+prefix in front of the whole conversation. That is why `tasks_get`, the
+Builder's and every handoff's first call, and `finalize_plan`, its last, stay
+core. The default Builder prefix measures 4,968 tokens on the harness's meter
+(12,337 before), and 6,445 with ten skills and a twenty-tool MCP server
 (17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
 10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
 the definitions actually sent.
@@ -195,7 +207,9 @@ previous one wrote even when a round of parallel tool calls adds more blocks
 than the API looks back over. Never more than three markers, never on a
 thinking block or an empty text block, and `Message`/`ContentBlock` are left
 alone — they are also the session format. `wants_cache_markers` decides who
-gets them: Anthropic protocol only, never a local engine or a loopback host,
+gets them: providers configured with the Anthropic protocol only (the built-in
+OpenRouter sign-in stores its provider with the OpenAI protocol, so it is not
+marked), never a local engine or a loopback host,
 and **never claudin.io** — its proxy runs a prompt manager that rewrites the
 system prompt server-side and its upstreams cache implicitly (it measures ~96%
 of executor input as cache reads), so changing the shape of `system` there
