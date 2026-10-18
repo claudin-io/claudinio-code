@@ -1,0 +1,54 @@
+id: hist-auto-mode-choice
+title: Decide when the mode control may offer Auto (history, c9e0524)
+tags:
+- history
+- feature
+- brain
+- typescript
+prompt: |
+  Add a small module src/lib/modeChoice.ts that decides when the mode control
+  can offer "Auto" (leave the choice between Brain and Builder to the harness's
+  router), with three exported functions and a type:
+
+  - `type ModeChoice = SessionMode | "auto"`.
+  - `routerOn(jev: JevStatus | undefined): boolean` — true only when Jev is not
+    disabled (`enabled !== false`), `route === "on"`, and Jev has a credential
+    (`backend` is not null/undefined). Unknown status, a config without `route`,
+    "shadow" and "off" all mean false.
+  - `autoAvailable(jev, sessionIsFresh: boolean): boolean` — Auto is offered only
+    on a fresh session (no first prompt yet) and only when `routerOn`.
+  - `modeToSend(mode: SessionMode, armed: boolean, jev): ModeChoice` — "auto"
+    when Auto was left on (`armed`) and there is a router; otherwise the mode the
+    user picked.
+
+  `JevStatus` comes from src/lib/ipc.ts; give it an optional
+  `route?: "on" | "shadow" | "off"` field if it has none. Cover the module with
+  vitest tests in src/lib/modeChoice.test.ts.
+setup:
+  git:
+    repo: ../..
+    commit: 39532d0836a43f6e0712756a80f42c927c4de575
+  symlinks:
+    node_modules: ../../node_modules
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+        }),
+      );
+check: ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vitest run --config vitest.eval.config.ts
+oracle:
+  command: ./node_modules/.bin/vitest run --config vitest.eval.config.ts src/lib/modeChoice.test.ts
+  timeout_s: 300
+  reference_files:
+  - src/lib/modeChoice.test.ts
+reference:
+  git_commit: c9e05242f0d5f151fe3559164de16a0ac684dcd3
+max_rounds: 60

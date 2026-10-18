@@ -1,0 +1,53 @@
+id: hist-hook-tooltip-wraps
+title: The hook tooltip grows with its text and long paths wrap inside it (history, e6a4567)
+tags:
+- history
+- bugfix
+- frontend
+- typescript
+prompt: |
+  The tooltip that appears when hovering a hook icon in the chat timeline
+  (HooksTooltip in src/components/chat/TimelineRows.tsx) is a fixed 320px wide
+  (`w-80`), and its values sit in a `grid-cols-[auto_1fr]` grid. A settings path
+  under "From" runs out of the right edge of the box, and a script path under
+  "Command" breaks in the middle of a name ("hoo" / "ks").
+
+  Fix it:
+  - The tooltip is as wide as its content (`w-max`), at least `min-w-56`, and at
+    most `max-w-[min(520px,calc(100vw-16px))]`; no fixed `w-*` width any more.
+  - The <dl> uses `grid-cols-[auto_minmax(0,1fr)]` so a value can be narrower
+    than its longest word.
+  - Every <dd> value gets `break-words`. The "From" (source) and "Command" values
+    get a `<wbr>` element after every "/", so a path wraps between segments; the
+    text content itself must stay exactly the path. The command may show up to
+    three lines instead of two.
+  Add a test for it next to the existing quiet-hooks tests in
+  src/components/chat/TimelineRows.test.tsx.
+setup:
+  git:
+    repo: ../..
+    commit: b9b83c8b0b77a79b7c4ce407ff062b071215bfce
+  symlinks:
+    node_modules: ../../node_modules
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+        }),
+      );
+check: ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vitest run --config vitest.eval.config.ts
+oracle:
+  command: ./node_modules/.bin/vitest run --config vitest.eval.config.ts src/components/chat/TimelineRows.test.tsx
+  timeout_s: 300
+  reference_files:
+  - src/components/chat/TimelineRows.test.tsx
+reference:
+  git_commit: e6a4567f3721ffcd9c20a80cd2854db0e2cbbe01
+max_rounds: 60
