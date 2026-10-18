@@ -2068,7 +2068,7 @@ pub(crate) mod surface_tests {
         tools.iter().map(|t| t.name.as_str()).collect()
     }
 
-    fn standard(mode: SessionMode) -> String {
+    fn standard(mode: SessionMode, version: crate::agent::prompt::PromptVersion) -> String {
         system_prompt(
             Some("/ws"),
             Some(SKILLS),
@@ -2078,6 +2078,7 @@ pub(crate) mod surface_tests {
             PromptProfile::Standard,
             4,
             false,
+            version,
         )
     }
 
@@ -2085,10 +2086,17 @@ pub(crate) mod surface_tests {
     // cost a failed call every time the model believed it.
     #[test]
     fn a_lean_prompt_names_none_of_the_tools_lean_drops() {
-        for mode in [SessionMode::Brain, SessionMode::Builder] {
-            let full = standard(mode);
+        for (mode, version) in [SessionMode::Brain, SessionMode::Builder]
+            .into_iter()
+            .flat_map(|m| crate::agent::prompt::PromptVersion::ALL.map(|v| (m, v)))
+        {
+            let full = standard(mode, version);
+            // v1 ranks the LSP tools first; v2 never names them (they are
+            // deferred, and the catalog leaves out what Lean drops).
             assert!(
-                LEAN_DROPPED.iter().any(|t| full.contains(t)) || full.contains("LSP"),
+                version == crate::agent::prompt::PromptVersion::V2
+                    || LEAN_DROPPED.iter().any(|t| full.contains(t))
+                    || full.contains("LSP"),
                 "{mode:?}: the full prompt steers toward the LSP tools"
             );
             let lean = prompt_for(ToolSurface::Lean, full.clone());
@@ -2098,7 +2106,7 @@ pub(crate) mod surface_tests {
             assert!(!lean.contains("LSP"), "{mode:?} still ranks LSP first");
             // Everything else is the same prompt.
             assert!(lean.contains("`semantic_search`") && lean.contains(SKILLS));
-            assert!(lean.len() < full.len() && lean.len() > full.len() - 400);
+            assert!(lean.len() <= full.len() && lean.len() > full.len() - 400);
         }
     }
 
@@ -2171,7 +2179,7 @@ pub(crate) mod surface_tests {
             // core of the surface plus `load_tools`; with no surface set the
             // surface itself is the full one.
             let catalog = system
-                .strip_prefix(standard(mode).as_str())
+                .strip_prefix(standard(mode, cfg.prompt_version).as_str())
                 .expect("the prompt, then the catalog");
             assert!(catalog.starts_with("\n\n## DEFERRED TOOLS"));
             assert!(catalog.contains("- go_to_definition "));
@@ -2230,7 +2238,11 @@ pub(crate) mod surface_tests {
         // prompt and tools — before any skill or MCP schema — took 30%.
         let compact = estimate_tokens(&[], &system, &tools);
         let full_tools = api_tools(SessionMode::Builder, PromptProfile::Standard, &mcp, &cfg);
-        let full = estimate_tokens(&[], &standard(SessionMode::Builder), &full_tools);
+        let full = estimate_tokens(
+            &[],
+            &standard(SessionMode::Builder, cfg.prompt_version),
+            &full_tools,
+        );
         assert!(compact < 4_000, "compact prefix: {compact} tokens");
         assert!(full > 2 * compact, "standard {full} vs compact {compact}");
     }

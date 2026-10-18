@@ -11,6 +11,7 @@ use crate::agent::subagent;
 use crate::agent::tools::{self, ToolContext};
 
 mod v1;
+mod v2;
 
 /// Which Standard prompt a session is sent (`AgentConfig::prompt_version`).
 ///
@@ -39,6 +40,11 @@ impl PromptVersion {
             PromptVersion::V2 => "v2",
         }
     }
+}
+
+#[cfg(test)]
+impl PromptVersion {
+    pub const ALL: [PromptVersion; 2] = [PromptVersion::V1, PromptVersion::V2];
 }
 
 impl From<String> for PromptVersion {
@@ -109,6 +115,47 @@ pub(super) fn build_spec_prompt_section(ctx: &ToolContext) -> Option<String> {
     ))
 }
 
+/// The Standard prompt's four texts in one version. Each mode block ends the
+/// prompt and holds the `{plans_subdir}` placeholder; the base holds
+/// `{max_parallel}`.
+struct PromptTexts {
+    base: &'static str,
+    golden: &'static str,
+    brain: &'static str,
+    builder: &'static str,
+}
+
+fn texts(version: PromptVersion) -> PromptTexts {
+    match version {
+        PromptVersion::V1 => PromptTexts {
+            base: v1::SYSTEM_PROMPT,
+            golden: v1::GOLDEN_PROMPT,
+            brain: v1::BRAIN_BLOCK,
+            builder: v1::BUILDER_BLOCK,
+        },
+        PromptVersion::V2 => PromptTexts {
+            base: v2::SYSTEM_PROMPT,
+            golden: v2::GOLDEN_PROMPT,
+            brain: v2::BRAIN_BLOCK,
+            builder: v2::BUILDER_BLOCK,
+        },
+    }
+}
+
+/// A chat profile's prompt `text` followed by the workspace facts, the same
+/// sentences for Standard (both versions) and Compact.
+fn with_workspace(text: &str, workspace_root: Option<&str>) -> String {
+    match workspace_root {
+        Some(root) => format!(
+            "{text}\n\nProject workspace root: {root}. \
+The bash tool already runs with this directory as its working directory - run commands directly \
+(e.g. \"git status\"), use relative paths, and never cd into guessed paths. \
+File tools take absolute paths inside this root."
+        ),
+        None => text.to_string(),
+    }
+}
+
 /// Build the per-session system prompt. The base is byte-identical for every
 /// request in the same workspace so the provider's prefix cache stays warm;
 /// the mode block is appended last and only changes when the mode switches.
@@ -127,6 +174,9 @@ pub(super) fn system_prompt(
     // Whether the session has golden tasks at run start: only then are the
     // golden-task rules sent.
     has_golden_goals: bool,
+    // Which Standard texts (`AgentConfig::prompt_version`); Compact and the
+    // git operator have one prompt each and ignore it.
+    version: PromptVersion,
 ) -> String {
     if profile == PromptProfile::GitSync {
         return match workspace_root {
@@ -141,27 +191,10 @@ The bash tool already runs with this directory as its working directory - run co
     if profile == PromptProfile::Compact {
         // No skills, no specs, no mode block: on the window this profile is
         // for, each of them is a file the model can no longer read.
-        let prompt = crate::agent::surface::COMPACT_PROMPT;
-        return match workspace_root {
-            Some(root) => format!(
-                "{prompt}\n\nProject workspace root: {root}. \
-The bash tool already runs with this directory as its working directory - run commands directly \
-(e.g. \"git status\"), use relative paths, and never cd into guessed paths. \
-File tools take absolute paths inside this root."
-            ),
-            None => prompt.to_string(),
-        };
+        return with_workspace(crate::agent::surface::COMPACT_PROMPT, workspace_root);
     }
-    let text = v1::SYSTEM_PROMPT;
-    let base = match workspace_root {
-        Some(root) => format!(
-            "{text}\n\nProject workspace root: {root}. \
-The bash tool already runs with this directory as its working directory - run commands directly \
-(e.g. \"git status\"), use relative paths, and never cd into guessed paths. \
-File tools take absolute paths inside this root."
-        ),
-        None => text.to_string(),
-    };
+    let texts = texts(version);
+    let base = with_workspace(texts.base, workspace_root);
     let base = match skills_section {
         Some(s) if !s.is_empty() => format!("{base}\n{s}"),
         _ => base,
@@ -176,19 +209,15 @@ File tools take absolute paths inside this root."
         _ => ".claudinio/plans".to_string(),
     };
     let base = base.replace("{max_parallel}", &max_parallel.to_string());
-    let golden = if has_golden_goals {
-        v1::GOLDEN_PROMPT
-    } else {
-        ""
-    };
+    let golden = if has_golden_goals { texts.golden } else { "" };
 
     match mode {
         SessionMode::Brain => {
-            let brain_prompt = v1::BRAIN_BLOCK.replace("{plans_subdir}", &plans_subdir);
+            let brain_prompt = texts.brain.replace("{plans_subdir}", &plans_subdir);
             format!("{base}{golden}{brain_prompt}")
         }
         SessionMode::Builder => {
-            let builder_prompt = v1::BUILDER_BLOCK.replace("{plans_subdir}", &plans_subdir);
+            let builder_prompt = texts.builder.replace("{plans_subdir}", &plans_subdir);
             format!("{base}{golden}{builder_prompt}")
         }
     }
@@ -227,6 +256,7 @@ pub(super) fn run_prefix(
         profile,
         subagent::effective_max_parallel(config),
         has_golden_goals,
+        config.prompt_version,
     );
     let system = if profile == PromptProfile::Standard {
         crate::agent::surface::prompt_for(
@@ -374,21 +404,24 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     // require the model to reason, call tools or reply in one language.
     #[test]
     fn no_system_prompt_imposes_a_language() {
-        for profile in [PromptProfile::Standard, PromptProfile::GitSync] {
-            for mode in [SessionMode::Brain, SessionMode::Builder] {
-                let sys = system_prompt(
-                    Some(ROOT),
-                    None,
-                    None,
-                    None,
-                    mode,
-                    profile,
-                    subagent::MAX_PARALLEL_AGENTS,
-                    false,
-                );
-                assert!(!sys.contains("MUST be in English"), "{profile:?}/{mode:?}");
-                assert!(!sys.contains("default to English"), "{profile:?}/{mode:?}");
-                assert!(!sys.contains("else English"), "{profile:?}/{mode:?}");
+        for version in PromptVersion::ALL {
+            for profile in [PromptProfile::Standard, PromptProfile::GitSync] {
+                for mode in [SessionMode::Brain, SessionMode::Builder] {
+                    let sys = system_prompt(
+                        Some(ROOT),
+                        None,
+                        None,
+                        None,
+                        mode,
+                        profile,
+                        subagent::MAX_PARALLEL_AGENTS,
+                        false,
+                        version,
+                    );
+                    assert!(!sys.contains("MUST be in English"), "{profile:?}/{mode:?}");
+                    assert!(!sys.contains("default to English"), "{profile:?}/{mode:?}");
+                    assert!(!sys.contains("else English"), "{profile:?}/{mode:?}");
+                }
             }
         }
     }
@@ -457,46 +490,64 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     /// policy, so a Standard session carried it twice on every request.
     #[test]
     fn the_language_policy_is_stated_once() {
-        for mode in [SessionMode::Brain, SessionMode::Builder] {
-            let sys = system_prompt(
-                Some(ROOT),
-                None,
-                None,
-                None,
-                mode,
-                PromptProfile::Standard,
-                subagent::MAX_PARALLEL_AGENTS,
-                false,
-            );
-            assert_eq!(sys.matches("# LANGUAGE POLICY").count(), 1, "{mode:?}");
+        for version in PromptVersion::ALL {
+            for mode in [SessionMode::Brain, SessionMode::Builder] {
+                let sys = system_prompt(
+                    Some(ROOT),
+                    None,
+                    None,
+                    None,
+                    mode,
+                    PromptProfile::Standard,
+                    subagent::MAX_PARALLEL_AGENTS,
+                    false,
+                    version,
+                );
+                assert_eq!(sys.matches("# LANGUAGE POLICY").count(), 1, "{mode:?}");
+            }
         }
     }
 
     /// Links are rendering facts, not instructions: two lines, no examples.
     #[test]
     fn the_links_section_is_two_lines() {
-        let sys = system_prompt(
-            Some(ROOT),
-            None,
-            None,
-            None,
-            SessionMode::Builder,
-            PromptProfile::Standard,
-            subagent::MAX_PARALLEL_AGENTS,
-            false,
-        );
-        let start = sys.find("# 6. LINKS").expect("links section");
-        let section: Vec<&str> = sys[start..]
-            .lines()
-            .skip(1)
-            .take_while(|l| !l.starts_with('#') && !l.is_empty())
-            .collect();
-        assert_eq!(section.len(), 2, "{section:?}");
-        assert!(section[0].contains("relative") && section[0].contains("workspace"));
-        assert!(section[1].contains("image") && section[1].contains("video"));
-        assert!(!sys.contains("Examples:"));
+        for version in PromptVersion::ALL {
+            let sys = system_prompt(
+                Some(ROOT),
+                None,
+                None,
+                None,
+                SessionMode::Builder,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                false,
+                version,
+            );
+            // v1 numbers its sections ("# 6. LINKS"), v2 does not.
+            let start = sys
+                .match_indices("\n# ")
+                .map(|(at, _)| at + 1)
+                .find(|&at| {
+                    sys[at..]
+                        .lines()
+                        .next()
+                        .is_some_and(|l| l.contains("LINKS"))
+                })
+                .expect("links section");
+            let section: Vec<&str> = sys[start..]
+                .lines()
+                .skip(1)
+                .take_while(|l| !l.starts_with('#') && !l.is_empty())
+                .collect();
+            assert_eq!(section.len(), 2, "{section:?}");
+            assert!(section[0].contains("relative") && section[0].contains("workspace"));
+            assert!(section[1].contains("image") && section[1].contains("video"));
+            assert!(!sys.contains("Examples:"));
+        }
     }
 
+    // Prompt v1 only. v2 carries the sizing and asset rules in the built-in `plan`
+    // skill, which its Brain block names (`skills::plan_skill_tests`).
     #[test]
     fn brain_prompt_mandates_size_and_verbatim_assets() {
         let sys = system_prompt(
@@ -508,6 +559,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
             false,
+            PromptVersion::V1,
         );
         // Size/dimensions must be a mandatory interview item.
         assert!(
@@ -525,6 +577,8 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         );
     }
 
+    // Prompt v1 only. v2 carries the Low-Level Design and consensus guidance in the built-in `plan`
+    // skill, which its Brain block names (`skills::plan_skill_tests`).
     #[test]
     fn brain_prompt_mandates_lld_stage() {
         let sys = system_prompt(
@@ -536,6 +590,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
             false,
+            PromptVersion::V1,
         );
         assert!(
             sys.contains("## Low-Level Design"),
@@ -559,55 +614,60 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     /// the model to resend the list would make the delta dead code.
     #[test]
     fn status_changes_are_pointed_at_tasks_update_in_both_modes() {
-        for mode in [SessionMode::Brain, SessionMode::Builder] {
-            let sys = system_prompt(
+        for version in PromptVersion::ALL {
+            for mode in [SessionMode::Brain, SessionMode::Builder] {
+                let sys = system_prompt(
+                    Some(ROOT),
+                    None,
+                    None,
+                    None,
+                    mode,
+                    PromptProfile::Standard,
+                    subagent::MAX_PARALLEL_AGENTS,
+                    false,
+                    version,
+                );
+                // Phase 4: `doing` rides with the task's first tool call rather
+                // than taking a round of its own.
+                assert!(sys.contains(
+                "Mark a task `doing` with `tasks_update` in the same round as the first tool call for it"
+            ));
+                assert!(sys.contains("Never resend the list just to change a status"));
+                assert!(!sys.contains("you MUST make a final `tasks_set` call"));
+                let names: Vec<String> =
+                    api_tools(mode, PromptProfile::Standard, &[], &AgentConfig::default())
+                        .into_iter()
+                        .map(|t| t.name)
+                        .collect();
+                for tool in ["tasks_get", "tasks_set", "tasks_update"] {
+                    assert!(names.contains(&tool.to_string()), "{mode:?} lacks {tool}");
+                }
+            }
+            let builder = system_prompt(
                 Some(ROOT),
                 None,
                 None,
                 None,
-                mode,
+                SessionMode::Builder,
                 PromptProfile::Standard,
                 subagent::MAX_PARALLEL_AGENTS,
                 false,
+                version,
             );
-            // Phase 4: `doing` rides with the task's first tool call rather
-            // than taking a round of its own.
-            assert!(sys.contains(
-                "Mark a task `doing` with `tasks_update` in the same round as the first tool call for it"
-            ));
-            assert!(sys.contains("Never resend the list just to change a status"));
-            assert!(!sys.contains("you MUST make a final `tasks_set` call"));
-            let names: Vec<String> =
-                api_tools(mode, PromptProfile::Standard, &[], &AgentConfig::default())
-                    .into_iter()
-                    .map(|t| t.name)
-                    .collect();
-            for tool in ["tasks_get", "tasks_set", "tasks_update"] {
-                assert!(names.contains(&tool.to_string()), "{mode:?} lacks {tool}");
-            }
+            // Phase 4: closing one task and starting the next is one call.
+            assert!(
+                builder
+                    .contains("closing one task and starting the next is one `tasks_update` call")
+            );
+            // The git profile has no task system at all.
+            let git = api_tools(
+                SessionMode::Builder,
+                PromptProfile::GitSync,
+                &[],
+                &AgentConfig::default(),
+            );
+            assert!(git.iter().all(|t| !t.name.starts_with("tasks_")));
         }
-        let builder = system_prompt(
-            Some(ROOT),
-            None,
-            None,
-            None,
-            SessionMode::Builder,
-            PromptProfile::Standard,
-            subagent::MAX_PARALLEL_AGENTS,
-            false,
-        );
-        // Phase 4: closing one task and starting the next is one call.
-        assert!(
-            builder.contains("closing one task and starting the next is one `tasks_update` call")
-        );
-        // The git profile has no task system at all.
-        let git = api_tools(
-            SessionMode::Builder,
-            PromptProfile::GitSync,
-            &[],
-            &AgentConfig::default(),
-        );
-        assert!(git.iter().all(|t| !t.name.starts_with("tasks_")));
     }
 
     // Decision D1 (lean-harness Phase 3): the Builder prompt must not tell a
@@ -616,29 +676,32 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     // parallel changes to disjoint files; otherwise the session edits.
     #[test]
     fn the_builder_prompt_edits_directly_and_says_when_to_delegate() {
-        for golden in [false, true] {
-            let sys = system_prompt(
-                Some(ROOT),
-                None,
-                None,
-                None,
-                SessionMode::Builder,
-                PromptProfile::Standard,
-                subagent::MAX_PARALLEL_AGENTS,
-                golden,
-            );
-            for gone in [
-                "CANNOT edit",
-                "there is no edit_file",
-                "ALL file modifications go through code-mode subagents",
-                "one subagent per task",
-            ] {
-                assert!(!sys.contains(gone), "still says {gone:?}");
+        for version in PromptVersion::ALL {
+            for golden in [false, true] {
+                let sys = system_prompt(
+                    Some(ROOT),
+                    None,
+                    None,
+                    None,
+                    SessionMode::Builder,
+                    PromptProfile::Standard,
+                    subagent::MAX_PARALLEL_AGENTS,
+                    golden,
+                    version,
+                );
+                for gone in [
+                    "CANNOT edit",
+                    "there is no edit_file",
+                    "ALL file modifications go through code-mode subagents",
+                    "one subagent per task",
+                ] {
+                    assert!(!sys.contains(gone), "still says {gone:?}");
+                }
+                assert!(sys.contains("`edit_file`"), "names the edit tool");
+                assert!(sys.contains("'explore'"), "says when to explore");
+                assert!(sys.contains("disjoint files"), "says when code pays");
+                assert!(sys.contains("Otherwise edit directly"));
             }
-            assert!(sys.contains("`edit_file`"), "names the edit tool");
-            assert!(sys.contains("'explore'"), "says when to explore");
-            assert!(sys.contains("disjoint files"), "says when code pays");
-            assert!(sys.contains("Otherwise edit directly"));
         }
     }
 
@@ -658,6 +721,8 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         assert!(!names(SessionMode::Builder, PromptProfile::GitSync).contains(&edit));
     }
 
+    // Prompt v1 only. v2 carries the Mermaid guidance in the built-in `plan`
+    // skill, which its Brain block names (`skills::plan_skill_tests`).
     #[test]
     fn brain_prompt_encourages_mermaid_diagrams() {
         let sys = system_prompt(
@@ -669,6 +734,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
             false,
+            PromptVersion::V1,
         );
         assert!(
             sys.contains("mermaid"),
@@ -683,42 +749,50 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn builder_prompt_mentions_lld_context() {
-        let sys = system_prompt(
-            Some(ROOT),
-            None,
-            None,
-            None,
-            SessionMode::Builder,
-            PromptProfile::Standard,
-            subagent::MAX_PARALLEL_AGENTS,
-            false,
-        );
-        assert!(
-            sys.contains("Low-Level Design"),
-            "Builder prompt must point at the Low-Level Design as the technical spec"
-        );
+        for version in PromptVersion::ALL {
+            let sys = system_prompt(
+                Some(ROOT),
+                None,
+                None,
+                None,
+                SessionMode::Builder,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                false,
+                version,
+            );
+            assert!(
+                sys.contains("Low-Level Design"),
+                "Builder prompt must point at the Low-Level Design as the technical spec"
+            );
+        }
     }
 
     #[test]
     fn builder_prompt_requires_complete_subagent_spec() {
-        let sys = system_prompt(
-            Some(ROOT),
-            None,
-            None,
-            None,
-            SessionMode::Builder,
-            PromptProfile::Standard,
-            subagent::MAX_PARALLEL_AGENTS,
-            false,
-        );
-        assert!(
-            sys.contains("COMPLETE technical spec"),
-            "Builder prompt must require complete subagent specs"
-        );
-        assert!(
-            sys.contains("VERBATIM"),
-            "Builder prompt must require repeating concrete values verbatim to subagents"
-        );
+        for version in PromptVersion::ALL {
+            let sys = system_prompt(
+                Some(ROOT),
+                None,
+                None,
+                None,
+                SessionMode::Builder,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                false,
+                version,
+            );
+            // v2 says it without the capitals (design rule 4); the rule is
+            // the same.
+            assert!(
+                sys.to_lowercase().contains("complete technical spec"),
+                "Builder prompt must require complete subagent specs"
+            );
+            assert!(
+                sys.contains("VERBATIM"),
+                "Builder prompt must require repeating concrete values verbatim to subagents"
+            );
+        }
     }
 
     #[test]
@@ -750,6 +824,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             PromptProfile::Standard,
             4,
             false,
+            PromptVersion::default(),
         );
         assert!(
             sys.contains("Ten percent off"),
@@ -771,24 +846,27 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
 
     #[test]
     fn system_prompt_warns_against_similar_to_guessing() {
-        let sys = system_prompt(
-            Some(ROOT),
-            None,
-            None,
-            None,
-            SessionMode::Builder,
-            PromptProfile::Standard,
-            subagent::MAX_PARALLEL_AGENTS,
-            false,
-        );
-        assert!(
-            sys.contains("similar to"),
-            "subagent guidance must call out the 'similar to X' anti-pattern"
-        );
-        assert!(
-            sys.contains("isn't yet concrete data"),
-            "subagent guidance must require resolving user references before delegating"
-        );
+        for version in PromptVersion::ALL {
+            let sys = system_prompt(
+                Some(ROOT),
+                None,
+                None,
+                None,
+                SessionMode::Builder,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                false,
+                version,
+            );
+            assert!(
+                sys.contains("similar to"),
+                "subagent guidance must call out the 'similar to X' anti-pattern"
+            );
+            assert!(
+                sys.contains("isn't yet concrete data"),
+                "subagent guidance must require resolving user references before delegating"
+            );
+        }
     }
 
     #[test]
@@ -802,6 +880,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             PromptProfile::GitSync,
             subagent::MAX_PARALLEL_AGENTS,
             false,
+            PromptVersion::default(),
         );
         assert!(
             !sys.contains("tasks_get") && !sys.contains("tasks_set"),
@@ -866,6 +945,10 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
             false,
+            // v1: the question must come from the prompt alone (no tool may
+            // be called here), and v2 keeps the sizing rules in the `plan`
+            // skill, read with a tool.
+            PromptVersion::V1,
         );
         let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
         let user = format!(
@@ -937,6 +1020,7 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
             false,
+            PromptVersion::default(),
         );
         let model = cfg
             .model_for_mode(SessionMode::Builder.as_str())
@@ -1587,28 +1671,31 @@ mod deferred_prefix_tests {
     /// batched, and that a one-step change needs no list.
     #[test]
     fn the_standard_prompt_says_how_tasks_work_without_round_trips() {
-        for mode in [SessionMode::Builder, SessionMode::Brain] {
-            let sys = system_prompt(
-                Some("/ws"),
-                None,
-                None,
-                None,
-                mode,
-                PromptProfile::Standard,
-                subagent::MAX_PARALLEL_AGENTS,
-                false,
-            );
-            for said in [
-                "`<tasks>`",
-                "in the same round as the first tool call",
-                "one-step change",
-                "`updates`",
-            ] {
-                assert!(sys.contains(said), "{mode:?} does not say {said:?}");
+        for version in PromptVersion::ALL {
+            for mode in [SessionMode::Builder, SessionMode::Brain] {
+                let sys = system_prompt(
+                    Some("/ws"),
+                    None,
+                    None,
+                    None,
+                    mode,
+                    PromptProfile::Standard,
+                    subagent::MAX_PARALLEL_AGENTS,
+                    false,
+                    version,
+                );
+                for said in [
+                    "`<tasks>`",
+                    "in the same round as the first tool call",
+                    "one-step change",
+                    "`updates`",
+                ] {
+                    assert!(sys.contains(said), "{mode:?} does not say {said:?}");
+                }
             }
+            let compact = crate::agent::surface::COMPACT_PROMPT;
+            assert!(compact.contains("`<tasks>`") && compact.contains("same round"));
         }
-        let compact = crate::agent::surface::COMPACT_PROMPT;
-        assert!(compact.contains("`<tasks>`") && compact.contains("same round"));
     }
 
     /// The living document (Phase 4b) in a few lines of the Standard prompt:
@@ -1617,35 +1704,39 @@ mod deferred_prefix_tests {
     /// session. Short: it is in every request of every session.
     #[test]
     fn the_standard_prompt_says_when_to_start_a_document_and_that_the_users_edits_win() {
-        for mode in [SessionMode::Builder, SessionMode::Brain] {
-            let sys = system_prompt(
-                Some("/ws"),
-                None,
-                None,
-                None,
-                mode,
-                PromptProfile::Standard,
-                subagent::MAX_PARALLEL_AGENTS,
-                false,
-            );
-            let start = sys.find("LIVING DOCUMENT").expect("a document section");
-            let section = &sys[start..sys[start..].find("\n# ").map_or(sys.len(), |e| start + e)];
-            for said in [
-                "several distinct parts",
-                "`doc_create`",
-                "`doc_write`",
-                "`section`",
-                "edits win",
-                "new session",
-                "`<document>`",
-            ] {
-                assert!(
-                    section.contains(said),
-                    "{mode:?} does not say {said:?}: {section}"
+        for version in PromptVersion::ALL {
+            for mode in [SessionMode::Builder, SessionMode::Brain] {
+                let sys = system_prompt(
+                    Some("/ws"),
+                    None,
+                    None,
+                    None,
+                    mode,
+                    PromptProfile::Standard,
+                    subagent::MAX_PARALLEL_AGENTS,
+                    false,
+                    version,
                 );
+                let start = sys.find("LIVING DOCUMENT").expect("a document section");
+                let section =
+                    &sys[start..sys[start..].find("\n# ").map_or(sys.len(), |e| start + e)];
+                for said in [
+                    "several distinct parts",
+                    "`doc_create`",
+                    "`doc_write`",
+                    "`section`",
+                    "edits win",
+                    "new session",
+                    "`<document>`",
+                ] {
+                    assert!(
+                        section.contains(said),
+                        "{mode:?} does not say {said:?}: {section}"
+                    );
+                }
+                let words = section.split_whitespace().count();
+                assert!(words <= 120, "{words} words");
             }
-            let words = section.split_whitespace().count();
-            assert!(words <= 120, "{words} words");
         }
     }
 
@@ -1887,6 +1978,7 @@ mod v1_pin_tests {
                 PromptProfile::Standard,
                 4,
                 golden,
+                PromptVersion::V1,
             )
         };
         let elsewhere = |mode| {
@@ -1899,6 +1991,7 @@ mod v1_pin_tests {
                 PromptProfile::Standard,
                 6,
                 false,
+                PromptVersion::V1,
             )
         };
         match name {
@@ -1965,5 +2058,240 @@ mod prompt_version_tests {
         );
         assert_eq!(cfg.brain_model, "b");
         assert_eq!(serde_json::to_value(&cfg).unwrap()["prompt_version"], "v2");
+    }
+}
+
+/// Phase 5 of the lean-harness plan: the v2 Standard prompt at the right
+/// altitude. Budgets are on the harness's own meter
+/// (`session::estimate_tokens`, chars/3), the one `run_config.prefix` and the
+/// context bar use.
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use crate::agent::session::estimate_tokens;
+
+    const ROOT: &str = "/home/user/projects/app";
+
+    fn tokens(text: &str) -> u64 {
+        estimate_tokens(&[], text, &[])
+    }
+
+    fn block(text: &str) -> String {
+        text.replace("{plans_subdir}", ".claudinio/plans")
+    }
+
+    /// Identity, environment, how the tools relate, when to ask and stop,
+    /// untrusted content, hook output, the living document and the language
+    /// policy, workspace line included.
+    #[test]
+    fn the_v2_base_prompt_fits_fifteen_hundred_tokens() {
+        let base = with_workspace(texts(PromptVersion::V2).base, Some(ROOT))
+            .replace("{max_parallel}", "4");
+        let total = tokens(&base);
+        eprintln!("v2 base: {total} tokens ({} chars)", base.len());
+        assert!(total <= 1_500, "v2 base prompt is {total} tokens");
+    }
+
+    #[test]
+    fn each_v2_mode_block_fits_six_hundred_tokens() {
+        let t = texts(PromptVersion::V2);
+        for (name, text) in [("brain", t.brain), ("builder", t.builder)] {
+            let total = tokens(&block(text));
+            eprintln!("v2 {name} block: {total} tokens");
+            assert!(total <= 600, "v2 {name} block is {total} tokens");
+        }
+    }
+
+    /// The MUST / NEVER / MANDATORY / STRICT register the plan's design rule
+    /// 4 retires: in prose, any word in capitals outside a code span that is
+    /// not an acronym; in a heading — where capitals are the style — only the
+    /// imperatives themselves.
+    fn capitalised_words(text: &str) -> Vec<String> {
+        const ACRONYMS: [&str; 13] = [
+            "AI", "UI", "UX", "URL", "SVG", "API", "MCP", "LSP", "JSON", "PR", "ID", "OK", "LLD",
+        ];
+        const IMPERATIVES: [&str; 9] = [
+            "MUST",
+            "NEVER",
+            "MANDATORY",
+            "STRICT",
+            "ALWAYS",
+            "ONLY",
+            "REQUIRED",
+            "CRITICAL",
+            "IMPORTANT",
+        ];
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let heading = line.trim_start().starts_with('#');
+            let prose: String = line
+                .split('`')
+                .enumerate()
+                .filter(|(i, _)| i % 2 == 0)
+                .map(|(_, part)| part)
+                .collect::<Vec<_>>()
+                .join(" ");
+            for word in prose.split(|c: char| !c.is_ascii_alphabetic()) {
+                let shouted = word.len() >= 2 && word.chars().all(|c| c.is_ascii_uppercase());
+                let counts = if heading {
+                    IMPERATIVES.contains(&word)
+                } else {
+                    !ACRONYMS.contains(&word)
+                };
+                if shouted && counts {
+                    found.push(word.to_string());
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_capital_detector_finds_the_old_register() {
+        let v1 = texts(PromptVersion::V1);
+        let all = [v1.base, v1.golden, v1.brain, v1.builder].concat();
+        let words = capitalised_words(&all);
+        for old in ["MUST", "MANDATORY", "VERIFIED", "REJECT"] {
+            assert!(words.iter().any(|w| w == old), "{old} not found: {words:?}");
+        }
+        assert!(capitalised_words("## TASK SYSTEM\nuse `MUST_X`, a UI and a URL").is_empty());
+        assert_eq!(capitalised_words("## GOALS (MANDATORY)"), ["MANDATORY"]);
+    }
+
+    /// Design rule 4: an imperative in capitals stays only where it fixes an
+    /// observed failure, and `v2::KEPT_IMPERATIVES` names that failure.
+    #[test]
+    fn v2_keeps_at_most_three_capitalised_imperatives_each_with_its_failure() {
+        let t = texts(PromptVersion::V2);
+        let all = [t.base, t.golden, t.brain, t.builder].concat();
+        let words = capitalised_words(&all);
+        assert!(
+            words.len() <= 3,
+            "{} capitalised words: {words:?}",
+            words.len()
+        );
+        for word in &words {
+            let kept = v2::KEPT_IMPERATIVES.iter().find(|(w, _)| w == word);
+            assert!(
+                kept.is_some_and(|(_, why)| !why.trim().is_empty()),
+                "{word} is in capitals with no failure cited in KEPT_IMPERATIVES"
+            );
+        }
+    }
+
+    /// The gates the code enforces teach through their error messages
+    /// (`tool_error_tests`, and the gates' own modules); v2 says once that
+    /// they exist and keeps none of the sentences that described them.
+    #[test]
+    fn v2_describes_no_gate_the_code_enforces() {
+        let t = texts(PromptVersion::V2);
+        let all = [t.base, t.golden, t.brain, t.builder].concat();
+        for described in [
+            "code-gated",
+            "returns an error",
+            "REJECT",
+            "rejects tasks until",
+            "Never delete golden tasks",
+            "automatically switches mode",
+            "re-checks it before",
+            "You must never implement",
+            "Stating that the tests pass has no effect",
+        ] {
+            assert!(
+                !all.contains(described),
+                "v2 still describes a gate: {described:?}"
+            );
+        }
+        let gate_lines: Vec<&str> = t
+            .base
+            .lines()
+            .filter(|l| l.contains("refuse") && l.contains("error"))
+            .collect();
+        assert_eq!(gate_lines.len(), 1, "{gate_lines:?}");
+        assert!(
+            gate_lines[0].contains("what to do next"),
+            "{}",
+            gate_lines[0]
+        );
+    }
+
+    /// Decision D5: ask only what changes the plan, bundle independent
+    /// questions, no interview for a fully specified request, one confirming
+    /// question before the plan is written — and the checklists live in the
+    /// `plan` skill, named in one line.
+    #[test]
+    fn the_v2_brain_interview_is_adaptive_and_points_at_the_plan_skill() {
+        let brain = texts(PromptVersion::V2).brain;
+        for said in [
+            "changes the plan",
+            "one `ask_user` call",
+            "fully specified request needs no interview",
+            "Confirm the design in one question",
+        ] {
+            assert!(brain.contains(said), "v2 Brain does not say {said:?}");
+        }
+        for gone in [
+            "one question at a time",
+            "Batching questions is confusing",
+            "never skip",
+        ] {
+            assert!(!brain.contains(gone), "v2 Brain still says {gone:?}");
+        }
+        let skill_lines = brain.lines().filter(|l| l.contains("`plan` skill")).count();
+        assert_eq!(skill_lines, 1, "{brain}");
+        for moved in [
+            "false consensus",
+            "Sizing and layout",
+            "FULL Mermaid catalog",
+        ] {
+            assert!(
+                !brain.contains(moved),
+                "{moved:?} belongs in the plan skill"
+            );
+        }
+    }
+
+    /// The setting reaches the run: the default config sends v2, and a config
+    /// set to v1 sends the v1 texts (pinned byte for byte in `v1_pin_tests`).
+    #[test]
+    fn the_run_prefix_follows_the_prompt_version_setting() {
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let system_for = |version: PromptVersion, mode| {
+            let config = AgentConfig {
+                prompt_version: version,
+                ..AgentConfig::default()
+            };
+            run_prefix(
+                &config,
+                &ctx,
+                PromptProfile::Standard,
+                mode,
+                None,
+                None,
+                &[],
+                false,
+                &[],
+            )
+            .1
+        };
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            let v1 = system_for(PromptVersion::V1, mode);
+            let v2 = system_for(PromptVersion::V2, mode);
+            let default = run_prefix(
+                &AgentConfig::default(),
+                &ctx,
+                PromptProfile::Standard,
+                mode,
+                None,
+                None,
+                &[],
+                false,
+                &[],
+            )
+            .1;
+            assert_eq!(default, v2, "{mode:?}: the default is v2");
+            assert!(v1.contains("UI Mandate: The Task Panel"), "{mode:?}");
+            assert!(!v2.contains("UI Mandate"), "{mode:?}");
+        }
     }
 }
