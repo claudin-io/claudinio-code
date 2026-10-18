@@ -396,20 +396,6 @@ describe("TasksPanel", () => {
 
   // ── Callbacks ──────────────────────────────────────────────────
 
-  it("calls onTasksChange with task count on mount", async () => {
-    const onTasksChange = vi.fn();
-    vi.mocked(getTasks).mockResolvedValue(sampleTasks);
-    const dispose = render(
-      () => <TasksPanel workspace="/test" onTasksChange={onTasksChange} />,
-      document.body,
-    );
-    await flush();
-
-    expect(onTasksChange).toHaveBeenCalledWith(sampleTasks.length);
-
-    dispose();
-  });
-
   // ── hoveredTask edge cases ────────────────────────────────────
 
   it("hoveredTask returns null when no task is hovered (initial state)", async () => {

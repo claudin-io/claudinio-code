@@ -6,7 +6,6 @@ import { createVisibilityAwareInterval } from "../lib/visibility";
 
 export const TasksPanel: Component<{
   workspace: string;
-  onTasksChange?: (count: number) => void;
 }> = (props) => {
   const [tasks, setTasksState] = createSignal<TaskItem[]>([]);
   // Only the setter is used: the tooltip renders from hoveredTaskSnapshot.
@@ -19,7 +18,6 @@ export const TasksPanel: Component<{
     try {
       const t = await getTasks(props.workspace);
       setTasksState(t);
-      props.onTasksChange?.(t.length);
     } catch {
       // no workspace open or other transient error
     }
@@ -55,7 +53,6 @@ export const TasksPanel: Component<{
     try {
       const remaining = await dismissGoldenTasks(props.workspace, id);
       setTasksState(remaining);
-      props.onTasksChange?.(remaining.length);
     } catch {
       load();
     }
