@@ -31,6 +31,7 @@ pub fn execute_set(
     let _writing = lock_task_list();
     let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
+    let incoming = keep_stored_details(&prev, incoming);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
     check_quality_gate(&prev, &merged, ctx)?;
     crate::agent::persist::append_tasks(Path::new(path), &merged)?;
@@ -405,6 +406,34 @@ fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<T
     (sanitized, renamed)
 }
 
+/// For a task that already exists, an empty description or an empty journal
+/// in a `tasks_set` call keeps the stored one.
+///
+/// Since Phase 4 the model sees the list each run as a `<tasks>` block —
+/// `id · status · title`, nothing more — and `tasks_get` is deferred. A
+/// model that adds or rewords one task resends every other one from that
+/// block, with nothing to put in their descriptions and journals; read
+/// literally, the full replacement would erase what Brain wrote and every
+/// finding recorded since (Phase 4 review). What the call does send — a
+/// title, a status, a non-empty description or journal — still replaces the
+/// stored value, so rewording stays what `tasks_set` is for.
+fn keep_stored_details(prev: &[TaskItem], incoming: Vec<TaskItem>) -> Vec<TaskItem> {
+    incoming
+        .into_iter()
+        .map(|mut t| {
+            if let Some(stored) = prev.iter().find(|p| p.id == t.id) {
+                if t.description.trim().is_empty() {
+                    t.description = stored.description.clone();
+                }
+                if t.journal.iter().all(|j| j.trim().is_empty()) {
+                    t.journal = stored.journal.clone();
+                }
+            }
+            t
+        })
+        .collect()
+}
+
 /// Merge an incoming task list with the previous snapshot, guaranteeing that
 /// no golden task is ever dropped. Any golden task present in `prev` whose id
 /// is absent from `incoming` is re-injected (preserving its prior state).
@@ -629,6 +658,98 @@ mod lld_gate_tests {
             assert_eq!(task.status, "done", "{}", task.id);
             assert_eq!(task.journal, vec![format!("closed by agent {i}")]);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Each run shows the model the list as `id · status · title` only, and
+    // `tasks_get` is deferred, so a model that adds or rewords one task with
+    // `tasks_set` resends the others from that block: an empty description
+    // and an empty journal. A full replacement must not turn that into the
+    // loss of the descriptions Brain wrote and the findings recorded since —
+    // for a task that already exists, an empty description or journal keeps
+    // the stored one, golden tasks included (Phase 4 review).
+    #[test]
+    fn a_rewrite_from_the_tasks_block_alone_keeps_descriptions_and_journals() {
+        let (ctx, root) = ctx_for("rewrite-from-block", None);
+        let stored = |id: &str, title: &str, description: &str, journal: &[&str]| TaskItem {
+            id: id.into(),
+            title: title.into(),
+            description: description.into(),
+            journal: journal.iter().map(|j| j.to_string()).collect(),
+            status: "todo".into(),
+        };
+        let store = ctx.session_store_path.clone().unwrap();
+        crate::agent::persist::append_tasks(
+            Path::new(&store),
+            &[
+                stored("golden-g-0", "the goal", "Plan the goal", &["scoped it"]),
+                stored("t1", "Parse it", "Brain's parser design", &["uses nom"]),
+            ],
+        )
+        .unwrap();
+
+        let from_block = |id: &str, title: &str, status: &str| TaskItem {
+            id: id.into(),
+            title: title.into(),
+            description: String::new(),
+            journal: vec![],
+            status: status.into(),
+        };
+        execute_set(
+            SetTasksArgs {
+                tasks: vec![
+                    from_block("golden-g-0", "the goal", "doing"),
+                    from_block("t1", "Parse the config", "done"),
+                    TaskItem {
+                        description: "Write the docs".into(),
+                        ..from_block("t2", "Docs", "todo")
+                    },
+                ],
+            },
+            &ctx,
+        )
+        .unwrap();
+
+        let after = crate::agent::persist::load_last_tasks(Path::new(&store)).unwrap();
+        let by_id = |id: &str| after.iter().find(|t| t.id == id).unwrap().clone();
+        let golden = by_id("golden-g-0");
+        assert_eq!(golden.description, "Plan the goal");
+        assert_eq!(golden.journal, ["scoped it"]);
+        assert_eq!(golden.status, "doing");
+        let t1 = by_id("t1");
+        // What the call does say still wins: the new title and status.
+        assert_eq!(t1.title, "Parse the config");
+        assert_eq!(t1.status, "done");
+        assert_eq!(t1.description, "Brain's parser design");
+        assert_eq!(t1.journal, ["uses nom"]);
+        assert_eq!(by_id("t2").description, "Write the docs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A description or journal the call does send replaces the stored one:
+    // rewording a task is what `tasks_set` is for.
+    #[test]
+    fn a_rewrite_that_sends_a_description_or_journal_replaces_it() {
+        let (ctx, root) = ctx_for("rewrite-with-details", None);
+        let store = ctx.session_store_path.clone().unwrap();
+        let t = |description: &str, journal: &[&str]| TaskItem {
+            id: "t1".into(),
+            title: "t".into(),
+            description: description.into(),
+            journal: journal.iter().map(|j| j.to_string()).collect(),
+            status: "todo".into(),
+        };
+        crate::agent::persist::append_tasks(Path::new(&store), &[t("old", &["a"])]).unwrap();
+        execute_set(
+            SetTasksArgs {
+                tasks: vec![t("new", &["b"])],
+            },
+            &ctx,
+        )
+        .unwrap();
+        let after = crate::agent::persist::load_last_tasks(Path::new(&store)).unwrap();
+        assert_eq!(after[0].description, "new");
+        assert_eq!(after[0].journal, ["b"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

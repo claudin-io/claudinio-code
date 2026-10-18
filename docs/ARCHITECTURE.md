@@ -210,8 +210,8 @@ model loads a tool to obey, and a load late in a session rewrites the cached
 prefix in front of the whole conversation. That is why `finalize_plan`, the
 Builder's last call, stays core; `tasks_get` was core for the same reason (the
 first call) until the task protocol stopped asking for it (below). The default
-Builder prefix measures 4,816 tokens on the harness's meter (12,337 before),
-and 6,293 with ten skills and a twenty-tool MCP server
+Builder prefix measures 4,843 tokens on the harness's meter (12,337 before),
+and 6,320 with ten skills and a twenty-tool MCP server
 (17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
 10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
 the definitions actually sent.
@@ -239,7 +239,11 @@ say: a list only beyond a one-step change; `doing` in the same round as the
 task's first tool call; batch status changes — `tasks_update` takes
 `updates: [{id, status?, journal?}]`, checks every item (LLD gate, id, status)
 and then the quality gate on the list as the whole batch leaves it, and applies
-nothing if any check fails, naming the task and the reason. A turn that ends
+nothing if any check fails, naming the task and the reason. Because the block
+carries no descriptions or journals, a `tasks_set` that resends an existing task
+with an empty description or journal keeps the stored one
+(`tasks::keep_stored_details`): a list rewritten from the block alone does not
+erase what Brain wrote or the findings recorded since. A turn that ends
 with a task still `doing` that this run set `doing` or wrote to (the loop keeps
 the list it read at run start and compares) gets one `nudges::still_doing`
 reminder per run, then finishes; a task an earlier run left `doing` is not
