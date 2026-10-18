@@ -23,13 +23,18 @@ use crate::agent::tools::{ReadTracker, ShellGate, ToolContext};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, InvokeResponseBody};
 
 /// A run that hands off more often than this is not converging.
 const MAX_HANDOFFS: usize = 5;
+
+/// How long a timed-out session gets to wind down after the interrupt before
+/// it is abandoned. A provider request stops at once; a tool already running
+/// (a test suite under `run_quality`) may take its own time to notice.
+const STOP_GRACE: Duration = Duration::from_secs(60);
 
 /// The id the eval's provider entry is registered under; models are
 /// addressed as `eval/<model>`.
@@ -57,7 +62,8 @@ pub(crate) struct TaskResult {
     pub title: String,
     pub tags: Vec<String>,
     pub pass: bool,
-    /// `completed`, `timeout`, or `error: …`.
+    /// `completed`, `timeout`, or `error: …` (`timeout (… abandoned)` when
+    /// the session did not stop within `STOP_GRACE` of the interrupt).
     pub outcome: String,
     pub wall_s: f64,
     pub oracle_exit: Option<i32>,
@@ -217,15 +223,30 @@ pub(crate) async fn run_task(task: &Task, opts: &RunOptions) -> TaskResult {
     if task.max_rounds.is_some() {
         opts.max_rounds = task.max_rounds;
     }
-    let outcome = tokio::time::timeout(
-        opts.task_timeout,
-        run_session(task, &opts, &ws, &root.join("index.db")),
-    )
-    .await;
-    result.outcome = match outcome {
+    let steering = Arc::new(SteeringCtl::new());
+    let index_db = root.join("index.db");
+    let session = run_session(task, &opts, &ws, &index_db, steering.clone());
+    tokio::pin!(session);
+    result.outcome = match tokio::time::timeout(opts.task_timeout, &mut session).await {
         Ok(Ok(())) => "completed".into(),
         Ok(Err(e)) => format!("error: {e}"),
-        Err(_) => "timeout".into(),
+        // Dropping the session here would leave its subagents running — they
+        // are spawned tasks, and a dropped JoinHandle does not stop one — and
+        // they would go on editing the workspace while the oracle graded it.
+        // So time running out is the Stop button: raise the interrupt, which
+        // every provider request, subagent round and tool batch watches, and
+        // let the session wind down (its approvals still answered) before the
+        // oracle runs.
+        Err(_) => {
+            steering.interrupt.store(true, Ordering::SeqCst);
+            match tokio::time::timeout(STOP_GRACE, &mut session).await {
+                Ok(_) => "timeout".into(),
+                Err(_) => format!(
+                    "timeout (still running {}s after the stop; abandoned)",
+                    STOP_GRACE.as_secs()
+                ),
+            }
+        }
     };
 
     let oracle: CommandOutcome = run_oracle(task, &ws);
@@ -278,6 +299,7 @@ async fn run_session(
     opts: &RunOptions,
     ws: &Path,
     index_db: &Path,
+    steering: Arc<SteeringCtl>,
 ) -> Result<(), String> {
     let workspace = ws.to_string_lossy().to_string();
     let config = eval_config(opts, ws);
@@ -289,7 +311,6 @@ async fn run_session(
         origin: ModeOrigin::Human.as_str().into(),
         ts: now_ms(),
     });
-    let steering = Arc::new(SteeringCtl::new());
     let db_path = {
         let (ws, db) = (ws.to_path_buf(), index_db.to_path_buf());
         tokio::task::spawn_blocking(move || build_index(&ws, &db))
@@ -340,21 +361,18 @@ async fn run_session(
     };
     let approvals = ApprovalMap::default();
     let answers = AnswerMap::default();
-    let stop = Arc::new(AtomicBool::new(false));
-    let delivery = {
-        let (responder, approvals, answers, stop) = (
-            responder.clone(),
-            approvals.clone(),
-            answers.clone(),
-            stop.clone(),
-        );
+    // The delivery loop lives exactly as long as this session: aborted when
+    // the session returns or, if it is ever abandoned, when it is dropped.
+    let _delivery = AbortOnDrop({
+        let (responder, approvals, answers) =
+            (responder.clone(), approvals.clone(), answers.clone());
         tokio::spawn(async move {
-            while !stop.load(Ordering::SeqCst) {
+            loop {
                 responder.deliver(&approvals, &answers).await;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
-    };
+    });
 
     let mut history = Vec::new();
     let mut message = task.prompt.clone();
@@ -407,9 +425,16 @@ async fn run_session(
             }
         }
     };
-    stop.store(true, Ordering::SeqCst);
-    let _ = delivery.await;
     result
+}
+
+/// Aborts a spawned task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn session_id_of(store: &SessionStore) -> String {
@@ -563,6 +588,65 @@ reference:
         assert_eq!(
             String::from_utf8_lossy(&status.stdout).trim(),
             "M greet.txt"
+        );
+    }
+
+    /// A task that runs out of time is stopped the way the app's Stop button
+    /// stops a run, and wound down before its oracle runs: a subagent still
+    /// waiting on the provider when the clock runs out must not edit the
+    /// workspace after the oracle graded it, and nothing may keep talking to
+    /// the provider once `run_task` has returned.
+    #[tokio::test]
+    async fn a_timed_out_task_is_stopped_before_its_oracle_runs() {
+        let work = tempfile::tempdir().unwrap();
+        let task = Task::parse(TASK, "greet").unwrap();
+        let file = work.path().join("greet").join("ws").join("greet.txt");
+        let path = file.to_string_lossy().to_string();
+        let (base, _, bodies) = spawn_with_usage(
+            vec![
+                Reply::Tool {
+                    name: "spawn_agents",
+                    input: serde_json::json!({"agents": [{
+                        "name": "fixer", "mode": "code",
+                        "goal": format!("Change hello to goodbye in {path}"),
+                    }]}),
+                },
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": path }),
+                },
+                Reply::Delayed(
+                    3_000,
+                    Box::new(Reply::Tool {
+                        name: "edit_file",
+                        input: serde_json::json!({
+                            "path": path, "old_string": "hello", "new_string": "goodbye",
+                        }),
+                    }),
+                ),
+                Reply::Text("done"),
+            ],
+            None,
+        )
+        .await;
+        let mut opts = options(&base, work.path());
+        // A window large enough for the full profile, which offers subagents.
+        opts.context_window = Some(200_000);
+        opts.task_timeout = Duration::from_millis(1_000);
+        let result = run_task(&task, &opts).await;
+        assert_eq!(result.outcome, "timeout");
+        assert!(!result.pass, "the edit had not happened when time ran out");
+        let requests = bodies.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "hello world\n",
+            "nothing edits the workspace after the oracle ran"
+        );
+        assert_eq!(
+            bodies.lock().unwrap().len(),
+            requests,
+            "no request after run_task returned"
         );
     }
 

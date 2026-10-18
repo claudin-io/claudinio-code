@@ -1239,6 +1239,9 @@ pub(crate) mod scripted_model {
         /// Several calls in one turn, as a model reading files in parallel makes.
         Tools(Vec<(&'static str, Value)>),
         Text(&'static str),
+        /// The inner reply, sent after this many milliseconds: a slow
+        /// provider, for tests about what happens while a request is in flight.
+        Delayed(u64, Box<Reply>),
     }
 
     fn sse(event: &str, data: Value) -> String {
@@ -1263,6 +1266,7 @@ pub(crate) mod scripted_model {
             json!({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}}),
         );
         match reply {
+            Reply::Delayed(_, inner) => return render(inner, n),
             Reply::Tool { name, input } => {
                 out += &tool_use(0, name, input);
                 out += &stop;
@@ -1367,6 +1371,9 @@ pub(crate) mod scripted_model {
                 } else {
                     let n = next.fetch_add(1, Ordering::SeqCst);
                     let reply = script.get(n).or(script.last()).expect("a script");
+                    if let Reply::Delayed(ms, _) = reply {
+                        tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+                    }
                     let mut body = render(reply, n);
                     if let Some(usage) = &usage {
                         body = sse(

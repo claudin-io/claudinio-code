@@ -42,7 +42,9 @@ cargo run --example claudinio-eval -- import-swebench instances.jsonl ../eval/sw
 ```
 
 `run` also takes `--context-window TOKENS` (the window the harness sizes its
-limits and prompt profile from), `--task-timeout-s` (default 3600),
+limits and prompt profile from), `--task-timeout-s` (default 3600; a task that
+runs out is stopped as the Stop button stops a run — subagents included — and
+the oracle runs only once it has wound down),
 `--price-cache-read/--price-cache-write`, `--jev-api-key-env ENV` (Jev runs
 only when this is given) and `--work-dir DIR`. Without `--work-dir` each command
 makes a fresh temporary directory and keeps it, so a failed task can be
