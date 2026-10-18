@@ -8,8 +8,8 @@
 //!   The last page of results is always missing. Fix it.
 //! setup:                        # the start state: files, or a git tree
 //!   files: { "pager.py": "...", "test_pager.py": "..." }
-//!   # git: { repo: /path/or/url, commit: <sha> }
-//!   # symlinks: { node_modules: /abs/path/node_modules }
+//!   # git: { repo: /path/or/url, commit: <sha> }   relative paths: from this file
+//!   # symlinks: { node_modules: ../../node_modules }  likewise
 //! check: python3 -m pytest -q   # what run_quality runs (default: oracle.command)
 //! oracle:                       # decides pass/fail after the run
 //!   command: python3 -m pytest -q
@@ -180,6 +180,35 @@ impl Task {
     }
 }
 
+impl Task {
+    /// Read a relative `setup.git.repo` and relative symlink targets from
+    /// `dir` (the task file's directory), so a task set can point at its own
+    /// repository (`repo: ../..`) wherever the runner is started from.
+    fn resolve_relative_paths(&mut self, dir: &Path) {
+        let base = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        let resolve = |p: &str| -> String {
+            let joined = base.join(p);
+            joined
+                .canonicalize()
+                .unwrap_or(joined)
+                .to_string_lossy()
+                .into_owned()
+        };
+        if let Some(git) = &mut self.setup.git
+            && !git.repo.contains("://")
+            && !git.repo.starts_with("git@")
+            && Path::new(&git.repo).is_relative()
+        {
+            git.repo = resolve(&git.repo);
+        }
+        for target in self.setup.symlinks.values_mut() {
+            if Path::new(target.as_str()).is_relative() {
+                *target = resolve(target);
+            }
+        }
+    }
+}
+
 /// A relative path with no `..` component: everything a task writes stays in
 /// its own directory.
 pub(crate) fn is_relative_inside(path: &str) -> bool {
@@ -219,7 +248,9 @@ pub(crate) fn load_taskset(dir: &Path, only: Option<&[String]>) -> Result<Vec<Ta
         }
         let text =
             std::fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
-        tasks.push(Task::parse(&text, &stem)?);
+        let mut task = Task::parse(&text, &stem)?;
+        task.resolve_relative_paths(dir);
+        tasks.push(task);
     }
     if let Some(only) = only {
         for id in only {
@@ -329,5 +360,44 @@ max_rounds: 12
         let one = load_taskset(dir.path(), Some(&["b-task".to_string()])).unwrap();
         assert_eq!(one.len(), 1);
         assert!(load_taskset(dir.path(), Some(&["c-task".to_string()])).is_err());
+    }
+
+    /// A task set travels with its repository: a relative `setup.git.repo` or
+    /// symlink target is read from the task file's directory, not from
+    /// wherever the runner was started.
+    #[test]
+    fn relative_repo_and_link_paths_resolve_against_the_task_file() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = root.path().join("eval").join("tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::create_dir_all(root.path().join("node_modules")).unwrap();
+        std::fs::write(
+            tasks.join("hist.yaml"),
+            "id: hist\ntitle: t\nprompt: p\nsetup:\n  git: {repo: ../.., commit: abc}\n\
+             \x20 symlinks: {node_modules: ../../node_modules}\n\
+             oracle: {command: 'true'}\nreference: {git_commit: def}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks.join("remote.yaml"),
+            "id: remote\ntitle: t\nprompt: p\n\
+             setup: {git: {repo: 'https://github.com/a/b', commit: abc}}\n\
+             oracle: {command: 'true'}\nreference: {git_commit: def}\n",
+        )
+        .unwrap();
+        let loaded = load_taskset(&tasks, None).unwrap();
+        let root = root.path().canonicalize().unwrap();
+        assert_eq!(
+            loaded[0].setup.git.as_ref().unwrap().repo,
+            root.to_string_lossy()
+        );
+        assert_eq!(
+            loaded[0].setup.symlinks["node_modules"],
+            root.join("node_modules").to_string_lossy()
+        );
+        assert_eq!(
+            loaded[1].setup.git.as_ref().unwrap().repo,
+            "https://github.com/a/b"
+        );
     }
 }
