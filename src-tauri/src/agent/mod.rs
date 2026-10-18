@@ -5,6 +5,7 @@ pub mod delegation;
 pub mod doc_session;
 pub mod document;
 pub mod events;
+pub mod gate_text;
 pub mod handoff;
 pub mod hooks;
 pub mod install_id;

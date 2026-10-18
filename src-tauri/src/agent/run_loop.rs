@@ -5,6 +5,7 @@
 
 use crate::agent::budget::ContextBudget;
 use crate::agent::events::{AgentEvent, QualityLayerView};
+use crate::agent::gate_text;
 use crate::agent::handoff::{
     HandoffReason, HandoffSpec, RunOutcome, compact_history, has_something_to_compress,
     maybe_context_handoff, try_verbatim_compaction,
@@ -1584,10 +1585,9 @@ pub async fn run_workflow_with_profile(
                     &tool_use_id,
                     &tool_input,
                     if in_brain {
-                        "edit_file is not available in Brain mode — it is read-only. \
-                         Record the intended change in the plan (write_plan) instead."
+                        gate_text::EDIT_IN_BRAIN
                     } else {
-                        "edit_file is not available in this session."
+                        gate_text::EDIT_NOT_IN_SESSION
                     },
                     event_tx,
                     session_id,
@@ -1606,8 +1606,7 @@ pub async fn run_workflow_with_profile(
                     &tool_name,
                     &tool_use_id,
                     &tool_input,
-                    "This bash command writes files, and this session does not edit \
-                     files. Bash here is for git, builds, tests and read-only inspection.",
+                    gate_text::BASH_WRITES_NO_EDIT,
                     event_tx,
                     session_id,
                 )
@@ -1624,8 +1623,7 @@ pub async fn run_workflow_with_profile(
                     &tool_name,
                     &tool_use_id,
                     &tool_input,
-                    "This bash command writes files. In Brain mode you cannot mutate \
-                     — record the change in the plan (write_plan) instead.",
+                    gate_text::BASH_WRITES_IN_BRAIN,
                     event_tx,
                     session_id,
                 )
@@ -1646,8 +1644,7 @@ pub async fn run_workflow_with_profile(
                     &tool_name,
                     &tool_use_id,
                     &tool_input,
-                    "Command not allowed in Brain mode — only read-only allowlisted \
-                     commands (git status/diff/log, ls, cat, cargo check, ...) run here.",
+                    gate_text::BASH_NOT_ALLOWED_IN_BRAIN,
                     event_tx,
                     session_id,
                 )

@@ -37,18 +37,10 @@ pub fn execute_set(
     crate::agent::persist::append_tasks(Path::new(path), &merged)?;
     let mut note = String::new();
     if renamed > 0 {
-        note.push_str(&format!(
-            " {} task(s) used the reserved 'golden-' id prefix and were renamed — \
-             golden tasks can only be created by the user via <goal> tags.",
-            renamed
-        ));
+        note.push_str(&crate::agent::gate_text::golden_renamed(renamed));
     }
     if preserved > 0 {
-        note.push_str(&format!(
-            " {} golden task(s) are mandatory and were preserved — golden tasks cannot be \
-             deleted, only completed.",
-            preserved
-        ));
+        note.push_str(&crate::agent::gate_text::golden_preserved(preserved));
     }
     Ok(format!(
         "Tasks updated: {} task(s) saved.{}",
@@ -308,26 +300,16 @@ fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext, tool: &str) -> R
         None => return Ok(()),
     };
     match latest_plan_path(root, ctx.plan_save_path.as_deref()) {
-        None => Err(format!(
-            "{tool} rejected: no plan file exists yet. In Brain mode tasks may only \
-             be created after the plan is complete: write the Solution Design via \
-             write_plan, then call write_plan again with the full content plus a \
-             '## Low-Level Design' section, then retry {tool}."
-        )),
+        None => Err(crate::agent::gate_text::lld_no_plan(tool)),
         Some(path) => {
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| format!("{tool}: cannot read plan {}: {e}", path.display()))?;
             if has_nonempty_section(&content, LLD_HEADING) {
                 Ok(())
             } else {
-                Err(format!(
-                    "{tool} rejected: the most recent plan ({}) has no non-empty \
-                     '## Low-Level Design' section. Research the codebase first (spawn_agents \
-                     'explore' mode, semantic_search, file reading), then call write_plan again \
-                     with the FULL plan content including a '## Low-Level Design' section \
-                     (files/symbols to touch, data flow, APIs/schemas, patterns to reuse) - \
-                     then retry {tool}.",
-                    path.display()
+                Err(crate::agent::gate_text::lld_missing(
+                    tool,
+                    &path.display().to_string(),
                 ))
             }
         }

@@ -1277,7 +1277,7 @@ impl ReadTracker {
         let entry = self
             .files
             .get(path)
-            .ok_or_else(|| format!("read_file must be called on {} before editing it", path))?;
+            .ok_or_else(|| crate::agent::gate_text::not_read(path))?;
 
         if entry.full_read {
             return Ok(());
