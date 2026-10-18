@@ -2227,6 +2227,20 @@ pub(crate) mod surface_tests {
         answer: Option<bool>,
         script: impl FnOnce(&str) -> Vec<Reply>,
     ) -> Run {
+        let steering = Arc::new(SteeringCtl::new());
+        run_script_steered(tag, context_window, answer, script, steering, |_, _| {}).await
+    }
+
+    /// `run_script`, with the run's steering in the test's hands and
+    /// `on_event` called with each event (and that steering) as it is sent.
+    async fn run_script_steered(
+        tag: &str,
+        context_window: Option<u32>,
+        answer: Option<bool>,
+        script: impl FnOnce(&str) -> Vec<Reply>,
+        steering: Arc<SteeringCtl>,
+        on_event: impl Fn(&AgentEvent, &SteeringCtl) + Send + Sync + 'static,
+    ) -> Run {
         let root = std::env::temp_dir().join(format!(
             "claudinio-surface-{tag}-{}-{}",
             std::process::id(),
@@ -2251,12 +2265,13 @@ pub(crate) mod surface_tests {
         };
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let events: Channel<AgentEvent> = {
-            let seen = seen.clone();
+            let (seen, steering) = (seen.clone(), steering.clone());
             Channel::new(
                 move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
                     if let tauri::ipc::InvokeResponseBody::Json(json) = &body
                         && let Ok(event) = serde_json::from_str::<AgentEvent>(json)
                     {
+                        on_event(&event, &steering);
                         seen.lock().unwrap().push(event);
                     }
                     Ok(())
@@ -2289,7 +2304,7 @@ pub(crate) mod surface_tests {
             "surface-test",
             &ctx,
             &store,
-            &Arc::new(SteeringCtl::new()),
+            &steering,
             &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
         )
         .await;
@@ -2391,6 +2406,78 @@ pub(crate) mod surface_tests {
             run.bodies[1].contains("between"),
             "the command's output came back"
         );
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    // Stop pressed while a run of reads is under way: whatever had finished
+    // keeps its result, the rest are reported as not run, and the model's turn
+    // is answered call for call, in order, once each.
+    #[tokio::test]
+    async fn a_pause_during_parallel_reads_answers_every_call_once() {
+        let steering = Arc::new(SteeringCtl::new());
+        let run = run_script_steered(
+            "batch-pause",
+            None,
+            None,
+            |path| {
+                vec![
+                    Reply::Tools(vec![
+                        ("read_file", serde_json::json!({ "path": path })),
+                        (
+                            "grep",
+                            serde_json::json!({ "pattern": "hello", "path": path }),
+                        ),
+                        ("read_file", serde_json::json!({ "path": path })),
+                    ]),
+                    Reply::Text("should not be asked for"),
+                ]
+            },
+            steering,
+            |event, steering| {
+                if matches!(event, AgentEvent::ToolCall { tool_id, .. } if tool_id == "tu_0_0") {
+                    steering.interrupt.store(true, Ordering::SeqCst);
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(
+            run.bodies.len(),
+            1,
+            "the run paused instead of asking again"
+        );
+        let turns: Vec<Message> = crate::agent::persist::load_records(&run.store.path)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                SessionRecord::Turn { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        let ids = |m: &Message, want_use: bool| -> Vec<String> {
+            m.content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, .. } if want_use => Some(id.clone()),
+                    ContentBlock::ToolResult { tool_use_id, .. } if !want_use => {
+                        Some(tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let [.., asked, answered] = &turns[..] else {
+            panic!("no tool round recorded: {turns:?}");
+        };
+        assert_eq!(ids(asked, true), ["tu_0_0", "tu_0_1", "tu_0_2"]);
+        assert_eq!(ids(answered, false), ["tu_0_0", "tu_0_1", "tu_0_2"]);
+        for id in ["tu_0_0", "tu_0_1", "tu_0_2"] {
+            event_at(&run, false, id);
+        }
         std::fs::remove_dir_all(&run.root).ok();
     }
 
