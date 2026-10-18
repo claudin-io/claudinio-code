@@ -141,25 +141,54 @@ impl Args {
         })
     }
 
-    /// `--work-dir`, or a fresh temporary directory (kept, so a failed run
-    /// can be inspected; its path is printed).
-    fn work_dir(&self) -> Result<PathBuf, String> {
+    /// `--work-dir`, or a fresh temporary directory (kept by `run`, and by a
+    /// `validate` with an invalid task, so a failure can be inspected; its
+    /// path is printed).
+    fn work_dir(&self) -> Result<WorkDir, String> {
         match self.flag("work-dir") {
-            Some(dir) => Ok(PathBuf::from(dir)),
+            Some(dir) => Ok(WorkDir {
+                path: PathBuf::from(dir),
+                temporary: false,
+            }),
             None => tempfile::Builder::new()
                 .prefix("claudinio-eval-")
                 .tempdir()
-                .map(|d| d.keep())
+                .map(|d| WorkDir {
+                    path: d.keep(),
+                    temporary: true,
+                })
                 .map_err(|e| format!("work dir: {e}")),
         }
     }
 }
 
+/// Where a command materializes its tasks, and whether this run made it.
+struct WorkDir {
+    path: PathBuf,
+    /// Made by this run rather than named with `--work-dir`.
+    temporary: bool,
+}
+
+/// Where `run` writes its JSONL: `--out`, else `results.jsonl` in the work dir.
+fn results_path(args: &Args, work: &WorkDir) -> PathBuf {
+    args.flag("out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| work.path.join("results.jsonl"))
+}
+
 fn cmd_validate(args: &Args) -> Result<i32, String> {
+    validate_taskset(args).map(|(code, _)| code)
+}
+
+/// `validate`, returning the exit code and the work dir it used.
+fn validate_taskset(args: &Args) -> Result<(i32, PathBuf), String> {
     let dir = PathBuf::from(args.positional(0, "<taskset-dir>")?);
     let only = args.tasks();
     let tasks = task::load_taskset(&dir, only.as_deref())?;
-    let work = args.work_dir()?;
+    let WorkDir {
+        path: work,
+        temporary,
+    } = args.work_dir()?;
     eprintln!("validating {} tasks in {}", tasks.len(), work.display());
     let mut results = Vec::new();
     for t in &tasks {
@@ -172,11 +201,20 @@ fn cmd_validate(args: &Args) -> Result<i32, String> {
         results.push(v);
     }
     print!("{}", validate::table(&results));
-    Ok(if results.iter().all(validate::Validation::is_valid) {
+    let code = if results.iter().all(validate::Validation::is_valid) {
         0
     } else {
         1
-    })
+    };
+    // A full validate materializes every start tree and reference, ~235 MB
+    // (measured on the shipped set): kept only when there is something to
+    // look at — a failing task — or when the user named the directory.
+    if code == 0 && temporary {
+        std::fs::remove_dir_all(&work).map_err(|e| format!("remove {}: {e}", work.display()))?;
+    } else {
+        eprintln!("work dir kept: {}", work.display());
+    }
+    Ok((code, work))
 }
 
 async fn cmd_run(args: &Args) -> Result<i32, String> {
@@ -195,6 +233,7 @@ async fn cmd_run(args: &Args) -> Result<i32, String> {
             "--protocol must be anthropic or openai, not {protocol}"
         ));
     }
+    let work = args.work_dir()?;
     let opts = RunOptions {
         model: args.required("model")?.to_string(),
         base_url: args.required("base-url")?.to_string(),
@@ -209,10 +248,10 @@ async fn cmd_run(args: &Args) -> Result<i32, String> {
             cache_write: args.number("price-cache-write")?,
         },
         jev_api_key,
-        work_root: args.work_dir()?,
+        work_root: work.path.clone(),
         task_timeout: Duration::from_secs(args.number("task-timeout-s")?.unwrap_or(3_600)),
     };
-    let out = PathBuf::from(args.flag("out").unwrap_or("eval-results.jsonl"));
+    let out = results_path(args, &work);
     eprintln!(
         "running {} tasks on {} in {}; results -> {}",
         tasks.len(),
@@ -381,6 +420,77 @@ mod tests {
         let mut unknown = result(true, 3, 0.1, 0);
         unknown.metrics.cost_known = false;
         assert_eq!(summarize(&[unknown]).cost_per_solved, None);
+    }
+
+    fn argv(args: &[&str]) -> Args {
+        Args::parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    /// A task set of one tiny task, valid or not depending on `oracle`.
+    fn taskset(oracle: &str) -> tempfile::TempDir {
+        let set = tempfile::tempdir().unwrap();
+        std::fs::write(
+            set.path().join("tiny.yaml"),
+            format!(
+                "id: tiny\ntitle: tiny\nprompt: fix it\nsetup:\n  files:\n    a.py: 'X = 1'\n\
+                 oracle:\n  command: \"{oracle}\"\n  timeout_s: 20\n\
+                 reference:\n  files:\n    a.py: 'X = 2'\n"
+            ),
+        )
+        .unwrap();
+        set
+    }
+
+    // A full validate materializes every start tree and reference: hundreds of
+    // megabytes in /tmp per run. When every task is valid nothing in it is
+    // worth inspecting.
+    #[test]
+    fn a_validate_where_every_task_is_valid_leaves_no_temporary_work_dir() {
+        let set = taskset("python3 -c 'import a; assert a.X == 2'");
+        let (code, work) = validate_taskset(&argv(&[set.path().to_str().unwrap()])).unwrap();
+        assert_eq!(code, 0);
+        assert!(!work.exists(), "{} was left behind", work.display());
+    }
+
+    #[test]
+    fn an_invalid_task_keeps_the_work_dir_for_inspection() {
+        let set = taskset("false");
+        let (code, work) = validate_taskset(&argv(&[set.path().to_str().unwrap()])).unwrap();
+        assert_eq!(code, 1);
+        assert!(work.join("tiny").exists());
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    #[test]
+    fn a_work_dir_the_user_named_is_never_removed() {
+        let set = taskset("python3 -c 'import a; assert a.X == 2'");
+        let mine = tempfile::tempdir().unwrap();
+        let (code, work) = validate_taskset(&argv(&[
+            set.path().to_str().unwrap(),
+            "--work-dir",
+            mine.path().to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert_eq!((code, work.as_path()), (0, mine.path()));
+        assert!(mine.path().exists());
+    }
+
+    // The documented invocation runs from src-tauri/, and a results file
+    // written into the cwd lands untracked in the repository.
+    #[test]
+    fn run_results_default_to_the_work_dir_not_the_current_directory() {
+        let work = WorkDir {
+            path: PathBuf::from("/w"),
+            temporary: true,
+        };
+        assert_eq!(
+            results_path(&argv(&[]), &work),
+            PathBuf::from("/w/results.jsonl")
+        );
+        assert_eq!(
+            results_path(&argv(&["--out", "r.jsonl"]), &work),
+            PathBuf::from("r.jsonl")
+        );
     }
 
     #[test]

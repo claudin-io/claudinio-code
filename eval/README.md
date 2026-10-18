@@ -47,8 +47,12 @@ runs out is stopped as the Stop button stops a run — subagents included — an
 the oracle runs only once it has wound down),
 `--price-cache-read/--price-cache-write`, `--jev-api-key-env ENV` (Jev runs
 only when this is given) and `--work-dir DIR`. Without `--work-dir` each command
-makes a fresh temporary directory and keeps it, so a failed task can be
-inspected; on a machine whose `/tmp` is in memory, point `--work-dir` at a disk.
+makes a fresh temporary directory. `run` keeps it, so every session can be read
+back; `validate` removes it when every task is valid (a full validate
+materializes ~235 MB) and keeps it, printing its path, when one is not. A
+directory named with `--work-dir` is never removed. On a machine whose `/tmp`
+is in memory, point `--work-dir` at a disk. Without `--out`, `run` writes its
+results to `results.jsonl` in the work directory, not into the current one.
 
 `run` writes one JSON line per task as it goes — `id`, `pass`, `outcome`
 (`completed`, `timeout`, `error: …`), `wall_s`, the oracle's exit code and
