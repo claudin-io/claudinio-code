@@ -3055,9 +3055,10 @@ pub(crate) mod surface_tests {
 
     /// The toggle can be flipped from Brain to Builder while a round's batch
     /// is still running. From that moment the session edits, and a shell
-    /// command that writes a file is an edit: it must be asked about (or
-    /// refused), never run unasked because its prefix (`echo `) is
-    /// allowlisted and the round began in Brain.
+    /// command that writes a file is an edit: it must be asked about — as
+    /// any Builder shell write is, not refused — and never run unasked
+    /// because its prefix (`echo `) is allowlisted and the round began in
+    /// Brain.
     #[tokio::test]
     async fn flipping_brain_to_builder_mid_batch_still_asks_before_a_shell_write() {
         let mode_ctl = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human));
@@ -3112,6 +3113,22 @@ pub(crate) mod surface_tests {
                         && permission == "auto"
             )),
             "a file-writing shell command never runs unasked"
+        );
+        // Asked, and the person's "no" is what the model reads.
+        assert!(
+            run.events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCall { tool_name, args, permission, .. }
+                    if tool_name == "bash"
+                        && args.to_string().contains("echo goodbye")
+                        && permission == "requires_approval"
+            )),
+            "the write after the flip is put to the person"
+        );
+        assert!(
+            run.bodies[1].contains("rejected by user"),
+            "{}",
+            run.bodies[1]
         );
         std::fs::remove_dir_all(&run.root).ok();
     }
