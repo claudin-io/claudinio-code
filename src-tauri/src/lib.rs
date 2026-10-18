@@ -228,6 +228,82 @@ mod architecture_tests {
         );
     }
 
+    /// The most production lines one file under `agent/` may carry.
+    ///
+    /// `session.rs` grew to 8,446 lines — 5,326 of them production — by owning
+    /// the prompt text, the run loop, both judges, handoff and compaction, the
+    /// event type, tool dispatch and the retries at once, so a change to any one
+    /// of them meant reading past the other six (lean-harness plan, Phase 8).
+    /// Tests are not counted: they live beside the code they test by convention
+    /// (CONTRIBUTING.md), and a thorough suite is not the weight this guards
+    /// against.
+    const MAX_AGENT_FILE_PRODUCTION_LINES: usize = 2_000;
+
+    #[test]
+    fn no_agent_file_carries_more_than_two_thousand_production_lines() {
+        let mut oversized = Vec::new();
+        visit(Path::new("src/agent"), &mut |path, body| {
+            let lines = production_lines(body);
+            if lines > MAX_AGENT_FILE_PRODUCTION_LINES {
+                oversized.push(format!("{} ({lines})", path.display()));
+            }
+        });
+        assert!(
+            oversized.is_empty(),
+            "split these by responsibility, they exceed \
+             {MAX_AGENT_FILE_PRODUCTION_LINES} production lines: {oversized:?}"
+        );
+    }
+
+    #[test]
+    fn production_lines_leave_out_only_the_test_modules() {
+        // A gated module in the middle of a file (`tools/mod.rs` opens its
+        // `tests_support` near the top) must not take the code after it along.
+        let body = "fn a() {}\n\
+                    #[cfg(test)]\n\
+                    pub(crate) mod support {\n    fn s() {}\n}\n\
+                    fn b() {}\n\
+                    #[cfg(test)]\n\
+                    fn gated_fn_is_production_code() {}\n\
+                    #[cfg(test)]\n\
+                    #[allow(dead_code)]\n\
+                    mod tests {\n    #[test]\n    fn t() {}\n}\n";
+        assert_eq!(production_lines(body), 4);
+    }
+
+    /// Lines of `body` outside its `#[cfg(test)]` modules.
+    ///
+    /// rustfmt puts a top-level module's closing brace alone at column 0, so a
+    /// gated `mod name {` ends at the first line that is exactly `}`. Test
+    /// modules are not always at the end of a file, so "everything after the
+    /// first `#[cfg(test)]`" would count most of `tools/mod.rs` as tests.
+    fn production_lines(body: &str) -> usize {
+        let lines: Vec<&str> = body.lines().collect();
+        let mut count = 0;
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i] == "#[cfg(test)]" {
+                let mut j = i + 1;
+                while j < lines.len() && lines[j].starts_with("#[") {
+                    j += 1;
+                }
+                let opens_module = lines.get(j).is_some_and(|l| {
+                    l.ends_with('{') && l.split_whitespace().take(2).any(|w| w == "mod")
+                });
+                if opens_module {
+                    while j < lines.len() && lines[j] != "}" {
+                        j += 1;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            count += 1;
+            i += 1;
+        }
+        count
+    }
+
     fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
