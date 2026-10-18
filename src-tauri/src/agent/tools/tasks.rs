@@ -417,11 +417,25 @@ fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<T
 /// finding recorded since (Phase 4 review). What the call does send — a
 /// title, a status, a non-empty description or journal — still replaces the
 /// stored value, so rewording stays what `tasks_set` is for.
+///
+/// "Already exists" is more than a shared id. Ids are the model's and
+/// usually sequential, so a fresh list for an unrelated request reuses the
+/// ids of a finished one, and matching on the id alone handed the new tasks
+/// the old ones' journals (Phase 4 final review). A stored task counts as
+/// the same task when it is not done yet (the list is still being worked,
+/// a reword included) or when the title is unchanged (a finished task
+/// resent from the block). A done task under another title is a different
+/// task that happens to reuse the id. One consequence stays: `tasks_set`
+/// cannot clear the journal of a task it keeps — an empty journal reads as
+/// "not sent".
 fn keep_stored_details(prev: &[TaskItem], incoming: Vec<TaskItem>) -> Vec<TaskItem> {
+    let same_task = |stored: &TaskItem, t: &TaskItem| {
+        stored.status != "done" || stored.title.trim() == t.title.trim()
+    };
     incoming
         .into_iter()
         .map(|mut t| {
-            if let Some(stored) = prev.iter().find(|p| p.id == t.id) {
+            if let Some(stored) = prev.iter().find(|p| p.id == t.id && same_task(p, &t)) {
                 if t.description.trim().is_empty() {
                     t.description = stored.description.clone();
                 }
@@ -724,6 +738,63 @@ mod lld_gate_tests {
         assert_eq!(t1.description, "Brain's parser design");
         assert_eq!(t1.journal, ["uses nom"]);
         assert_eq!(by_id("t2").description, "Write the docs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Ids are the model's and usually sequential (`t1`, `t2`, ...), so a
+    // fresh list for an unrelated request reuses the ids of a finished one.
+    // A task that only shares an id with a finished task of another title is
+    // a new task: it must start with the details it was sent, not inherit
+    // the old task's description and journal. A finished task resent from
+    // the `<tasks>` block under its own title still keeps them.
+    #[test]
+    fn a_fresh_list_that_reuses_ids_does_not_inherit_the_finished_tasks_details() {
+        let (ctx, root) = ctx_for("fresh-list-reuses-ids", None);
+        let store = ctx.session_store_path.clone().unwrap();
+        let task =
+            |id: &str, title: &str, description: &str, journal: &[&str], status: &str| TaskItem {
+                id: id.into(),
+                title: title.into(),
+                description: description.into(),
+                journal: journal.iter().map(|j| j.to_string()).collect(),
+                status: status.into(),
+            };
+        crate::agent::persist::append_tasks(
+            Path::new(&store),
+            &[
+                task(
+                    "t1",
+                    "Parse the config",
+                    "nom parser",
+                    &["uses nom"],
+                    "done",
+                ),
+                task(
+                    "t2",
+                    "Write the docs",
+                    "README",
+                    &["added a section"],
+                    "done",
+                ),
+            ],
+        )
+        .unwrap();
+        execute_set(
+            SetTasksArgs {
+                tasks: vec![
+                    task("t1", "Add a login page", "", &[], "todo"),
+                    task("t2", "Write the docs", "", &[], "done"),
+                ],
+            },
+            &ctx,
+        )
+        .unwrap();
+        let after = crate::agent::persist::load_last_tasks(Path::new(&store)).unwrap();
+        assert_eq!(after[0].title, "Add a login page");
+        assert_eq!(after[0].description, "");
+        assert!(after[0].journal.is_empty(), "{:?}", after[0].journal);
+        assert_eq!(after[1].description, "README");
+        assert_eq!(after[1].journal, ["added a section"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
