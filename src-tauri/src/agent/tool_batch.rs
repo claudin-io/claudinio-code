@@ -35,9 +35,9 @@ use tokio::task::JoinSet;
 
 /// At most this many calls of one round run at the same time. Four is what the
 /// plan settled on: enough to cover the usual fan-out of a model reading a
-/// handful of files, few enough that a burst of searches does not take every
-/// worker thread (the file tools read synchronously) from the provider stream
-/// and the UI.
+/// handful of files without a burst of searches competing for the disk. The
+/// bodies run on the blocking pool ([`on_blocking_thread`]), so the limit is
+/// about the disk and `rg` processes, not about the async workers.
 pub(crate) const MAX_CONCURRENT_TOOLS: usize = 4;
 
 /// The `tool_result` of a call a pause kept from running (or from finishing).
@@ -139,8 +139,8 @@ where
 /// The executor the loop hands [`run_ahead`]: announces the call (in the
 /// model's order, since `run_ahead` calls this in that order before any job
 /// starts) and returns a job that runs it as the loop's auto-approved path
-/// does. The job owns clones of what it needs, so it can run on a task of its
-/// own.
+/// does, on the blocking pool. The job owns clones of what it needs, so it can
+/// run on a thread of its own.
 pub(crate) fn executor<'a>(
     event_tx: &'a Channel<AgentEvent>,
     session_id: &'a str,
@@ -157,20 +157,45 @@ pub(crate) fn executor<'a>(
         });
         let (name, id) = (name.to_string(), id.to_string());
         let (event_tx, session_id, ctx) = (event_tx.clone(), session_id.to_string(), ctx.clone());
-        async move {
-            crate::agent::tool_exec::execute_reported(
-                &name,
-                &id,
-                input,
-                "auto",
-                &event_tx,
-                &session_id,
-                &ctx,
-            )
-            .await
-        }
-        .boxed()
+        on_blocking_thread(
+            async move {
+                crate::agent::tool_exec::execute_reported(
+                    &name,
+                    &id,
+                    input,
+                    "auto",
+                    &event_tx,
+                    &session_id,
+                    &ctx,
+                )
+                .await
+            }
+            .boxed(),
+        )
     }
+}
+
+/// Run `job` on tokio's blocking pool rather than on an async worker.
+///
+/// The parallel-safe tools are async in name only: `read_file`, `list_dir`
+/// and the index lookups do synchronous I/O, and `grep` waits on `rg` with
+/// `Command::output`. The app runs on Tauri's default runtime, one worker per
+/// core, so four such bodies on workers would stall every worker of a
+/// four-core machine — the provider stream, IPC, the other sessions — for as
+/// long as the slowest search. On the blocking pool they cost a thread each
+/// and nothing else. The job is still a future (a tool may await a lock or an
+/// HTTP request), so it is driven there with `Handle::block_on`. A panic in
+/// it is carried back to the caller's task, where [`run_ahead`] answers it.
+fn on_blocking_thread<T: Send + 'static>(job: BoxFuture<'static, T>) -> BoxFuture<'static, T> {
+    let runtime = tokio::runtime::Handle::current();
+    async move {
+        match tokio::task::spawn_blocking(move || runtime.block_on(job)).await {
+            Ok(value) => value,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("tool task did not finish: {e}"),
+        }
+    }
+    .boxed()
 }
 
 /// How one job of a run ended.
@@ -661,6 +686,78 @@ mod tests {
             ],
             "the model hears what the timeline shows"
         );
+    }
+
+    // The file tools read, list and search synchronously. Four of them on
+    // async worker threads at once would take every worker of a small machine
+    // (and, on one thread, simply run one after another); off the runtime they
+    // overlap and leave the workers to the provider stream and the UI.
+    #[tokio::test]
+    async fn blocking_tool_bodies_overlap_even_on_a_single_runtime_thread() {
+        let calls = reads(4);
+        let mut ready = vec![None; 4];
+        let (events, _) = recording_channel();
+        let exec = |_: &str, id: &str, _: Value| -> BoxFuture<'static, ContentBlock> {
+            let id = id.to_string();
+            on_blocking_thread(
+                async move {
+                    std::thread::sleep(Duration::from_millis(100));
+                    ContentBlock::tool_result(&id, "read")
+                }
+                .boxed(),
+            )
+        };
+        let started = std::time::Instant::now();
+        run_ahead(
+            &calls,
+            0,
+            &mut ready,
+            any_call,
+            exec,
+            &AtomicBool::new(false),
+            &events,
+        )
+        .await;
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(300), "took {took:?}");
+        assert!(ready.iter().all(Option::is_some));
+    }
+
+    // A tool body that panics on its blocking thread still ends its call
+    // with an error, not with a call left unanswered.
+    #[tokio::test]
+    async fn a_blocking_body_that_panics_is_answered_with_an_error() {
+        let calls = reads(2);
+        let mut ready = vec![None; 2];
+        let (events, _) = recording_channel();
+        let exec = |_: &str, id: &str, _: Value| -> BoxFuture<'static, ContentBlock> {
+            let id = id.to_string();
+            on_blocking_thread(
+                async move {
+                    if id == "tu_1" {
+                        panic!("tool blew up");
+                    }
+                    ContentBlock::tool_result(&id, "fine")
+                }
+                .boxed(),
+            )
+        };
+        run_ahead(
+            &calls,
+            0,
+            &mut ready,
+            any_call,
+            exec,
+            &AtomicBool::new(false),
+            &events,
+        )
+        .await;
+        assert!(
+            text(ready[1].as_ref().expect("answered"))
+                .1
+                .starts_with("Error")
+        );
+        assert_eq!(text(ready[0].as_ref().unwrap()).1, "fine");
     }
 
     #[tokio::test(start_paused = true)]
