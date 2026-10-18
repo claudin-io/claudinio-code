@@ -159,6 +159,12 @@ pub(crate) fn normalize_spawn_input(tool_input: Value) -> Value {
     }
 }
 
+/// The stem prefix of a compaction summarizer's transcript in `<id>.sub/`
+/// (`compact-<n>.jsonl`), where a spawned subagent's is its parent tool-use
+/// id. Readers of the directory (`eval::metrics`, `scripts/session-stats.py`)
+/// tell the two apart by it.
+pub(crate) const COMPACTION: &str = "compact";
+
 /// A subagent's transcript file (`persist::subagent_transcript_path`): its
 /// turns and one `Usage` record per provider request.
 ///
@@ -185,6 +191,27 @@ impl Transcript {
         let parent = std::path::Path::new(ctx.session_store_path.as_deref()?);
         let path =
             crate::agent::persist::subagent_transcript_path(parent, parent_tool_use_id, index);
+        Self::at(path, ctx, subagent_id)
+    }
+
+    /// Open a fresh transcript for a compaction's summarizer:
+    /// `<id>.sub/compact-<n>.jsonl`, `n` the first number not yet taken.
+    ///
+    /// The summarizer is a subagent like any other — fresh context, its own
+    /// provider requests, billed — and before it had a transcript its rounds
+    /// were written nowhere, so a run that compacted reported less than the
+    /// provider charged. A new file per attempt rather than one per
+    /// `Compacted` record, because a failed attempt writes no `Compacted` and
+    /// its requests were billed all the same.
+    pub(crate) fn open_compaction(ctx: &ToolContext, summarizer_id: &str) -> Option<Self> {
+        let parent = std::path::Path::new(ctx.session_store_path.as_deref()?);
+        let path = (0..)
+            .map(|n| crate::agent::persist::subagent_transcript_path(parent, COMPACTION, n))
+            .find(|p| !p.exists())?;
+        Self::at(path, ctx, summarizer_id)
+    }
+
+    fn at(path: std::path::PathBuf, ctx: &ToolContext, subagent_id: &str) -> Option<Self> {
         std::fs::create_dir_all(path.parent()?).ok()?;
         let label = path.file_stem()?.to_str()?.to_string();
         let store = crate::agent::persist::SessionStore { path };
@@ -417,7 +444,10 @@ fn subagent_system_prompt(workspace_root: Option<&str>, skills_hint: &str) -> St
 
 /// Run a single subagent: a simplified enxuto version of `run_workflow`.
 /// No steering injection, no `AgentEvent::Done`, and no transcript — see
-/// `run_subagent_recorded` for the one `spawn_agents` keeps.
+/// `run_subagent_recorded` for the one `spawn_agents` and the compaction
+/// summarizer keep. Test-only: every production subagent is a session's
+/// provider requests, and those are always recorded.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_subagent(
     config: &AgentConfig,
@@ -1014,8 +1044,17 @@ pub async fn run_summary_agent(
         ),
     };
 
-    let result = run_subagent(
-        config, ctx, &spec, event_tx, approvals, answers, session_id, steering,
+    let transcript = Transcript::open_compaction(ctx, &format!("{session_id}-summarizer"));
+    let result = run_subagent_recorded(
+        config,
+        ctx,
+        &spec,
+        event_tx,
+        approvals,
+        answers,
+        session_id,
+        steering,
+        transcript.as_ref(),
     )
     .await;
 

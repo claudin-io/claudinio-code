@@ -814,3 +814,115 @@ mod handoff_usage_tests {
         std::fs::remove_file(&store.path).ok();
     }
 }
+
+/// A compaction's summarizer is a subagent making provider requests, and every
+/// one of them is billed. Before it had a transcript, a run that compacted
+/// reported fewer rounds and a lower cost than the provider charged for it.
+#[cfg(test)]
+mod compaction_usage_tests {
+    use super::*;
+    use crate::agent::persist::load_records;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_with_usage};
+
+    fn usage_labels(path: &std::path::Path) -> Vec<Option<String>> {
+        load_records(path)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| match r {
+                SessionRecord::Usage { subagent, .. } => Some(subagent),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_summarizer_request_leaves_a_usage_record_in_a_compaction_transcript() {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio_compact_usage_{}_{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore {
+            path: dir.join("sess.jsonl"),
+        };
+        store
+            .append(&SessionRecord::User {
+                text: "Refactor the parser.".into(),
+                ts: now_ms(),
+            })
+            .unwrap();
+        store
+            .append(&SessionRecord::Turn {
+                message: Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text("Working on it.")],
+                },
+                ts: now_ms(),
+            })
+            .unwrap();
+        let (base, sizes, _) = spawn_with_usage(
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": store.path.to_string_lossy() }),
+                },
+                Reply::Text("## Task & intent\nRefactor the parser."),
+            ],
+            Some(serde_json::json!({"input_tokens": 40, "cache_read_input_tokens": 300})),
+        )
+        .await;
+        let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let ctx = ToolContext {
+            workspace_root: Some(dir.to_string_lossy().to_string()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let (approvals, answers) = (ApprovalMap::default(), AnswerMap::default());
+        let steering = Arc::new(SteeringCtl::new());
+        let compact = || {
+            compact_history(
+                &config,
+                &store,
+                &ctx,
+                &events,
+                &approvals,
+                &answers,
+                "compact-usage",
+                &steering,
+                crate::agent::hooks::CompactTrigger::Auto,
+                10_000,
+            )
+        };
+        compact().await.expect("the first compaction");
+        let requests = sizes.lock().unwrap().len();
+        assert_eq!(requests, 2, "a read, then the summary");
+
+        let first = dir.join("sess.sub").join("compact-0.jsonl");
+        assert_eq!(
+            usage_labels(&first),
+            vec![Some("compact-0".to_string()); requests],
+            "one usage record per summarizer request, labelled with its transcript"
+        );
+        assert!(
+            usage_labels(&store.path).is_empty(),
+            "the summarizer's requests stay out of the model's history file"
+        );
+
+        // A second compaction of the same session gets a transcript of its own.
+        compact().await.expect("the second compaction");
+        let second = dir.join("sess.sub").join("compact-1.jsonl");
+        assert_eq!(
+            usage_labels(&second).len(),
+            sizes.lock().unwrap().len() - requests
+        );
+
+        // And the eval reads them back as provider requests of the run.
+        let m = crate::eval::metrics::collect(&dir, &Default::default());
+        assert_eq!(m.rounds as usize, sizes.lock().unwrap().len());
+        assert_eq!(m.subagents, 0, "a summarizer is not a spawned subagent");
+        assert_eq!(m.compactions, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

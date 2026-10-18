@@ -61,7 +61,10 @@ pub(crate) struct RunMetrics {
     /// False when some request had neither a reported cost nor a price.
     pub cost_known: bool,
     pub tool_calls: BTreeMap<String, u32>,
+    /// Subagents spawned with `spawn_agents`.
     pub subagents: u32,
+    /// Compaction summaries, each a subagent run of its own.
+    pub compactions: u32,
     pub sessions: u32,
 }
 
@@ -73,7 +76,8 @@ pub(crate) fn collect(sessions_dir: &Path, prices: &Prices) -> RunMetrics {
     };
     let (main, subs) = session_files(sessions_dir);
     m.sessions = main.len() as u32;
-    m.subagents = subs.len() as u32;
+    m.compactions = subs.iter().filter(|p| is_compaction(p)).count() as u32;
+    m.subagents = subs.len() as u32 - m.compactions;
     for (path, is_sub) in main
         .iter()
         .map(|p| (p, false))
@@ -128,6 +132,16 @@ pub(crate) fn collect(sessions_dir: &Path, prices: &Prices) -> RunMetrics {
         }
     }
     m
+}
+
+/// A compaction summarizer's transcript (`compact-<n>.jsonl`), as opposed to
+/// a spawned subagent's (`<tool-use id>-<index>.jsonl`). Its requests count as
+/// subagent rounds and tokens — it is one — but not as a spawned subagent.
+fn is_compaction(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit_once('-'))
+        .is_some_and(|(prefix, _)| prefix == crate::agent::subagent::COMPACTION)
 }
 
 /// The main session files (`*.jsonl` at the top) and subagent transcripts

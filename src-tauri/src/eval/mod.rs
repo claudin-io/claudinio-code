@@ -16,7 +16,7 @@
 //! approval policy and how to read the results.
 
 mod materialize;
-mod metrics;
+pub(crate) mod metrics;
 mod policy;
 mod runner;
 mod swebench;
