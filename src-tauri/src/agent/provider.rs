@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
+pub mod cache;
 pub mod catalog;
 pub mod openai;
 
@@ -1390,6 +1391,43 @@ pub async fn stream_message(
         )
         .await;
     }
+    let cache_markers = cache::should_mark(&rp);
+    stream_anthropic(
+        &rp,
+        cache_markers,
+        config,
+        messages,
+        tools,
+        system,
+        event_tx,
+        session_id,
+        assistant_text,
+        interrupt,
+        emit_text_deltas,
+        net_detail,
+    )
+    .await
+}
+
+/// The Anthropic-protocol half of `stream_message`, once the provider is
+/// resolved. `cache_markers` is decided by the caller (`cache::should_mark`)
+/// so a test can drive the marked path against a stub on loopback, which the
+/// predicate itself never marks.
+#[allow(clippy::too_many_arguments)]
+async fn stream_anthropic(
+    rp: &ResolvedProvider,
+    cache_markers: bool,
+    config: &AgentConfig,
+    messages: &[Message],
+    tools: &[ToolDescription],
+    system: Option<&str>,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+    assistant_text: &mut String,
+    interrupt: &AtomicBool,
+    emit_text_deltas: bool,
+    net_detail: &str,
+) -> Result<StreamOutput, String> {
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
@@ -1427,18 +1465,21 @@ pub async fn stream_message(
     };
 
     let url = format!("{}/v1/messages", rp.base_url.trim_end_matches('/'));
-
-    let request = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("x-api-key", &rp.api_key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .json(&body)
-        .send();
-    let Some(response) = until_stopped(request, interrupt).await else {
+    let body = serde_json::to_value(&body).map_err(|e| format!("request body: {e}"))?;
+    let post = |body: Value| {
+        let request = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("x-api-key", &rp.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&body)
+            .send();
+        until_stopped(request, interrupt)
+    };
+    let Some(response) = cache::post_with_cache_fallback(rp, cache_markers, body, post).await?
+    else {
         return Ok(StreamOutput::stopped());
     };
-    let response = response.map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
     if !status.is_success() {

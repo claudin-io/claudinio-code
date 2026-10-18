@@ -1300,6 +1300,9 @@ pub(crate) mod scripted_model {
         /// connection stays open, as a provider mid-generation does when the
         /// user presses stop.
         Hang(&'static str),
+        /// An HTTP error: this status and this JSON body, no stream. A
+        /// provider refusing the request outright.
+        Status(u16, &'static str),
     }
 
     fn sse(event: &str, data: Value) -> String {
@@ -1325,6 +1328,7 @@ pub(crate) mod scripted_model {
         );
         match reply {
             Reply::Delayed(_, inner) => return render(inner, n),
+            Reply::Status(_, body) => return body.to_string(),
             Reply::Tool { name, input } => {
                 out += &tool_use(0, name, input);
                 out += &stop;
@@ -1444,6 +1448,16 @@ pub(crate) mod scripted_model {
                             "message_start",
                             json!({"message": {"role": "assistant", "usage": usage}}),
                         ) + &body;
+                    }
+                    if let Reply::Status(code, body) = reply {
+                        let resp = format!(
+                            "HTTP/1.1 {code} Error\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        let _ = socket.flush().await;
+                        continue;
                     }
                     if let Reply::Hang(_) = reply {
                         // Promise more than is sent, then hold the line.
