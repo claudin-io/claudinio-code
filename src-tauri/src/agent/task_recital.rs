@@ -13,7 +13,8 @@
 //! (one line per task: `id · status · title`), added where hook context is
 //! added and persisted inside the same `Turn`, so a reload replays it and the
 //! history stays append-only. A context handoff's successor gets it the same
-//! way, in its first message, after the handoff document.
+//! way, in its first message, after the handoff document; a summarizing
+//! compaction restates it after the summary ([`recite_after_compaction`]).
 
 use crate::agent::persist::TaskItem;
 use crate::agent::tools::ToolContext;
@@ -65,6 +66,39 @@ pub fn still_doing_nudge(ctx: &ToolContext) -> Option<String> {
     let tasks = crate::agent::persist::load_last_tasks(std::path::Path::new(path)).ok()?;
     let doing: Vec<TaskItem> = tasks.into_iter().filter(|t| t.status == "doing").collect();
     (!doing.is_empty()).then(|| crate::agent::nudges::still_doing(&doing))
+}
+
+/// After a summarizing compaction, restate `tasks` as the last block of the
+/// rebuilt context — after the summary and the kept tail, where attention is
+/// highest (Manus's recitation). `persist::history_from_records` calls it at
+/// the compaction point with the list as it stood then, so the loop's rebuild
+/// right after compacting and any later reload produce the same history.
+///
+/// Only a context that ends on a user message gets it: that is a compaction
+/// inside a run (the tail ends on the round's tool results, or on the run's
+/// own user turn). One that ends on the model's answer was compacted between
+/// runs, and the next run's user turn carries the list anyway; adding a user
+/// message after the answer would put words in the conversation no loop
+/// wrote. A tail that already ends with this exact list — the run's user
+/// turn, when a run compacts before its first request — is left as it is.
+pub fn recite_after_compaction(
+    history: &mut [crate::agent::provider::Message],
+    tasks: &[TaskItem],
+) {
+    let Some(block) = tasks_block(tasks) else {
+        return;
+    };
+    let Some(last) = history.last_mut().filter(|m| m.role == "user") else {
+        return;
+    };
+    let already = matches!(
+        last.content.last(),
+        Some(crate::agent::provider::ContentBlock::Text { text, .. }) if *text == block
+    );
+    if !already {
+        last.content
+            .push(crate::agent::provider::ContentBlock::text(block));
+    }
 }
 
 #[cfg(test)]
@@ -450,5 +484,203 @@ mod loop_tests {
             crate::agent::persist::load_last_tasks(path).unwrap()[0].status,
             "done"
         );
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+    use crate::agent::persist::{SessionRecord, history_from_records};
+    use crate::agent::provider::{ContentBlock, Message};
+
+    fn list() -> Vec<TaskItem> {
+        vec![TaskItem {
+            id: "t1".into(),
+            title: "wire the UI".into(),
+            description: "d".into(),
+            journal: vec![],
+            status: "doing".into(),
+        }]
+    }
+
+    fn tasks_record(tasks: &[TaskItem]) -> SessionRecord {
+        SessionRecord::Tasks {
+            tasks_json: serde_json::to_string(tasks).unwrap(),
+            ts: 1,
+        }
+    }
+
+    fn turn(role: &str, content: Vec<ContentBlock>) -> SessionRecord {
+        SessionRecord::Turn {
+            message: Message {
+                role: role.into(),
+                content,
+            },
+            ts: 1,
+        }
+    }
+
+    fn compacted(tail_turns: usize) -> SessionRecord {
+        SessionRecord::Compacted {
+            summary: "## Summary\nwhat happened".into(),
+            tail_turns,
+            ts: 2,
+        }
+    }
+
+    fn last_block_text(history: &[Message]) -> Option<String> {
+        match history.last()?.content.last()? {
+            ContentBlock::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    fn count_blocks(history: &[Message]) -> usize {
+        history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(
+                |b| matches!(b, ContentBlock::Text { text, .. } if text.starts_with(TASKS_OPEN)),
+            )
+            .count()
+    }
+
+    // A compaction in the middle of a run: the kept tail ends on the round's
+    // tool results, and the list goes after them — the last thing the model
+    // reads, where attention is highest. The loop rebuilds its history with
+    // `history_from_records` after compacting, exactly as a reload does, so
+    // this one function is what both see.
+    #[test]
+    fn a_compaction_mid_run_restates_the_list_as_the_last_block() {
+        let tasks = list();
+        let records = vec![
+            tasks_record(&tasks),
+            turn("user", vec![ContentBlock::text("do it")]),
+            turn(
+                "assistant",
+                vec![ContentBlock::tool_use(
+                    "r1",
+                    "read_file",
+                    serde_json::json!({}),
+                )],
+            ),
+            turn("user", vec![ContentBlock::tool_result("r1", "contents")]),
+            compacted(3),
+        ];
+        let history = history_from_records(&records);
+        assert_eq!(last_block_text(&history), tasks_block(&tasks));
+        assert!(matches!(
+            history.last().unwrap().content[0],
+            ContentBlock::ToolResult { .. }
+        ));
+        assert_eq!(count_blocks(&history), 1);
+    }
+
+    // No tail kept: the list follows the summary, in the same message.
+    #[test]
+    fn with_no_tail_the_list_follows_the_summary() {
+        let tasks = list();
+        let records = vec![
+            tasks_record(&tasks),
+            turn("user", vec![ContentBlock::text("do it")]),
+            compacted(0),
+        ];
+        let history = history_from_records(&records);
+        assert_eq!(history.len(), 1);
+        let ContentBlock::Text { text, .. } = &history[0].content[0] else {
+            panic!("the summary first")
+        };
+        assert!(text.contains("what happened"));
+        assert_eq!(last_block_text(&history), tasks_block(&tasks));
+    }
+
+    // A compaction at a run's start keeps the run's user turn, which already
+    // ends with the list it was sent with: it is not said twice.
+    #[test]
+    fn a_tail_that_already_ends_with_the_list_does_not_get_a_second_copy() {
+        let tasks = list();
+        let block = tasks_block(&tasks).unwrap();
+        let records = vec![
+            tasks_record(&tasks),
+            turn(
+                "user",
+                vec![
+                    ContentBlock::text("go on"),
+                    ContentBlock::text(block.clone()),
+                ],
+            ),
+            compacted(1),
+        ];
+        let history = history_from_records(&records);
+        assert_eq!(count_blocks(&history), 1);
+        assert_eq!(last_block_text(&history), Some(block));
+    }
+
+    // The list recited is the one that stood when the compaction ran; what
+    // happens after it is appended after it, as the loop appended it.
+    #[test]
+    fn the_list_is_the_one_at_the_compaction_and_later_turns_follow_it() {
+        let before = list();
+        let mut after = list();
+        after[0].status = "done".into();
+        let records = vec![
+            tasks_record(&before),
+            turn("user", vec![ContentBlock::text("do it")]),
+            compacted(1),
+            turn("assistant", vec![ContentBlock::text("finished")]),
+            tasks_record(&after),
+        ];
+        let history = history_from_records(&records);
+        assert_eq!(
+            history.len(),
+            3,
+            "summary, the tail's user turn, the answer"
+        );
+        assert_eq!(
+            last_block_text(&history[..2]),
+            tasks_block(&before),
+            "recited at the compaction point"
+        );
+        assert_eq!(last_block_text(&history), Some("finished".into()));
+    }
+
+    // An idle compaction (the /compact button between runs) ends on the
+    // model's answer; the next run's user turn carries the list, so nothing
+    // is added here — an assistant turn is never followed by a user message
+    // the loop did not write.
+    #[test]
+    fn an_idle_compaction_leaves_the_list_to_the_next_run() {
+        let records = vec![
+            tasks_record(&list()),
+            turn("user", vec![ContentBlock::text("do it")]),
+            turn("assistant", vec![ContentBlock::text("done")]),
+            compacted(2),
+        ];
+        let history = history_from_records(&records);
+        assert_eq!(count_blocks(&history), 0);
+        assert_eq!(history.last().unwrap().role, "assistant");
+    }
+
+    // Sessions without a list, and every session that was never compacted,
+    // replay exactly as before.
+    #[test]
+    fn without_a_list_or_a_compaction_nothing_changes() {
+        let records = vec![
+            turn("user", vec![ContentBlock::text("do it")]),
+            turn(
+                "assistant",
+                vec![ContentBlock::tool_use(
+                    "r1",
+                    "read_file",
+                    serde_json::json!({}),
+                )],
+            ),
+            turn("user", vec![ContentBlock::tool_result("r1", "x")]),
+            compacted(3),
+        ];
+        assert_eq!(count_blocks(&history_from_records(&records)), 0);
+        let mut uncompacted = vec![tasks_record(&list())];
+        uncompacted.extend(records.into_iter().take(3));
+        assert_eq!(count_blocks(&history_from_records(&uncompacted)), 0);
     }
 }

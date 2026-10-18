@@ -878,7 +878,8 @@ fn replace_dangling_media(value: &mut serde_json::Value) {
 ///
 /// When the session has been compacted, only records AFTER the last
 /// `Compacted` marker are included, with the summary injected as the
-/// opening user message so the model retains context of earlier work.
+/// opening user message so the model retains context of earlier work, and
+/// the task list restated after the kept tail.
 pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
     // Find the last compaction point
     let compact_idx = records
@@ -905,14 +906,34 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
                     ))],
                 });
             }
-            // Kept-verbatim tail before the marker, then everything after it.
+            // Kept-verbatim tail before the marker, the task list as it stood
+            // at the compaction (`agent::task_recital`), then everything after.
             let tail_start = tail_start_index(records, idx, tail_turns);
             fold_into_history(&mut out, records[tail_start..idx].iter());
+            crate::agent::task_recital::recite_after_compaction(
+                &mut out,
+                &last_tasks_in(&records[..idx]),
+            );
             fold_into_history(&mut out, records.iter().skip(idx + 1));
         }
         None => fold_into_history(&mut out, records.iter()),
     }
     apply_prunes(out, records)
+}
+
+/// The task list of the last `tasks` record in `records`, or none (also when
+/// it does not parse: a replay never fails over the list).
+fn last_tasks_in(records: &[SessionRecord]) -> Vec<TaskItem> {
+    records
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            SessionRecord::Tasks { tasks_json, .. } => {
+                Some(serde_json::from_str(tasks_json).unwrap_or_default())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Re-apply every verbatim compaction the session recorded. Ids that are no
