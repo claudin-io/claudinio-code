@@ -220,9 +220,11 @@ pub async fn run_workflow_with_profile(
         )));
     }
     // The task list rides the same way, last, so no run spends a round
-    // fetching it (`agent::task_recital`). Not for the git operator.
+    // fetching it (`agent::task_recital`). Not for the git operator. The
+    // snapshot is kept: the finish line nudges only for what this run moved.
+    let tasks_at_start = crate::agent::task_recital::session_tasks(ctx);
     if profile == PromptProfile::Standard
-        && let Some(block) = crate::agent::task_recital::run_start_block(ctx)
+        && let Some(block) = crate::agent::task_recital::tasks_block(&tasks_at_start)
     {
         blocks.push(ContentBlock::text(block));
     }
@@ -247,11 +249,9 @@ pub async fn run_workflow_with_profile(
         .unwrap_or_default();
     // Read once: goals are written before the run starts and never minted
     // inside it, and a profile that moved mid-run would move the cached prefix.
-    let has_golden_goals = ctx
-        .session_store_path
-        .as_deref()
-        .and_then(|p| crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok())
-        .is_some_and(|t| t.iter().any(crate::agent::tools::tasks::is_golden));
+    let has_golden_goals = tasks_at_start
+        .iter()
+        .any(crate::agent::tools::tasks::is_golden);
     // From here on `profile` is the one the run actually uses; what the caller
     // asked for is kept to derive it again when the mode — and with it the
     // model and its window — changes.
@@ -1018,7 +1018,8 @@ pub async fn run_workflow_with_profile(
             // update, so the harness looks for itself).
             if profile.is_chat()
                 && !guards.doing_nudged
-                && let Some(nudge) = crate::agent::task_recital::still_doing_nudge(ctx)
+                && let Some(nudge) =
+                    crate::agent::task_recital::still_doing_nudge(ctx, &tasks_at_start)
             {
                 guards.doing_nudged = true;
                 push_user_blocks(history, store, ctx, vec![ContentBlock::text(nudge)]);
