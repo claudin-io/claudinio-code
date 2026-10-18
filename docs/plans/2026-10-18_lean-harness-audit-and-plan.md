@@ -9,7 +9,7 @@
 
 ## 0. The one-paragraph version
 
-The harness is already strong where most harnesses are weak: context is shed verbatim before it is summarized, limits follow the model's window, verification is mechanical, every write is gated, and everything is persisted and inspectable. Its weight is somewhere else — **in what every request carries and in how many requests a task takes**. Today a Builder session starts with a ~10k-token prefix that reaches ~33k once skills and MCP schemas join; nothing in that prefix is marked for the provider's cache, so on Anthropic-protocol providers it is re-read cold every turn; the main session is forbidden to edit files and must brief a fresh subagent (a second prefix, a second exploration, a re-typed spec) for every change; and the task protocol costs three to five round-trips of pure ceremony per task. The literature of the last eighteen months says the same five things from five directions: **measure cost per solved task, not tokens** (PointFive 2026); **the cache is the margin** (Manus; our own proxy numbers); **one agent with one context beats a committee unless the work is read-only and parallel** (Cognition; Anthropic's own 15× figure); **load context and tools just in time** (Anthropic's tool search, −85% tool tokens); and **put policy in code, not in prose** (the eleven-harness study; this repo's `claudius` incident on the LiteLLM side). The plan below is nine phases, each shippable and gated on a headless eval we do not yet have — which is why Phase 0 is the eval. The target is a Standard prefix under 8k tokens, half the round-trips per task, the same or better pass rate on the eval, and one place (the loop) a new contributor can read in an afternoon.
+The harness is already strong where most harnesses are weak: context is shed verbatim before it is summarized, limits follow the model's window, verification is mechanical, every write is gated, and everything is persisted and inspectable. Its weight is somewhere else — **in what every request carries and in how many requests a task takes**. Today a Builder session starts with a ~10k-token prefix that reaches ~33k once skills and MCP schemas join; nothing in that prefix is marked for the provider's cache, so on Anthropic-protocol providers it is re-read cold every turn; the main session is forbidden to edit files and must brief a fresh subagent (a second prefix, a second exploration, a re-typed spec) for every change; and the task protocol costs three to five round-trips of pure ceremony per task. The literature of the last eighteen months says the same five things from five directions: **measure cost per solved task, not tokens** (PointFive 2026); **the cache is the margin** (Manus; our own proxy numbers); **one agent with one context beats a committee unless the work is read-only and parallel** (Cognition; Anthropic's own 15× figure); **load context and tools just in time** (Anthropic's tool search, −85% tool tokens); and **put policy in code, not in prose** (the eleven-harness study; this repo's `claudius` incident on the LiteLLM side). The plan below is ten phases, each shippable and gated on a headless eval we do not yet have — which is why Phase 0 is the eval. The target is a Standard prefix under 8k tokens, half the round-trips per task, the same or better pass rate on the eval, and one place (the loop) a new contributor can read in an afternoon.
 
 ---
 
@@ -191,6 +191,37 @@ Each phase: what changes, where, the expected effect on M1–M3 (honest guesses 
 *Gate.* Eval: median rounds per internal task down ≥ 25%; Task Panel parity tests in `src/components/TasksPanel.test.tsx` extended for batched updates and the single-step state.
 *Risk.* A model that forgets to update at all once it is not forced per step. The finish-line check already refuses to end with a task `doing`; keep it, and the completion judge's rubric gains "tasks left `todo` that the message claims done".
 
+### Phase 4b — The living document: one `.md` is the session
+
+*The idea (the maintainer's, 2026-10-18).* A session owns one Markdown file. The agent writes its scaffold first — a title and one placeholder per step of the work — and then fills each placeholder on demand, in order or in parallel. The user can open the file at any time and edit it or add to it, and that edit is now part of the plan. The UI shows, per section, who is working on it. A new top-level topic is a new file, and therefore a new session.
+
+```md
+# Pudim de leite
+
+[origem do pudim de leite]
+[ingredientes originais]
+[Modo de preparo clássico]
+[Como servir o pudim]
+[Como armazenar o pudim]
+```
+
+*Why it belongs in this plan.* It is four of the sources above in one artefact. The file system is the context (Manus) — the work lives outside the window and is restorable by reading it. The outline at the tail of every request is the recitation that keeps the goal in attention. It is structured note-taking (Anthropic) that survives compaction and handoff by construction. And it is the shared trace Cognition asks for: subagents do not *report back through the parent* — they write their section into the document, and the parent reads headings and status, not bodies. The human editing the plan in place is also the cheapest interview there is: an edit replaces an `ask_user` round-trip.
+
+*What.*
+- **Format.** Plain Markdown that any editor can open. A placeholder is a line of the form `[topic]`; the harness treats each as one section/task. Ownership and status live in an HTML comment the harness maintains on the section heading, invisible when rendered: `<!-- claudinio: id=s3 status=doing by=sub:2 since=... -->`. Nothing else is special syntax, so a human never has to learn one.
+- **Session ↔ document, 1:1.** `.claudinio/docs/<slug>.md`, path recorded on the session's `Meta`. The existing `write_plan` / plan file becomes this document (one mechanism, not two). A request that opens a new top-level topic is a new document and a new linked session — `transition.rs` already knows how to hand off; the trigger is "the user or the agent starts a new document", and the old one is closed with its outline intact.
+- **Placeholders are the task list.** The harness parses the document; each placeholder is a task (`todo`); a section being written is `doing` by the agent or subagent that claimed it; a filled section is `done`. The Task Panel becomes a *view* of the document, so Phase 4's round-trips disappear for this kind of work: claiming a section is one `doc_write(section)` call that also does the work. Golden goals are sections the user wrote; the quality gate still decides when an *execution* section may close.
+- **Writes are section-scoped.** The agent writes through `doc_write(id, body)` (a core tool) and never through `edit_file` on this path. Subagents in `explore` mode may write *only* the section they were given — their first write capability, and a safe one: one section, one file, inside `.claudinio/`. Two agents cannot claim the same section.
+- **Human edits are first-class.** The file watcher already exists for indexing; it watches this file too. A human edit to a section marks it `human-edited`; if an agent was mid-write on that section its write is rejected and it re-reads (the human wins). A human adding a new `[placeholder]` adds a task. A human deleting a section removes the task. The harness tells the agent what changed as a short `<doc-changed>` note in the next user turn (sections and ids, not bodies).
+- **What the model carries.** The outline — heading, status, owner, one line per section — at the tail of every request (recitation), not the bodies. Bodies are read when needed (`doc_read(id)`), and the duplicate-read pointer from 0.6.0 applies. Compaction and handoff keep the outline and the path; the summary no longer has to carry what the document already holds.
+- **UI.** A document panel beside the chat: sections as rows with the status chip and the owner (`main`, `sub:2 — origem`), live, clicking a row opens the section in the existing Monaco viewer for editing. The subagent timeline already exists; the chip links to it. The Task Panel stays for sessions without a document.
+
+*Files.* `agent/persist.rs` (`Meta.document`, section ids), new `agent/document.rs` (parse, claim, write, watch diff), `agent/tools/mod.rs` (`doc_write`, `doc_read` in the core set; `write_plan` folded in), `agent/subagent.rs` (section grant), `agent/session.rs` (outline injection at the tail; `<doc-changed>` note), `agent/transition.rs` (new-document handoff), `code_intel/mod.rs` watcher hook, `src/components/DocumentPanel.tsx`, `TasksPanel.tsx` as a view.
+*Effect.* M2 down on research-shaped and multi-section work: no `tasks_set`/`tasks_update` rounds, no subagent report round, fewer `ask_user` rounds. M1 follows, plus the parent never carries section bodies it did not ask for. M3 up where the user's edits would otherwise have arrived as a correction three turns late. The cost is re-reads after human edits, bounded by outline-only notifications. **Guess: on a five-section research task with two subagents, the parent's input falls by the size of two reports and four task calls per section.** The eval gets a tagged subset of such tasks.
+*Gate.* Round-trip tests on the format (parse → write → parse is identity; a human edit in a foreign editor survives); a resumed session rebuilds the same outline; eval subset: M2 down ≥ 30%, M3 not down; the panel's status matches the file within one watcher tick.
+*Risk.* Two writers on one file: section-scoped writes and the claim table remove the common case; a human and an agent editing the *same* section at once is resolved in the human's favour and reported. A document that grows large: bodies are never in the prompt, so the window is unaffected; the file is the user's, so size is their call.
+*Relation to other work.* The LiteLLM side carries a `conversation_branches` experiment (sub-task as a branch, merged back as one structured summary, Jev-judged, `CLAUDIN_BRANCHES=off` today). The document is the client-side, human-visible version of the same intuition: the section is the branch, the filled section is the merge, and a person can see and edit it.
+
 ### Phase 5 — The prompt at the right altitude (C5)
 
 *What.* One rewrite, test-driven against the eval, in three moves.
@@ -246,7 +277,7 @@ Tool calls in one round that are auto-approved and read-only (`read_file`, `list
 | Standard prefix, built-in only | ~10k tokens | ~5k | §2.2 C2 arithmetic |
 | Standard prefix, measured setup (skills + MCP) | ~33k tokens | ≤ 10k | Anthropic −85% on deferred tools; skills by reference |
 | Cache-read share of input, Anthropic-direct | ~0 (no markers) | ≥ 80% after round 3 | Anthropic prompt-caching semantics |
-| Rounds per Builder task | median 6 (whole sessions) | −30% to −50% | Phase 3 + 4 round accounting |
+| Rounds per Builder task | median 6 (whole sessions) | −30% to −50% | Phase 3 + 4 round accounting; more on document-shaped work (4b) |
 | Brain rounds per session | median 40 | ≤ 15 | Phase 5 |
 | **Cost per solved task (M1)** | baseline in Phase 0 | **−40% to −60%** on Anthropic-direct; **−25% to −40%** on claudin.io | sum of the above; the wide range is the point of Phase 0 |
 | Pass rate (M3) | baseline in Phase 0 | not down; up on multi-edit and long tasks | Cognition, Chroma, JetBrains |
@@ -258,8 +289,8 @@ The numbers in the third column are *estimates built from the sources cited*; no
 ## 7. Order, and why
 
 ```
-Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
- (eval)     (cache)     (prefix)   (edits)     (tasks)     (prompt)
+Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 4b ──► Phase 5
+ (eval)     (cache)     (prefix)   (edits)     (tasks)     (document)   (prompt)
                 │
                 ├──► Phase 6 (context quality)   — any time after 0
                 ├──► Phase 7 (parallel tools)    — any time after 0
@@ -267,7 +298,7 @@ Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 
                 └──► Phase 9 (memory)            — after 5
 ```
 
-Phase 1 before 2 because 1 is pure gain with no model-visible change, and because 2's "deferred tools cost one cache write per load" is only true once there is a cache. Phase 2 before 3 because a main session that edits carries more context, and should carry a smaller prefix first. Phase 8 is placed early on purpose: splitting `session.rs` is the single change that makes 3, 4 and 5 safe to do in small commits.
+Phase 1 before 2 because 1 is pure gain with no model-visible change, and because 2's "deferred tools cost one cache write per load" is only true once there is a cache. Phase 2 before 3 because a main session that edits carries more context, and should carry a smaller prefix first. Phase 4b after 4 because it reuses 4's task-list-as-view and 3's section grant for subagents; it could also absorb 4 entirely if the eval says the document is the better task list. Phase 8 is placed early on purpose: splitting `session.rs` is the single change that makes 3, 4 and 5 safe to do in small commits.
 
 Each phase is one PR series on its own branch, merged when the eval gate is green, in the commit discipline this repo already keeps (test first; a prompt line removed carries the eval task or gate test that justifies it).
 
@@ -284,6 +315,8 @@ Each phase is one PR series on its own branch, merged when the eval gate is gree
 | D5 | The Brain interview: adaptive (Phase 5) or keep mandatory one-question-at-a-time? | **Adaptive.** Median 40 rounds is the harness being heavy in the user's hands; the eval rubric guards against under-asking. |
 | D6 | Where does the project memory live — `.claudinio/MEMORY.md` or `AGENTS.md`? | `.claudinio/MEMORY.md`, harness-owned; *read* `AGENTS.md`/`CLAUDE.md` if present as user-owned context (many repos already have one). |
 | D7 | Ship Phase 5 behind a profile flag for one release? | **Yes.** |
+| D8 | Phase 4b: does the living document *replace* the plan file and become the only task list when present, or coexist with `tasks_*`? | **Replace, when a document exists.** One mechanism the user can see and edit beats two the model has to keep in step. Sessions without a document keep `tasks_*`. |
+| D9 | Phase 4b: may `explore` subagents write their own section? | **Yes** — one section, one file under `.claudinio/`, granted by the parent. It is what removes the report round. |
 
 ---
 
