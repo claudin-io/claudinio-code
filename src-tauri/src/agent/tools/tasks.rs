@@ -107,9 +107,14 @@ pub fn execute_update(
 /// `status`, `journal`) or several (`updates: [{id, status?, journal?}]`).
 /// A call in neither form, or in both at once, is refused with both shapes
 /// spelled out, so the retry is the right one.
-pub fn parse_update_args(args: serde_json::Value) -> Result<Vec<UpdateTaskArgs>, String> {
+pub fn parse_update_args(mut args: serde_json::Value) -> Result<Vec<UpdateTaskArgs>, String> {
     const SHAPES: &str = "pass either one task as {\"id\", \"status\"?, \"journal\"?} \
                           or several as {\"updates\": [{\"id\", \"status\"?, \"journal\"?}, ...]}";
+    // A model that fills every optional property sends null for the form it
+    // does not use; a null is an absent value, not a second form.
+    if let Some(fields) = args.as_object_mut() {
+        fields.retain(|_, v| !v.is_null());
+    }
     let has_id = args.get("id").is_some();
     match args.get("updates") {
         Some(_) if has_id => Err(format!("tasks_update: {SHAPES}, not both.")),
@@ -1269,6 +1274,32 @@ mod quality_gate_tests {
                 "{bad}: {err}"
             );
         }
+    }
+
+    // Some models fill every optional schema property, sending null for the
+    // form they do not use. A null is an absent value, not a second form: the
+    // call means what its non-null fields say.
+    #[test]
+    fn a_null_for_the_unused_form_is_read_as_absent() {
+        use serde_json::json;
+        let one = parse_update_args(
+            json!({"id": "t1", "status": "done", "updates": null, "journal": null}),
+        )
+        .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].id, "t1");
+        assert_eq!(one[0].status.as_deref(), Some("done"));
+        assert!(one[0].journal.is_empty());
+        let many = parse_update_args(json!({
+            "updates": [{"id": "t1", "status": "done"}, {"id": "t2", "status": "doing"}],
+            "id": null,
+            "status": null
+        }))
+        .unwrap();
+        assert_eq!(many.len(), 2);
+        // Both null names no task at all.
+        let err = parse_update_args(json!({"id": null, "updates": null})).unwrap_err();
+        assert!(err.contains("no task named"), "{err}");
     }
 }
 
