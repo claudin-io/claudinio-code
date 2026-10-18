@@ -17,9 +17,19 @@
 //! `tools_loaded` record so a later run of the same session, or a resumed one,
 //! rebuilds the identical array in the identical order. A call to a deferred
 //! tool the model did not load is not refused: it is loaded on the spot and
-//! run. Each load is a `cache_break` (reason `tools_loaded`), so what the
-//! deferral costs in cache writes is countable against its budget
-//! (decision D2: one write per load is acceptable).
+//! run. Each round that loads anything is one `cache_break` (reason
+//! `tools_loaded`) — the prefix is rewritten once at the top of the next
+//! round however many tools joined — so what the deferral costs in cache
+//! writes is countable against its budget (decision D2: one write per load is
+//! acceptable).
+//!
+//! A direct call loads its tool when the call is dispatched, before the
+//! approval prompt and the mode gates: a call the user then rejects still
+//! leaves the definition in the list. That is deliberate. The model has shown
+//! it wants the tool, a rejected call is usually retried in another shape,
+//! and telling "ran" from "refused" would mean reading the result's text.
+//! Only a PreToolUse hook's `deny` stops the load; its `ask` is not consulted
+//! for `load_tools`, which only changes what the model is offered.
 //!
 //! The catalog never depends on what is loaded: the system prompt stays byte
 //! identical for the run, and only the tool list grows.
@@ -297,7 +307,10 @@ impl Load {
     }
 }
 
-/// Persist a load: the names, and the cache break it causes.
+/// Persist what one round loaded: the names, in load order, and the one
+/// cache break they cause together. The main loop calls this once per round,
+/// after every call in it — the prefix is rebuilt once at the top of the next
+/// round however many tools joined, and the plan's gate counts these breaks.
 pub fn record(store: &SessionStore, ctx: &ToolContext, names: &[String]) {
     if names.is_empty() {
         return;
@@ -313,18 +326,16 @@ pub fn record(store: &SessionStore, ctx: &ToolContext, names: &[String]) {
 /// The main loop's step for one tool call, before it is dispatched.
 ///
 /// `load_tools` is answered here (`Some(result)`). A call to a deferred tool
-/// that is not loaded yet loads it — recorded like an explicit load — and
-/// returns `None`, so the call runs as any other. `deferred` is asked for
-/// only when one of the two applies.
-#[allow(clippy::too_many_arguments)]
+/// that is not loaded yet loads it and returns `None`, so the call runs as any
+/// other. Either way the names join `loaded`; persisting them is the caller's,
+/// once per round ([`record`]). `deferred` is asked for only when one of the
+/// two applies.
 pub(crate) fn before_call(
     tool_name: &str,
     tool_use_id: &str,
     tool_input: &Value,
     deferred: impl FnOnce() -> Vec<ToolDescription>,
     loaded: &mut Vec<String>,
-    store: &SessionStore,
-    ctx: &ToolContext,
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
 ) -> Option<crate::agent::provider::ContentBlock> {
@@ -333,7 +344,6 @@ pub(crate) fn before_call(
             let deferred = deferred();
             if deferred.iter().any(|t| t.name == tool_name) {
                 loaded.push(tool_name.to_string());
-                record(store, ctx, &[tool_name.to_string()]);
             }
         }
         return None;
@@ -360,7 +370,6 @@ pub(crate) fn before_call(
         Err("load_tools needs the names to load: {\"names\": [\"code_search\"]}".to_string())
     } else {
         let load = resolve(&requested, &deferred, loaded);
-        record(store, ctx, &load.added);
         loaded.extend(load.added.iter().cloned());
         load.answer(&deferred)
     };

@@ -1363,6 +1363,9 @@ pub async fn run_workflow_with_profile(
 
         // Results of read-only calls run ahead of the loop, by call index.
         let mut ready: Vec<Option<ContentBlock>> = vec![None; tool_uses.len()];
+        // Deferred tools loaded before this round; what the round adds is
+        // recorded once, after it (`agent::deferred::record`).
+        let loaded_before_round = loaded.len();
         for (ti, tool_use) in tool_uses.iter().enumerate() {
             // At the head of a run of read-only, unprompted, unhooked calls,
             // run the whole run at once (`tool_batch`). Each result is then
@@ -1481,8 +1484,6 @@ pub async fn run_workflow_with_profile(
                     &tool_input,
                     || deferred_tools(cur_mode, profile, &mcp_defs, config),
                     &mut loaded,
-                    store,
-                    ctx,
                     event_tx,
                     session_id,
                 )
@@ -1702,6 +1703,9 @@ pub async fn run_workflow_with_profile(
                 block,
             ));
         }
+        // However many calls loaded a deferred tool, the next request rewrites
+        // the prefix once: one `tools_loaded` record, one cache break.
+        crate::agent::deferred::record(store, ctx, &loaded[loaded_before_round..]);
 
         push_turn(
             history,
@@ -3414,6 +3418,59 @@ mod deferred_loop_tests {
         assert_eq!(
             crate::agent::deferred::loaded_names(&records_of(&ws)),
             ["tasks_get"]
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// The prefix is rewritten once per round however many deferred tools the
+    /// round loaded, so a round that calls two of them side by side — or
+    /// `load_tools` and a deferred tool directly — must count as one cache
+    /// break, not one per call: the plan's gate counts these records.
+    #[tokio::test]
+    async fn two_deferred_tools_loaded_in_one_round_are_one_cache_break() {
+        let ws = workspace("one-break");
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tools(vec![
+                    ("code_search", serde_json::json!({"query": "greet"})),
+                    ("tasks_get", serde_json::json!({})),
+                    ("load_tools", serde_json::json!({"names": ["file_outline"]})),
+                ]),
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        let second = tool_names(&bodies[1]);
+        assert_eq!(
+            second[second.len() - 3..],
+            ["code_search", "tasks_get", "file_outline"],
+            "loaded in the order the calls came"
+        );
+        let records = records_of(&ws);
+        let breaks = records
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    SessionRecord::CacheBreak { reason, .. } if reason == "tools_loaded"
+                )
+            })
+            .count();
+        assert_eq!(breaks, 1, "one prefix rewrite, one cache break");
+        let loads = records
+            .iter()
+            .filter(|r| matches!(r, SessionRecord::ToolsLoaded { .. }))
+            .count();
+        assert_eq!(loads, 1, "one record names everything the round loaded");
+        assert_eq!(
+            crate::agent::deferred::loaded_names(&records),
+            ["code_search", "tasks_get", "file_outline"]
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }
