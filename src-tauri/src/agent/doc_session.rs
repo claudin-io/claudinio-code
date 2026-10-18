@@ -841,7 +841,7 @@ pub fn note_round(
 }
 
 /// How the successor's first message for a new top-level topic begins.
-const NEW_DOCUMENT_KICKOFF: &str = "[system] A new top-level topic:";
+pub(crate) const NEW_DOCUMENT_KICKOFF: &str = "[system] A new top-level topic:";
 
 /// The successor's first message for a new top-level topic. The outline
 /// follows it as the run's `<document>` block.
@@ -851,6 +851,53 @@ fn new_document_kickoff(user_message: &str, rel: &str) -> String {
          previous session keeps its own). Its outline follows as a `<document>` block; fill \
          its sections. The user's request was:\n\n{user_message}"
     )
+}
+
+/// Whether the run whose message is `user_message` is part of a user turn
+/// a new-document handoff already spent: the run that handoff started, or
+/// the first run of a session a context handoff opened from such a run —
+/// a context handoff continues its predecessor's run, so it is still the
+/// same user turn (Phase 4b final review: the kickoff check alone let a
+/// kickoff run that filled its window open a second document in its
+/// successor). Followed back through `context_handoff` links only, and
+/// only while each session is in its first run; any run the user typed
+/// ends the walk. Bounded, in case a session file links in a cycle.
+fn new_document_turn(
+    workspace: Option<&Path>,
+    user_message: &str,
+    records: &[crate::agent::persist::SessionRecord],
+) -> bool {
+    use crate::agent::persist::SessionRecord;
+    let mut message = user_message.to_string();
+    let mut records = records.to_vec();
+    for _ in 0..32 {
+        if message.starts_with(NEW_DOCUMENT_KICKOFF) {
+            return true;
+        }
+        let runs = records
+            .iter()
+            .filter(|r| matches!(r, SessionRecord::User { .. }))
+            .count();
+        let continued = crate::agent::persist::linked_from(&records)
+            .filter(|l| runs <= 1 && l.reason == "context_handoff");
+        let Some(prev) = continued
+            .zip(workspace)
+            .and_then(|(l, ws)| session_file(ws, &l.prev_session_id))
+            .and_then(|p| crate::agent::persist::load_records(&p).ok())
+        else {
+            return false;
+        };
+        // The predecessor's last run is the one that handed off.
+        let Some(last) = prev.iter().rev().find_map(|r| match r {
+            SessionRecord::User { text, .. } => Some(text.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        message = last;
+        records = prev;
+    }
+    false
 }
 
 /// `doc_create`, answered by the main loop. A session without a document
@@ -895,7 +942,13 @@ pub(crate) fn create_call(
     // every handoff, so a second `doc_create` here would open session after
     // session with nothing to stop the chain; a new topic from this session
     // waits for a turn the user types.
-    let kickoff_run = user_message.starts_with(NEW_DOCUMENT_KICKOFF);
+    let kickoff_run = existing.is_some()
+        && new_document_turn(
+            ctx.workspace_root.as_deref().map(Path::new),
+            user_message,
+            &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                .unwrap_or_default(),
+        );
     let result = match (ctx.workspace_root.as_deref(), &existing) {
         (Some(_), Some(own)) if kickoff_run => Err(format!(
             "this session was just opened for {}; fill its sections (doc_add adds one) \

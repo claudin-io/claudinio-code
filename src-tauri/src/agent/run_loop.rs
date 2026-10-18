@@ -4221,6 +4221,94 @@ mod document_loop_tests {
         std::fs::remove_dir_all(&ws.root).ok();
     }
 
+    /// One new-document handoff per user message holds across a context
+    /// handoff: a kickoff run that fills its window hands off with a
+    /// document of its own as the successor's first message, and that first
+    /// run is still the same user turn — it may not open another document.
+    /// A context handoff from a run the user typed leaves the successor free
+    /// to open a new topic.
+    #[tokio::test]
+    async fn a_context_handoff_inside_a_new_document_turn_cannot_open_another_document() {
+        for (prev_message, refused) in [
+            (
+                format!(
+                    "{} this fresh session owns the document .claudinio/docs/pudim-de-leite.md",
+                    crate::agent::doc_session::NEW_DOCUMENT_KICKOFF
+                ),
+                true,
+            ),
+            ("write the pudim recipe".to_string(), false),
+        ] {
+            let ws = workspace("doc-handoff-context");
+            let doc = link_doc(&ws, &["origem"]);
+            let rel = doc
+                .strip_prefix(&ws.root)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            // The predecessor: its run's message, then the context handoff.
+            let sessions = ws.root.join(".claudinio/sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let prev = SessionStore {
+                path: sessions.join("prev.jsonl"),
+            };
+            for record in [
+                SessionRecord::DocumentLinked {
+                    path: rel.clone(),
+                    ts: now_ms(),
+                },
+                SessionRecord::User {
+                    text: prev_message.clone(),
+                    ts: now_ms(),
+                },
+            ] {
+                prev.append(&record).unwrap();
+            }
+            ws.store
+                .append(&SessionRecord::LinkedFrom {
+                    prev_session_id: "prev".into(),
+                    reason: "context_handoff".into(),
+                    golden_cycle: 0,
+                    golden_stalls: 0,
+                    golden_last_pending: vec![],
+                    ts: now_ms(),
+                })
+                .unwrap();
+            let (outcome, bodies) = run_saying(
+                &ws,
+                None,
+                "## Handoff\nThe pudim document is half written.",
+                vec![
+                    Reply::Tool {
+                        name: "doc_create",
+                        input: serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                    },
+                    Reply::Text("filling it instead"),
+                ],
+            )
+            .await;
+            if refused {
+                assert!(
+                    matches!(outcome, Ok(RunOutcome::Completed)),
+                    "no second handoff: {:?}",
+                    outcome.as_ref().err()
+                );
+                assert!(last_result(&bodies[1]).contains("Error"));
+                assert!(
+                    !ws.root.join(".claudinio/docs/bolo-de-cenoura.md").exists(),
+                    "no new file either"
+                );
+            } else {
+                assert!(
+                    matches!(outcome, Ok(RunOutcome::Handoff(_))),
+                    "a typed turn may open a new topic: {:?}",
+                    outcome.as_ref().err()
+                );
+            }
+            std::fs::remove_dir_all(&ws.root).ok();
+        }
+    }
+
     /// A new document is a new topic, not a way out of the user's mandatory
     /// goals: the golden loop's counters travel with the handoff, so its
     /// caps never reset, exactly as on a context handoff.
