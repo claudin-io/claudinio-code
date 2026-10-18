@@ -1107,6 +1107,14 @@ fn normalize_ask_user_questions(questions: &Value) -> Result<Value, String> {
             if label.is_empty() {
                 return Err(at("options must not be empty or blank"));
             }
+            // The UI appends a free-text "Other" to every question; one here
+            // would be shown twice.
+            let lower = label.to_lowercase();
+            if lower == "other" || lower.starts_with("other (") || lower.starts_with("other:") {
+                return Err(at(
+                    "do not add an 'Other' option — the UI adds a free-text 'Other' to every question",
+                ));
+            }
             if !seen.insert(label.to_lowercase()) {
                 return Err(at(&format!(
                     "duplicate option '{label}' — options must be distinct"
@@ -1157,7 +1165,8 @@ fn ask_user_error_with_example(detail: &str, raw_questions: &Value) -> String {
          string, OR an object {{ \"label\": \"concise choice\", \"description\": \"optional one-line detail\" }} \
          (label required, description optional). Do NOT add an \"Other\" option — the UI always \
          appends a free-text \"Other\" for you. If the answer is open-ended, still offer the most \
-         likely concrete choices.\n\n\
+         likely concrete choices. \"multi_select\": false (the default) shows radio buttons and the \
+         user picks one; true shows checkboxes and the user may pick several.\n\n\
          Example of a correct call for your question:\n{example_str}\n\n\
          Replace the example option text with the real, distinct choices and call ask_user again."
     )
@@ -1742,6 +1751,48 @@ mod tests {
         // An empty object is likewise unusable.
         let empty_obj = json!([{"question": "q", "options": [{}, "b"]}]);
         assert!(normalize_ask_user_questions(&empty_obj).is_err());
+    }
+
+    // The UI appends a free-text "Other" to every question, so one in the
+    // options would show twice. The description used to say so on every
+    // request; the rule now costs nothing until a call breaks it.
+    #[test]
+    fn an_other_option_is_refused_and_the_error_says_why() {
+        for other in [
+            json!("Other"),
+            json!(" other "),
+            json!({"label": "Other (please specify)"}),
+        ] {
+            let raw = json!([{"question": "q", "options": ["Yes", "No", other]}]);
+            let detail = normalize_ask_user_questions(&raw).unwrap_err();
+            assert!(
+                detail.contains("Other") && detail.contains("adds"),
+                "{detail}"
+            );
+        }
+        // A real choice that merely starts with the word is fine.
+        let ok = json!([{"question": "q", "options": ["Yes", "Otherwise keep it"]}]);
+        assert!(normalize_ask_user_questions(&ok).is_ok());
+    }
+
+    /// What the tool description no longer carries, the error a malformed
+    /// call gets back does: the option shapes, how many, no "Other", and what
+    /// multi_select changes.
+    #[test]
+    fn the_ask_user_error_carries_the_rules_the_description_no_longer_does() {
+        let raw = json!([{"question": "Pick?", "options": ["only"]}]);
+        let detail = normalize_ask_user_questions(&raw).unwrap_err();
+        let msg = ask_user_error_with_example(&detail, &raw);
+        for rule in [
+            "2-4",
+            "\"label\"",
+            "\"description\"",
+            "\"Other\"",
+            "multi_select",
+            "checkboxes",
+        ] {
+            assert!(msg.contains(rule), "{rule} missing from: {msg}");
+        }
     }
 
     #[test]

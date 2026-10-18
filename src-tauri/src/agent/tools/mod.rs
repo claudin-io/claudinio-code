@@ -286,49 +286,49 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read_file".into(),
-            description: "Read a text file (project workspace only, max 2MB). Use the absolute path within the project. Optionally specify start_line and end_line (1-based, inclusive) to read only a subset of lines. Reading a file is REQUIRED before you can edit it with edit_file.".into(),
+            description: "Read a text file in the workspace (max 2MB), or only lines start_line..end_line (1-based, inclusive). A file must be read before edit_file may change it.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to the file within the project workspace" },
-                    "start_line": { "type": "integer", "description": "Optional starting line number (1-based, inclusive). If omitted, reads from the beginning." },
-                    "end_line": { "type": "integer", "description": "Optional ending line number (1-based, inclusive). If omitted, reads to the end." }
+                    "path": { "type": "string", "description": "Absolute path inside the workspace" },
+                    "start_line": { "type": "integer" },
+                    "end_line": { "type": "integer" }
                 },
                 "required": ["path"]
             }),
         },
         ToolDef {
             name: "list_dir".into(),
-            description: "List files and directories at a given path (one level, project workspace only, respects .gitignore). Start from the project root.".into(),
+            description: "List one level of a workspace directory (respects .gitignore).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to a directory within the project workspace" }
+                    "path": { "type": "string", "description": "Absolute path inside the workspace" }
                 },
                 "required": ["path"]
             }),
         },
         ToolDef {
             name: "grep".into(),
-            description: "Search for a regex pattern across files in the project workspace using ripgrep. LAST RESORT for search — prefer the indexed tools first: semantic_search for behavior/concepts, code_search/symbol_lookup for known names. Reach for grep only when those come up empty or you need a literal regex over raw file text.".into(),
+            description: "Search for a regex pattern across workspace files (ripgrep). For a behavior or concept, semantic_search usually finds it faster.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Regex pattern" },
-                    "path": { "type": "string", "description": "Optional subdirectory within the project workspace to scope the search" }
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string", "description": "Optional directory to search in" }
                 },
                 "required": ["pattern"]
             }),
         },
         ToolDef {
             name: "edit_file".into(),
-            description: "Propose a change to a file in the project workspace. Replaces the FIRST occurrence of old_string with new_string, so old_string MUST uniquely identify the target — include enough surrounding lines that it matches exactly one place (a bare, repeated snippet will edit the wrong spot). NOT applied until you approve. IMPORTANT: You MUST call read_file on the file first (or at least the line range containing the edit) before using edit_file — otherwise the edit will be rejected with an error.".into(),
+            description: "Replace the FIRST occurrence of old_string with new_string in a workspace file, so old_string must match exactly one place: include enough surrounding lines. The file (at least the lines being changed) must have been read with read_file first. The change is shown as a diff and applied once approved.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path within the project workspace" },
-                    "old_string": { "type": "string", "description": "Text to replace" },
-                    "new_string": { "type": "string", "description": "Replacement text" }
+                    "path": { "type": "string", "description": "Absolute path inside the workspace" },
+                    "old_string": { "type": "string" },
+                    "new_string": { "type": "string" }
                 },
                 "required": ["path", "old_string", "new_string"]
             }),
@@ -407,35 +407,31 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "bash".into(),
-            description: "Run a shell command. It already runs with the project workspace root as its working directory — run commands directly (e.g. \"git status\") with relative paths; never cd into guessed paths. Requires approval for non-allowlisted commands. Danger-sensitive commands are blocked automatically.".into(),
+            description: "Run a shell command. The working directory is already the workspace root: use relative paths and never cd into guessed paths. Commands outside the allowlist need approval; dangerous ones are blocked.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The shell command to run" },
-                    "workdir": { "type": "string", "description": "Working directory (defaults to the project root)" },
-                    "stdin": { "type": "string", "description": "Optional stdin for the command" },
-                    "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default 30; override if the command needs more time)" }
+                    "command": { "type": "string" },
+                    "workdir": { "type": "string", "description": "Defaults to the workspace root" },
+                    "stdin": { "type": "string" },
+                    "timeout_seconds": { "type": "integer", "description": "Default 30" }
                 },
                 "required": ["command"]
             }),
         },
         ToolDef {
             name: "run_quality".into(),
-            description: "Run this project's own verification layers and record the result as \
-                          session evidence: 'tests' runs the test suite, 'coverage' measures how \
-                          much of what YOU changed is actually executed by a test. The commands \
-                          come from the project (detected, or set in .claudinio.json) — you \
-                          cannot pass a command. \
-                          A golden task CANNOT be marked done unless the most recent run is green \
-                          AND no file changed since it ran: the harness verifies this \
-                          mechanically, so saying the tests pass does not work — run them. \
-                          Call this after finishing the work, and again after any further edit.".into(),
+            description: "Run the project's own checks and record the result as session evidence: \
+                          'tests' runs its test suite, 'coverage' how much of what you changed a \
+                          test executes. The commands come from the project; you cannot pass one. \
+                          A golden task can be closed only after a green run with no file changed \
+                          since, so call this when the work is done and again after any later edit.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "layers": {
                         "type": "array",
-                        "description": "Layers to run. Omit to run what this project enforces (tests, and coverage when configured).",
+                        "description": "Omit to run what the project enforces",
                         "items": { "type": "string", "enum": ["tests", "coverage", "mutation", "gherkin", "metrics"] }
                     }
                 },
@@ -456,7 +452,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "browser".into(),
-            description: "Drive a dedicated browser: open a URL, move around in it, and interact with it. The browser stays open between calls, so login, scroll position and SPA route persist across the session.\n\nThis tool never returns pixels — call browser_screenshot to SEE the page, and browser_inspect to read its console, network or text.\n\nOnly http:// and https:// are allowed. Navigating to a site outside this machine asks the user for approval; localhost and other local addresses do not.".into(),
+            description: "Drive a dedicated browser: open a URL and operate the page. It stays open between calls, so login, scroll position and SPA route persist. It never returns pixels: browser_screenshot shows the page, browser_inspect reads its console, network or text.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -465,7 +461,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                         "enum": ["navigate", "reload", "back", "url", "click", "type", "press", "scroll_to", "focus", "wait_for", "close"],
                         "description": "navigate: open `url`. reload: reload the current page. back: one step back in history. url: report the current URL. click: click the centre of the first element matching `selector`, scrolling it into view first. type: focus `selector` and enter `text`. press: send one special key to the focused element (or to `selector` if given). scroll_to: scroll `selector` into view without clicking. focus: focus `selector`. wait_for: block until `selector` exists in the DOM (presence, not visibility — an element hidden with display:none already counts). close: shut the browser down and free its memory."
                     },
-                    "url": { "type": "string", "description": "For navigate. Absolute http:// or https:// URL." },
+                    "url": { "type": "string", "description": "For navigate. Absolute http:// or https:// URL only; a site outside this machine asks the user first, localhost does not." },
                     "selector": { "type": "string", "description": "CSS selector; the first match wins. Used by click, type, press, scroll_to, focus and wait_for." },
                     "text": { "type": "string", "description": "For type: the text to enter." },
                     "key": {
@@ -502,14 +498,14 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "browser_screenshot".into(),
-            description: "Capture what the browser is showing, as an image you can actually see. Call the browser tool with action=navigate first.\n\nPrefer target=selector or target=rect over full_page: a whole-page capture of a long page costs several times more context and is usually harder to read. full_page is clamped to the top 8000 CSS pixels.".into(),
+            description: "Capture what the browser is showing, as an image you can see. Open a page with the browser tool first. Prefer target=selector or rect: a whole long page costs several times the context and is harder to read.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
                         "enum": ["viewport", "full_page", "selector", "rect"],
-                        "description": "viewport: what is on screen right now (default, cheapest). selector: just the element matching `selector`, scrolled into view first. rect: an arbitrary region. full_page: the entire scrollable page."
+                        "description": "viewport: what is on screen now (default, cheapest). selector: the element matching `selector`, scrolled into view. rect: a region. full_page: the whole page, clamped to the top 8000 CSS pixels."
                     },
                     "selector": { "type": "string", "description": "Required when target=selector. CSS selector; the first match wins." },
                     "rect": {
@@ -529,35 +525,34 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text (including pasting the questions JSON into your reply) ends the turn unanswered and stalls the task.\n\nSHAPE: each question is { \"question\": string, \"options\": Option[], \"multi_select\"?: bool }. Each option is EITHER a plain string, OR an object { \"label\": string, \"description\"?: string } where `label` is the concise choice shown on the button and `description` is an optional one-line explanation rendered under it. Mix the two freely. Right: \"options\": [\"Keep `chat` subcommand\", \"Make it the default\"]. Also right: \"options\": [{\"label\": \"Keep `chat`\", \"description\": \"Runs the interactive chat as a subcommand\"}, {\"label\": \"Make it default\", \"description\": \"`claudinio` with no args opens chat\"}].\n\nEach question can have:\n- `multi_select: false` (default): radio buttons, user picks exactly ONE option. Best for mutually exclusive decisions.\n- `multi_select: true`: checkboxes, user can pick SEVERAL options. The UI shows square indicators instead of circles.\n\nThe UI automatically appends an \"Other\" option with a free-text input field to EVERY question (single and multi). When the user types in \"Other\", their text is appended to the chosen options. So NEVER add an \"Other\" option manually to your options list — it's always there automatically.\n\nProvide 2-4 options; their labels must be non-empty and distinct (no blank or duplicated entries). Blocks until answered and returns the compiled question/answer pairs.".into(),
+            description: "Ask the user when you need information or a decision only they can make: a question written as plain text instead ends your turn unanswered. Give each question 2-4 options; the UI adds a free-text 'Other' to every question. Blocks until answered and returns the answers.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "questions": {
                         "type": "array",
-                        "description": "Questions to ask the user",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "question": { "type": "string", "description": "The full question, ending with a question mark" },
+                                "question": { "type": "string" },
                                 "options": {
                                     "type": "array",
-                                    "description": "2-4 distinct, non-empty choices. Each is EITHER a plain string, OR an object { \"label\": string, \"description\"?: string } — label is the concise choice, description an optional one-line detail shown under it. Do NOT include an 'Other' option — the UI adds it automatically.",
+                                    "description": "2-4 distinct choices: a string, or {label, description?} (description is one line shown under the label). Never an 'Other': the UI adds it.",
                                     "items": {
                                         "oneOf": [
                                             { "type": "string" },
                                             {
                                                 "type": "object",
                                                 "properties": {
-                                                    "label": { "type": "string", "description": "Concise choice shown on the button" },
-                                                    "description": { "type": "string", "description": "Optional one-line explanation shown under the label" }
+                                                    "label": { "type": "string" },
+                                                    "description": { "type": "string" }
                                                 },
                                                 "required": ["label"]
                                             }
                                         ]
                                     }
                                 },
-                                "multi_select": { "type": "boolean", "description": "false (default) = radio buttons, user picks one. true = checkboxes, user picks several plus the auto-added 'Other' free-text field." }
+                                "multi_select": { "type": "boolean", "description": "true: checkboxes, pick several. Default false: pick one." }
                             },
                             "required": ["question", "options"]
                         }
@@ -573,21 +568,20 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_set".into(),
-            description: "Create or rewrite the task list. A full replacement: pass ALL tasks. Each task has: id (unique string), title, description, journal (array of findings/memory entries), status (todo | doing | done). Use it to create the list and to add, remove or reword tasks — to change one task's status or journal, use tasks_update instead of resending the list. Read current tasks first with tasks_get before modifying. In Brain mode this is rejected until the current plan file contains a non-empty '## Low-Level Design' section.".into(),
+            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. In Brain mode it is refused until the plan has a non-empty '## Low-Level Design' section.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "tasks": {
                         "type": "array",
-                        "description": "All tasks (full replace — include every task, not just the one you changed)",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": { "type": "string", "description": "Unique task identifier" },
-                                "title": { "type": "string", "description": "Short task title" },
-                                "description": { "type": "string", "description": "Task description/goal" },
-                                "journal": { "type": "array", "items": { "type": "string" }, "description": "Findings or relevant info, as memory entries" },
-                                "status": { "type": "string", "enum": ["todo", "doing", "done"], "description": "Task status" }
+                                "id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "description": { "type": "string" },
+                                "journal": { "type": "array", "items": { "type": "string" }, "description": "Findings and decisions" },
+                                "status": { "type": "string", "enum": ["todo", "doing", "done"] }
                             },
                             "required": ["id", "title", "description", "journal", "status"]
                         }
@@ -598,20 +592,20 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_update".into(),
-            description: "Change ONE task without resending the list: set its status and/or append journal entries. This is how a task moves todo -> doing -> done. Returns where the whole list stands.".into(),
+            description: "Change ONE task without resending the list: its status (todo -> doing -> done) and/or journal entries to append. Returns where the whole list stands.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "Id of the task to change" },
-                    "status": { "type": "string", "enum": ["todo", "doing", "done"], "description": "New status; omit to leave it as it is" },
-                    "journal": { "type": "array", "items": { "type": "string" }, "description": "Entries to APPEND to the task's journal: findings, decisions, the 'why'" }
+                    "id": { "type": "string" },
+                    "status": { "type": "string", "enum": ["todo", "doing", "done"] },
+                    "journal": { "type": "array", "items": { "type": "string" }, "description": "Appended: findings, decisions, the 'why'" }
                 },
                 "required": ["id"]
             }),
         },
         ToolDef {
             name: "spawn_agents".into(),
-            description: format!("ONE call spawns ALL agents: pass 'agents', an array of 1-{n} specs ({{name, goal, mode, expected_output}}); every spec in the call runs in parallel, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints.", n = max_parallel),
+            description: format!("Run 1-{n} subagents in parallel, all in ONE call's 'agents' array. Each starts with an empty context and cannot ask the user, so its goal must be self-contained: paths, symbols, constraints, exact values. 'explore' reads; 'code' can also edit files and run bash. Returns each agent's report.", n = max_parallel),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["agents"],
@@ -622,10 +616,10 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                             "type": "object",
                             "required": ["name", "goal", "mode"],
                             "properties": {
-                                "name": { "type": "string", "description": "Short label shown to the user, e.g. 'auth-flow-investigator'" },
-                                "goal": { "type": "string", "description": "Self-contained instructions: the task, known file paths/symbols, constraints (write the goal in English)" },
-                                "mode": { "type": "string", "enum": ["explore", "code"], "description": "explore = read-only tools; code = can edit files and run bash (requires user approval)" },
-                                "expected_output": { "type": "string", "description": "What the final report must contain" }
+                                "name": { "type": "string", "description": "Short label shown to the user" },
+                                "goal": { "type": "string", "description": "Self-contained instructions, in English" },
+                                "mode": { "type": "string", "enum": ["explore", "code"] },
+                                "expected_output": { "type": "string", "description": "What the report must contain" }
                             }
                         }
                     }
@@ -1325,6 +1319,29 @@ mod tests {
                 std::num::NonZeroUsize::new(1).unwrap(),
             ))),
         }
+    }
+
+    /// The description diet (lean-harness Phase 2): a core tool rides on
+    /// every request, so its description says what the tool is for in at most
+    /// 400 characters, and the shape rules live in the schema's property
+    /// descriptions and in the error a malformed call gets back — where they
+    /// cost nothing until they are needed. The browser tools are held to the
+    /// same line: loaded, they ride on every request too.
+    #[test]
+    fn every_core_tool_description_is_at_most_400_characters() {
+        let mut defs = get_defs(4);
+        defs.push(write_plan_def());
+        defs.push(exit_plan_mode_def());
+        defs.push(crate::agent::deferred::load_tools_def());
+        let over: Vec<(String, usize)> = defs
+            .iter()
+            .filter(|t| {
+                !crate::agent::deferred::is_deferred(&t.name) || t.name.starts_with("browser")
+            })
+            .filter(|t| t.description.chars().count() > 400)
+            .map(|t| (t.name.clone(), t.description.chars().count()))
+            .collect();
+        assert!(over.is_empty(), "over 400 characters: {over:?}");
     }
 
     /// A skill in the workspace is what `skills` answers with — the same scan

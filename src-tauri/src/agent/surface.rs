@@ -177,9 +177,7 @@ pub const COMPACT_TOOLS: [&str; 10] = [
 /// `grep` calls itself a last resort behind the indexed searches — which here
 /// do not exist, while the prompt names `grep` as the way to find things.
 const COMPACT_REWRITES: [(&str, &str); 1] = [(
-    " LAST RESORT for search \u{2014} prefer the indexed tools first: semantic_search for \
-     behavior/concepts, code_search/symbol_lookup for known names. Reach for grep only when \
-     those come up empty or you need a literal regex over raw file text.",
+    " For a behavior or concept, semantic_search usually finds it faster.",
     "",
 )];
 

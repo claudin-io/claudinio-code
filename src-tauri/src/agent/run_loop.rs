@@ -3008,10 +3008,12 @@ mod context_line_tests {
     // second of which replaced the user's message with a summary of it.
     #[tokio::test]
     async fn a_prefix_the_window_cannot_hold_is_refused_before_anything_is_tried() {
-        let (budget, prefix) = lines(4_096);
+        // 2,048 since Phase 2's description diet: the Compact prefix now fits
+        // the 4,096 window this test used to overflow.
+        let (budget, prefix) = lines(2_048);
         assert!(budget.prefix_overflows(prefix), "{budget:?} / {prefix}");
 
-        let (outcome, requests, records) = open_with("overflow", 4_096, 200).await;
+        let (outcome, requests, records) = open_with("overflow", 2_048, 200).await;
         let err = outcome.err().expect("refused");
         assert!(err.contains("too small for the"), "{err}");
         assert_eq!(requests, 0, "nothing was sent to find that out");

@@ -308,7 +308,13 @@ pub async fn run_spawn_agents(
         .collect();
 
     if specs.len() != agents.len() {
-        let msg = "failed to parse one or more agent specs".to_string();
+        let msg = format!(
+            "failed to parse one or more agent specs. Each spec needs a string 'name' (a short \
+             label) and 'goal' (self-contained instructions: paths, symbols, constraints, exact \
+             values), a 'mode' of 'explore' (read-only tools) or 'code' (can edit files and run \
+             bash, with approval), and optionally 'expected_output'. All of them go in ONE call: \
+             {{\"agents\": [{{\"name\", \"goal\", \"mode\", \"expected_output\"}}]}}, 1-{max} per call."
+        );
         let _ = event_tx.send(AgentEvent::ToolResult {
             tool_id: parent_tool_use_id.to_string(),
             tool_name: "spawn_agents".into(),
@@ -2187,6 +2193,38 @@ mod transcript_tests {
             answered, ids,
             "the turn is answered call for call, in order"
         );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // The spawn_agents description no longer spells out a spec's fields
+    // (Phase 2 description diet); a spec that does not parse gets them back
+    // in the error, where they cost nothing until a call needs them.
+    #[tokio::test]
+    async fn a_spec_that_does_not_parse_is_answered_with_the_spec_shape() {
+        let (ws, ws_str, store) = session_in("badspec");
+        let config = config_for("http://127.0.0.1:1");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let (block, _, _, _) = run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_bad",
+            serde_json::json!({"agents": [{"name": "r", "goal": "explain", "mode": "write"}]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        let text = format!("{block:?}");
+        for part in ["'name'", "'goal'", "'explore'", "'code'", "expected_output"] {
+            assert!(text.contains(part), "{part} missing: {text}");
+        }
         std::fs::remove_dir_all(&ws).ok();
     }
 
