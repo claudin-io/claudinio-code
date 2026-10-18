@@ -22,7 +22,7 @@
 //! per-request injection, which would rewrite the cached prefix.
 
 use crate::agent::document::{self, Change, ChangeKind, Document, Status};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// What a context may do to the session's document. `Main` by default:
@@ -92,6 +92,39 @@ struct DocState {
     /// person deleted are never handed out again.
     #[serde(default)]
     next_id: u32,
+    /// For each section a subagent holds: how it stood before the claim, so
+    /// a subagent that writes nothing gives it back as it found it.
+    #[serde(default)]
+    claimed: BTreeMap<String, BeforeClaim>,
+}
+
+/// A section as it stood when a subagent claimed it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BeforeClaim {
+    status: String,
+    owner: Option<String>,
+    text: String,
+}
+
+/// Free a section a subagent still holds as `doing`. Untouched since the
+/// claim, it goes back to how it stood then: a section `main` finished or a
+/// person edited keeps that status and owner (Phase 4b final review — it
+/// used to become `todo` under the subagent's name). Written to but never
+/// finished, or claimed before this memory existed, it goes to `todo`, and
+/// keeps the subagent as owner only when there is text it wrote.
+fn give_back(s: &mut document::Section, before: Option<BeforeClaim>) {
+    match before {
+        Some(b) if b.text == s.text() => {
+            s.status = Status::parse(&b.status);
+            s.owner = b.owner;
+        }
+        _ => {
+            s.status = Status::Todo;
+            if s.text().is_empty() {
+                s.owner = None;
+            }
+        }
+    }
 }
 
 /// A session's document: where the file is and where its memory is.
@@ -490,7 +523,12 @@ pub fn claim(
     owner: &str,
 ) -> Result<String, String> {
     let l = linked(ctx).ok_or(NO_DOCUMENT)?;
-    with_doc(&l, |doc, _| {
+    with_doc(&l, |doc, state| {
+        let before = doc.section(id).map(|s| BeforeClaim {
+            status: s.status.as_str().into(),
+            owner: s.owner.clone(),
+            text: s.text().into(),
+        });
         doc.apply_write(id, None, owner, Status::Doing)
             .map_err(|e| match e {
                 document::WriteError::Claimed { owner } => {
@@ -501,26 +539,27 @@ pub fn claim(
                     doc.ids().join(", ")
                 ),
             })?;
+        if let Some(before) = before {
+            state.claimed.insert(id.to_string(), before);
+        }
         Ok(doc.section(id).map(|s| s.topic.clone()).unwrap_or_default())
     })
 }
 
 /// After the subagent ends: a section it still holds as `doing` (it never
-/// finished it) goes back to `todo`, so nobody waits on an agent that is
-/// gone.
+/// finished it) is freed ([`give_back`]), so nobody waits on an agent that
+/// is gone.
 pub fn release(ctx: &crate::agent::tools::ToolContext, id: &str, owner: &str) {
     let Some(l) = linked(ctx) else {
         return;
     };
-    let _ = with_doc(&l, |doc, _| {
+    let _ = with_doc(&l, |doc, state| {
+        let before = state.claimed.remove(id);
         if let Some(s) = doc.section_mut(id)
             && s.status == Status::Doing
             && s.owner.as_deref() == Some(owner)
         {
-            s.status = Status::Todo;
-            if s.text().is_empty() {
-                s.owner = None;
-            }
+            give_back(s, before);
         }
         Ok(())
     });
@@ -612,12 +651,10 @@ pub fn run_start_blocks(ctx: &crate::agent::tools::ToolContext) -> Vec<String> {
             if s.status == Status::Doing
                 && s.owner.as_deref().is_some_and(|o| o.starts_with("sub:"))
             {
-                s.status = Status::Todo;
-                if s.text().is_empty() {
-                    s.owner = None;
-                }
+                give_back(s, state.claimed.remove(&s.id));
             }
         }
+        state.claimed.clear();
         let mut blocks = vec![format!(
             "<document path=\"{}\">\n{}\n</document>",
             l.rel,
@@ -1499,6 +1536,59 @@ mod tests {
             "the main session's own stays"
         );
         write(&ws.ctx, "s1", Some("now mine"), Status::Done).unwrap();
+    }
+
+    /// A subagent handed a section it never writes leaves the section as it
+    /// found it: a section `main` finished stays `done by=main`, and one a
+    /// person edited stays "Edited by you" — whether the subagent ends
+    /// (`release`) or never ends and the next run frees its claim. Moving
+    /// them to `todo` under the subagent's name would show written text as
+    /// unwritten, owned by an agent that wrote nothing.
+    #[test]
+    fn a_section_a_subagent_gives_up_on_returns_to_how_it_was_before_the_claim() {
+        let status_of = |ws: &Ws, id: &str| {
+            let v = view(&ws.root, &ws.store()).unwrap();
+            let s = v.sections.into_iter().find(|s| s.id == id).unwrap();
+            (s.status, s.owner)
+        };
+        for stale in [false, true] {
+            let (ws, path) = Ws::with_doc("give-up", &["origem", "servir"]);
+            write(&ws.ctx, "s1", Some("veio de Portugal"), Status::Done).unwrap();
+            write(&ws.ctx, "s2", Some("gelado"), Status::Done).unwrap();
+            edit(&path, "gelado", "bem gelado");
+            read(&ws.ctx, Some("s2")).unwrap();
+            assert_eq!(status_of(&ws, "s2"), ("human".into(), None));
+
+            claim(&ws.ctx, "s1", "sub:a").unwrap();
+            claim(&ws.ctx, "s2", "sub:b").unwrap();
+            if stale {
+                run_start_blocks(&ws.ctx);
+            } else {
+                release(&ws.ctx, "s1", "sub:a");
+                release(&ws.ctx, "s2", "sub:b");
+            }
+            assert_eq!(
+                status_of(&ws, "s1"),
+                ("done".into(), Some("main".into())),
+                "stale={stale}"
+            );
+            assert_eq!(
+                status_of(&ws, "s2"),
+                ("human".into(), None),
+                "stale={stale}"
+            );
+        }
+    }
+
+    /// A memory written before a field existed still loads: losing it would
+    /// make the next read take the file as "what the agents know" and drop
+    /// a person's unread edit.
+    #[test]
+    fn a_document_memory_from_before_the_claim_field_still_loads() {
+        let old = r#"{"path":"p","known":"k","unread":["s1"],"pending":[],"next_id":3}"#;
+        let state: DocState = serde_json::from_str(old).unwrap();
+        assert!(state.unread.contains("s1"));
+        assert!(state.claimed.is_empty());
     }
 
     /// The document is written through `doc_write`, never `edit_file`: an
