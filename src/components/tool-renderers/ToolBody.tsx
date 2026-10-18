@@ -24,7 +24,7 @@ import { Icon, toolIcon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
 import { renderMarkdown, escapeHtml } from "../../lib/markdown";
-import { detectLanguageFromPath, toolTitle } from "./toolPresentation";
+import { describeTaskUpdate, detectLanguageFromPath, taskUpdates, toolTitle } from "./toolPresentation";
 import { parseLineList, UNCHANGED_MARK, type ListRow } from "./lineResults";
 
 // The result goes straight to `innerHTML`, and both inputs are untrusted: the
@@ -478,6 +478,34 @@ const ToolImagesBody: Component<{ images?: ToolImageData[] }> = (props) => (
   </Show>
 );
 
+// ── tasks_update ────────────────────────────────────────────────────
+// One row per change, in either form of the call (lean-harness Phase 4: a
+// batch closes a task and starts the next in one call). The status icon is
+// the task list's own; a journal-only change shows how much was noted.
+const TaskUpdatesBody: Component<{ args: Record<string, unknown>; result?: ToolResultData }> = (props) => (
+  <div class="flex flex-col gap-1">
+    <For each={taskUpdates(props.args)}>
+      {(u) => (
+        <div class="flex items-start gap-2" data-task-update>
+          <Icon
+            name={statusIcon(String(u.status ?? ""))}
+            class={`mt-[1px] h-3.5 w-3.5 shrink-0 ${u.status ? statusClass(String(u.status)) : "text-ink-faint"}`}
+          />
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[12px] text-ink">{describeTaskUpdate(u)}</div>
+            <Show when={u.status && u.journal && u.journal.length > 0}>
+              <div class="truncate text-[11px] text-ink-faint">{u.journal![u.journal!.length - 1]}</div>
+            </Show>
+          </div>
+        </div>
+      )}
+    </For>
+    <Show when={props.result?.error}>
+      <div class="text-[11px] text-danger">{props.result!.error}</div>
+    </Show>
+  </div>
+);
+
 // ── load_tools ──────────────────────────────────────────────────────
 // A deferred-tool load: which tools joined the model's list. One row per
 // requested name, by the name the timeline gives that tool elsewhere.
@@ -589,6 +617,9 @@ export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }
       </Match>
       <Match when={name() === "tasks_set" || name() === "tasks_get"}>
         <TasksBody argsTasks={props.call.args.tasks} result={props.result} />
+      </Match>
+      <Match when={name() === "tasks_update"}>
+        <TaskUpdatesBody args={props.call.args} result={props.result} />
       </Match>
       <Match when={name() === "write_plan"}>
         <PlanBody markdown={(props.call.args.content as string) ?? ""} />

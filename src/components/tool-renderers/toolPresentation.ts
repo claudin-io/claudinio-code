@@ -46,6 +46,26 @@ const TITLES: Record<string, string> = {
   skills: "Listed skills",
 };
 
+/** One change in a `tasks_update` call, in either of its two forms. */
+export interface TaskUpdateArg {
+  id?: string;
+  status?: string;
+  journal?: string[];
+}
+
+/** The task's id and its new status, or how many notes it got. */
+export function describeTaskUpdate(u: TaskUpdateArg): string {
+  const id = String(u.id ?? "");
+  const notes = u.journal?.length ?? 0;
+  if (u.status) return `${id} → ${String(u.status)}`;
+  return notes > 0 ? `${id} · ${notes} note${notes === 1 ? "" : "s"}` : id;
+}
+
+/** The changes a `tasks_update` call asked for: its `updates`, or itself. */
+export function taskUpdates(args: Record<string, unknown>): TaskUpdateArg[] {
+  return Array.isArray(args.updates) ? (args.updates as TaskUpdateArg[]) : [args as TaskUpdateArg];
+}
+
 export function toolTitle(name: string): string {
   if (TITLES[name]) return TITLES[name];
   if (name.startsWith("mcp__")) {
@@ -103,6 +123,10 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
     };
     const title = byAction[String(call.args.action ?? "")];
     if (title) return { icon: "globe", title };
+  }
+  // A batched update moves several tasks; the title says so.
+  if (call.toolName === "tasks_update" && Array.isArray(call.args.updates)) {
+    return { icon: toolIcon("tasks_update"), title: TITLES.tasks_set };
   }
   if (call.toolName === "skills" && call.args.action === "read") {
     return { icon: toolIcon("skills"), title: "Read a skill" };
@@ -181,12 +205,10 @@ export function toolSummary(call: ToolCallData): string {
       return `${done}/${tasks.length} done`;
     }
     case "tasks_update": {
-      // One task changed: say which, and to what. A journal-only update has no
-      // status to show, so it says how much was noted instead.
-      const id = String(args.id ?? "");
-      const notes = (args.journal as string[] | undefined)?.length ?? 0;
-      if (args.status) return `${id} → ${String(args.status)}`;
-      return notes > 0 ? `${id} · ${notes} note${notes === 1 ? "" : "s"}` : id;
+      // Each task changed: say which, and to what. A journal-only update has
+      // no status to show, so it says how much was noted instead. A batch
+      // (`updates`) lists its changes in order.
+      return truncate(taskUpdates(args).map(describeTaskUpdate).join(", "), 80);
     }
     case "spawn_agents": {
       const agents = (args.agents as { name: string }[] | undefined) ?? [];

@@ -409,6 +409,64 @@ describe("ToolBody", () => {
   });
 });
 
+// Phase 4 of the lean-harness plan: one `tasks_update` call may close a task
+// and start the next. The row says how many tasks moved and the body lists
+// each change, whichever form the call took.
+describe("batched tasks_update", () => {
+  const batch = makeCall("tasks_update", {
+    updates: [
+      { id: "t1", status: "done", journal: ["it was the cache"] },
+      { id: "t2", status: "doing" },
+      { id: "t3", journal: ["a", "b"] },
+    ],
+  });
+
+  it("titles a batch in the plural and summarizes each change", () => {
+    expect(toolHeader(batch).title).toBe("Updated tasks");
+    expect(toolSummary(batch)).toBe("t1 → done, t2 → doing, t3 · 2 notes");
+    // The single form keeps its own title and summary.
+    const one = makeCall("tasks_update", { id: "t3", status: "done" });
+    expect(toolHeader(one).title).toBe("Updated task");
+    expect(toolSummary(one)).toBe("t3 → done");
+  });
+
+  it("renders one row per change with the new status", () => {
+    const dispose = render(
+      () => <ToolBody call={batch} result={makeResult("tasks_update", "Tasks updated — …")} />,
+      document.body,
+    );
+    const rows = document.body.querySelectorAll("[data-task-update]");
+    expect(rows.length).toBe(3);
+    expect(rows[0].textContent).toContain("t1");
+    expect(rows[0].textContent).toContain("done");
+    expect(rows[0].textContent).toContain("it was the cache");
+    expect(rows[0].querySelector('[data-testid="icon-check-circle"]')).not.toBeNull();
+    expect(rows[1].querySelector('[data-testid="icon-loader"]')).not.toBeNull();
+    expect(rows[2].textContent).toContain("2 notes");
+    dispose();
+  });
+
+  it("renders the single form as one row too", () => {
+    const one = makeCall("tasks_update", { id: "t9", status: "doing" });
+    const dispose = render(() => <ToolBody call={one} />, document.body);
+    const rows = document.body.querySelectorAll("[data-task-update]");
+    expect(rows.length).toBe(1);
+    expect(rows[0].textContent).toContain("t9");
+    dispose();
+  });
+
+  it("shows why a batch was refused", () => {
+    const result = makeResult(
+      "tasks_update",
+      "",
+      "tasks_update: there is no task 't9'. The batch was refused: nothing was applied.",
+    );
+    const dispose = render(() => <ToolBody call={batch} result={result} />, document.body);
+    expect(document.body.textContent).toContain("nothing was applied");
+    dispose();
+  });
+});
+
 // The two tools Phase 2 of the lean-harness plan added: a deferred-tool load
 // and a skill read are bookkeeping, so each renders as compact rows rather
 // than a key-value dump of its arguments.

@@ -373,3 +373,85 @@ describe("the live run — when an answer closes its message", () => {
     expect(closingText("Same.", "Same.", "Same.")).toBe("Same.");
   });
 });
+
+// Lean-harness Phase 4: a run's user turn ends with the task list as a
+// `<tasks>` block, beside any `<hook-context>`, and a compaction restates it
+// after the round's tool results. The model reads those blocks; the person
+// must never see them as words they typed or the agent wrote. The bubble is
+// the raw `user` record, exactly as for hook context.
+describe("recordsToMessages — the harness's own blocks in a user turn", () => {
+  const TASKS = "<tasks>\nt1 · doing · wire the UI\n</tasks>";
+  const everyText = (messages: ChatMessage[]) =>
+    messages.flatMap((m) => [
+      m.text,
+      ...(m.steps ?? []).map((s) => (s.type === "text" ? s.text ?? "" : "")),
+      ...(m.steps ?? []).map((s) => (s.type === "linked" ? s.linked?.firstMessage ?? "" : "")),
+    ]);
+
+  it("shows the user's words, never the task list or hook context sent with them", () => {
+    const m = recordsToMessages([
+      { kind: "user", text: "go on", ts: 1 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: "go on" },
+          { type: "text", text: "<hook-context>\nproject memory\n</hook-context>" },
+          { type: "text", text: TASKS },
+        ],
+        ts: 1,
+      },
+      ...toolRound("r1", "read_file", "contents"),
+      answer("done"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: go on", "assistant: done"]);
+    expect(everyText(m).some((t) => t.includes("<tasks>"))).toBe(false);
+  });
+
+  it("keeps a successor's kickoff free of the list its first turn carries", () => {
+    const kickoff = "[system] This is a fresh session that continues previous work…";
+    const m = recordsToMessages([
+      { kind: "linked_from", prev_session_id: "a", reason: "context_handoff", ts: 1 },
+      { kind: "user", text: kickoff, ts: 2 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: kickoff },
+          { type: "text", text: TASKS },
+        ],
+        ts: 2,
+      },
+      answer("continuing"),
+      done(),
+    ]);
+    expect(everyText(m)).toContain(kickoff);
+    expect(everyText(m).some((t) => t.includes("<tasks>"))).toBe(false);
+  });
+
+  it("does not render the list a compaction restates after the tool results", () => {
+    const m = recordsToMessages([
+      ...user("do it"),
+      {
+        kind: "turn",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "r1", name: "read_file", input: {} }],
+        ts: 2,
+      },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "r1", content: "contents" },
+          { type: "text", text: TASKS },
+        ],
+        ts: 2,
+      },
+      answer("done"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: do it", "assistant: done"]);
+    expect(everyText(m).some((t) => t.includes("<tasks>"))).toBe(false);
+  });
+});
