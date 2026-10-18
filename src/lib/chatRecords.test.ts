@@ -430,28 +430,24 @@ describe("recordsToMessages — the harness's own blocks in a user turn", () => 
     expect(everyText(m).some((t) => t.includes("<tasks>"))).toBe(false);
   });
 
-  it("does not render the list a compaction restates after the tool results", () => {
+  // The finish-line nudge (`nudges::still_doing`) is persisted as a user
+  // turn of its own after the model's answer. It is the harness talking to
+  // the model: the user must not see it as something they said, and the
+  // thread is still one question and its final answer.
+  it("does not show the still-doing nudge as the user's words", () => {
+    const nudge =
+      "[system] You ended your turn with 't1' (wire the UI) still marked 'doing'. " +
+      "If that work is finished and verified, mark it 'done' with `tasks_update`.";
     const m = recordsToMessages([
       ...user("do it"),
-      {
-        kind: "turn",
-        role: "assistant",
-        content: [{ type: "tool_use", id: "r1", name: "read_file", input: {} }],
-        ts: 2,
-      },
-      {
-        kind: "turn",
-        role: "user",
-        content: [
-          { type: "tool_result", tool_use_id: "r1", content: "contents" },
-          { type: "text", text: TASKS },
-        ],
-        ts: 2,
-      },
-      answer("done"),
+      ...toolRound("r1", "read_file", "contents"),
+      { kind: "turn", role: "assistant", content: [{ type: "text", text: "wired" }], ts: 3 },
+      { kind: "turn", role: "user", content: [{ type: "text", text: nudge }], ts: 4 },
+      ...toolRound("r2", "tasks_update", "'t1': doing -> done"),
+      answer("wired and verified"),
       done(),
     ]);
-    expect(thread(m)).toEqual(["user: do it", "assistant: done"]);
-    expect(everyText(m).some((t) => t.includes("<tasks>"))).toBe(false);
+    expect(m.filter((x) => x.role === "user").map((x) => x.text)).toEqual(["do it"]);
+    expect(everyText(m).some((t) => t.includes("[system]"))).toBe(false);
   });
 });
