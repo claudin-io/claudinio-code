@@ -1432,6 +1432,12 @@ pub async fn run_workflow_with_profile(
             // `RunLimits::writes_files`). Brain's read-only gates are
             // untouched — a toggle mid-round is read here, per call.
             let direct_edit = profile.edits_files(mode_ctl.get().0);
+            // ...and handed to `run_tool` from this same reading. Set only at
+            // round boundaries, a flip from Brain to Builder mid-batch left it
+            // false while `direct_edit` was true: the write was let past the
+            // refusal below and then judged by the plain allowlist, so
+            // `echo x > f` ran unasked.
+            ctx.limits.set_writes_files(direct_edit);
             // Compact also refuses whatever lies outside its ten tools.
             let compact = profile == PromptProfile::Compact && !in_brain;
             // A denial short-circuits everything downstream, including the mode
@@ -2270,7 +2276,8 @@ pub(crate) mod surface_tests {
         script: impl FnOnce(&str) -> Vec<Reply>,
     ) -> Run {
         let steering = Arc::new(SteeringCtl::new());
-        run_script_with(mode, tag, None, answer, script, steering, |_, _| {}).await
+        let mode_ctl = Arc::new(ModeCtl::new(mode, ModeOrigin::Human));
+        run_script_with(mode_ctl, tag, None, answer, script, steering, |_, _| {}).await
     }
 
     /// `run_script`, with the run's steering in the test's hands and
@@ -2284,7 +2291,7 @@ pub(crate) mod surface_tests {
         on_event: impl Fn(&AgentEvent, &SteeringCtl) + Send + Sync + 'static,
     ) -> Run {
         run_script_with(
-            SessionMode::Builder,
+            Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
             tag,
             context_window,
             answer,
@@ -2295,8 +2302,10 @@ pub(crate) mod surface_tests {
         .await
     }
 
+    /// The run is handed `mode_ctl`, so a test holding it can flip the
+    /// session's mode while the run is under way, as the UI toggle does.
     async fn run_script_with(
-        mode: SessionMode,
+        mode_ctl: Arc<ModeCtl>,
         tag: &str,
         context_window: Option<u32>,
         answer: Option<bool>,
@@ -2320,7 +2329,7 @@ pub(crate) mod surface_tests {
 
         let (base, _, bodies) = spawn_recording(script(&path)).await;
         let mut config = config_for(&base, context_window);
-        if mode == SessionMode::Brain {
+        if mode_ctl.get().0 == SessionMode::Brain {
             config.brain_model = config.builder_model.clone();
         }
         config.yolo_mode = answer.is_none();
@@ -2371,7 +2380,7 @@ pub(crate) mod surface_tests {
             &ctx,
             &store,
             &steering,
-            &Arc::new(ModeCtl::new(mode, ModeOrigin::Human)),
+            &mode_ctl,
         )
         .await;
         if let Some(user) = user {
@@ -2992,6 +3001,69 @@ pub(crate) mod surface_tests {
         assert!(!sent.contains(&"edit_file"), "{sent:?}");
         assert!(run.bodies[2].contains("not available in Brain mode"));
         assert!(run.bodies[3].contains("In Brain mode you cannot mutate"));
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    /// The toggle can be flipped from Brain to Builder while a round's batch
+    /// is still running. From that moment the session edits, and a shell
+    /// command that writes a file is an edit: it must be asked about (or
+    /// refused), never run unasked because its prefix (`echo `) is
+    /// allowlisted and the round began in Brain.
+    #[tokio::test]
+    async fn flipping_brain_to_builder_mid_batch_still_asks_before_a_shell_write() {
+        let mode_ctl = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human));
+        let flip = mode_ctl.clone();
+        let run = run_script_with(
+            mode_ctl,
+            "brain-flip",
+            None,
+            Some(false),
+            |path| {
+                vec![
+                    Reply::Tools(vec![
+                        (
+                            "bash",
+                            serde_json::json!({ "command": format!("cat {path}") }),
+                        ),
+                        (
+                            "bash",
+                            serde_json::json!({ "command": format!("echo goodbye > {path}") }),
+                        ),
+                    ]),
+                    Reply::Text("done"),
+                ]
+            },
+            Arc::new(SteeringCtl::new()),
+            move |event, _| {
+                // The person flips the toggle as soon as the first call answers.
+                if let AgentEvent::ToolResult { output, .. } = event
+                    && output.contains("hello world")
+                {
+                    flip.set(SessionMode::Builder, ModeOrigin::Human);
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&run.file).unwrap(),
+            "hello world\n",
+            "the write ran although the person said no to every prompt"
+        );
+        assert!(
+            !run.events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCall { tool_name, args, permission, .. }
+                    if tool_name == "bash"
+                        && args.to_string().contains("echo goodbye")
+                        && permission == "auto"
+            )),
+            "a file-writing shell command never runs unasked"
+        );
         std::fs::remove_dir_all(&run.root).ok();
     }
 }

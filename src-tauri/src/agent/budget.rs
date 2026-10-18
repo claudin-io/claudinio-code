@@ -278,7 +278,9 @@ impl RunLimits {
 
     /// Set for a session that edits files itself (`PromptProfile::edits_files`:
     /// Builder under Compact or Standard): there a shell command that writes a
-    /// file is an edit, and is asked about like one (`writes_files`).
+    /// file is an edit, and is asked about like one (`writes_files`). The run
+    /// loop sets it before every tool call from the live mode, so a toggle
+    /// mid-batch cannot leave it disagreeing with the gates it applied.
     pub fn set_writes_files(&self, yes: bool) {
         self.writes_files.store(yes, Ordering::Relaxed);
     }
