@@ -41,7 +41,7 @@ pub fn tasks_for_successor(
     }
     tasks
         .into_iter()
-        .filter(|t| t.id.starts_with("golden-"))
+        .filter(crate::agent::tools::tasks::is_golden)
         .collect()
 }
 
@@ -408,6 +408,24 @@ mod tests {
             journal: vec!["the spike lives in spikes/nom.rs".into()],
             status: "todo".into(),
         }
+    }
+
+    /// A new top-level topic leaves the old topic's tasks behind but takes
+    /// the golden ones, recognised by the golden prefix itself; every other
+    /// handoff carries the whole list.
+    #[test]
+    fn a_new_document_successor_keeps_only_the_golden_tasks() {
+        let golden = persist::TaskItem {
+            id: format!("{}tests-pass-0", crate::agent::session::GOLDEN_TASK_PREFIX),
+            ..brain_task()
+        };
+        let tasks = vec![brain_task(), golden.clone()];
+        let kept = tasks_for_successor(tasks.clone(), &HandoffReason::NewDocument);
+        assert_eq!(kept.iter().map(|t| &t.id).collect::<Vec<_>>(), [&golden.id]);
+        assert_eq!(
+            tasks_for_successor(tasks.clone(), &HandoffReason::ContextHandoff).len(),
+            2
+        );
     }
 
     // With no plan file the Builder works from the task list, and the run's
