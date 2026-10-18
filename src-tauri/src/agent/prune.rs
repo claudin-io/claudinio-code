@@ -1,5 +1,8 @@
 //! Verbatim compaction: drop the tool calls and tool results Jev says are no
-//! longer needed, keep everything else exactly as it was.
+//! longer needed, keep everything else exactly as it was. A dropped call is
+//! stubbed in place — its `tool_use` block stays, emptied, and its result
+//! becomes a one-line note — because removing a block breaks DeepSeek's
+//! thinking mode (see [`apply`]).
 //!
 //! Ported from tamaratran/fast-jev-compaction. The summarizing compaction and
 //! the context handoff both replace the conversation with prose a model wrote,
@@ -13,7 +16,7 @@
 //! still matters), and should its **result** stay verbatim (the contents are
 //! still needed and re-running the tool would not do). Then, against
 //! [`KEEP_RESULT_THRESHOLD`] / [`KEEP_CALL_THRESHOLD`]: keep both · keep the call with the result cut to a short
-//! head · drop the call together with its result.
+//! head · drop the call together with its result (stubbed, see [`apply`]).
 //!
 //! The state is the whole history oldest-first with tool results replaced by a
 //! one-line note, fitted into [`MAX_STATE_CHARS`] in stages. It is resent with
@@ -191,7 +194,9 @@ pub fn is_pinned(index: usize, total: usize) -> bool {
 }
 
 /// Pair every tool_use with its tool_result. Calls without a result are not
-/// candidates.
+/// candidates, and neither are calls an earlier prune already dropped (their
+/// result is [`DROPPED_RESULT_NOTE`]): nothing of them is left to judge, cut
+/// or drop.
 pub fn collect_tool_calls(history: &[Message]) -> Vec<ToolCall> {
     let mut results = std::collections::HashMap::new();
     for (i, m) in history.iter().enumerate() {
@@ -203,6 +208,9 @@ pub fn collect_tool_calls(history: &[Message]) -> Vec<ToolCall> {
             } = b
             {
                 let text = content.as_text();
+                if text == DROPPED_RESULT_NOTE {
+                    continue;
+                }
                 results.insert(
                     tool_use_id.clone(),
                     (i, text.len(), text.starts_with("Error")),
@@ -512,9 +520,32 @@ pub fn fit_state(history: &[Message], calls: &[ToolCall]) -> Option<(String, &'s
     None
 }
 
-/// Remove dropped calls with their results, cut truncated results to a head
-/// and a note, drop messages left empty, and merge neighbours left with the
-/// same role so the roles still alternate.
+/// What a dropped call's result becomes. Short, because it is paid for on
+/// every request after the prune; it says why the output is gone so the model
+/// does not read it as a failure and run the call again.
+pub const DROPPED_RESULT_NOTE: &str = "[dropped to save context: no longer needed]";
+
+/// Stub dropped calls, cut truncated results to a head and a note, drop
+/// messages left empty, and merge neighbours left with the same role so the
+/// roles still alternate.
+///
+/// **A dropped call is stubbed, never removed.** Its `tool_use` block stays in
+/// the assistant message with the same id and name and its input replaced by
+/// `{}`, and its `tool_result` becomes [`DROPPED_RESULT_NOTE`]; the message
+/// count and the role alternation are unchanged. DeepSeek's thinking mode
+/// (claudin.io's models are DeepSeek V4.1 Flash) re-attaches its server-side
+/// reasoning by matching the tool_use blocks of earlier assistant messages,
+/// and the harness stores no thinking blocks it could send back instead. In
+/// the first live eval (2026-10-18, task hist-windows-folder-name) removing
+/// the first of two tool_use blocks of one message got HTTP 400 "The
+/// `content[].thinking` in the thinking mode must be passed back to the API";
+/// replayed against the API, the same block kept with input `{}` and a stub
+/// result was accepted, as was any edit of an input or a text block.
+///
+/// The price is a few tokens per dropped call (the empty block and the note)
+/// that the old removal reclaimed; the bulk is still freed, because the
+/// result goes and the input — the whole new content of a big `edit_file` —
+/// is emptied.
 pub fn apply(history: &[Message], decision: &Decision, head_chars: usize) -> Vec<Message> {
     let drop: HashSet<&str> = decision.drop_calls.iter().map(String::as_str).collect();
     let cut: HashSet<&str> = decision
@@ -537,14 +568,15 @@ pub fn apply(history: &[Message], decision: &Decision, head_chars: usize) -> Vec
         let content: Vec<ContentBlock> = m
             .content
             .iter()
-            .filter(|b| match b {
-                ContentBlock::ToolUse { id, .. } => !drop.contains(id.as_str()),
-                ContentBlock::ToolResult { tool_use_id, .. } => {
-                    !drop.contains(tool_use_id.as_str())
-                }
-                _ => true,
-            })
             .map(|b| match b {
+                ContentBlock::ToolUse { id, name, .. } if drop.contains(id.as_str()) => {
+                    ContentBlock::tool_use(id.clone(), name.clone(), json!({}))
+                }
+                ContentBlock::ToolResult { tool_use_id, .. }
+                    if drop.contains(tool_use_id.as_str()) =>
+                {
+                    ContentBlock::tool_result(tool_use_id.clone(), DROPPED_RESULT_NOTE)
+                }
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
@@ -1043,7 +1075,12 @@ pub fn plan_by_age(
         if freed >= free_chars {
             break;
         }
-        freed += c.input.to_string().len() + c.result_chars.min(CUT_RESULT_CHARS);
+        // A dropped call is stubbed, not removed (see `apply`): the input
+        // shrinks to `{}` and the result to the note.
+        freed += c.input.to_string().len().saturating_sub(2)
+            + c.result_chars
+                .min(CUT_RESULT_CHARS)
+                .saturating_sub(DROPPED_RESULT_NOTE.len());
         decision.truncate_results.retain(|id| id != &c.tool_use_id);
         decision.drop_calls.push(c.tool_use_id.clone());
     }
@@ -1279,6 +1316,28 @@ mod tests {
         assert!(collect_tool_calls(&h).is_empty());
     }
 
+    /// A stubbed call has nothing left to judge, cut or drop: offering it
+    /// again would bill Jev for it and let the last resort count the stub as
+    /// context it could still free.
+    #[test]
+    fn a_call_already_dropped_is_not_a_candidate_again() {
+        let h = session(3);
+        let d = Decision {
+            drop_calls: vec!["toolu_1".into()],
+            truncate_results: vec![],
+        };
+        let after = apply(&h, &d, TRUNCATE_HEAD_CHARS);
+        let ids: Vec<String> = collect_tool_calls(&after)
+            .into_iter()
+            .map(|c| c.tool_use_id)
+            .collect();
+        assert!(!ids.contains(&"toolu_1".to_string()), "{ids:?}");
+        assert!(ids.contains(&"toolu_0".to_string()) && ids.contains(&"toolu_2".to_string()));
+        let again = plan_by_age(&after, usize::MAX, usize::MAX, true);
+        assert!(!again.drop_calls.contains(&"toolu_1".to_string()));
+        assert!(!again.truncate_results.contains(&"toolu_1".to_string()));
+    }
+
     #[test]
     fn the_live_probes_map_to_conservative_decisions() {
         // (P(keep call), P(keep result)) from the two live probes, 2026-10-05.
@@ -1347,21 +1406,106 @@ mod tests {
     }
 
     #[test]
-    fn apply_drops_a_call_with_its_result_and_keeps_roles_alternating() {
+    fn apply_stubs_a_dropped_call_and_its_result_and_keeps_every_message() {
         let h = session(3);
         let d = Decision {
             drop_calls: vec!["toolu_1".into()],
             truncate_results: vec![],
         };
         let out = apply(&h, &d, TRUNCATE_HEAD_CHARS);
+        assert_eq!(out.len(), h.len(), "a drop removes no message");
         let text = serde_json::to_string(&out).unwrap();
-        assert!(!text.contains("toolu_1"));
-        assert!(text.contains("toolu_0") && text.contains("toolu_2"));
+        // The call is still there by id, but what it read and its input are gone.
+        assert!(text.contains("toolu_1"));
+        assert!(!text.contains("src/file_1.rs"));
+        assert!(text.contains(DROPPED_RESULT_NOTE));
+        assert!(text.contains("src/file_0.rs") && text.contains("src/file_2.rs"));
+        assert!(history_chars(&out) < history_chars(&h));
         assert!(
             out.windows(2).all(|w| w[0].role != w[1].role),
             "roles must alternate"
         );
         assert!(out.iter().all(|m| !m.content.is_empty()));
+    }
+
+    /// The harness never removes a `tool_use` block from an assistant message
+    /// once it was sent. DeepSeek's thinking mode re-attaches its server-side
+    /// reasoning by the tool_use blocks of earlier assistant messages: in the
+    /// first live eval (2026-10-18, deepseek-flash) a prune that removed the
+    /// first of two tool_use blocks got HTTP 400 "The `content[].thinking` in
+    /// the thinking mode must be passed back to the API", while the same block
+    /// kept with an emptied input and a stub result was accepted. A dropped
+    /// call therefore keeps its block (same id, same name) with input `{}`,
+    /// its result becomes a short stub, and its neighbour is untouched.
+    #[test]
+    fn a_dropped_call_keeps_its_tool_use_block_with_an_empty_input_and_a_stub_result() {
+        let h = vec![
+            user("Rename the windows folder."),
+            Message {
+                role: "assistant".into(),
+                content: vec![
+                    ContentBlock::text("Reading the module and listing the tree."),
+                    ContentBlock::tool_use(
+                        "toolu_read",
+                        "read_file",
+                        json!({"path": "src/lib.rs"}),
+                    ),
+                    ContentBlock::tool_use("toolu_bash", "bash", json!({"command": "ls"})),
+                ],
+            },
+            Message {
+                role: "user".into(),
+                content: vec![
+                    ContentBlock::tool_result("toolu_read", "fn body() {}\n".repeat(400)),
+                    ContentBlock::tool_result("toolu_bash", "a\nb"),
+                ],
+            },
+            assistant("Done."),
+            user("Thanks"),
+        ];
+        let d = Decision {
+            drop_calls: vec!["toolu_read".into()],
+            truncate_results: vec![],
+        };
+        let out = apply(&h, &d, TRUNCATE_HEAD_CHARS);
+        assert_eq!(out.len(), h.len(), "a drop removes no message");
+        assert!(out.iter().zip(&h).all(|(a, b)| a.role == b.role));
+        assert_eq!(out[1].content.len(), 3, "both tool_use blocks remain");
+        match &out[1].content[1] {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                assert_eq!(id, "toolu_read");
+                assert_eq!(name, "read_file");
+                assert_eq!(input, &json!({}), "the dropped call's input is emptied");
+            }
+            other => panic!("expected the dropped tool_use block, got {other:?}"),
+        }
+        let json_of = |b: &ContentBlock| serde_json::to_string(b).unwrap();
+        assert_eq!(json_of(&out[1].content[0]), json_of(&h[1].content[0]));
+        assert_eq!(json_of(&out[1].content[2]), json_of(&h[1].content[2]));
+        assert_eq!(out[2].content.len(), 2, "both results remain");
+        match &out[2].content[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "toolu_read");
+                let text = content.as_text();
+                assert!(text.starts_with("[dropped to save context"), "{text}");
+                assert!(text.len() < 80, "the stub is short: {text}");
+            }
+            other => panic!("expected the stub result, got {other:?}"),
+        }
+        assert_eq!(json_of(&out[2].content[1]), json_of(&h[2].content[1]));
+        // Applying the same decision again changes nothing: a reload replays
+        // every `pruned` record over a history that may already hold stubs.
+        let twice = apply(&out, &d, TRUNCATE_HEAD_CHARS);
+        assert_eq!(
+            serde_json::to_string(&twice).unwrap(),
+            serde_json::to_string(&out).unwrap()
+        );
     }
 
     #[test]
@@ -1527,7 +1671,18 @@ mod tests {
             .collect();
         assert!(ids.contains(&"set_3".to_string()));
         assert!(ids.contains(&"set_bad".to_string()));
-        assert!(!ids.contains(&"set_0".to_string()));
+        // A superseded snapshot keeps its tool_use block, emptied.
+        let input_of = |id: &str| {
+            after
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .find_map(|b| match b {
+                    ContentBlock::ToolUse { id: i, input, .. } if i == id => Some(input.clone()),
+                    _ => None,
+                })
+        };
+        assert_eq!(input_of("set_0"), Some(json!({})));
+        assert_eq!(input_of("set_3"), Some(tasks(8)));
         // Unrelated calls are not this stage's business.
         assert_eq!(ids.iter().filter(|id| id.starts_with("bash_")).count(), 4);
         assert!(history_chars(&after) < history_chars(&h) / 2);

@@ -2942,10 +2942,14 @@ mod pruned_tests {
         });
         let h = history_from_records(&recs);
         let text = serde_json::to_string(&h).unwrap();
+        // The dropped call keeps its tool_use block (see `prune::apply`): its
+        // input and its result are gone, a stub stands in for the result.
+        assert!(text.contains("toolu_a"));
         assert!(
-            !text.contains("toolu_a"),
-            "the dropped call and its result are gone"
+            !text.contains("\"path\":\"a\"") && !text.contains("AAAA"),
+            "the dropped call's input and result are gone"
         );
+        assert!(text.contains(crate::agent::prune::DROPPED_RESULT_NOTE));
         assert!(text.contains("toolu_b"));
         assert!(
             !text.contains(&"B".repeat(400)),
