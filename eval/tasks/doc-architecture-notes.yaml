@@ -149,7 +149,9 @@ oracle:
           for section, words in must_mention.items():
               body = got.get(section.lower(), "")
               for word in words:
-                  if word not in body:
+                  # "a|b": any of the alternatives, in any case — the check
+                  # grades content, not the exact word the write-up chose.
+                  if not any(alt.lower() in body.lower() for alt in word.split("|")):
                       sys.exit(f"section '{section}' does not mention {word}")
           print("ok")
       if __name__ == "__main__":
@@ -158,7 +160,7 @@ oracle:
               ["Overview", "Modules", "Data flow", "Failure modes"],
               {
                   "Modules": ["codes.py", "store.py", "service.py", "http_api.py"],
-                  "Failure modes": ["collision"],
+                  "Failure modes": ["collision|collide|clash|same code"],
               },
           )
     tests/test_service.py: |
