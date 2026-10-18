@@ -127,6 +127,12 @@ fn build_messages(messages: &[Message], system: Option<&str>) -> Vec<Value> {
                         ContentBlock::Text { text, .. } => {
                             parts.push(json!({"type": "text", "text": text}));
                             if let Some(acc) = only_text.as_mut() {
+                                // One string for several blocks: a blank line
+                                // keeps the message, `<hook-context>` and the
+                                // `<tasks>` block apart.
+                                if !acc.is_empty() && !text.is_empty() {
+                                    acc.push_str("\n\n");
+                                }
                                 acc.push_str(text);
                             }
                         }
@@ -867,6 +873,27 @@ mod tests {
         assert_eq!(parts[0]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
         assert_eq!(parts[1]["type"], "text");
         assert_eq!(out.len(), 3);
+    }
+
+    /// A run's user turn is the message plus whatever the harness added after
+    /// it (`<hook-context>`, the `<tasks>` block). Sent as one string, the
+    /// blocks must stay apart: glued together the model reads
+    /// "go on<tasks>" as one word, and a summary runs into the list that
+    /// follows it.
+    #[test]
+    fn text_blocks_of_a_text_only_user_message_are_separated_by_a_blank_line() {
+        let messages = vec![Message {
+            role: "user".into(),
+            content: vec![
+                ContentBlock::text("go on"),
+                ContentBlock::text("<tasks>\nt1 \u{b7} todo \u{b7} Write it\n</tasks>"),
+            ],
+        }];
+        let out = build_messages(&messages, None);
+        assert_eq!(
+            out[0]["content"],
+            "go on\n\n<tasks>\nt1 \u{b7} todo \u{b7} Write it\n</tasks>"
+        );
     }
 
     #[test]
