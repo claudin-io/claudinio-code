@@ -373,6 +373,27 @@ describe("TasksPanel", () => {
     dispose();
   });
 
+  // Phase 4 of the lean-harness plan: single-step work gets no task list,
+  // and the panel says so instead of standing empty.
+  it("explains single-step work when there is no task list", async () => {
+    vi.mocked(getTasks).mockResolvedValue([]);
+    const dispose = render(() => <TasksPanel workspace="/test" />, document.body);
+    await flush();
+
+    const empty = document.body.querySelector("[data-tasks-empty]");
+    expect(empty).not.toBeNull();
+    expect(empty!.getAttribute("title")).toBe("No task list — single-step work");
+    expect(empty!.textContent).toContain("Single step");
+
+    dispose();
+  });
+
+  it("does not show the single-step note when there are tasks", async () => {
+    const dispose = await mount();
+    expect(document.body.querySelector("[data-tasks-empty]")).toBeNull();
+    dispose();
+  });
+
   // ── Callbacks ──────────────────────────────────────────────────
 
   it("calls onTasksChange with task count on mount", async () => {

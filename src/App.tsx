@@ -143,7 +143,6 @@ function App() {
   const [settingsApiKeyError, setSettingsApiKeyError] = createSignal<string | null>(null);
   const [showTree, setShowTree] = createSignal(false);
   const [contextPos, setContextPos] = createSignal<{ x: number; y: number; path: string } | null>(null);
-  const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
   const [onboardingSignInError, setOnboardingSignInError] = createSignal<string | null>(null);
   // Easter egg "iddqd" — override de URL e API Key para LLM
@@ -212,10 +211,6 @@ function App() {
     if (!ws) return null;
     const v = indexStatusMap()[ws];
     return v ?? null;
-  };
-  const taskCount = () => {
-    const ws = activeWorkspace();
-    return ws ? taskCounts()[ws] ?? 0 : 0;
   };
   const setWsProgress = (ws: string, p: IndexProgress | null) =>
     setProgressMap((m) => ({ ...m, [ws]: p }));
@@ -1258,17 +1253,13 @@ function App() {
 
         <Show when={activeWorkspace()}>
           <aside
-            class="shrink-0 border-l border-border-subtle bg-surface-1 overflow-hidden transition-[width] duration-100"
-            classList={{ "w-10": taskCount() > 0, "w-0": taskCount() === 0 }}
+            class="w-10 shrink-0 border-l border-border-subtle bg-surface-1 overflow-hidden"
           >
             <For each={openWorkspaces()}>
               {(ws) => (
                 <Show when={activeWorkspace() === ws}>
                   <div class="h-full">
-                    <TasksPanel
-                      workspace={ws}
-                      onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
-                    />
+                    <TasksPanel workspace={ws} />
                   </div>
                 </Show>
               )}
