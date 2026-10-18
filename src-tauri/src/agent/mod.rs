@@ -26,6 +26,7 @@ pub mod session;
 pub mod skills;
 pub mod subagent;
 pub mod surface;
+pub mod task_recital;
 pub mod tool_batch;
 pub mod tool_exec;
 pub mod tools;

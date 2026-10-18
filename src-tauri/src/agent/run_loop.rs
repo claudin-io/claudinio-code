@@ -219,6 +219,13 @@ pub async fn run_workflow_with_profile(
             "<hook-context>\n{text}\n</hook-context>"
         )));
     }
+    // The task list rides the same way, last, so no run spends a round
+    // fetching it (`agent::task_recital`). Not for the git operator.
+    if profile == PromptProfile::Standard
+        && let Some(block) = crate::agent::task_recital::run_start_block(ctx)
+    {
+        blocks.push(ContentBlock::text(block));
+    }
     push_user_blocks(history, store, ctx, blocks);
 
     let skill_mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
