@@ -140,11 +140,43 @@ What is sent ahead of the conversation is chosen once per run
 (`agent/surface.rs`): the profile the window calls for (`Standard`, or
 `Compact` under 64k in Builder), then the tool surface the user set for that
 model. Prompt, tool list and the write gates are derived together and never
-change between turns of the same mode, because they are the cached prefix.
+change between turns of the same mode, because they are the cached prefix —
+with one exception, below: a deferred tool the model loads is appended to the
+end of the list.
 A Compact session edits files itself, so two things hold there that hold
 nowhere else: a shell command that writes a file is asked about like an
 `edit_file` even when its prefix is allowlisted, and a call to any tool outside
 the profile's ten is refused rather than run.
+
+**Deferred tools and skills by reference** (`agent/deferred.rs`,
+`agent/skills.rs`). A Standard main session sends a core set — `read_file`,
+`list_dir`, `grep`, `bash`, `run_quality`, `ask_user`, `tasks_set`,
+`tasks_update`, `spawn_agents`, `skills`, `load_tools`, and `write_plan` /
+`exit_plan_mode` in Brain — and names everything else in a `DEFERRED TOOLS`
+section of the system prompt, one line each: the index and LSP searches,
+`web_search`, the browser tools, `tasks_get`, `finalize_plan`,
+`enter_plan_mode`, and every MCP tool (its own description cut to 100
+characters, at most 60 lines, the rest counted by server). `load_tools`
+appends definitions to the end of the tool list in load order, and a call to a
+deferred tool the model did not load loads it on the spot and runs; either way
+the session file gets a `tools_loaded` record and a `cache_break`, and every
+later run starts from those records, so a resumed session sends the identical
+array. The catalog never depends on what is loaded, so the system prompt stays
+the same bytes and only the list grows (never a swap — that would rewrite the
+cached prefix each time). Feature-gated tools leave the catalog with their
+feature. Hooks select by the name of the tool called, through the alias table,
+so a `WebSearch` matcher still selects `web_search` loaded or not. The skills
+section is likewise one line per skill (`- name — description`, cut at 160
+characters, scope priority then name, 25 lines and a count); a skill's
+instructions come from the `skills` tool (`list` / `read`), which is also what
+the catalog tells the model to do with a `<skill>name</skill>` mention.
+Subagents defer nothing — a fresh context has no earlier load to build on —
+and leave out only the three LSP tools. Compact and GitSync defer nothing
+either. The default Builder prefix measures 4,745 tokens on the harness's
+meter (12,337 before), and 6,222 with ten skills and a twenty-tool MCP server
+(17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
+10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
+the definitions actually sent.
 
 The prefix only stays cheap if the provider caches it. OpenAI-protocol
 servers cache automatically, but on the Anthropic Messages API a prefix is
@@ -171,8 +203,9 @@ specs are scanned in path order, MCP servers are connected by name and their
 tools enter the list by server then tool name, and nothing in it carries a
 timestamp — `prompt.rs`'s `prefix_stability_tests` build it twice and compare
 bytes. Each time the harness rewrites a history the provider had cached (an
-accepted prune, a compaction, a context handoff) it appends a `cache_break`
-record, so the cost of a rewrite is countable.
+accepted prune, a compaction, a context handoff) or grows the tool list (a
+deferred-tool load) it appends a `cache_break` record, so the cost of a
+rewrite is countable.
 
 Each run writes a `run_config` record (model, window, lines, prefix by part,
 profile), each subagent a `subagent_run`, each routing decision a `mode_route`,

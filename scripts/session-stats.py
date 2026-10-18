@@ -30,7 +30,7 @@ what the provider reported — a request that reported none is counted as
 unpriced, never estimated. It also counts `cache_break` records per session
 (written since the lean-harness Phase 1, one each time the harness rewrites a
 history the provider had cached: an accepted prune, a compaction, a context
-handoff); sessions from earlier builds count zero.
+handoff, a deferred-tool load); sessions from earlier builds count zero.
 
 Limits worth knowing before quoting a number:
 - Thinking is not persisted, and before `subagent_run` records existed nothing

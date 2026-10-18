@@ -110,9 +110,18 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   não basta a sessão faz handoff ou compacta.
 - **Janela pequena recebe prompt pequeno.** Abaixo de 64k tokens, uma sessão
   Builder roda um perfil compacto — um prompt curto, dez ferramentas, e ela
-  mesma edita os arquivos em vez de delegar — cerca de 3,6k tokens antes de a
-  conversa começar, onde o prompt e as ferramentas completos ocupam 10k antes
-  de qualquer skill ou servidor MCP.
+  mesma edita os arquivos em vez de delegar — cerca de 2,3k tokens antes de a
+  conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
+  cerca de 4,7k.
+- **Ferramentas e skills chegam quando são necessárias.** Uma sessão Standard
+  envia onze ferramentas centrais; as demais — as buscas do índice e do LSP, as
+  ferramentas de web e browser, as trocas de modo de plano e toda ferramenta
+  MCP — aparecem no prompt em uma linha cada, e o modelo carrega as que a
+  tarefa pede (`load_tools`, ou simplesmente chamando uma). Uma ferramenta
+  carregada é acrescentada ao fim e fica pela sessão, então o prefixo em cache
+  só cresce no final. As skills são listadas do mesmo jeito, uma linha cada, e
+  lidas com a ferramenta `skills`. Com dez skills e um servidor MCP de vinte
+  ferramentas o prefixo fica em cerca de 6,2k tokens, onde antes passava de 17k.
 - **Ferramentas por modelo.** Em Settings › Models um modelo pode ser posto em
   *Lean*, que deixa de fora as três ferramentas de navegação por LSP e as
   linhas do prompt sobre elas. Nada é Lean por padrão: se menos ferramentas
@@ -292,33 +301,43 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 
 ## As ferramentas que o modelo pode chamar
 
-| Ferramenta | Aprovação | O que faz |
-|---|---|---|
-| `read_file` | automático | Lê um arquivo de texto dentro do workspace |
-| `list_dir` | automático | Lista um diretório, respeitando `.gitignore` |
-| `grep` | automático | Busca regex (ripgrep) |
-| `code_search` | automático | Busca full-text de símbolos (SQLite FTS5) |
-| `semantic_search` | automático | Busca híbrida BM25 + embeddings |
-| `symbol_lookup` | automático | Lookup exato de símbolo |
-| `file_outline` | automático | Símbolos definidos em um arquivo |
-| `go_to_definition` | automático | Definição via LSP |
-| `find_references` | automático | Referências via LSP |
-| `web_search` | automático | Busca na web |
-| `browser_inspect` | automático | Lê console, network, texto ou HTML da página aberta |
-| `browser_screenshot` | automático | Captura o viewport, a página inteira, um elemento ou uma região |
-| `ask_user` | automático | Faz uma pergunta a você, com opções |
-| `tasks_get` / `tasks_set` / `tasks_update` | automático | Lê a lista de tarefas, reescreve-a ou altera uma tarefa |
-| `write_plan` / `finalize_plan` | automático | Escreve e fecha um documento de plano |
-| `enter_plan_mode` / `exit_plan_mode` | automático | Alterna entre Brain e Builder |
-| `spawn_agents` | automático | Dispara subagentes paralelos |
-| **`browser`** | **barrado por origem** | Navega e interage com uma página (endereços locais são automáticos; outras origens perguntam) |
-| **`edit_file`** | **requer aprovação** | Propõe uma edição, exibida como diff |
-| **`bash`** | **requer aprovação** | Roda um comando de shell (comandos de leitura são allowlisted) |
+| Ferramenta | Aprovação | Enviada | O que faz |
+|---|---|---|---|
+| `read_file` | automático | sempre | Lê um arquivo de texto dentro do workspace |
+| `list_dir` | automático | sempre | Lista um diretório, respeitando `.gitignore` |
+| `grep` | automático | sempre | Busca regex (ripgrep) |
+| `code_search` | automático | adiada | Busca full-text de símbolos (SQLite FTS5) |
+| `semantic_search` | automático | adiada | Busca híbrida BM25 + embeddings |
+| `symbol_lookup` | automático | adiada | Lookup exato de símbolo |
+| `file_outline` | automático | adiada | Símbolos definidos em um arquivo |
+| `go_to_definition` | automático | adiada | Definição via LSP |
+| `find_references` | automático | adiada | Referências via LSP |
+| `web_search` | automático | adiada | Busca na web |
+| `browser_inspect` | automático | adiada | Lê console, network, texto ou HTML da página aberta |
+| `browser_screenshot` | automático | adiada | Captura o viewport, a página inteira, um elemento ou uma região |
+| `ask_user` | automático | sempre | Faz uma pergunta a você, com opções |
+| `tasks_get` | automático | adiada | Lê a lista de tarefas |
+| `tasks_set` / `tasks_update` | automático | sempre | Reescreve a lista de tarefas ou altera uma tarefa |
+| `run_quality` | automático | sempre | Roda os testes (e a cobertura) do projeto e registra o resultado |
+| `write_plan` / `exit_plan_mode` | automático | sempre (Brain) | Escreve o plano; volta ao Builder |
+| `finalize_plan` / `enter_plan_mode` | automático | adiada (Builder) | Fecha o plano; passa para o Brain |
+| `spawn_agents` | automático | sempre | Dispara subagentes paralelos |
+| `skills` | automático | sempre | Lista as skills instaladas ou lê uma |
+| `load_tools` | automático | sempre | Acrescenta ferramentas adiadas à lista pelo resto da sessão |
+| Ferramentas MCP | **requer aprovação** | adiada | O que os servidores conectados oferecem |
+| **`browser`** | **barrado por origem** | adiada | Navega e interage com uma página (endereços locais são automáticos; outras origens perguntam) |
+| **`edit_file`** | **requer aprovação** | sempre (Compact, subagentes code) | Propõe uma edição, exibida como diff |
+| **`bash`** | **requer aprovação** | sempre | Roda um comando de shell (comandos de leitura são allowlisted) |
 
-As chamadas às ferramentas só de leitura do primeiro bloco (de `read_file` a
-`web_search`, mais `tasks_get`) que o modelo faz lado a lado rodam ao mesmo
-tempo, no máximo quatro; todo o resto roda uma chamada de cada vez, na ordem em
-que o modelo pediu.
+*Enviada* é o que uma sessão Standard põe em todo pedido. Uma ferramenta
+*adiada* aparece no prompt de sistema em uma linha, e sua definição entra no
+pedido quando o modelo a carrega com `load_tools` — ou a chama, o que também a
+carrega. Subagentes não adiam nada; só deixam de fora as três ferramentas LSP.
+
+As chamadas às ferramentas só de leitura (`read_file`, `list_dir`, `grep`, as
+buscas do índice e do LSP, `web_search` e `tasks_get`) que o modelo faz lado a
+lado rodam ao mesmo tempo, no máximo quatro; todo o resto roda uma chamada de
+cada vez, na ordem em que o modelo pediu.
 
 As ferramentas de arquivo ficam confinadas ao workspace aberto por um guard de
 caminho que rejeita traversal. Uma denylist bloqueia comandos sabidamente

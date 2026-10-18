@@ -107,9 +107,17 @@ requests several times its size.
   when it is not enough does the session hand off or compact.
 - **A small window gets a small prompt.** Under 64k tokens a Builder session
   runs a compact profile — one short prompt, ten tools, and it edits files
-  itself instead of delegating — about 3.6k tokens before the conversation
-  starts, where the full prompt and tools take 10k before a single skill or MCP
-  server.
+  itself instead of delegating — about 2.3k tokens before the conversation
+  starts, where the Standard prompt and tools take about 4.7k.
+- **Tools and skills arrive when they are needed.** A Standard session sends
+  eleven core tools; the rest — the index and LSP searches, the web and browser
+  tools, the plan-mode switches and every MCP tool — are listed in the prompt
+  one line each, and the model loads the ones a task needs (`load_tools`, or
+  simply by calling one). A loaded tool is appended and stays for the session,
+  so the cached prefix only ever grows at its end. Skills are listed the same
+  way, one line each, and read with the `skills` tool. With ten skills and a
+  twenty-tool MCP server the prefix is about 6.2k tokens, where it used to be
+  17k.
 - **The context is cached where the provider has to be told.** On an
   Anthropic-protocol provider (Anthropic itself, OpenRouter's Claude routes, a
   company proxy in front of either) a prefix is cached only up to an explicit
@@ -294,33 +302,43 @@ resident, context used against context served, and the current token rate.
 
 ## The tools the model can call
 
-| Tool | Approval | What it does |
-|---|---|---|
-| `read_file` | auto | Read a text file inside the workspace |
-| `list_dir` | auto | List a directory, honouring `.gitignore` |
-| `grep` | auto | Regex search (ripgrep) |
-| `code_search` | auto | Full-text symbol search (SQLite FTS5) |
-| `semantic_search` | auto | Hybrid BM25 + embedding search |
-| `symbol_lookup` | auto | Exact symbol lookup |
-| `file_outline` | auto | Symbols defined in a file |
-| `go_to_definition` | auto | LSP definition |
-| `find_references` | auto | LSP references |
-| `web_search` | auto | Search the web |
-| `browser_inspect` | auto | Read the open page's console, network, text or HTML |
-| `browser_screenshot` | auto | Capture the viewport, full page, an element or a region |
-| `ask_user` | auto | Ask you a question, with options |
-| `tasks_get` / `tasks_set` / `tasks_update` | auto | Read the task list, rewrite it, or change one task |
-| `write_plan` / `finalize_plan` | auto | Author and close out a plan document |
-| `enter_plan_mode` / `exit_plan_mode` | auto | Switch between Brain and Builder |
-| `spawn_agents` | auto | Launch parallel subagents |
-| **`browser`** | **origin-gated** | Navigate and interact with a page (local addresses are automatic; other origins ask) |
-| **`edit_file`** | **requires approval** | Propose an edit, shown as a diff |
-| **`bash`** | **requires approval** | Run a shell command (read-only commands are allowlisted) |
+| Tool | Approval | Sent | What it does |
+|---|---|---|---|
+| `read_file` | auto | always | Read a text file inside the workspace |
+| `list_dir` | auto | always | List a directory, honouring `.gitignore` |
+| `grep` | auto | always | Regex search (ripgrep) |
+| `code_search` | auto | deferred | Full-text symbol search (SQLite FTS5) |
+| `semantic_search` | auto | deferred | Hybrid BM25 + embedding search |
+| `symbol_lookup` | auto | deferred | Exact symbol lookup |
+| `file_outline` | auto | deferred | Symbols defined in a file |
+| `go_to_definition` | auto | deferred | LSP definition |
+| `find_references` | auto | deferred | LSP references |
+| `web_search` | auto | deferred | Search the web |
+| `browser_inspect` | auto | deferred | Read the open page's console, network, text or HTML |
+| `browser_screenshot` | auto | deferred | Capture the viewport, full page, an element or a region |
+| `ask_user` | auto | always | Ask you a question, with options |
+| `tasks_get` | auto | deferred | Read the task list |
+| `tasks_set` / `tasks_update` | auto | always | Rewrite the task list, or change one task |
+| `run_quality` | auto | always | Run the project's tests (and coverage) and record the result |
+| `write_plan` / `exit_plan_mode` | auto | always (Brain) | Author the plan; return to Builder |
+| `finalize_plan` / `enter_plan_mode` | auto | deferred (Builder) | Close out the plan; switch to Brain |
+| `spawn_agents` | auto | always | Launch parallel subagents |
+| `skills` | auto | always | List the installed skills, or read one |
+| `load_tools` | auto | always | Add deferred tools to the list for the rest of the session |
+| MCP tools | **requires approval** | deferred | Whatever the connected servers offer |
+| **`browser`** | **origin-gated** | deferred | Navigate and interact with a page (local addresses are automatic; other origins ask) |
+| **`edit_file`** | **requires approval** | always (Compact, code subagents) | Propose an edit, shown as a diff |
+| **`bash`** | **requires approval** | always | Run a shell command (read-only commands are allowlisted) |
 
-Calls to the read-only tools in the first block (`read_file` through
-`web_search`, plus `tasks_get`) that the model makes side by side run at the
-same time, four at most; everything else runs one call at a time, in the order
-the model asked.
+*Sent* is what a Standard session puts in every request. A *deferred* tool is
+named in the system prompt in one line and its definition joins the request
+once the model loads it with `load_tools` — or calls it, which loads it too.
+Subagents defer nothing; they leave out only the three LSP tools.
+
+Calls to the read-only tools (`read_file`, `list_dir`, `grep`, the index and
+LSP searches, `web_search` and `tasks_get`) that the model makes side by side
+run at the same time, four at most; everything else runs one call at a time,
+in the order the model asked.
 
 File tools are confined to the opened workspace by a path guard that rejects
 traversal. A denylist blocks known-destructive commands outright. Anything the
