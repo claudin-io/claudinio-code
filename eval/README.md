@@ -97,9 +97,39 @@ VM.** `run_quality` and the oracle run pytest, `node --test` and vitest over
 files the model wrote (a `conftest.py`, a test file, a vite config), so
 model-authored code runs on the host in every task, by design: that is what
 running a project's tests means. The policy closes the routes *through
-approvals*; it does not contain a model that sets out to escape.
+approvals*; it does not contain a model that sets out to escape (see
+[Running it sandboxed](#running-it-sandboxed)). Its rules:
 
-**The sandbox the first live baseline used** (2026-10-18, run by the
+- **File edits are approved**, confined to the workspace (the temporary
+  directory) by the path guard — except anything inside a `.git/` directory
+  and the runner's own `.claudinio.json` / `.claudinio/`. `.git/config` can
+  name a program git runs by itself (`core.fsmonitor` runs on every
+  `git status`, which the policy approves), and `.claudinio.json` names the
+  command `run_quality` runs; an approved edit to either would turn an approved
+  read-only command into any command at all.
+- **A shell command is approved only when it only looks**, as the permissions
+  module classifies it (`ls`, `cat a.txt`, `git status`, `git diff`, `wc -l` …
+  with no chaining, pipes, substitution or redirection), **and only inside the
+  task's workspace**: the directory it runs in and every word naming a path
+  (absolute, with a `..` component, `~` or `$`) must resolve inside it. The
+  first live baseline showed agents listing the eval's own directory, reading
+  other tasks' sessions and the task files that carry the reference solution;
+  the harness's saved-outputs directory stays readable, since trimmed results
+  point the model at it.
+- **Every other shell command is denied** (`rm -rf /tmp/x`, `curl … | sh`,
+  `python3 -c …`, `echo x > f`, `node script.js`, `cargo test`), with a result
+  telling the model to change files with `edit_file` and to run checks with
+  `run_quality`, which runs the task's own `check` command from the workspace
+  config (a file the model cannot edit). The runner sets a shell gate so that
+  even commands the app's allowlist would run unasked reach this policy.
+- **Anything else is refused** (MCP tools, browser navigation): neither is
+  configured, and an unknown tool fails closed.
+- **`ask_user`** is answered from the task's `answers` list, in order, and then
+  with "No further input is available; proceed with your best judgement."
+
+## Running it sandboxed
+
+The sandbox the first live baseline used (2026-10-18, run by the
 orchestrator on a shared host). A transient systemd unit, so nothing outside
 the work directory is writable and nothing private is readable:
 
@@ -133,33 +163,6 @@ systemd-run --wait --collect --pty --unit claudinio-eval-<name> \
 
 It is still not a VM: the network is open (the provider has to be reached)
 and the kernel is shared. Prefer a disposable VM when one is available.
-
-- **File edits are approved**, confined to the workspace (the temporary
-  directory) by the path guard — except anything inside a `.git/` directory
-  and the runner's own `.claudinio.json` / `.claudinio/`. `.git/config` can
-  name a program git runs by itself (`core.fsmonitor` runs on every
-  `git status`, which the policy approves), and `.claudinio.json` names the
-  command `run_quality` runs; an approved edit to either would turn an approved
-  read-only command into any command at all.
-- **A shell command is approved only when it only looks**, as the permissions
-  module classifies it (`ls`, `cat a.txt`, `git status`, `git diff`, `wc -l` …
-  with no chaining, pipes, substitution or redirection), **and only inside the
-  task's workspace**: the directory it runs in and every word naming a path
-  (absolute, with a `..` component, `~` or `$`) must resolve inside it. The
-  first live baseline showed agents listing the eval's own directory, reading
-  other tasks' sessions and the task files that carry the reference solution;
-  the harness's saved-outputs directory stays readable, since trimmed results
-  point the model at it.
-- **Every other shell command is denied** (`rm -rf /tmp/x`, `curl … | sh`,
-  `python3 -c …`, `echo x > f`, `node script.js`, `cargo test`), with a result
-  telling the model to change files with `edit_file` and to run checks with
-  `run_quality`, which runs the task's own `check` command from the workspace
-  config (a file the model cannot edit). The runner sets a shell gate so that
-  even commands the app's allowlist would run unasked reach this policy.
-- **Anything else is refused** (MCP tools, browser navigation): neither is
-  configured, and an unknown tool fails closed.
-- **`ask_user`** is answered from the task's `answers` list, in order, and then
-  with "No further input is available; proceed with your best judgement."
 
 ## The task format
 
