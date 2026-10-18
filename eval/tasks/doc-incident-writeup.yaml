@@ -115,6 +115,15 @@ oracle:
               ["Summary", "Timeline", "Root cause", "Proposed fix"],
               {"Root cause": ["parse_timestamp"]},
           )
+    tests/test_job.py: |
+      from datetime import datetime
+
+      from exporter.job import run
+
+
+      def test_exports_the_last_hour_of_utc_records():
+          records = [{"at": "2026-10-17T20:30:00+00:00"}, {"at": "2026-10-17T19:30:00+00:00"}]
+          assert run(records, datetime(2026, 10, 17, 21, 0)) == [records[0]]
 reference:
   files:
     INCIDENT.md: |

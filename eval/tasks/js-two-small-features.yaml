@@ -69,6 +69,18 @@ oracle:
         assert.equal(sum([2, 2]), 4);
         assert.equal(reverse("ab"), "ba");
       });
+    math.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { sum } from "./math.js";
+
+      test("sum", () => assert.equal(sum([1, 2, 3]), 6));
+    strings.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { reverse } from "./strings.js";
+
+      test("reverse", () => assert.equal(reverse("abc"), "cba"));
 reference:
   files:
     math.js: |

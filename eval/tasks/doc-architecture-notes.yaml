@@ -161,6 +161,22 @@ oracle:
                   "Failure modes": ["collision"],
               },
           )
+    tests/test_service.py: |
+      import pytest
+
+      from shortener.service import Shortener
+      from shortener.store import Store
+
+
+      def test_round_trip(tmp_path):
+          s = Shortener(Store(str(tmp_path / "db.json")))
+          code = s.shorten("https://example.com")
+          assert s.resolve(code) == "https://example.com"
+
+
+      def test_rejects_other_schemes(tmp_path):
+          with pytest.raises(ValueError):
+              Shortener(Store(str(tmp_path / "db.json"))).shorten("ftp://x")
 reference:
   files:
     docs/ARCHITECTURE.md: |

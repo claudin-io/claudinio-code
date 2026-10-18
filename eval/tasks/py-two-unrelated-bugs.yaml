@@ -62,6 +62,38 @@ setup:
 oracle:
   command: python3 -m pytest -q -p no:cacheprovider tests
   timeout_s: 60
+  files:
+    conftest.py: ''
+    tests/test_dates.py: |
+      from dates import days_in_february, is_leap_year
+
+
+      def test_century_rule():
+          assert is_leap_year(2000)
+          assert not is_leap_year(1900)
+          assert not is_leap_year(2100)
+          assert is_leap_year(2024)
+          assert not is_leap_year(2023)
+
+
+      def test_february():
+          assert days_in_february(1900) == 28
+    tests/test_text.py: |
+      from text import shout, word_count
+
+
+      def test_words_separated_by_any_whitespace():
+          assert word_count("a  b") == 2
+          assert word_count(" one\ttwo\nthree ") == 3
+
+
+      def test_no_words():
+          assert word_count("") == 0
+          assert word_count("   ") == 0
+
+
+      def test_shout():
+          assert shout("hi") == "HI!"
 reference:
   files:
     dates.py: |

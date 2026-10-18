@@ -431,6 +431,77 @@ max_rounds: 12
         }
     }
 
+    /// A graded file the agent can see is a file the agent can edit: the
+    /// policy approves every `edit_file` in the workspace. So every test file
+    /// in a shipped task's start tree, and every start-tree file its oracle
+    /// command takes as test configuration (`--config`), must be rewritten by
+    /// the oracle — from `oracle.files` or `oracle.reference_files` — before
+    /// it runs; otherwise a run passes by changing the assertion instead of
+    /// the code.
+    #[test]
+    fn every_graded_file_the_agent_can_see_is_rewritten_by_the_oracle() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../eval/tasks");
+        let mut exposed = Vec::new();
+        for task in load_taskset(&dir, None).unwrap() {
+            let rewritten = |path: &str| {
+                task.oracle.files.contains_key(path)
+                    || task.oracle.reference_files.iter().any(|p| p == path)
+            };
+            // The configuration a test runner is pointed at (`--config X`)
+            // decides which tests run, so it is graded like a test file.
+            let words: Vec<&str> = task.oracle.command.split_whitespace().collect();
+            let named = words
+                .windows(2)
+                .filter(|w| matches!(w[0], "--config" | "-c"))
+                .map(|w| w[1])
+                .filter(|path| task.setup.files.contains_key(*path));
+            for path in task
+                .setup
+                .files
+                .keys()
+                .map(String::as_str)
+                .filter(|p| is_test_file(p))
+                .chain(named)
+            {
+                if !rewritten(path) {
+                    exposed.push(format!("{}: {path}", task.id));
+                }
+            }
+        }
+        exposed.dedup();
+        assert!(exposed.is_empty(), "graded but editable: {exposed:#?}");
+    }
+
+    /// A file a test runner would collect or load as part of the tests:
+    /// pytest's `test_*.py` / `*_test.py` and `conftest.py`, and the
+    /// `*.test.*` / `*.spec.*` files of node --test and vitest.
+    fn is_test_file(path: &str) -> bool {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        name == "conftest.py"
+            || (name.ends_with(".py") && (name.starts_with("test_") || name.ends_with("_test.py")))
+            || name.contains(".test.")
+            || name.contains(".spec.")
+    }
+
+    #[test]
+    fn test_files_are_recognised_by_name() {
+        for path in [
+            "test_pager.py",
+            "tests/test_api.py",
+            "dates_test.py",
+            "conftest.py",
+            "tests/conftest.py",
+            "slug.test.js",
+            "src/lib/path.test.ts",
+            "a.spec.tsx",
+        ] {
+            assert!(is_test_file(path), "{path}");
+        }
+        for path in ["pager.py", "latest.js", "contest.py", "tests/__init__.py"] {
+            assert!(!is_test_file(path), "{path}");
+        }
+    }
+
     #[test]
     fn a_taskset_loads_in_file_order_and_can_be_narrowed() {
         let dir = tempfile::tempdir().unwrap();

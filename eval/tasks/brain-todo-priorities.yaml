@@ -134,6 +134,24 @@ oracle:
               "[ ] (medium) legacy",
               "[ ] (low) new",
           ]
+    test_todo.py: |
+      import os
+      import subprocess
+      import sys
+
+      HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+      def todo(tmp_path, *args):
+          env = dict(os.environ, TODO_FILE=str(tmp_path / "todo.json"))
+          return subprocess.run(
+              [sys.executable, os.path.join(HERE, "todo.py"), *args],
+              capture_output=True, text=True, env=env,
+          )
+      def test_add_and_done(tmp_path):
+          assert todo(tmp_path, "add", "buy", "milk").returncode == 0
+          assert todo(tmp_path, "done", "1").returncode == 0
+          assert "buy milk" in todo(tmp_path, "list").stdout
 reference:
   files:
     todo.py: |

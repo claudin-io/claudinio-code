@@ -98,6 +98,18 @@ setup:
 oracle:
   command: node --test
   timeout_s: 60
+  files:
+    summary.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { summarize } from "./summary.js";
+
+      test("only real users are counted", () => {
+        assert.deepEqual(summarize(new URL("./fixtures/2026-10-17.jsonl", import.meta.url)), {
+          "2026-10-17": 2,
+          "2026-10-16": 1,
+        });
+      });
 reference:
   files:
     filter.js: |

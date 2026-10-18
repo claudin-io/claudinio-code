@@ -87,6 +87,34 @@ oracle:
   command: python3 -m pytest -q -p no:cacheprovider && ! grep -q 're\.' handlers.py
   timeout_s: 60
   files:
+    test_handlers.py: |
+      from handlers import create_user, invite_user, update_user
+
+
+      def test_create_and_update():
+          db = {}
+          assert create_user({"email": "a@b.io", "name": " Ana "}, db) == {"ok": True}
+          assert db == {"a@b.io": {"name": "Ana"}}
+          assert update_user({"email": "a@b.io", "name": "Bea"}, db) == {"ok": True}
+          assert update_user({"email": "x@b.io", "name": "Bea"}, db)["errors"] == ["no such user"]
+
+
+      def test_every_handler_reports_both_errors_in_order():
+          for call in (
+              lambda p: create_user(p, {}),
+              lambda p: update_user(p, {}),
+              lambda p: invite_user(p, {}, []),
+          ):
+              assert call({"email": "nope", "name": ""}) == {
+                  "ok": False,
+                  "errors": ["invalid email", "name must be 1-40 characters"],
+              }
+
+
+      def test_invite_sends_a_welcome():
+          outbox = []
+          assert invite_user({"email": "c@d.org", "name": "Cy"}, {}, outbox) == {"ok": True}
+          assert outbox == [("c@d.org", "Welcome, Cy!")]
     test_validators.py: |
       from validators import validate_user
 

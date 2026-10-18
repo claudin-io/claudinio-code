@@ -150,6 +150,29 @@ setup:
 oracle:
   command: python3 -m pytest -q -p no:cacheprovider tests
   timeout_s: 60
+  files:
+    tests/test_parse.py: |
+      from inventory.parse import parse_rows
+
+
+      def test_comments_and_blank_lines_are_skipped():
+          items = parse_rows("# header\n\nX;thing;1;g;2\n")
+          assert len(items) == 1 and items[0].unit == "g"
+    tests/test_report.py: |
+      from pathlib import Path
+
+      from inventory.parse import parse_rows
+      from inventory.report import weekly_report
+
+      DATA = Path(__file__).resolve().parent.parent / "data" / "week42.csv"
+
+
+      def test_week42_matches_the_warehouse_scale():
+          # The warehouse weighed this stock: 25 kg + 15 lb + 500 g + 16 oz.
+          report = weekly_report(parse_rows(DATA.read_text()))
+          assert report["skus"] == 4
+          assert report["total_kg"] == 32.757
+          assert report["value"] == 49.5
 reference:
   files:
     inventory/factors.py: |

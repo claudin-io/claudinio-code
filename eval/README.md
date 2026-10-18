@@ -151,7 +151,12 @@ this repository's own `node_modules` into `/tmp`. Call tools by path
   findable by meaning), `document` (a write-up whose oracle checks a markdown
   file for given sections with content) and `brain` (a fully specified feature
   that should need no interview). Hidden tests sit in `oracle.files` where
-  the agent must not see them.
+  the agent never sees them, and every test file the agent *can* see is also
+  in `oracle.files`, so the oracle rewrites it before it runs: the policy
+  approves every edit in the workspace, and a run must not pass by changing
+  the assertion instead of the code (pinned by
+  `every_graded_file_the_agent_can_see_is_rewritten_by_the_oracle` in
+  `src-tauri/src/eval/task.rs`).
 - **7 history tasks** (`hist-*`) from this repository's own frontend: the start
   tree is the parent of a real commit, the oracle is the vitest file that
   commit added or changed (copied in from the commit only when the oracle
@@ -159,7 +164,9 @@ this repository's own `node_modules` into `/tmp`. Call tools by path
   `node_modules`, call `tsc` and `vitest` by path, and lay a small
   `vitest.eval.config.ts` over the tree that turns Vite's `fs.strict` off (the
   linked packages resolve to real paths outside the temporary tree, which Vite
-  otherwise refuses to serve). The in-session check is `tsc` plus the full
+  otherwise refuses to serve) and sets `passWithNoTests: false`; the oracle
+  rewrites that config too, so a start-tree edit cannot make the graded run
+  collect nothing and pass. The in-session check is `tsc` plus the full
   vitest suite, green on every start tree. They need the commits in the
   repository the task points at (`repo: ../..`), so they do not run from a
   shallow clone.

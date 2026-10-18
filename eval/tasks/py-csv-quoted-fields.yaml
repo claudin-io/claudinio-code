@@ -45,6 +45,27 @@ setup:
 oracle:
   command: python3 -m pytest -q -p no:cacheprovider
   timeout_s: 60
+  files:
+    test_records.py: |
+      from records import load
+
+
+      def test_plain_rows():
+          assert load("name,city\nAna,Porto\n") == [{"name": "Ana", "city": "Porto"}]
+
+
+      def test_empty_document():
+          assert load("") == []
+
+
+      def test_quoted_comma_stays_in_the_field():
+          text = 'name,city\n"Smith, John",Lisbon\n'
+          assert load(text) == [{"name": "Smith, John", "city": "Lisbon"}]
+
+
+      def test_doubled_quotes_are_a_literal_quote():
+          text = 'name,nick\nAna,"the ""fast"" one"\n'
+          assert load(text) == [{"name": "Ana", "nick": 'the "fast" one'}]
 reference:
   files:
     records.py: |

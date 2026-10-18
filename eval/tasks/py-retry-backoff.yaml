@@ -29,6 +29,12 @@ oracle:
   command: python3 -m pytest -q -p no:cacheprovider
   timeout_s: 60
   files:
+    test_retry_basic.py: |
+      from retry import retry
+
+
+      def test_returns_the_first_success():
+          assert retry(lambda: 42, sleep=lambda s: None) == 42
     test_retry_hidden.py: |
       import pytest
       from retry import retry

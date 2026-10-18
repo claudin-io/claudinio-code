@@ -41,6 +41,22 @@ setup:
 oracle:
   command: node --test
   timeout_s: 60
+  files:
+    slug.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { slugify } from "./slug.js";
+
+      test("plain titles", () => {
+        assert.equal(slugify("  Hello, World!  "), "hello-world");
+        assert.equal(slugify("a--b"), "a-b");
+      });
+
+      test("accents keep their base letter", () => {
+        assert.equal(slugify("Café Crème Brûlée"), "cafe-creme-brulee");
+        assert.equal(slugify("Ünïcödé"), "unicode");
+        assert.equal(slugify("São Paulo 2026"), "sao-paulo-2026");
+      });
 reference:
   files:
     slug.js: |
