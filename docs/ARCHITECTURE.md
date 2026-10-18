@@ -288,7 +288,11 @@ old task list; any other successor carries the predecessor's document and its
 memory. A subagent spawned with `section` gets that section claimed for it
 (`doing`, owner `sub:<name>`; one held by another agent is not given) and
 `doc_write`/`doc_read` for it alone; every subagent context is
-`DocAccess::Section` or `::None`, never the parent's `Main`. The UI hears of
+`DocAccess::Section` or `::None`, never the parent's `Main`. No subagent
+outlives the run that spawned it, so a run's start frees any section still
+`doing` under a `sub:` owner. `edit_file` refuses the linked document: an
+agent's edit would read as the person's and lock the agent out of its own
+section. The UI hears of
 every write and every detected edit through `AgentEvent::DocumentUpdated`
 and loads the panel with `get_document`; `save_document` merges a person's
 save from the app with what agents wrote while the editor was open
