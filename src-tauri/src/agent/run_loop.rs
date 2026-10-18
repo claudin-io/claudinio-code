@@ -2362,11 +2362,14 @@ pub(crate) mod surface_tests {
             .collect()
     }
 
-    // Read-only calls next to each other run together; a call that is not one
-    // of them waits for the run before it and holds back the run after it, and
-    // the model gets every result back in the order it asked.
+    // Read-only calls next to each other are taken as one parallel run: all
+    // of them are announced before any answers. A call that is not one of
+    // them waits for the run before it and holds back the run after it, and
+    // the model gets every result back in the order it asked. That the calls
+    // of a run overlap in time is measured in `tool_batch`'s tests, with an
+    // executor slow enough to see it; real reads of a tiny file are not.
     #[tokio::test]
-    async fn a_round_runs_its_reads_together_and_everything_else_in_order() {
+    async fn a_round_announces_its_reads_together_and_runs_everything_else_in_order() {
         let run = run_script("batch", None, None, |path| {
             let root = std::path::Path::new(path)
                 .parent()
@@ -2397,7 +2400,7 @@ pub(crate) mod surface_tests {
             |id: &str| event_at(&run, true, id),
             |id: &str| event_at(&run, false, id),
         );
-        // Both reads of the first run were under way before either answered.
+        // Both reads of the first run were announced before either answered.
         assert!(call("tu_0_1") < result("tu_0_0"), "{:#?}", run.events);
         // The shell command started only once that run was over…
         assert!(result("tu_0_0") < call("tu_0_2") && result("tu_0_1") < call("tu_0_2"));

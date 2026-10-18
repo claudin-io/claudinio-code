@@ -1677,9 +1677,11 @@ mod context_budget_tests {
     }
 
     // An explore subagent is where reading happens; its reads in one turn
-    // run together as the parent's do, and come back in the order asked.
+    // are taken as one parallel run as the parent's are — all announced
+    // before any answers — and come back in the order asked. The overlap
+    // itself is measured in `tool_batch`'s tests.
     #[tokio::test]
-    async fn a_subagents_reads_in_one_turn_run_together() {
+    async fn a_subagents_reads_in_one_turn_are_announced_together_and_answered_in_order() {
         let (root, file) = workspace("together");
         let dir = root.to_string_lossy().to_string();
         let (base, _, bodies) = super::scripted_model::spawn_recording(vec![
@@ -1747,7 +1749,7 @@ mod context_budget_tests {
         assert_eq!(
             kinds[..3],
             ["call tu_0_0", "call tu_0_1", "call tu_0_2"],
-            "all three under way before any answered: {kinds:?}"
+            "all three announced before any answered: {kinds:?}"
         );
         assert_eq!(kinds.len(), 6, "{kinds:?}");
         let second: Value = serde_json::from_str(&bodies.lock().unwrap()[1]).unwrap();
