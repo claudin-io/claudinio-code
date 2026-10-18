@@ -46,13 +46,13 @@ describe("DocumentPanel", () => {
     const { dispose, onDocumentChange } = await mount(null);
     expect(getDocument).toHaveBeenCalledWith("/ws");
     expect(document.body.querySelector("[data-document-panel]")).toBeNull();
-    expect(onDocumentChange).toHaveBeenLastCalledWith(false);
+    expect(onDocumentChange).toHaveBeenLastCalledWith(null);
     dispose();
   });
 
   it("shows the title and one row per section with its status and owner", async () => {
     const { dispose, onDocumentChange } = await mount(DOC);
-    expect(onDocumentChange).toHaveBeenLastCalledWith(true);
+    expect(onDocumentChange).toHaveBeenLastCalledWith(DOC);
     expect(document.body.textContent).toContain("Pudim de leite");
     expect(rows().length).toBe(4);
     expect(rows()[0].textContent).toContain("origem do pudim");
@@ -81,14 +81,17 @@ describe("DocumentPanel", () => {
   });
 
   it("follows the outline a run publishes, without asking the backend again", async () => {
-    const { dispose } = await mount(DOC);
+    const { dispose, onDocumentChange } = await mount(DOC);
     const calls = vi.mocked(getDocument).mock.calls.length;
-    publishDocument("/ws", {
+    const updated = {
       ...DOC,
       sections: DOC.sections.map((s) => (s.id === "s2" ? { ...s, status: "done" } : s)),
-    });
+    };
+    publishDocument("/ws", updated);
     await flush();
     expect(rows()[1].querySelector("[data-doc-status]")?.textContent).toBe("Done");
+    // App learns the document's path from it, to route its saves.
+    expect(onDocumentChange).toHaveBeenLastCalledWith(updated);
     publishDocument("/other", { ...DOC, title: "Not this one" });
     await flush();
     expect(document.body.textContent).not.toContain("Not this one");

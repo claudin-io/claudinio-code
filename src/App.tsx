@@ -10,6 +10,7 @@ import { EmptyState } from "./components/EmptyState";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { TasksPanel } from "./components/TasksPanel";
 import { DocumentPanel } from "./components/DocumentPanel";
+import { isLinkedDocument } from "./lib/documentStore";
 import { Icon } from "./components/Icon";
 import { resolvedTheme } from "./lib/theme";
 import FileEditorModal from "./components/FileEditorModal";
@@ -167,11 +168,13 @@ function App() {
   const [contextPos, setContextPos] = createSignal<{ x: number; y: number; path: string } | null>(null);
   const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
   const [conversations, setConversations] = createSignal<Record<string, boolean>>({});
-  // Whether each workspace's session has a living document (DocumentPanel
-  // reports it), and the document the editor is open on, if any: its saves
-  // go through `saveDocument` so a person's edit merges with what agents
-  // wrote meanwhile and is marked as theirs.
-  const [documents, setDocuments] = createSignal<Record<string, boolean>>({});
+  // Each workspace's living document, null without one (DocumentPanel
+  // reports it). Any save of that file — opened from the panel, the file
+  // tree or a chat link — goes through `saveDocument`, so a person's edit
+  // merges with what agents wrote meanwhile and is marked as theirs; a plain
+  // write would roll the agents' writes back as the person's. The editor's
+  // document, set by the panel, only positions it at a section.
+  const [documents, setDocuments] = createSignal<Record<string, DocView | null>>({});
   const [editorDocument, setEditorDocument] = createSignal<{ workspace: string; path: string } | null>(null);
   const [editorLine, setEditorLine] = createSignal<number | undefined>(undefined);
   const openDocument = (workspace: string, doc: DocView, line: number) => {
@@ -252,7 +255,7 @@ function App() {
   const taskColumn = () => {
     const ws = activeWorkspace();
     return ws
-      ? taskColumnWidth(documents()[ws] ?? false, taskCounts()[ws] ?? 0, conversations()[ws] ?? false)
+      ? taskColumnWidth(!!documents()[ws], taskCounts()[ws] ?? 0, conversations()[ws] ?? false)
       : "w-0";
   };
   const setWsProgress = (ws: string, p: IndexProgress | null) =>
@@ -1308,7 +1311,7 @@ function App() {
                     <DocumentPanel
                       workspace={ws}
                       onOpen={(doc, line) => openDocument(ws, doc, line)}
-                      onDocumentChange={(has) => setDocuments((m) => ({ ...m, [ws]: has }))}
+                      onDocumentChange={(doc) => setDocuments((m) => ({ ...m, [ws]: doc }))}
                     />
                     <Show when={!documents()[ws]}>
                       <TasksPanel
@@ -1335,9 +1338,9 @@ function App() {
           onCursorLineChange={(line) => setActiveEditorCursor({ path: editorFilePath()!, line })}
           initialLine={editorDocument()?.path === editorFilePath() ? editorLine() : undefined}
           onSave={
-            editorDocument()?.path === editorFilePath()
+            isLinkedDocument(editorFilePath()!, activeWorkspace()!, documents()[activeWorkspace()!] ?? null)
               ? async (base, content) => {
-                  await saveDocument(editorDocument()!.workspace, base, content);
+                  await saveDocument(activeWorkspace()!, base, content);
                   return readFile(editorFilePath()!);
                 }
               : undefined

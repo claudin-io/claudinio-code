@@ -33,8 +33,12 @@ function chipClass(status: string): string {
 export const DocumentPanel: Component<{
   workspace: string;
   onOpen: (doc: DocView, line: number) => void;
-  /** Called with whether the session has a document each time it is loaded. */
-  onDocumentChange?: (has: boolean) => void;
+  /**
+   * Called with the session's document (null without one) each time it is
+   * loaded or a run publishes it: App routes every save of that file through
+   * `save_document` (`isLinkedDocument`) and hides the task list.
+   */
+  onDocumentChange?: (doc: DocView | null) => void;
 }> = (props) => {
   const [doc, setDoc] = createSignal<DocView | null>(null);
 
@@ -42,7 +46,7 @@ export const DocumentPanel: Component<{
     try {
       const d = await getDocument(props.workspace);
       setDoc(d);
-      props.onDocumentChange?.(d !== null);
+      props.onDocumentChange?.(d);
     } catch {
       // no workspace open or a transient error: keep what is shown
     }
@@ -59,7 +63,7 @@ export const DocumentPanel: Component<{
         if (p.version === 0) return;
         if (p.doc) {
           setDoc(p.doc);
-          props.onDocumentChange?.(true);
+          props.onDocumentChange?.(p.doc);
         } else {
           void load();
         }

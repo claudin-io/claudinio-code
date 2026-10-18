@@ -75,3 +75,26 @@ export function subagentForOwner(owner: string, candidates: { id: string; name: 
   }
   return null;
 }
+
+// ── Which file is the session's document ───────────────────────────
+
+/**
+ * Whether the editor's `filePath` is `doc`, the session's living document in
+ * `workspace` — however the editor was opened on it (the panel, the file
+ * tree, a chat link). App routes every save of that file through
+ * `save_document`, which merges with what agents wrote while the editor was
+ * open and marks the person's sections `human`; a plain `write_file` would
+ * roll the agents' writes back and attribute them to the person.
+ */
+export function isLinkedDocument(filePath: string, workspace: string, doc: DocView | null): boolean {
+  if (!doc) return false;
+  // Forward slashes, no `.` segments, no trailing slash: the tree, the panel
+  // and Windows paths spell the same file differently.
+  const normal = (p: string) =>
+    p
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter((seg, i) => seg !== "." && (seg !== "" || i === 0))
+      .join("/");
+  return normal(filePath) === normal(`${workspace}/${doc.path}`);
+}

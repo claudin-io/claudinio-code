@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   documentFromEvent,
   invalidateDocument,
+  isLinkedDocument,
   publishDocument,
   publishedDocument,
   subagentForOwner,
@@ -43,5 +44,17 @@ describe("documentStore", () => {
     expect(subagentForOwner("sub:origem", subs)).toBe("b");
     expect(subagentForOwner("main", subs)).toBeNull();
     expect(subagentForOwner("sub:nobody", subs)).toBeNull();
+  });
+
+  it("knows the session's document however the editor was opened on it", () => {
+    // From the panel, the file tree or a chat link: every save of the
+    // linked document must go through save_document.
+    expect(isLinkedDocument("/ws/.claudinio/docs/pudim.md", "/ws", DOC)).toBe(true);
+    expect(isLinkedDocument("/ws/.claudinio/docs/pudim.md", "/ws/", DOC)).toBe(true);
+    expect(isLinkedDocument("C:\\ws\\.claudinio\\docs\\pudim.md", "C:\\ws", DOC)).toBe(true);
+    expect(isLinkedDocument("/ws/.claudinio/docs/./pudim.md", "/ws", DOC)).toBe(true);
+    expect(isLinkedDocument("/ws/.claudinio/docs/other.md", "/ws", DOC)).toBe(false);
+    expect(isLinkedDocument("/other/.claudinio/docs/pudim.md", "/ws", DOC)).toBe(false);
+    expect(isLinkedDocument("/ws/.claudinio/docs/pudim.md", "/ws", null)).toBe(false);
   });
 });
