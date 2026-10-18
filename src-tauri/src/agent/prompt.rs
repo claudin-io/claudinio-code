@@ -1022,7 +1022,8 @@ mod prefix_stability_tests {
         root
     }
 
-    /// Two MCP servers' tools, as `connect_all` assembles them; `swapped`
+    /// Two MCP servers' tools, raw as they arrive and stored through the
+    /// same step `connect_all` uses; `swapped`
     /// reverses both the server arrival order and each server's tool order,
     /// which is what a different `HashMap` seed and a server that builds its
     /// tool list from a map produce on the next connect.
@@ -1051,7 +1052,8 @@ mod prefix_stability_tests {
                 defs.reverse();
             }
         }
-        crate::agent::mcp::in_prefix_order(servers)
+        let outcomes = servers.into_iter().map(|(n, d)| (n, Ok(d))).collect();
+        crate::agent::mcp::snapshots(outcomes).0
     }
 
     fn prefix_json(root: &std::path::Path, mode: SessionMode) -> String {

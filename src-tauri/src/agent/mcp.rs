@@ -64,50 +64,31 @@ impl McpManager {
     ) -> Arc<Self> {
         let manager = Self::empty();
         let mut connections = Vec::new();
-        let mut statuses = Vec::new();
-        let mut per_server = Vec::new();
+        let mut outcomes = Vec::new();
 
         for (name, entry) in connect_order(servers) {
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect_one(name, entry, workspace_root))
-                .await
+            let outcome = match tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                connect_one(name, entry, workspace_root),
+            )
+            .await
             {
                 Ok(Ok((conn, defs))) => {
-                    statuses.push(McpServerStatus {
-                        name: name.clone(),
-                        connected: true,
-                        tool_count: defs.len(),
-                        tool_names: defs.iter().map(|d| d.name.clone()).collect(),
-                        error: None,
-                    });
-                    per_server.push((name.clone(), defs));
                     connections.push(conn);
+                    Ok(defs)
                 }
-                Ok(Err(e)) => {
-                    statuses.push(McpServerStatus {
-                        name: name.clone(),
-                        connected: false,
-                        tool_count: 0,
-                        tool_names: Vec::new(),
-                        error: Some(e),
-                    });
-                }
-                Err(_) => {
-                    statuses.push(McpServerStatus {
-                        name: name.clone(),
-                        connected: false,
-                        tool_count: 0,
-                        tool_names: Vec::new(),
-                        error: Some(format!(
-                            "connection timed out after {}s",
-                            CONNECT_TIMEOUT.as_secs()
-                        )),
-                    });
-                }
-            }
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(format!(
+                    "connection timed out after {}s",
+                    CONNECT_TIMEOUT.as_secs()
+                )),
+            };
+            outcomes.push((name.clone(), outcome));
         }
 
+        let (defs, statuses) = snapshots(outcomes);
         *manager.connections.lock().await = connections;
-        *manager.defs_snapshot.write().unwrap() = in_prefix_order(per_server);
+        *manager.defs_snapshot.write().unwrap() = defs;
         *manager.status_snapshot.write().unwrap() = statuses;
         manager
     }
@@ -196,7 +177,7 @@ fn connect_order(servers: &HashMap<String, McpServerEntry>) -> Vec<(&String, &Mc
 /// The order MCP tools enter the prompt prefix: servers by name, then each
 /// server's tools by name. A server is free to list its tools in any order,
 /// and some build the list from a map, so its order is not kept.
-pub(crate) fn in_prefix_order(mut per_server: Vec<(String, Vec<ToolDef>)>) -> Vec<ToolDef> {
+fn in_prefix_order(mut per_server: Vec<(String, Vec<ToolDef>)>) -> Vec<ToolDef> {
     per_server.sort_by(|a, b| a.0.cmp(&b.0));
     per_server
         .into_iter()
@@ -205,6 +186,40 @@ pub(crate) fn in_prefix_order(mut per_server: Vec<(String, Vec<ToolDef>)>) -> Ve
             defs
         })
         .collect()
+}
+
+/// Turns each server's connect outcome into the two snapshots the manager
+/// keeps: the tool definitions, in the order they enter the prompt prefix,
+/// and one status per server, in the order they were tried. Kept apart from
+/// the connecting so the prefix order is tested on what `connect_all` really
+/// stores, not on a list a test sorted itself.
+pub(crate) fn snapshots(
+    outcomes: Vec<(String, Result<Vec<ToolDef>, String>)>,
+) -> (Vec<ToolDef>, Vec<McpServerStatus>) {
+    let mut statuses = Vec::new();
+    let mut per_server = Vec::new();
+    for (name, outcome) in outcomes {
+        match outcome {
+            Ok(defs) => {
+                statuses.push(McpServerStatus {
+                    name: name.clone(),
+                    connected: true,
+                    tool_count: defs.len(),
+                    tool_names: defs.iter().map(|d| d.name.clone()).collect(),
+                    error: None,
+                });
+                per_server.push((name, defs));
+            }
+            Err(e) => statuses.push(McpServerStatus {
+                name,
+                connected: false,
+                tool_count: 0,
+                tool_names: Vec::new(),
+                error: Some(e),
+            }),
+        }
+    }
+    (in_prefix_order(per_server), statuses)
 }
 
 async fn connect_one(
@@ -415,6 +430,42 @@ mod tests {
                 "mcp__zeta__write"
             ]
         );
+    }
+
+    /// What `connect_all` stores must be in prefix order whatever order the
+    /// servers answered in and whatever order each listed its tools; the
+    /// statuses keep the order the servers were tried, failures included.
+    #[test]
+    fn connect_all_stores_tools_in_prefix_order_whatever_order_servers_answer_in() {
+        let (defs, statuses) = snapshots(vec![
+            (
+                "zeta".into(),
+                Ok(vec![def("mcp__zeta__write"), def("mcp__zeta__read")]),
+            ),
+            ("broken".into(), Err("spawn failed".into())),
+            (
+                "alpha".into(),
+                Ok(vec![def("mcp__alpha__search"), def("mcp__alpha__fetch")]),
+            ),
+        ]);
+        assert_eq!(
+            names(&defs),
+            [
+                "mcp__alpha__fetch",
+                "mcp__alpha__search",
+                "mcp__zeta__read",
+                "mcp__zeta__write"
+            ]
+        );
+        let tried: Vec<(&str, bool, usize)> = statuses
+            .iter()
+            .map(|s| (s.name.as_str(), s.connected, s.tool_count))
+            .collect();
+        assert_eq!(
+            tried,
+            [("zeta", true, 2), ("broken", false, 0), ("alpha", true, 2)]
+        );
+        assert_eq!(statuses[1].error.as_deref(), Some("spawn failed"));
     }
 
     #[test]
