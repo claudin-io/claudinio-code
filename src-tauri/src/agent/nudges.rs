@@ -65,7 +65,7 @@ pub const HANDOFF_RETRY: &str = "[system] That reply was not a valid handoff doc
 /// The first message of the session a golden flip hands over to.
 pub fn golden_flip(pending: &[String], mode: &str, cycle: u32, max_cycles: usize) -> String {
     format!(
-        "[system] Golden tasks are still pending: {}. You are now in {} mode (golden cycle {}/{max_cycles}). Read the linked session's plan file and tasks, then resume work on the pending goals — plan or execute what is missing, and only mark a golden task 'done' after verifying the goal is truly met.",
+        "[system] Golden tasks are still pending: {}. You are now in {} mode (golden cycle {}/{max_cycles}). The task list, pending goals included, is the `<tasks>` block at the end of this message; read the linked session's plan file, then resume work on the pending goals — plan or execute what is missing, and only mark a golden task 'done' after verifying the goal is truly met.",
         pending.join(", "),
         mode,
         cycle,
@@ -111,4 +111,26 @@ pub fn repeating(what: &str) -> String {
          the root cause somewhere else, or, if you need information or a decision only the \
          user has, call ask_user."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A golden flip's successor always has a list (the pending goals are
+    // tasks), and its first run ends the kickoff with it as a `<tasks>` block.
+    // The kickoff points there rather than asking the model to "read the
+    // tasks" — the only tool that reads them is `tasks_get`, which is
+    // deferred, so an order to read them is a load and a prefix rewrite
+    // (Phase 4 review).
+    #[test]
+    fn the_golden_flip_points_at_the_tasks_block_instead_of_a_read() {
+        let msg = golden_flip(&["golden-ship-1".into()], "builder", 1, 3);
+        assert!(msg.contains("`<tasks>` block"), "{msg}");
+        assert!(!msg.contains("plan file and tasks"), "{msg}");
+        assert!(
+            msg.contains("golden-ship-1") && msg.contains("1/3"),
+            "{msg}"
+        );
+    }
 }
