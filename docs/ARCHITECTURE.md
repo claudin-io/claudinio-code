@@ -179,13 +179,13 @@ first user message, never in a prefix.
 
 **Deferred tools and skills by reference** (`agent/deferred.rs`,
 `agent/skills.rs`). A Standard main session sends a core set — `read_file`,
-`list_dir`, `grep`, `bash`, `run_quality`, `ask_user`, `tasks_get`,
+`list_dir`, `grep`, `bash`, `run_quality`, `ask_user`,
 `tasks_set`, `tasks_update`, `spawn_agents`, `skills`, `load_tools`,
 `edit_file` and `finalize_plan` in Builder and `write_plan` / `exit_plan_mode`
 in Brain — and
 names everything else in a `DEFERRED TOOLS` section of the system prompt, one
 line each: the index and LSP searches, `web_search`, the browser tools,
-`enter_plan_mode`, and every MCP tool (its own description cut to 100
+`enter_plan_mode`, `tasks_get`, and every MCP tool (its own description cut to 100
 characters, at most 60 lines, the rest counted by server). `load_tools`
 appends definitions to the end of the tool list in load order, and a call to a
 deferred tool the model did not load loads it on the spot and runs; either way
@@ -207,13 +207,38 @@ either. No Standard prompt line makes a deferred tool a first, last or
 mandatory call, and no text the harness injects (`agent/nudges.rs`, the handoff
 kickoffs in `agent/transition.rs`) names one — both pinned by tests, because the
 model loads a tool to obey, and a load late in a session rewrites the cached
-prefix in front of the whole conversation. That is why `tasks_get`, the
-Builder's and every handoff's first call, and `finalize_plan`, its last, stay
-core. The default Builder prefix measures 4,970 tokens on the harness's meter
-(12,337 before), and 6,446 with ten skills and a twenty-tool MCP server
+prefix in front of the whole conversation. That is why `finalize_plan`, the
+Builder's last call, stays core; `tasks_get` was core for the same reason (the
+first call) until the task protocol stopped asking for it (below). The default
+Builder prefix measures 4,816 tokens on the harness's meter (12,337 before),
+and 6,293 with ten skills and a twenty-tool MCP server
 (17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
 10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
 the definitions actually sent.
+
+**Tasks as recitation, not RPC** (`agent/task_recital.rs`). The prompt used
+to make `tasks_get` the first call of every run, a standalone `doing` update
+before any work, a final update before the answer, and forbade batching — three
+to five rounds per task spent on state the harness already holds. Now a
+Standard-profile run (both modes, also when the window makes it Compact) ends
+its user turn with a `<tasks>` block, one line per task (`id · status ·
+title`, golden tasks marked), added beside `<hook-context>` and persisted in the
+same `Turn`, so a reload replays it; the chat bubble is the `user` record and
+never shows it. A successor session gets it after its kickoff, because
+`link_session` copies the tasks before that run starts. After a summarizing
+compaction `persist::history_from_records` restates the list as it stood at the
+compaction point as the last block of the rebuilt context, when that context
+ends on a user message (a compaction inside a run; one between runs leaves it to
+the next run's turn, and an identical last block is not repeated). The prompts
+say: a list only beyond a one-step change; `doing` in the same round as the
+task's first tool call; batch status changes — `tasks_update` takes
+`updates: [{id, status?, journal?}]`, checks every item (LLD gate, id, status)
+and then the quality gate on the list as the whole batch leaves it, and applies
+nothing if any check fails, naming the task and the reason. A turn that ends
+with a task still `doing` gets one `nudges::still_doing` reminder per run, then
+finishes. `prompt.rs` pins the absence of mandated round-trips
+(`no_prompt_mandates_a_task_round_trip`) across the Standard prompts, Compact,
+the kickoffs and the nudges.
 
 The prefix only stays cheap if the provider caches it. OpenAI-protocol
 servers cache automatically, but on the Anthropic Messages API a prefix is

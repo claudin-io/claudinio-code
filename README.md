@@ -115,17 +115,25 @@ requests several times its size.
   when it is not enough does the session hand off or compact.
 - **A small window gets a small prompt.** Under 64k tokens a Builder session
   runs a compact profile — one short prompt and ten tools, no subagents and no
-  plans — about 2.3k tokens before the conversation starts, where the
-  Standard prompt and tools take about 5.0k.
+  plans — about 2.4k tokens before the conversation starts, where the
+  Standard prompt and tools take about 4.8k.
 - **Tools and skills arrive when they are needed.** A Standard Builder
-  session sends fourteen core tools; the rest — the index and LSP searches, the web and browser
-  tools, the switch to plan mode and every MCP tool — are listed in the prompt
+  session sends thirteen core tools; the rest — the index and LSP searches, the web and browser
+  tools, the switch to plan mode, the full task reader and every MCP tool — are listed in the prompt
   one line each, and the model loads the ones a task needs (`load_tools`, or
   simply by calling one). A loaded tool is appended and stays for the session,
   so the cached prefix only ever grows at its end. Skills are listed the same
   way, one line each, and read with the `skills` tool. With ten skills and a
-  twenty-tool MCP server the prefix is about 6.4k tokens, where it used to be
+  twenty-tool MCP server the prefix is about 6.3k tokens, where it used to be
   17k.
+- **The task list comes to the agent, not the other way round.** Each run's
+  message ends with the session's task list, one line per task
+  (`id · status · title`), so no request is spent reading it back; the agent
+  marks a task in progress in the same request as the task's first tool call,
+  and moves several tasks in one `tasks_update`. One-step work needs no list at
+  all, and the Task Panel says *Single step*. A compaction restates the list
+  after its summary, and a turn that ends with a task still in progress gets one
+  reminder before it may finish.
 - **The context is cached where the provider has to be told.** On a provider
   configured with the Anthropic protocol (Anthropic itself, a company proxy in
   front of it) a prefix is cached only up to an explicit
@@ -330,7 +338,8 @@ resident, context used against context served, and the current token rate.
 | `browser_inspect` | auto | deferred | Read the open page's console, network, text or HTML |
 | `browser_screenshot` | auto | deferred | Capture the viewport, full page, an element or a region |
 | `ask_user` | auto | always | Ask you a question, with options |
-| `tasks_get` / `tasks_set` / `tasks_update` | auto | always | Read the task list, rewrite it, or change one task |
+| `tasks_get` | auto | deferred | Every task's description and journal (each run already carries the list) |
+| `tasks_set` / `tasks_update` | auto | always | Rewrite the task list, or change one or several tasks in one call |
 | `run_quality` | auto | always | Run the project's tests (and coverage) and record the result |
 | `write_plan` / `exit_plan_mode` | auto | always (Brain) | Author the plan; return to Builder |
 | `finalize_plan` | auto | always (Builder) | Close out the plan |

@@ -118,17 +118,25 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   não basta a sessão faz handoff ou compacta.
 - **Janela pequena recebe prompt pequeno.** Abaixo de 64k tokens, uma sessão
   Builder roda um perfil compacto — um prompt curto e dez ferramentas, sem
-  subagentes e sem planos — cerca de 2,3k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
-  cerca de 5,0k.
+  subagentes e sem planos — cerca de 2,4k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
+  cerca de 4,8k.
 - **Ferramentas e skills chegam quando são necessárias.** Uma sessão Builder
-  Standard envia catorze ferramentas centrais; as demais — as buscas do índice e do LSP, as
-  ferramentas de web e browser, a troca para o modo de plano e toda ferramenta
-  MCP — aparecem no prompt em uma linha cada, e o modelo carrega as que a
+  Standard envia treze ferramentas centrais; as demais — as buscas do índice e do LSP, as
+  ferramentas de web e browser, a troca para o modo de plano, a leitura completa
+  das tarefas e toda ferramenta MCP — aparecem no prompt em uma linha cada, e o modelo carrega as que a
   tarefa pede (`load_tools`, ou simplesmente chamando uma). Uma ferramenta
   carregada é acrescentada ao fim e fica pela sessão, então o prefixo em cache
   só cresce no final. As skills são listadas do mesmo jeito, uma linha cada, e
   lidas com a ferramenta `skills`. Com dez skills e um servidor MCP de vinte
-  ferramentas o prefixo fica em cerca de 6,4k tokens, onde antes passava de 17k.
+  ferramentas o prefixo fica em cerca de 6,3k tokens, onde antes passava de 17k.
+- **A lista de tarefas vem até o agente, e não o contrário.** A mensagem de
+  cada execução termina com a lista de tarefas da sessão, uma linha por tarefa
+  (`id · status · título`), então nenhum pedido é gasto relendo-a; o agente
+  marca uma tarefa como em andamento no mesmo pedido da primeira chamada de
+  ferramenta dela, e move várias tarefas em um só `tasks_update`. Trabalho de
+  um passo só não precisa de lista, e o painel de tarefas mostra *Single step*.
+  Uma compactação repete a lista depois do resumo, e um turno que termina com
+  uma tarefa ainda em andamento recebe um lembrete antes de poder encerrar.
 - **Ferramentas por modelo.** Em Settings › Models um modelo pode ser posto em
   *Lean*, que deixa de fora as três ferramentas de navegação por LSP e as
   linhas do prompt sobre elas. Nada é Lean por padrão: se menos ferramentas
@@ -329,8 +337,8 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `browser_inspect` | automático | adiada | Lê console, network, texto ou HTML da página aberta |
 | `browser_screenshot` | automático | adiada | Captura o viewport, a página inteira, um elemento ou uma região |
 | `ask_user` | automático | sempre | Faz uma pergunta a você, com opções |
-| `tasks_get` | automático | adiada | Lê a lista de tarefas |
-| `tasks_set` / `tasks_update` | automático | sempre | Reescreve a lista de tarefas ou altera uma tarefa |
+| `tasks_get` | automático | adiada | Descrição e diário de cada tarefa (cada execução já traz a lista) |
+| `tasks_set` / `tasks_update` | automático | sempre | Reescreve a lista de tarefas, ou altera uma ou várias tarefas numa chamada |
 | `run_quality` | automático | sempre | Roda os testes (e a cobertura) do projeto e registra o resultado |
 | `write_plan` / `exit_plan_mode` | automático | sempre (Brain) | Escreve o plano; volta ao Builder |
 | `finalize_plan` | automático | sempre (Builder) | Fecha o plano |
