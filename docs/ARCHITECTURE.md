@@ -126,6 +126,34 @@ nowhere else: a shell command that writes a file is asked about like an
 `edit_file` even when its prefix is allowlisted, and a call to any tool outside
 the profile's ten is refused rather than run.
 
+The prefix only stays cheap if the provider caches it. OpenAI-protocol
+servers cache automatically, but on the Anthropic Messages API a prefix is
+cached only up to an explicit `cache_control` breakpoint, and a request without
+one is re-read cold every round. `agent/provider/cache.rs` marks the
+serialized request of `provider::stream_message` (so the loop, the handoff
+document and subagents alike): `system` goes out as one text block carrying the
+marker, which covers the tool list too since tools precede it in the cache
+order; and the last eligible block of the last message and of the most recent
+earlier user message carry a moving pair, so each request reads what the
+previous one wrote even when a round of parallel tool calls adds more blocks
+than the API looks back over. Never more than three markers, never on a
+thinking block or an empty text block, and `Message`/`ContentBlock` are left
+alone — they are also the session format. `wants_cache_markers` decides who
+gets them: Anthropic protocol only, never a local engine or a loopback host,
+and **never claudin.io** — its proxy runs a prompt manager that rewrites the
+system prompt server-side and its upstreams cache implicitly (it measures ~96%
+of executor input as cache reads), so changing the shape of `system` there
+would be production risk for no gain. A marked request refused with a 400 is
+retried once without markers, and the provider is remembered for the rest of
+the process when the error names `cache_control` or the retry succeeds. What
+goes into the prefix is deterministic for that reason: skills, plugins and
+specs are scanned in path order, MCP servers are connected by name and their
+tools enter the list by server then tool name, and nothing in it carries a
+timestamp — `prompt.rs`'s `prefix_stability_tests` build it twice and compare
+bytes. Each time the harness rewrites a history the provider had cached (an
+accepted prune, a compaction, a context handoff) it appends a `cache_break`
+record, so the cost of a rewrite is countable.
+
 Each run writes a `run_config` record (model, window, lines, prefix by part,
 profile), each subagent a `subagent_run`, each routing decision a `mode_route`,
 and every provider request a `usage` record (round, model, uncached input,
@@ -138,7 +166,7 @@ into it: the session file is the model's history and is replayed into the next
 request. A compaction's summarizer is a subagent too and writes
 `<session>.sub/compact-<n>.jsonl` (a fresh file per attempt). Jev's calls are
 billed into the session total but leave no `usage` record. `scripts/session-stats.py` aggregates them (`--cost` for cost, rounds
-and cache share per run).
+and cache share per run, and cache breaks per session).
 
 ## Trust boundaries
 

@@ -110,6 +110,14 @@ requests several times its size.
   itself instead of delegating — about 3.6k tokens before the conversation
   starts, where the full prompt and tools take 10k before a single skill or MCP
   server.
+- **The context is cached where the provider has to be told.** On an
+  Anthropic-protocol provider (Anthropic itself, OpenRouter's Claude routes, a
+  company proxy in front of either) a prefix is cached only up to an explicit
+  breakpoint, so each request marks the system prompt and the end of the
+  conversation; the next round reads all of it from the cache instead of
+  paying full price again. claudin.io and OpenAI-protocol servers cache on
+  their own and are sent no markers; a server that refuses them gets one
+  retry without, and none after that.
 - **Tools per model.** Settings › Models can set a model to *Lean*, which
   leaves out the three LSP navigation tools and the prompt lines about them.
   Nothing is Lean by default: whether fewer tools help is a property of the
