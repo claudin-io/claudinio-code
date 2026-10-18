@@ -333,6 +333,72 @@ mod loop_tests {
         ));
     }
 
+    /// The gate of Phase 4: a Builder run on a session that already has
+    /// tasks is handed the list in its first request and is not told to
+    /// fetch it — `tasks_get` is not among the tools sent, the prompt names it
+    /// only in the deferred catalog — so a model that goes straight to work
+    /// finishes in its own rounds, with no round spent on the list and no
+    /// `tasks_get` load.
+    #[tokio::test]
+    async fn a_run_with_existing_tasks_sees_the_list_and_spends_no_round_fetching_it() {
+        let tasks = [todo("t1", "say goodbye"), todo("t2", "check it")];
+        let ws = workspace("gate", &tasks);
+        let path = ws.root.join("greet.txt").to_string_lossy().to_string();
+        let (outcome, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "go on",
+            vec![
+                Reply::Tools(vec![
+                    (
+                        "tasks_update",
+                        serde_json::json!({"id": "t1", "status": "doing"}),
+                    ),
+                    ("read_file", serde_json::json!({"path": path})),
+                ]),
+                Reply::Tool {
+                    name: "tasks_update",
+                    input: serde_json::json!({"updates": [
+                        {"id": "t1", "status": "done"},
+                        {"id": "t2", "status": "done"}
+                    ]}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        assert_eq!(bodies.len(), 3, "three rounds of work, none for the list");
+        let first: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let tools: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(!tools.contains(&"tasks_get"), "{tools:?}");
+        assert!(tools.contains(&"tasks_update"));
+        let system = first["system"].to_string();
+        assert!(!system.contains("call `tasks_get`"));
+        assert_eq!(
+            last_message_texts(&bodies[0]).last(),
+            tasks_block(&tasks).as_ref()
+        );
+        let records = crate::agent::persist::load_records(&ws.store.path).unwrap();
+        assert!(
+            !crate::agent::deferred::loaded_names(&records)
+                .iter()
+                .any(|n| n == "tasks_get")
+        );
+        let path = std::path::Path::new(&ws.store.path);
+        let after = crate::agent::persist::load_last_tasks(path).unwrap();
+        assert!(after.iter().all(|t| t.status == "done"), "{after:?}");
+    }
+
     #[tokio::test]
     async fn a_session_without_tasks_is_sent_no_block() {
         let ws = workspace("no-tasks", &[]);
