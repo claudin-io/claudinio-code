@@ -931,3 +931,150 @@ not merely say 'similar to'"
         );
     }
 }
+
+/// The prefix — system prompt plus tool list — is what a provider caches, so
+/// it must come out byte-identical every time the same run builds it (design
+/// rule 2 of the lean-harness plan). A `HashMap` walked in iteration order, a
+/// timestamp or a per-round value anywhere in it would silently turn every
+/// request into a cache miss; these tests are the tripwire.
+#[cfg(test)]
+mod prefix_stability_tests {
+    use super::*;
+    use crate::agent::skills::{SkillManager, build_skills_system_prompt_section};
+
+    fn skill(dir: &std::path::Path, name: &str, description: &str) {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+        std::fs::write(
+            dir.join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\nBody of {name}."),
+        )
+        .unwrap();
+    }
+
+    /// A workspace with skills in several scopes: project skills under two of
+    /// the three conventional directories, and subfolder skills in two
+    /// monorepo packages — one name defined in both packages.
+    fn workspace(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-prefix-{tag}-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        skill(
+            &root.join(".agents/skills"),
+            "zeta-deploy",
+            "Deploys things",
+        );
+        skill(
+            &root.join(".agents/skills"),
+            "alpha-review",
+            "Reviews diffs",
+        );
+        skill(&root.join(".claude/skills"), "mid-docs", "Writes docs");
+        for (pkg, description) in [
+            ("web", "Lint the web package"),
+            ("api", "Lint the api package"),
+        ] {
+            skill(
+                &root.join("packages").join(pkg).join(".agents/skills"),
+                "lint",
+                description,
+            );
+            skill(
+                &root.join("packages").join(pkg).join(".agents/skills"),
+                &format!("{pkg}-build"),
+                "Builds a package",
+            );
+        }
+        // Eight more packages sharing one name: enough that `read_dir` order
+        // matching name order by accident would be a coincidence.
+        for pkg in ["p5", "p2", "p7", "p0", "p6", "p3", "p1", "p4"] {
+            skill(
+                &root.join("packages").join(pkg).join(".claude/skills"),
+                "shared",
+                &format!("Shared from {pkg}"),
+            );
+        }
+        root
+    }
+
+    fn prefix_json(root: &std::path::Path, mode: SessionMode) -> String {
+        let config = AgentConfig::default();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        // Built the way the run builds it: a fresh scan per run.
+        let skills = build_skills_system_prompt_section(&SkillManager::with_plugin_prefs(
+            Some(root.to_path_buf()),
+            &config.plugins,
+        ));
+        let (profile, system, tools) = run_prefix(
+            &config,
+            &ctx,
+            PromptProfile::Standard,
+            mode,
+            skills.as_deref(),
+            None,
+            &[],
+            false,
+        );
+        assert_eq!(profile, PromptProfile::Standard);
+        serde_json::to_string(&serde_json::json!({ "system": system, "tools": tools })).unwrap()
+    }
+
+    #[test]
+    fn the_run_prefix_is_byte_identical_when_built_twice() {
+        let root = workspace("twice");
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            let first = prefix_json(&root, mode);
+            let second = prefix_json(&root, mode);
+            assert!(first.contains("zeta-deploy") && first.contains("web-build"));
+            assert_eq!(first, second, "{mode:?}: the prefix changed between builds");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The skills catalog lists skills in name order whatever order the
+    /// directories were read in, and when one name exists in two packages of
+    /// the same scope the winner does not depend on `read_dir` order either:
+    /// the package that sorts first keeps it.
+    #[test]
+    fn the_skills_catalog_is_deterministic_across_scans() {
+        let root = workspace("catalog");
+        let sections: Vec<String> = (0..5)
+            .map(|_| {
+                build_skills_system_prompt_section(&SkillManager::new(Some(root.clone()))).unwrap()
+            })
+            .collect();
+        assert!(sections.windows(2).all(|w| w[0] == w[1]));
+        let s = &sections[0];
+        let order: Vec<usize> = [
+            "alpha-review",
+            "api-build",
+            "lint",
+            "mid-docs",
+            "web-build",
+            "zeta-deploy",
+        ]
+        .iter()
+        .map(|n| {
+            s.find(&format!("<name>{n}</name>"))
+                .unwrap_or_else(|| panic!("{n}"))
+        })
+        .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "name order: {order:?}"
+        );
+        assert!(
+            s.contains("Lint the api package") && !s.contains("Lint the web package"),
+            "the first package in path order keeps a shared name"
+        );
+        assert!(
+            s.contains("Shared from p0"),
+            "and so does p0 among the eight"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+}

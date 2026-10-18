@@ -100,13 +100,7 @@ fn scan_skills_dir(
     scope: SkillScope,
     skills: &mut HashMap<String, (SkillEntry, SkillScope)>,
 ) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in sorted_dir_entries(dir) {
         if !path.is_dir() {
             continue;
         }
@@ -148,6 +142,22 @@ fn scan_skills_dir(
             }
         }
     }
+}
+
+/// The entries of `dir`, in path order.
+///
+/// `read_dir` order is whatever the filesystem keeps, and within one scope the
+/// first skill found with a name wins — so two packages defining the same name
+/// would otherwise put whichever one the directory listing happened to return
+/// first into the system prompt. The prompt is the cached prefix: it has to be
+/// the same text on every scan of the same tree.
+fn sorted_dir_entries(dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.flatten().map(|e| e.path()).collect(),
+        Err(_) => Vec::new(),
+    };
+    paths.sort();
+    paths
 }
 
 /// Priority order: Project > Subfolder > User > Plugin > Builtin (fallback).
@@ -391,18 +401,15 @@ impl SkillManager {
                 root.join("modules"),
             ];
             for pkg_root in pkg_dirs.iter() {
-                if let Ok(entries) = std::fs::read_dir(pkg_root) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir()
-                            && !path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("")
-                                .starts_with('.')
-                        {
-                            scan_for_skills(&path, SkillScope::Subfolder, &mut all);
-                        }
+                for path in sorted_dir_entries(pkg_root) {
+                    if path.is_dir()
+                        && !path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .starts_with('.')
+                    {
+                        scan_for_skills(&path, SkillScope::Subfolder, &mut all);
                     }
                 }
             }
