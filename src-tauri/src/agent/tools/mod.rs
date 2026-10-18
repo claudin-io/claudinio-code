@@ -1342,6 +1342,42 @@ mod tests {
         );
     }
 
+    // The reads of one round may finish in any order (`tool_batch` runs them
+    // together), so what a later edit may touch must not depend on which read
+    // was recorded first.
+    #[test]
+    fn what_an_edit_may_touch_does_not_depend_on_the_order_reads_finished() {
+        let path = "/nowhere/order.txt";
+        let reads: [(Option<usize>, Option<usize>, &str); 3] = [
+            (None, None, "alpha\nbeta\ngamma\n"),
+            (Some(2), Some(2), "beta\n"),
+            (Some(3), Some(3), "gamma\n"),
+        ];
+        let tracker = |order: &[usize]| {
+            let mut t = ReadTracker::default();
+            for &i in order {
+                let (start, end, text) = reads[i];
+                t.record_read(path, start, end, text);
+            }
+            t
+        };
+        for old in ["alpha", "beta", "gamma"] {
+            for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0], [1, 2, 0]] {
+                assert!(
+                    tracker(&order).check_can_edit(path, old).is_ok(),
+                    "{old} {order:?}"
+                );
+            }
+        }
+        // Ranged reads only: the same text is editable whichever came first.
+        for order in [[1, 2], [2, 1]] {
+            let t = tracker(&order);
+            assert!(t.check_can_edit(path, "beta").is_ok());
+            assert!(t.check_can_edit(path, "gamma").is_ok());
+            assert!(t.check_can_edit(path, "alpha").is_err());
+        }
+    }
+
     // A name in the list that no tool answers to would be a rule about
     // nothing; one that needs approval would run before the user said yes.
     #[test]
