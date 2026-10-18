@@ -1,6 +1,7 @@
 pub mod app_sign;
 pub mod budget;
 pub mod deferred;
+pub mod delegation;
 pub mod events;
 pub mod handoff;
 pub mod hooks;
