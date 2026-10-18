@@ -16,11 +16,14 @@ pub const EDIT_IN_BRAIN: &str = "edit_file is not available in Brain mode — it
      Record the intended change in the plan (write_plan) instead.";
 
 /// `edit_file` called in a session that does not edit (the git operator).
-pub const EDIT_NOT_IN_SESSION: &str = "edit_file is not available in this session.";
+pub const EDIT_NOT_IN_SESSION: &str = "edit_file is not available in this session: it commits \
+     and pushes the changes already in the workspace. If something must change first, say so \
+     with ask_user.";
 
 /// A `bash` command that writes files, in a session that does not edit.
 pub const BASH_WRITES_NO_EDIT: &str = "This bash command writes files, and this session does not edit \
-     files. Bash here is for git, builds, tests and read-only inspection.";
+     files. Bash here is for git, builds, tests and read-only inspection; if a file must \
+     change first, say so with ask_user.";
 
 /// A `bash` command that writes files, in Brain.
 pub const BASH_WRITES_IN_BRAIN: &str = "This bash command writes files. In Brain mode you cannot mutate \
@@ -28,7 +31,9 @@ pub const BASH_WRITES_IN_BRAIN: &str = "This bash command writes files. In Brain
 
 /// A `bash` command outside Brain's read-only allowlist.
 pub const BASH_NOT_ALLOWED_IN_BRAIN: &str = "Command not allowed in Brain mode — only read-only allowlisted \
-     commands (git status/diff/log, ls, cat, cargo check, ...) run here.";
+     commands (git status/diff/log, ls, cat, cargo check, ...) run here. Read files with \
+     read_file, search with grep or the indexed search tools, and put what needs running in \
+     the plan.";
 
 /// The Low-Level Design gate, before any plan file exists.
 pub fn lld_no_plan(tool: &str) -> String {
@@ -44,8 +49,8 @@ pub fn lld_no_plan(tool: &str) -> String {
 pub fn lld_missing(tool: &str, plan: &str) -> String {
     format!(
         "{tool} rejected: the most recent plan ({plan}) has no non-empty \
-         '## Low-Level Design' section. Research the codebase first (spawn_agents \
-         'explore' mode, semantic_search, file reading), then call write_plan again \
+         '## Low-Level Design' section. Research the codebase first ('explore' \
+         subagents, indexed search, file reading), then call write_plan again \
          with the FULL plan content including a '## Low-Level Design' section \
          (files/symbols to touch, data flow, APIs/schemas, patterns to reuse) - \
          then retry {tool}."
@@ -54,7 +59,10 @@ pub fn lld_missing(tool: &str, plan: &str) -> String {
 
 /// Read-before-edit, for a file never read in this session.
 pub fn not_read(path: &str) -> String {
-    format!("read_file must be called on {path} before editing it")
+    format!(
+        "read_file must be called on {path} before editing it: read the whole file, or the \
+         lines you will change, then retry edit_file."
+    )
 }
 
 /// The quality gate, with no `run_quality` result in the session.
@@ -96,6 +104,126 @@ pub fn golden_renamed(count: usize) -> String {
 pub fn golden_preserved(count: usize) -> String {
     format!(
         " {count} golden task(s) are mandatory and were preserved — golden tasks cannot be \
-         deleted, only completed."
+         deleted, only completed: keep them in the list and update their status."
     )
+}
+
+/// Every refusal above, by name, rendered with sample arguments: for the
+/// actionability test below and for
+/// `prompt::tests::no_harness_text_orders_a_deferred_tool`. Kept complete by
+/// `tests::every_gate_text_is_in_all`, which reads this file.
+#[cfg(test)]
+pub fn all() -> Vec<(&'static str, String)> {
+    vec![
+        ("EDIT_IN_BRAIN", EDIT_IN_BRAIN.to_string()),
+        ("EDIT_NOT_IN_SESSION", EDIT_NOT_IN_SESSION.to_string()),
+        ("BASH_WRITES_NO_EDIT", BASH_WRITES_NO_EDIT.to_string()),
+        ("BASH_WRITES_IN_BRAIN", BASH_WRITES_IN_BRAIN.to_string()),
+        (
+            "BASH_NOT_ALLOWED_IN_BRAIN",
+            BASH_NOT_ALLOWED_IN_BRAIN.to_string(),
+        ),
+        ("lld_no_plan", lld_no_plan("tasks_set")),
+        (
+            "lld_missing",
+            lld_missing("tasks_set", ".claudinio/plans/p.md"),
+        ),
+        ("not_read", not_read("/w/src/a.rs")),
+        ("quality_missing", quality_missing("golden-g-1")),
+        ("quality_stale", quality_stale("golden-g-1")),
+        (
+            "quality_failed",
+            quality_failed("golden-g-1", "1 failing", "detail"),
+        ),
+        ("golden_renamed", golden_renamed(1)),
+        ("golden_preserved", golden_preserved(1)),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The step each refusal must name, because since prompt v2 nothing else
+    /// tells the model what to do when it hits that gate. Case-blind.
+    const NEXT_STEP: &[(&str, &[&str])] = &[
+        // Brain plans; the edit belongs in the plan.
+        ("EDIT_IN_BRAIN", &["write_plan"]),
+        // The git operator commits what is there; a needed change is the user's call.
+        ("EDIT_NOT_IN_SESSION", &["ask_user"]),
+        ("BASH_WRITES_NO_EDIT", &["ask_user"]),
+        ("BASH_WRITES_IN_BRAIN", &["write_plan"]),
+        // What to use instead of the refused command.
+        ("BASH_NOT_ALLOWED_IN_BRAIN", &["read_file", "git status"]),
+        (
+            "lld_no_plan",
+            &["write_plan", "## low-level design", "then retry tasks_set"],
+        ),
+        (
+            "lld_missing",
+            &["write_plan", "## low-level design", "then retry tasks_set"],
+        ),
+        ("not_read", &["read_file", "then retry edit_file"]),
+        ("quality_missing", &["call run_quality"]),
+        ("quality_stale", &["call run_quality"]),
+        ("quality_failed", &["fix the failures", "call run_quality"]),
+        // v1's golden block said "keep them in the list and update their
+        // status"; v2 leaves that to the note `tasks_set` returns.
+        ("golden_renamed", &["<goal>"]),
+        (
+            "golden_preserved",
+            &["keep them in the list", "update their status"],
+        ),
+    ];
+
+    #[test]
+    fn every_gate_refusal_says_what_to_do_next() {
+        let all = all();
+        for (name, steps) in NEXT_STEP {
+            let text = &all
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} is not in gate_text::all"))
+                .1
+                .to_lowercase();
+            for step in *steps {
+                assert!(text.contains(step), "{name} does not say {step:?}: {text}");
+            }
+        }
+        assert_eq!(
+            all.len(),
+            NEXT_STEP.len(),
+            "every refusal needs its next step pinned"
+        );
+    }
+
+    /// The finish-line check and the spec guard keep their texts beside
+    /// their logic (`nudges`, `quality::spec`); they are instructions too.
+    #[test]
+    fn the_finish_line_and_the_spec_guard_say_what_to_do_next() {
+        let finish = crate::agent::nudges::quality_failed("1 failing", "d", 1, 3).to_lowercase();
+        assert!(finish.contains("fix the cause") && finish.contains("call run_quality again"));
+        let spec = crate::quality::spec::edit_refusal("features/a.feature").to_lowercase();
+        assert!(spec.contains("ask the user"), "{spec}");
+    }
+
+    // The guard is only as wide as `all()`; a refusal added here and left
+    // out of it would never be checked, so the list is compared with the
+    // file itself.
+    #[test]
+    fn every_gate_text_is_in_all() {
+        let source = include_str!("gate_text.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let declared: Vec<&str> = production
+            .lines()
+            .filter_map(|l| {
+                l.strip_prefix("pub const ")
+                    .and_then(|r| r.split_once(':'))
+                    .or_else(|| l.strip_prefix("pub fn ").and_then(|r| r.split_once('(')))
+            })
+            .map(|(name, _)| name)
+            .collect();
+        let listed: Vec<&str> = all().iter().map(|(n, _)| *n).collect();
+        assert_eq!(declared, listed);
+    }
 }

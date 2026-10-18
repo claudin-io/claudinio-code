@@ -1566,6 +1566,8 @@ mod deferred_prefix_tests {
             transition::compose_builder_kickoff(None, None),
             transition::compose_context_handoff_message("handoff", Some("docs/plans/p.md")),
         ]);
+        // The gates' refusals: since prompt v2 they are the instruction.
+        texts.extend(crate::agent::gate_text::all().into_iter().map(|(_, t)| t));
         for text in &texts {
             for name in &deferred {
                 assert!(
