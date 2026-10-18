@@ -152,16 +152,37 @@ model. Prompt, tool list and the write gates are derived together and never
 change between turns of the same mode, because they are the cached prefix —
 with one exception, below: a deferred tool the model loads is appended to the
 end of the list.
-A Compact session edits files itself, so two things hold there that hold
-nowhere else: a shell command that writes a file is asked about like an
-`edit_file` even when its prefix is allowlisted, and a call to any tool outside
-the profile's ten is refused rather than run.
+A Builder session edits files itself under both chat profiles
+(`PromptProfile::edits_files`; Standard since decision D1, lean-harness Phase
+3): it is offered `edit_file`, which shows a diff and waits for approval, and a
+shell command that writes a file (`permissions::bash_writes_files`) is asked
+about like an `edit_file` even when its prefix is allowlisted
+(`RunLimits::writes_files` → `bash_permission_writing`). Brain refuses both,
+approval or not, and the git operator refuses them too. Compact adds one rule
+of its own: a call to any tool outside the profile's ten is refused rather than
+run.
+
+**Subagents** (`agent/subagent.rs`, `agent/delegation.rs`) are the exception
+now, not the route every edit takes: the Builder prompt sends broad read-only
+investigation to `explore` subagents and keeps `code` subagents for two or more
+changes to disjoint files. A spawned explore subagent's system prompt asks for a
+report of at most ~1,500 tokens in `## Findings` / `## Files` (`path:line`) /
+`## Open questions`; the compaction summarizer, also explore mode, is not asked
+for it (`SubagentSpec::reports_to_parent`). The parent's `tool_result` carries
+at most 6,000 characters of any report — head and tail, cut on line boundaries,
+around a marker counting what was omitted — while `SubagentDone` gives the
+timeline all of it. Each code subagent's goal is prefixed with one `<brief>`
+composed per `spawn_agents` call: the `doing` task, the latest plan path, and
+the paths in the run's read tracker (shared with subagents, so earlier
+subagents' reads count), relative, sorted, at most 40. The brief sits in the
+first user message, never in a prefix.
 
 **Deferred tools and skills by reference** (`agent/deferred.rs`,
 `agent/skills.rs`). A Standard main session sends a core set — `read_file`,
 `list_dir`, `grep`, `bash`, `run_quality`, `ask_user`, `tasks_get`,
 `tasks_set`, `tasks_update`, `spawn_agents`, `skills`, `load_tools`,
-`finalize_plan` in Builder and `write_plan` / `exit_plan_mode` in Brain — and
+`edit_file` and `finalize_plan` in Builder and `write_plan` / `exit_plan_mode`
+in Brain — and
 names everything else in a `DEFERRED TOOLS` section of the system prompt, one
 line each: the index and LSP searches, `web_search`, the browser tools,
 `enter_plan_mode`, and every MCP tool (its own description cut to 100
@@ -188,8 +209,8 @@ kickoffs in `agent/transition.rs`) names one — both pinned by tests, because t
 model loads a tool to obey, and a load late in a session rewrites the cached
 prefix in front of the whole conversation. That is why `tasks_get`, the
 Builder's and every handoff's first call, and `finalize_plan`, its last, stay
-core. The default Builder prefix measures 4,968 tokens on the harness's meter
-(12,337 before), and 6,445 with ten skills and a twenty-tool MCP server
+core. The default Builder prefix measures 4,970 tokens on the harness's meter
+(12,337 before), and 6,446 with ten skills and a twenty-tool MCP server
 (17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
 10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
 the definitions actually sent.

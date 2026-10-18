@@ -80,10 +80,18 @@ Building from source is covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Brain and Builder
 
 Two modes with different tool surfaces. **Brain** explores read-only, interviews
-you about requirements and writes a plan. **Builder** executes it — writing code,
-running commands, verifying. The handoff between them starts a fresh session
-seeded with the plan, so execution never inherits a context window full of
-exploration.
+you about requirements and writes a plan, and never writes a file. **Builder**
+executes it — writing code, running commands, verifying. The handoff between
+them starts a fresh session seeded with the plan, so execution never inherits a
+context window full of exploration.
+
+Builder edits files itself: each `edit_file` is shown to you as a diff to
+approve, and a shell command that writes a file is asked about the same way,
+even one whose prefix is allowlisted. It hands work to subagents only when that
+pays — an explore subagent for a broad read-only investigation or parallel
+research, code subagents for two or more changes to disjoint files — because a
+delegated edit costs a second prompt, a second exploration and the spec written
+out twice.
 
 You pick the mode, or let the harness pick. A new session starts on **Auto**
 wherever the decision model behind it (Jev) is available: its first message is
@@ -106,11 +114,11 @@ requests several times its size.
   tool results. In that step your words and the model's are never cut; only
   when it is not enough does the session hand off or compact.
 - **A small window gets a small prompt.** Under 64k tokens a Builder session
-  runs a compact profile — one short prompt, ten tools, and it edits files
-  itself instead of delegating — about 2.3k tokens before the conversation
-  starts, where the Standard prompt and tools take about 5.0k.
+  runs a compact profile — one short prompt and ten tools, no subagents and no
+  plans — about 2.3k tokens before the conversation starts, where the
+  Standard prompt and tools take about 5.0k.
 - **Tools and skills arrive when they are needed.** A Standard Builder
-  session sends thirteen core tools; the rest — the index and LSP searches, the web and browser
+  session sends fourteen core tools; the rest — the index and LSP searches, the web and browser
   tools, the switch to plan mode and every MCP tool — are listed in the prompt
   one line each, and the model loads the ones a task needs (`load_tools`, or
   simply by calling one). A loaded tool is appended and stays for the session,
@@ -184,9 +192,14 @@ leave the prompt entirely.
 
 ### Parallel subagents
 
-The main agent delegates to parallel subagents (4 by default, configurable),
+The main agent can delegate to parallel subagents (4 by default, configurable),
 each with a fresh context and its own timeline you can open and read. Modes are
-`explore` (read-only) or `code`.
+`explore` (read-only) or `code`. An explore subagent is asked for a short
+report — findings, `path:line` references, open questions — and the main
+agent's context carries at most 6,000 characters of any report (the middle of a
+longer one is cut; the timeline keeps all of it). Every code subagent of a call
+starts from the same brief: the task in progress, the plan's path and the files
+the session has read, as paths.
 
 ### Nothing is a black box
 
@@ -320,13 +333,14 @@ resident, context used against context served, and the current token rate.
 | `tasks_get` / `tasks_set` / `tasks_update` | auto | always | Read the task list, rewrite it, or change one task |
 | `run_quality` | auto | always | Run the project's tests (and coverage) and record the result |
 | `write_plan` / `exit_plan_mode` | auto | always (Brain) | Author the plan; return to Builder |
-| `finalize_plan` / `enter_plan_mode` | auto | deferred (Builder) | Close out the plan; switch to Brain |
+| `finalize_plan` | auto | always (Builder) | Close out the plan |
+| `enter_plan_mode` | auto | deferred (Builder) | Switch to Brain |
 | `spawn_agents` | auto | always | Launch parallel subagents |
 | `skills` | auto | always | List the installed skills, or read one |
 | `load_tools` | auto | always | Add deferred tools to the list for the rest of the session |
 | MCP tools | **requires approval** | deferred | Whatever the connected servers offer |
 | **`browser`** | **origin-gated** | deferred | Navigate and interact with a page (local addresses are automatic; other origins ask) |
-| **`edit_file`** | **requires approval** | always (Compact, code subagents) | Propose an edit, shown as a diff |
+| **`edit_file`** | **requires approval** | always (Builder, code subagents) | Propose an edit, shown as a diff |
 | **`bash`** | **requires approval** | always | Run a shell command (read-only commands are allowlisted) |
 
 *Sent* is what a Standard session puts in every request. A *deferred* tool is

@@ -81,10 +81,18 @@ Build a partir do código-fonte está em [CONTRIBUTING.md](CONTRIBUTING.md).
 ### Brain e Builder
 
 Dois modos com superfícies de ferramenta diferentes. O **Brain** explora em modo
-somente-leitura, te entrevista sobre os requisitos e escreve um plano. O
-**Builder** executa — escrevendo código, rodando comandos, verificando. O handoff
-entre eles abre uma sessão nova semeada com o plano, para a execução não herdar
-uma janela de contexto cheia de exploração.
+somente-leitura, te entrevista sobre os requisitos e escreve um plano, sem nunca
+gravar um arquivo. O **Builder** executa — escrevendo código, rodando comandos,
+verificando. O handoff entre eles abre uma sessão nova semeada com o plano, para
+a execução não herdar uma janela de contexto cheia de exploração.
+
+O Builder edita os arquivos ele mesmo: cada `edit_file` aparece para você como
+um diff a aprovar, e um comando de shell que grava um arquivo é perguntado do
+mesmo jeito, mesmo quando o prefixo está na allowlist. Ele só passa trabalho a
+subagentes quando compensa — um subagente explore para uma investigação ampla
+somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
+mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo
+prompt, uma segunda exploração e a especificação escrita duas vezes.
 
 Você escolhe o modo, ou deixa o harness escolher. Uma sessão nova começa em
 **Auto** onde o modelo de decisão por trás dele (o Jev) estiver disponível: a
@@ -109,12 +117,11 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   Nessa etapa nem as suas palavras nem as do modelo são cortadas; só quando ela
   não basta a sessão faz handoff ou compacta.
 - **Janela pequena recebe prompt pequeno.** Abaixo de 64k tokens, uma sessão
-  Builder roda um perfil compacto — um prompt curto, dez ferramentas, e ela
-  mesma edita os arquivos em vez de delegar — cerca de 2,3k tokens antes de a
-  conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
+  Builder roda um perfil compacto — um prompt curto e dez ferramentas, sem
+  subagentes e sem planos — cerca de 2,3k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
   cerca de 5,0k.
 - **Ferramentas e skills chegam quando são necessárias.** Uma sessão Builder
-  Standard envia treze ferramentas centrais; as demais — as buscas do índice e do LSP, as
+  Standard envia catorze ferramentas centrais; as demais — as buscas do índice e do LSP, as
   ferramentas de web e browser, a troca para o modo de plano e toda ferramenta
   MCP — aparecem no prompt em uma linha cada, e o modelo carrega as que a
   tarefa pede (`load_tools`, ou simplesmente chamando uma). Uma ferramenta
@@ -179,9 +186,15 @@ somem inteiramente do prompt.
 
 ### Subagentes paralelos
 
-O agente principal delega para subagentes paralelos (4 por padrão, configurável),
-cada um com contexto fresco e sua própria timeline, que você pode abrir e ler.
-Os modos são `explore` (somente leitura) ou `code`.
+O agente principal pode delegar para subagentes paralelos (4 por padrão,
+configurável), cada um com contexto fresco e sua própria timeline, que você pode
+abrir e ler. Os modos são `explore` (somente leitura) ou `code`. Um subagente
+explore é instruído a entregar um relatório curto — achados, referências
+`caminho:linha`, perguntas em aberto — e o contexto do agente principal carrega
+no máximo 6.000 caracteres de qualquer relatório (o meio de um mais longo é
+cortado; a timeline guarda tudo). Todo subagente code de uma chamada parte do
+mesmo briefing: a tarefa em andamento, o caminho do plano e os arquivos que a
+sessão já leu, como caminhos.
 
 ### Nada é caixa-preta
 
@@ -320,13 +333,14 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `tasks_set` / `tasks_update` | automático | sempre | Reescreve a lista de tarefas ou altera uma tarefa |
 | `run_quality` | automático | sempre | Roda os testes (e a cobertura) do projeto e registra o resultado |
 | `write_plan` / `exit_plan_mode` | automático | sempre (Brain) | Escreve o plano; volta ao Builder |
-| `finalize_plan` / `enter_plan_mode` | automático | adiada (Builder) | Fecha o plano; passa para o Brain |
+| `finalize_plan` | automático | sempre (Builder) | Fecha o plano |
+| `enter_plan_mode` | automático | adiada (Builder) | Passa para o Brain |
 | `spawn_agents` | automático | sempre | Dispara subagentes paralelos |
 | `skills` | automático | sempre | Lista as skills instaladas ou lê uma |
 | `load_tools` | automático | sempre | Acrescenta ferramentas adiadas à lista pelo resto da sessão |
 | Ferramentas MCP | **requer aprovação** | adiada | O que os servidores conectados oferecem |
 | **`browser`** | **barrado por origem** | adiada | Navega e interage com uma página (endereços locais são automáticos; outras origens perguntam) |
-| **`edit_file`** | **requer aprovação** | sempre (Compact, subagentes code) | Propõe uma edição, exibida como diff |
+| **`edit_file`** | **requer aprovação** | sempre (Builder, subagentes code) | Propõe uma edição, exibida como diff |
 | **`bash`** | **requer aprovação** | sempre | Roda um comando de shell (comandos de leitura são allowlisted) |
 
 *Enviada* é o que uma sessão Standard põe em todo pedido. Uma ferramenta
