@@ -604,6 +604,23 @@ pub fn linked_document(records: &[SessionRecord]) -> Option<String> {
     })
 }
 
+/// [`linked_document`] for the session file at `path`, read without
+/// loading every record: only a line that names the record's kind is
+/// parsed, latest first. The document panel asks every few seconds, and
+/// `load_records` parses the whole conversation and rehydrates its images —
+/// a cost the records cache (800 ms) does not absorb at that interval, paid
+/// mostly by sessions that have no document at all.
+pub fn linked_document_at(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("\"document_linked\""))
+        .find_map(|l| match serde_json::from_str::<SessionRecord>(l).ok()? {
+            SessionRecord::DocumentLinked { path, .. } => Some(path),
+            _ => None,
+        })
+}
+
 /// Whether the session already has a `BaseCommit` record (used to write it
 /// only once, anchoring the diff window to the true start of the plan's work).
 pub fn has_base_commit(records: &[SessionRecord]) -> bool {
@@ -3149,6 +3166,35 @@ mod usage_tests {
         );
         assert_eq!(history_from_records(&records).len(), 1);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The document panel asks every few seconds, for sessions that mostly
+    /// have no document: the link must come out as `linked_document` over
+    /// every record would give it — the latest one, never a message that
+    /// merely mentions the record's kind — from the file alone.
+    #[test]
+    fn the_document_link_read_from_the_file_is_the_latest_document_linked_record() {
+        let none = tmp_file("no_doc_at", &OLD_SESSION);
+        assert_eq!(linked_document_at(&none), None);
+        assert_eq!(linked_document_at(&none.with_extension("missing")), None);
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/a.md","ts":7}"#);
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/b.md","ts":8}"#);
+        lines.push(r#"{"kind":"document_linked","path":"#);
+        lines.push(
+            r#"{"kind":"user","text":"{\"kind\":\"document_linked\",\"path\":\"x.md\"}","ts":9}"#,
+        );
+        let path = tmp_file("document_linked_at", &lines);
+        assert_eq!(
+            linked_document_at(&path),
+            linked_document(&load_records(&path).unwrap())
+        );
+        assert_eq!(
+            linked_document_at(&path).as_deref(),
+            Some(".claudinio/docs/b.md")
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(none.parent().unwrap()).ok();
     }
 
     /// A record kind this build does not know (one a later version adds) is

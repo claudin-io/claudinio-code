@@ -144,7 +144,14 @@ fn linked_from(
     store_path: &Path,
     records: &[crate::agent::persist::SessionRecord],
 ) -> Option<Linked> {
-    let rel = crate::agent::persist::linked_document(records)?;
+    linked_rel(
+        workspace,
+        store_path,
+        crate::agent::persist::linked_document(records)?,
+    )
+}
+
+fn linked_rel(workspace: &Path, store_path: &Path, rel: String) -> Option<Linked> {
     Some(Linked {
         abs: document_path(workspace, &rel)?,
         rel,
@@ -152,9 +159,14 @@ fn linked_from(
     })
 }
 
+/// For the app's commands, which have no run's records cache: the link is
+/// read straight from the session file (`persist::linked_document_at`).
 fn linked_at(workspace: &Path, store_path: &Path) -> Option<Linked> {
-    let records = crate::agent::persist::load_records(store_path).ok()?;
-    linked_from(workspace, store_path, &records)
+    linked_rel(
+        workspace,
+        store_path,
+        crate::agent::persist::linked_document_at(store_path)?,
+    )
 }
 
 /// Through the run's records cache: the loop asks after every round, and
