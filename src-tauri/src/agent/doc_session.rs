@@ -743,11 +743,14 @@ pub fn note_round(
     }
 }
 
+/// How the successor's first message for a new top-level topic begins.
+const NEW_DOCUMENT_KICKOFF: &str = "[system] A new top-level topic:";
+
 /// The successor's first message for a new top-level topic. The outline
 /// follows it as the run's `<document>` block.
 fn new_document_kickoff(user_message: &str, rel: &str) -> String {
     format!(
-        "[system] A new top-level topic: this fresh session owns the document {rel} (the \
+        "{NEW_DOCUMENT_KICKOFF} this fresh session owns the document {rel} (the \
          previous session keeps its own). Its outline follows as a `<document>` block; fill \
          its sections. The user's request was:\n\n{user_message}"
     )
@@ -790,9 +793,21 @@ pub(crate) fn create_call(
         })
         .unwrap_or_default();
     let existing = linked(ctx);
-    let result = match ctx.workspace_root.as_deref() {
-        None => Err("doc_create needs an open workspace".to_string()),
-        Some(ws) => create(
+    // The run a new document's handoff starts exists to fill that document.
+    // Its first message repeats the user's request, and the app follows
+    // every handoff, so a second `doc_create` here would open session after
+    // session with nothing to stop the chain; a new topic from this session
+    // waits for a turn the user types.
+    let kickoff_run = user_message.starts_with(NEW_DOCUMENT_KICKOFF);
+    let result = match (ctx.workspace_root.as_deref(), &existing) {
+        (Some(_), Some(own)) if kickoff_run => Err(format!(
+            "this session was just opened for {}; fill its sections (doc_add adds one) \
+             instead of creating another document. A further new topic waits for the \
+             user's next message.",
+            own.rel
+        )),
+        (None, _) => Err("doc_create needs an open workspace".to_string()),
+        (Some(ws), _) => create(
             Path::new(ws),
             existing.is_none().then_some(store.path.as_path()),
             title,

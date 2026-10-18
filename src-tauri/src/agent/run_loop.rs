@@ -3593,6 +3593,16 @@ mod deferred_loop_tests {
         window: Option<u32>,
         script: Vec<Reply>,
     ) -> (Result<RunOutcome, String>, Vec<String>) {
+        run_saying(ws, window, "go", script).await
+    }
+
+    /// `run_on`, with `message` as the user's message.
+    pub(super) async fn run_saying(
+        ws: &Workspace,
+        window: Option<u32>,
+        message: &str,
+        script: Vec<Reply>,
+    ) -> (Result<RunOutcome, String>, Vec<String>) {
         let (base, _, bodies) = spawn_recording(script).await;
         let config = super::surface_tests::config_for(&base, window);
         let ctx = ToolContext {
@@ -3607,7 +3617,7 @@ mod deferred_loop_tests {
         let outcome = run_workflow(
             &config,
             &mut history,
-            "go".into(),
+            message.into(),
             Vec::new(),
             &events,
             &ApprovalMap::default(),
@@ -3873,7 +3883,7 @@ mod deferred_loop_tests {
 #[cfg(test)]
 mod document_loop_tests {
     use super::deferred_loop_tests::{
-        Workspace, last_result, records_of, run, tool_names, workspace,
+        Workspace, last_result, records_of, run, run_saying, tool_names, workspace,
     };
     use super::*;
     use crate::agent::deferred::DOCUMENT_TOOLS;
@@ -4097,6 +4107,74 @@ mod document_loop_tests {
             crate::agent::persist::linked_document(&records_of(&ws)).as_deref(),
             Some(".claudinio/docs/pudim-de-leite.md"),
             "this session keeps its own document"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// The session a new document opens exists to fill that document: its
+    /// first run (the one the handoff starts, not a turn the user typed)
+    /// may not hand off again. The successor still has `doc_create` and
+    /// its first message repeats the user's request, so a model that calls
+    /// it once more would otherwise open session after session, each with a
+    /// new file and a new request, with nothing in the app to stop the
+    /// chain.
+    #[tokio::test]
+    async fn the_session_a_new_document_opens_cannot_hand_off_again_in_its_first_run() {
+        let ws = workspace("doc-handoff-chain");
+        link_doc(&ws, &["origem"]);
+        let (outcome, _) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                },
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        let Ok(RunOutcome::Handoff(spec)) = outcome else {
+            panic!("expected a handoff");
+        };
+        // The successor, as `carry_into` links it, running its first message.
+        ws.store
+            .append(&SessionRecord::DocumentLinked {
+                path: spec.document.clone().unwrap(),
+                ts: now_ms(),
+            })
+            .unwrap();
+        let (outcome, bodies) = run_saying(
+            &ws,
+            None,
+            &spec.first_message,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                },
+                Reply::Text("filling it instead"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "no second handoff: {:?}",
+            outcome.as_ref().err()
+        );
+        let refused = last_result(&bodies[1]);
+        assert!(
+            refused.contains("Error") && refused.contains("bolo-de-cenoura.md"),
+            "{refused}"
+        );
+        assert!(
+            !ws.root
+                .join(".claudinio/docs/bolo-de-cenoura-2.md")
+                .exists(),
+            "no new file either"
+        );
+        assert_eq!(
+            crate::agent::persist::linked_document(&records_of(&ws)).as_deref(),
+            Some(".claudinio/docs/bolo-de-cenoura.md")
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }
