@@ -451,3 +451,61 @@ describe("recordsToMessages — the harness's own blocks in a user turn", () => 
     expect(everyText(m).some((t) => t.includes("[system]"))).toBe(false);
   });
 });
+
+// Lean-harness Phase 4b: a run of a session with a living document ends its
+// user turn with a `<document>` outline block, and a person's edit found
+// during a run joins the round's tool results as a `<doc-changed>` note.
+// Both are the harness talking to the model, never words the person typed
+// or the agent wrote.
+describe("recordsToMessages — the living document's blocks", () => {
+  const OUTLINE =
+    '<document path=".claudinio/docs/pudim.md">\n# Pudim\ns1 · todo · - · origem\n</document>';
+  const NOTE =
+    "<doc-changed>\nThe user changed the document: s1 (origem) edited. Their edits win.\n</doc-changed>";
+  const everyText = (messages: ChatMessage[]) =>
+    messages.flatMap((m) => [m.text, ...(m.steps ?? []).map((s) => (s.type === "text" ? s.text ?? "" : ""))]);
+
+  it("shows the user's words, never the outline sent with them", () => {
+    const m = recordsToMessages([
+      { kind: "user", text: "write it", ts: 1 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: "write it" },
+          { type: "text", text: OUTLINE },
+        ],
+        ts: 1,
+      },
+      answer("done"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: write it", "assistant: done"]);
+    expect(everyText(m).some((t) => t.includes("<document"))).toBe(false);
+  });
+
+  it("never shows the note that rides with a round's tool results", () => {
+    const m = recordsToMessages([
+      ...user("write it"),
+      {
+        kind: "turn",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "w1", name: "doc_write", input: { id: "s1", body: "x" } }],
+        ts: 2,
+      },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "w1", content: "Wrote s1 (done)." },
+          { type: "text", text: NOTE },
+        ],
+        ts: 2,
+      },
+      answer("merged your edit"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: write it", "assistant: merged your edit"]);
+    expect(everyText(m).some((t) => t.includes("<doc-changed>"))).toBe(false);
+  });
+});

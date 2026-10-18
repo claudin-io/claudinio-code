@@ -24,7 +24,7 @@ import { Icon, toolIcon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
 import { renderMarkdown, escapeHtml } from "../../lib/markdown";
-import { describeTaskUpdate, detectLanguageFromPath, taskUpdates, toolTitle } from "./toolPresentation";
+import { describeTaskUpdate, detectLanguageFromPath, parseOutline, taskUpdates, toolTitle } from "./toolPresentation";
 import { parseLineList, UNCHANGED_MARK, type ListRow } from "./lineResults";
 
 // The result goes straight to `innerHTML`, and both inputs are untrusted: the
@@ -526,6 +526,61 @@ const LoadToolsBody: Component<{ names: string[]; result?: ToolResultData }> = (
   </div>
 );
 
+// ── doc_* ───────────────────────────────────────────────────────────
+// The living document (lean-harness Phase 4b). Every write answers with the
+// outline; it renders as one row per section with its status and owner. A
+// doc_write also shows the text it wrote; a section read, the section.
+const DocOutlineRows: Component<{ text: string }> = (props) => (
+  <div class="flex flex-col gap-0.5">
+    <For each={parseOutline(props.text)}>
+      {(row) => (
+        <div class="flex items-center gap-2 text-[12px]" data-doc-section>
+          <span class="w-6 shrink-0 font-mono text-[11px] text-ink-faint">{row.id}</span>
+          <span class={`w-11 shrink-0 text-[11px] ${docStatusClass(row.status)}`}>{row.status}</span>
+          <span class="min-w-0 flex-1 truncate text-ink">{row.topic}</span>
+          <Show when={row.owner !== "-"}>
+            <span class="shrink-0 truncate font-mono text-[10px] text-ink-faint">{row.owner}</span>
+          </Show>
+        </div>
+      )}
+    </For>
+  </div>
+);
+
+export function docStatusClass(status: string): string {
+  if (status === "done") return "text-success";
+  if (status === "doing") return "text-amber-500";
+  if (status === "human") return "text-accent";
+  return "text-ink-faint";
+}
+
+const DocBody: Component<{ name: string; args: Record<string, unknown>; result?: ToolResultData }> = (props) => (
+  <div class="flex flex-col gap-2">
+    <Show when={props.name === "doc_write" && props.args.body}>
+      <div class="max-h-60 overflow-y-auto">
+        <ProseContent
+          class="prose-content text-[12px] leading-[1.6] text-ink-muted"
+          html={renderMarkdown(String(props.args.body))}
+        />
+      </div>
+    </Show>
+    <Show
+      when={props.name === "doc_read" && props.args.id}
+      fallback={<DocOutlineRows text={props.result?.output ?? ""} />}
+    >
+      <div class="max-h-60 overflow-y-auto">
+        <ProseContent
+          class="prose-content text-[12px] leading-[1.6] text-ink-muted"
+          html={renderMarkdown(props.result?.output ?? "")}
+        />
+      </div>
+    </Show>
+    <Show when={props.result?.error}>
+      <div class="whitespace-pre-wrap text-[11px] text-danger">{props.result!.error}</div>
+    </Show>
+  </div>
+);
+
 // ── skills ──────────────────────────────────────────────────────────
 // `list` answers "- name [scope] location" lines, each followed by an
 // indented description (agent/tools/skills_tool.rs); `read` answers the
@@ -635,6 +690,9 @@ export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }
       </Match>
       <Match when={name() === "load_tools"}>
         <LoadToolsBody names={(props.call.args.names as string[]) ?? []} result={props.result} />
+      </Match>
+      <Match when={name().startsWith("doc_")}>
+        <DocBody name={name()} args={props.call.args} result={props.result} />
       </Match>
       <Match when={name() === "skills"}>
         <SkillsBody action={String(props.call.args.action ?? "")} result={props.result} />

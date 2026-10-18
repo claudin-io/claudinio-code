@@ -532,3 +532,67 @@ describe("load_tools and skills", () => {
     dispose();
   });
 });
+
+// Lean-harness Phase 4b: the living document's tools. Each reads as what it
+// did to the document — started it, wrote or claimed a section, read one,
+// added one — and the outline the backend answers with renders as rows.
+describe("living document tools", () => {
+  const OUTLINE =
+    "Wrote s1 (done).\n# Pudim de leite\ns1 · done · main · origem do pudim\ns2 · doing · sub:ingredientes · ingredientes originais";
+
+  it("titles each call by what it did to the document", () => {
+    expect(toolHeader(makeCall("doc_create", { title: "Pudim", sections: ["a"] })).title).toBe(
+      "Started a document",
+    );
+    expect(toolHeader(makeCall("doc_write", { id: "s1", body: "x" })).title).toBe("Wrote a section");
+    expect(toolHeader(makeCall("doc_write", { id: "s1", status: "doing" })).title).toBe("Claimed a section");
+    expect(toolHeader(makeCall("doc_read", { id: "s1" })).title).toBe("Read a section");
+    expect(toolHeader(makeCall("doc_read", {})).title).toBe("Read the document");
+    expect(toolHeader(makeCall("doc_add", { topic: "caramelo" })).title).toBe("Added a section");
+  });
+
+  it("summarizes the document, section or topic", () => {
+    expect(toolSummary(makeCall("doc_create", { title: "Pudim", sections: ["a", "b"] }))).toBe(
+      "Pudim · 2 sections",
+    );
+    expect(toolSummary(makeCall("doc_write", { id: "s2", body: "x" }))).toBe("s2");
+    expect(toolSummary(makeCall("doc_read", {}))).toBe("outline");
+    expect(toolSummary(makeCall("doc_add", { topic: "caramelo", after: "s1" }))).toBe("caramelo");
+  });
+
+  it("renders the outline a doc tool answers with as one row per section", () => {
+    const call = makeCall("doc_add", { topic: "x" });
+    const dispose = render(
+      () => <ToolBody call={call} result={makeResult("doc_add", OUTLINE)} />,
+      document.body,
+    );
+    const rows = document.body.querySelectorAll("[data-doc-section]");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("origem do pudim");
+    expect(rows[0].textContent).toContain("done");
+    expect(rows[1].textContent).toContain("sub:ingredientes");
+    dispose();
+  });
+
+  it("shows what a doc_write wrote, and why a write was refused", () => {
+    const call = makeCall("doc_write", { id: "s1", body: "Veio de **Portugal**." });
+    let dispose = render(
+      () => <ToolBody call={call} result={makeResult("doc_write", OUTLINE)} />,
+      document.body,
+    );
+    expect(document.body.querySelector("strong")?.textContent).toBe("Portugal");
+    dispose();
+    document.body.innerHTML = "";
+    dispose = render(
+      () => (
+        <ToolBody
+          call={call}
+          result={makeResult("doc_write", "", "s1 was edited by the user since you last read it")}
+        />
+      ),
+      document.body,
+    );
+    expect(document.body.textContent).toContain("edited by the user");
+    dispose();
+  });
+});

@@ -44,7 +44,29 @@ const TITLES: Record<string, string> = {
   exit_plan_mode: "Exited plan mode",
   load_tools: "Loaded tools",
   skills: "Listed skills",
+  doc_create: "Started a document",
+  doc_write: "Wrote a section",
+  doc_read: "Read a section",
+  doc_add: "Added a section",
 };
+
+/** One line of a document outline (`agent::document::Document::outline`). */
+export interface OutlineRow {
+  id: string;
+  status: string;
+  owner: string;
+  topic: string;
+}
+
+/** The `id · status · owner · topic` lines of a doc tool's answer. */
+export function parseOutline(text: string): OutlineRow[] {
+  const rows: OutlineRow[] = [];
+  for (const line of text.split("\n")) {
+    const m = /^(s\d+) · (\w+) · (\S+) · (.*)$/.exec(line);
+    if (m) rows.push({ id: m[1], status: m[2], owner: m[3], topic: m[4] });
+  }
+  return rows;
+}
 
 /** One change in a `tasks_update` call, in either of its two forms. */
 export interface TaskUpdateArg {
@@ -130,6 +152,12 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
   }
   if (call.toolName === "skills" && call.args.action === "read") {
     return { icon: toolIcon("skills"), title: "Read a skill" };
+  }
+  if (call.toolName === "doc_write" && call.args.status === "doing") {
+    return { icon: toolIcon("doc_write"), title: "Claimed a section" };
+  }
+  if (call.toolName === "doc_read" && !call.args.id) {
+    return { icon: toolIcon("doc_read"), title: "Read the document" };
   }
   return { icon: toolIcon(call.toolName), title: toolTitle(call.toolName) };
 }
@@ -224,6 +252,16 @@ export function toolSummary(call: ToolCallData): string {
       return truncate(((args.names as string[] | undefined) ?? []).join(", "), 80);
     case "skills":
       return args.action === "read" ? String(args.name ?? "") : "";
+    case "doc_create": {
+      const n = ((args.sections as unknown[] | undefined) ?? []).length;
+      return `${truncate(String(args.title ?? ""), 60)} · ${n} section${n === 1 ? "" : "s"}`;
+    }
+    case "doc_write":
+      return String(args.id ?? "");
+    case "doc_read":
+      return args.id ? String(args.id) : "outline";
+    case "doc_add":
+      return truncate(String(args.topic ?? ""), 80);
     default: {
       const path = args.path as string | undefined;
       if (path) return path;
