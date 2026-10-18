@@ -344,16 +344,11 @@ fn error_message(v: &Value) -> Option<String> {
     Some(msg.to_string())
 }
 
-fn shape_http_error(status: reqwest::StatusCode, body: &str) -> String {
+fn shape_http_error(status: reqwest::StatusCode, body: &str, api_key: &str) -> String {
     if status.as_u16() == 401 {
         return "Unauthorized — check your API key".into();
     }
-    if let Ok(v) = serde_json::from_str::<Value>(body)
-        && let Some(msg) = error_message(&v)
-    {
-        return format!("API error: HTTP {status} — {msg}");
-    }
-    format!("API error: HTTP {status}")
+    super::http_error::api_error(status, body, api_key)
 }
 
 /// `Authorization` for an OpenAI-protocol request. A keyless endpoint — a
@@ -409,7 +404,7 @@ pub async fn stream_message(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(shape_http_error(status, &body));
+        return Err(shape_http_error(status, &body, &rp.api_key));
     }
 
     let net_guard =
@@ -756,7 +751,7 @@ pub async fn complete_metered(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(shape_http_error(status, &body));
+        return Err(shape_http_error(status, &body, &rp.api_key));
     }
     let json: Value = response
         .json()

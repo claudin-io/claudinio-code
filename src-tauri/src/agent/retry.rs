@@ -159,4 +159,42 @@ mod tests {
         assert!(!is_retryable_error("API error: HTTP 404 Not Found"));
         assert!(!is_retryable_error("Unauthorized — check your API key"));
     }
+
+    /// Every HTTP error now carries the provider's message after the status
+    /// (`provider::http_error::api_error`). The class comes from the status
+    /// alone: a 400 whose message mentions an overload is still the request's
+    /// fault, and a 5xx with any message is still worth another attempt.
+    #[test]
+    fn the_providers_message_after_the_status_does_not_change_the_class() {
+        let real = |status, body| {
+            crate::agent::provider::http_error::api_error(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                body,
+                "k",
+            )
+        };
+        let thinking = real(
+            400,
+            r#"{"error":{"message":"The `content[].thinking` in the thinking mode must be passed back to the API.","type":"invalid_request_error"}}"#,
+        );
+        assert!(thinking.contains("thinking mode"), "{thinking}");
+        assert!(!is_retryable_error(&thinking));
+        assert!(!is_retryable_error(&real(
+            400,
+            r#"{"error":{"message":"upstream overloaded, request cancelled via POST /v1/mtplx/cancel"}}"#
+        )));
+        assert!(!is_retryable_error(&real(404, "no such model")));
+        assert!(is_retryable_error(&real(
+            529,
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
+        )));
+        assert!(is_retryable_error(&real(
+            503,
+            "<html>Service Unavailable</html>"
+        )));
+        assert!(is_retryable_error(&real(
+            429,
+            r#"{"error":{"message":"rate limited"}}"#
+        )));
+    }
 }

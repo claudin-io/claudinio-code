@@ -9,6 +9,7 @@ use tauri::ipc::Channel;
 
 pub mod cache;
 pub mod catalog;
+pub mod http_error;
 pub mod openai;
 
 pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -1217,7 +1218,7 @@ pub async fn classify_turn_completion_metered(
         let body = response.text().await.unwrap_or_default();
         return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
             Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
-            None => Err(format!("API error: HTTP {status}")),
+            None => Err(http_error::api_error(status, &body, &rp.api_key)),
         };
     }
     let json: Value = response
@@ -1301,7 +1302,7 @@ pub async fn one_shot(
         let body = response.text().await.unwrap_or_default();
         return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
             Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
-            None => Err(format!("API error: HTTP {status}")),
+            None => Err(http_error::api_error(status, &body, &rp.api_key)),
         };
     }
     let json: Value = response
@@ -1489,7 +1490,7 @@ async fn stream_anthropic(
         } else if let Some(m) = budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
             format!("{BUDGET_EXCEEDED_MARKER}{m}")
         } else {
-            format!("API error: HTTP {status}")
+            http_error::api_error(status, &body, &rp.api_key)
         };
         return Err(err_msg);
     }
