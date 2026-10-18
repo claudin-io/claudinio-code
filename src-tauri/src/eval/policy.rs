@@ -30,7 +30,9 @@
 
 use crate::agent::permissions;
 use crate::agent::session::UserAnswer;
+use crate::workspace_path;
 use serde_json::Value;
+use std::path::{Component, Path};
 
 /// The tool result a refused shell command gets.
 pub(crate) const SHELL_REJECTION: &str = "Not run: this evaluation runs unattended and approves \
@@ -42,8 +44,9 @@ with the run_quality tool.";
 pub(crate) const NO_FURTHER_INPUT: &str =
     "No further input is available; proceed with your best judgement.";
 
-/// Whether the eval approves one tool call that asked for approval.
-pub(crate) fn approves(tool_name: &str, input: &Value) -> bool {
+/// Whether the eval approves one tool call that asked for approval, in a
+/// session whose workspace is `workspace`.
+pub(crate) fn approves(tool_name: &str, input: &Value, workspace: &Path) -> bool {
     match tool_name {
         "edit_file" | "batch_edit" | "write_file" => {
             let mut paths = Vec::new();
@@ -53,9 +56,56 @@ pub(crate) fn approves(tool_name: &str, input: &Value) -> bool {
         "bash" => input
             .get("command")
             .and_then(Value::as_str)
-            .is_some_and(permissions::bash_is_read_only),
+            .is_some_and(|command| {
+                permissions::bash_is_read_only(command)
+                    && stays_in_workspace(
+                        command,
+                        input.get("workdir").and_then(Value::as_str),
+                        workspace,
+                    )
+            }),
         _ => false,
     }
+}
+
+/// Whether a read-only command only looks inside the task's workspace: the
+/// directory it runs in, and every word that names a path — absolute, with a
+/// `..` component, from the home directory (`~`) or through a variable (`$`) —
+/// must resolve inside it. `bash_is_read_only` has already refused pipes,
+/// chaining, substitution and redirection, so the words are the arguments.
+///
+/// Measured on the first live baseline (2026-10-18): with reads approved
+/// anywhere, agents read other tasks' sessions, the task files (which carry
+/// the reference solution) and the repository the history tasks come from.
+/// The one place outside the workspace a command may read is the directory
+/// the harness saves long outputs to, which the trimmed result names.
+fn stays_in_workspace(command: &str, workdir: Option<&str>, workspace: &Path) -> bool {
+    let cwd = match workdir {
+        None => workspace.to_path_buf(),
+        Some(dir) if workspace_path::is_within_root(Path::new(dir), workspace) => {
+            workspace.join(dir)
+        }
+        Some(_) => return false,
+    };
+    let saved_outputs = std::env::temp_dir().join("claudinio-code").join("outputs");
+    command.split_whitespace().all(|word| {
+        let word = word.trim_matches(|c| c == '"' || c == '\'');
+        // `--include=/etc/passwd` names a path after the `=`.
+        let value = word.split_once('=').map_or(word, |(_, v)| v);
+        if value.contains('$') || value.starts_with('~') {
+            return false;
+        }
+        let path = Path::new(value);
+        let escapes = path.components().any(|c| c == Component::ParentDir);
+        if !path.is_absolute() && !escapes {
+            return true;
+        }
+        if path.starts_with(&saved_outputs) && !escapes {
+            return true;
+        }
+        // Joining an absolute path replaces `cwd`, so both shapes land here.
+        workspace_path::is_within_root(&cwd.join(path), workspace)
+    })
 }
 
 /// Every `path` string anywhere in a tool input (one for `edit_file`, one
@@ -117,8 +167,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A workspace path for the tests that do not look at the file system.
+    const WS: &str = "/tmp/claudinio-eval-policy-ws";
+
     fn bash(command: &str) -> bool {
-        approves("bash", &json!({ "command": command }))
+        approves("bash", &json!({ "command": command }), Path::new(WS))
     }
 
     #[test]
@@ -155,14 +208,23 @@ mod tests {
     fn edits_are_approved_and_unknown_tools_fail_closed() {
         assert!(approves(
             "edit_file",
-            &json!({"path": "a", "old_string": "x", "new_string": "y"})
+            &json!({"path": "a", "old_string": "x", "new_string": "y"}),
+            Path::new(WS)
         ));
-        assert!(!approves("mcp__github__create_issue", &json!({})));
+        assert!(!approves(
+            "mcp__github__create_issue",
+            &json!({}),
+            Path::new(WS)
+        ));
         assert!(!approves(
             "browser",
-            &json!({"action": "navigate", "url": "https://x"})
+            &json!({"action": "navigate", "url": "https://x"}),
+            Path::new(WS)
         ));
-        assert!(!approves("bash", &json!({})), "a bash call with no command");
+        assert!(
+            !approves("bash", &json!({}), Path::new(WS)),
+            "a bash call with no command"
+        );
     }
 
     /// `.git/config` can name a program git runs on its own (`core.fsmonitor`
@@ -185,7 +247,8 @@ mod tests {
             assert!(
                 !approves(
                     "edit_file",
-                    &json!({"path": path, "old_string": "", "new_string": "x"})
+                    &json!({"path": path, "old_string": "", "new_string": "x"}),
+                    Path::new(WS)
                 ),
                 "{path} must be refused"
             );
@@ -199,7 +262,8 @@ mod tests {
             assert!(
                 approves(
                     "edit_file",
-                    &json!({"path": path, "old_string": "", "new_string": "x"})
+                    &json!({"path": path, "old_string": "", "new_string": "x"}),
+                    Path::new(WS)
                 ),
                 "{path} should be approved"
             );
@@ -207,11 +271,15 @@ mod tests {
         assert!(
             !approves(
                 "batch_edit",
-                &json!({"edits": [{"path": "a.py"}, {"path": ".git/config"}]})
+                &json!({"edits": [{"path": "a.py"}, {"path": ".git/config"}]}),
+                Path::new(WS)
             ),
             "one protected path refuses the whole batch"
         );
-        assert!(!approves("edit_file", &json!({})), "an edit with no path");
+        assert!(
+            !approves("edit_file", &json!({}), Path::new(WS)),
+            "an edit with no path"
+        );
     }
 
     /// `edit_file` accepts `file_path` as an alias of `path` (models trained on
@@ -222,16 +290,82 @@ mod tests {
     fn an_edit_through_the_file_path_alias_is_judged_like_one_through_path() {
         assert!(approves(
             "edit_file",
-            &json!({"file_path": "a.py", "old_string": "x", "new_string": "y"})
+            &json!({"file_path": "a.py", "old_string": "x", "new_string": "y"}),
+            Path::new(WS)
         ));
         assert!(!approves(
             "edit_file",
-            &json!({"file_path": ".git/config", "old_string": "", "new_string": "x"})
+            &json!({"file_path": ".git/config", "old_string": "", "new_string": "x"}),
+            Path::new(WS)
         ));
         assert!(!approves(
             "edit_file",
-            &json!({"file_path": ".claudinio.json", "old_string": "", "new_string": "x"})
+            &json!({"file_path": ".claudinio.json", "old_string": "", "new_string": "x"}),
+            Path::new(WS)
         ));
+    }
+
+    /// Measured on the first live baseline (2026-10-18, deepseek-flash): with
+    /// read-only commands approved anywhere on the host, agents listed the
+    /// eval's own directory, read other tasks' sessions, and catted the task
+    /// files — which carry the reference solution — and the repository the
+    /// history tasks were cut from. A read-only command is approved only when
+    /// everything it names, and the directory it runs in, is the task's own.
+    #[test]
+    fn a_read_only_command_may_only_look_inside_the_task_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("task").join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("a.txt"), "x").unwrap();
+        let sibling = dir.path().join("other").join("ws");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let run = |command: &str, workdir: Option<&str>| {
+            let mut input = json!({ "command": command });
+            if let Some(w) = workdir {
+                input["workdir"] = json!(w);
+            }
+            approves("bash", &input, &ws)
+        };
+        let ws_s = ws.to_string_lossy().to_string();
+        let sib_s = sibling.to_string_lossy().to_string();
+
+        assert!(run("cat a.txt", None));
+        assert!(run("ls src", None));
+        assert!(run("git log --all", None));
+        assert!(run(&format!("cat {ws_s}/a.txt"), None));
+        assert!(run("ls", Some(&ws_s)));
+        assert!(run("ls", Some("src")));
+        let saved = std::env::temp_dir()
+            .join("claudinio-code")
+            .join("outputs")
+            .join("bash-1.log");
+        assert!(
+            run(&format!("tail -n 20 {}", saved.display()), None),
+            "the harness tells the model to read its saved outputs"
+        );
+
+        for (command, workdir) in [
+            (
+                "head -n 40 .claudinio/sessions/x.jsonl",
+                Some(sib_s.as_str()),
+            ),
+            ("ls", Some("..")),
+            ("ls /srv/claudinio-eval", None),
+            ("cat /root/claudinio-code/eval/tasks/x.yaml", None),
+            (&*format!("cat {sib_s}/a.txt"), None),
+            ("cat ../../other/ws/a.txt", None),
+            ("ls ..", None),
+            ("cat ~/.ssh/id_rsa", None),
+            ("cat $HOME/x", None),
+            ("git -C /root/claudinio-code log", None),
+            ("grep -r --include=/etc/passwd x", None),
+            ("cat src/../../../etc/hosts", None),
+        ] {
+            assert!(
+                !run(command, workdir),
+                "{command} in {workdir:?} must be refused"
+            );
+        }
     }
 
     #[test]

@@ -130,6 +130,8 @@ pub(crate) fn eval_config(opts: &RunOptions, workspace: &Path) -> AgentConfig {
 /// and handed over once the matching oneshot is registered.
 #[derive(Default)]
 struct Responder {
+    /// The task's workspace: read-only commands may only look inside it.
+    workspace: PathBuf,
     approvals: Mutex<HashMap<String, bool>>,
     answers: Mutex<HashMap<String, Vec<UserAnswer>>>,
     scripted: Mutex<Vec<String>>,
@@ -146,7 +148,7 @@ impl Responder {
                 permission,
                 ..
             } if permission == "requires_approval" => {
-                let approve = policy::approves(&tool_name, &args);
+                let approve = policy::approves(&tool_name, &args, &self.workspace);
                 if let Ok(mut map) = self.approvals.lock() {
                     map.insert(format!("{session_id}:{tool_id}"), approve);
                 }
@@ -351,7 +353,10 @@ async fn run_session(
         ))),
     };
 
-    let responder = Arc::new(Responder::default());
+    let responder = Arc::new(Responder {
+        workspace: ws.to_path_buf(),
+        ..Responder::default()
+    });
     if let Ok(mut scripted) = responder.scripted.lock() {
         *scripted = task.answers.clone();
     }
