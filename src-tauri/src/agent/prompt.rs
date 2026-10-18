@@ -12,6 +12,50 @@ use crate::agent::tools::{self, ToolContext};
 
 mod v1;
 
+/// Which Standard prompt a session is sent (`AgentConfig::prompt_version`).
+///
+/// v2 is the Phase 5 rewrite of the lean-harness plan: policy the code
+/// enforces left to the gates' own error messages, an adaptive Brain
+/// interview, the planning checklists in the `plan` skill. v1 is the prompt
+/// as it stood before, kept for one release (decision D7) so a user can flip
+/// back if v2 is worse for them. Compact and the git operator have one prompt
+/// each and ignore it.
+///
+/// Stored as a string and read leniently: an unknown value is v2, so a config
+/// written by a later build never fails to parse here (`load_config` would
+/// replace the whole file with defaults).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum PromptVersion {
+    V1,
+    #[default]
+    V2,
+}
+
+impl PromptVersion {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PromptVersion::V1 => "v1",
+            PromptVersion::V2 => "v2",
+        }
+    }
+}
+
+impl From<String> for PromptVersion {
+    fn from(s: String) -> Self {
+        match s.trim() {
+            "v1" => PromptVersion::V1,
+            _ => PromptVersion::V2,
+        }
+    }
+}
+
+impl From<PromptVersion> for String {
+    fn from(v: PromptVersion) -> Self {
+        v.as_str().to_string()
+    }
+}
+
 /// Prompt budget for the scenario index. Enough for a real spec suite, small
 /// enough that a thousand scenarios cannot crowd out the conversation.
 const MAX_SPEC_SECTION_CHARS: usize = 4_000;
@@ -1873,5 +1917,53 @@ mod v1_pin_tests {
         for (name, fixture) in FIXTURES {
             assert!(v1(name) == fixture, "v1 {name} drifted from its fixture");
         }
+    }
+}
+
+/// `AgentConfig::prompt_version` (decision D7): which Standard prompt a
+/// session is sent. v2 is the default; v1 stays selectable for one release.
+/// The config file is the user's, and `load_config` falls back to an empty
+/// config when it does not parse, so a value this build does not know must
+/// not cost the user every other setting.
+#[cfg(test)]
+mod prompt_version_tests {
+    use crate::agent::provider::AgentConfig;
+
+    fn load(json: &str) -> AgentConfig {
+        serde_json::from_str(json).expect("the config parses")
+    }
+
+    #[test]
+    fn a_config_written_before_the_setting_gets_prompt_v2() {
+        let cfg = load(r#"{"base_url": "u", "api_key": "k"}"#);
+        assert_eq!(serde_json::to_value(&cfg).unwrap()["prompt_version"], "v2");
+        assert_eq!(
+            serde_json::to_value(AgentConfig::default()).unwrap()["prompt_version"],
+            "v2"
+        );
+    }
+
+    #[test]
+    fn prompt_version_round_trips_through_the_config_file() {
+        for version in ["v1", "v2"] {
+            let cfg = load(&format!(
+                r#"{{"base_url": "u", "api_key": "k", "prompt_version": "{version}"}}"#
+            ));
+            let saved = serde_json::to_string(&cfg).unwrap();
+            let again = load(&saved);
+            assert_eq!(
+                serde_json::to_value(&again).unwrap()["prompt_version"],
+                version
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_prompt_version_reads_as_v2_and_keeps_every_other_setting() {
+        let cfg = load(
+            r#"{"base_url": "u", "api_key": "k", "brain_model": "b", "prompt_version": "v9"}"#,
+        );
+        assert_eq!(cfg.brain_model, "b");
+        assert_eq!(serde_json::to_value(&cfg).unwrap()["prompt_version"], "v2");
     }
 }

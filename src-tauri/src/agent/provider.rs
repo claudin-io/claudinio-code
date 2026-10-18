@@ -260,6 +260,10 @@ pub struct AgentConfig {
     /// full catalog — see `crate::agent::surface`.
     #[serde(default)]
     pub tool_surface: std::collections::HashMap<String, String>,
+    /// Which Standard prompt sessions are sent: v2 (default) or v1, the
+    /// pre-Phase-5 prompt kept for one release — see `agent::prompt`.
+    #[serde(default)]
+    pub prompt_version: crate::agent::prompt::PromptVersion,
 }
 
 /// A connected external provider. Credentials follow the existing plaintext
@@ -572,6 +576,7 @@ impl Default for AgentConfig {
             jev: crate::agent::jev::JevPrefs::default(),
             local: crate::llama::LocalPrefs::default(),
             tool_surface: std::collections::HashMap::new(),
+            prompt_version: Default::default(),
         }
     }
 }
