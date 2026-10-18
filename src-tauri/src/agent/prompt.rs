@@ -132,6 +132,7 @@ pub(super) fn build_spec_prompt_section(ctx: &ToolContext) -> Option<String> {
 /// Build the per-session system prompt. The base is byte-identical for every
 /// request in the same workspace so the provider's prefix cache stays warm;
 /// the mode block is appended last and only changes when the mode switches.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn system_prompt(
     workspace_root: Option<&str>,
     skills_section: Option<&str>,
