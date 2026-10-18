@@ -1,6 +1,7 @@
 use crate::agent::permissions;
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
 use crate::agent::session::{self, AgentEvent, AnswerMap, ApprovalMap, SteeringCtl};
+use crate::agent::tool_batch;
 use crate::agent::tools::{self, ToolContext, ToolDef};
 use serde::Deserialize;
 use serde_json::Value;
@@ -744,23 +745,34 @@ pub(crate) async fn run_subagent_recorded(
             });
         }
 
-        for tool_use in &stream_output.tool_uses {
+        let tool_uses = &stream_output.tool_uses;
+        // Read-only calls run ahead together, as in the parent's loop.
+        let mut ready: Vec<Option<ContentBlock>> = vec![None; tool_uses.len()];
+        for (ti, tool_use) in tool_uses.iter().enumerate() {
+            if ready[ti].is_none() && !interrupt.load(Ordering::SeqCst) {
+                tool_batch::run_ahead(
+                    tool_uses,
+                    ti,
+                    &mut ready,
+                    |name, input| tool_batch::runs_in_parallel(name, input, config, ctx, false),
+                    tool_batch::executor(event_tx, session_id, ctx),
+                    interrupt,
+                    event_tx,
+                )
+                .await;
+            }
+            // Every call from here on is answered: a call a parallel run had
+            // already finished keeps its result, the rest are reported as not
+            // run.
             if interrupt.load(Ordering::SeqCst) {
-                let tid = tool_use.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let tname = tool_use.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                tool_assistant_blocks.push(ContentBlock::tool_use(
-                    tid,
-                    tname,
-                    tool_use.get("input").cloned().unwrap_or(Value::Null),
-                ));
-                let msg = "Interrupted by user — tool not executed.";
-                let _ = event_tx.send(AgentEvent::ToolResult {
-                    tool_id: tid.to_string(),
-                    tool_name: tname.to_string(),
-                    output: msg.into(),
-                    error: None,
-                });
-                tool_result_blocks.push(ContentBlock::tool_result(tid, msg));
+                tool_batch::answer_unrun(
+                    &tool_uses[ti..],
+                    &mut ready[ti..],
+                    "Interrupted by user — tool not executed.",
+                    event_tx,
+                    &mut tool_assistant_blocks,
+                    &mut tool_result_blocks,
+                );
                 break;
             }
 
@@ -803,32 +815,33 @@ pub(crate) async fn run_subagent_recorded(
             };
 
             let perm = permissions::tool_permission(&tool_name);
-            let block =
-                if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_pre.verdict {
-                    session::deny_tool(
-                        &tool_name,
-                        &tool_use_id,
-                        &hook_input,
-                        reason,
-                        event_tx,
-                        session_id,
-                    )
-                } else {
-                    session::run_tool(
-                        &tool_name,
-                        &tool_use_id,
-                        tool_input,
-                        perm,
-                        event_tx,
-                        approvals,
-                        answers,
-                        session_id,
-                        ctx,
-                        config,
-                        &hook_pre.verdict,
-                    )
-                    .await
-                };
+            let block = if let Some(block) = ready[ti].take() {
+                block
+            } else if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_pre.verdict {
+                session::deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &hook_input,
+                    reason,
+                    event_tx,
+                    session_id,
+                )
+            } else {
+                session::run_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    tool_input,
+                    perm,
+                    event_tx,
+                    approvals,
+                    answers,
+                    session_id,
+                    ctx,
+                    config,
+                    &hook_pre.verdict,
+                )
+                .await
+            };
 
             if let Some(h) = &ctx.hooks
                 && !matches!(
@@ -1654,6 +1667,91 @@ mod context_budget_tests {
             );
             std::fs::remove_dir_all(&root).ok();
         }
+    }
+
+    // An explore subagent is where reading happens; its reads in one turn
+    // run together as the parent's do, and come back in the order asked.
+    #[tokio::test]
+    async fn a_subagents_reads_in_one_turn_run_together() {
+        let (root, file) = workspace("together");
+        let dir = root.to_string_lossy().to_string();
+        let (base, _, bodies) = super::scripted_model::spawn_recording(vec![
+            Reply::Tools(vec![
+                (
+                    "read_file",
+                    serde_json::json!({ "path": file, "start_line": 1, "end_line": 50 }),
+                ),
+                ("list_dir", serde_json::json!({ "path": dir })),
+                (
+                    "read_file",
+                    serde_json::json!({ "path": file, "start_line": 51, "end_line": 99 }),
+                ),
+            ]),
+            Reply::Text("read it"),
+        ])
+        .await;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let events: Channel<AgentEvent> = {
+            let seen = seen.clone();
+            Channel::new(
+                move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
+                    if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                        && let Ok(event) = serde_json::from_str::<AgentEvent>(json)
+                    {
+                        seen.lock().unwrap().push(event);
+                    }
+                    Ok(())
+                },
+            )
+        };
+        let ctx = ToolContext {
+            workspace_root: Some(dir.clone()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let spec = SubagentSpec {
+            name: "reader".into(),
+            goal: "read the file".into(),
+            mode: SubagentMode::Explore,
+            expected_output: None,
+        };
+        let result = run_subagent(
+            &config_for(&base, None),
+            &ctx,
+            &spec,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "test-session",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        assert_eq!(result.status, "completed", "{}", result.report);
+
+        let kinds: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCall { tool_id, .. } => Some(format!("call {tool_id}")),
+                AgentEvent::ToolResult { tool_id, .. } => Some(format!("result {tool_id}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds[..3],
+            ["call tu_0_0", "call tu_0_1", "call tu_0_2"],
+            "all three under way before any answered: {kinds:?}"
+        );
+        assert_eq!(kinds.len(), 6, "{kinds:?}");
+        let second: Value = serde_json::from_str(&bodies.lock().unwrap()[1]).unwrap();
+        let answered: Vec<&str> = second["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["tool_use_id"].as_str())
+            .collect();
+        assert_eq!(answered, ["tu_0_0", "tu_0_1", "tu_0_2"]);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Tokens of the largest request sent, by the session's own chars/3 rule.
