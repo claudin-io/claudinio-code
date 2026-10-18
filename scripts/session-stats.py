@@ -35,6 +35,11 @@ Limits worth knowing before quoting a number:
   output only.
 - `done.input_tokens` is what the provider billed as uncached input. Cached
   input is only known for runs that carry `cache_read_tokens`.
+- A `usage` record's `input_tokens` is uncached input on every protocol (the
+  app subtracts OpenAI's `cached_tokens` from `prompt_tokens` before writing
+  it), so uncached + cache reads + cache writes is all input processed.
+  Records written by builds before 2026-10-18 on an OpenAI-protocol provider
+  count cached tokens twice.
 """
 
 import argparse

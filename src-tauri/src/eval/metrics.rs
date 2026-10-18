@@ -253,6 +253,37 @@ mod tests {
         assert!((m.cost - expected).abs() < 1e-12, "{}", m.cost);
     }
 
+    /// A 90% cache hit on an OpenAI-protocol provider (`prompt_tokens` 1,000,
+    /// 900 of them cached) is a 90% cache-read share, and its estimated cost
+    /// bills the 900 at the cache-read price and the 100 at the input price.
+    #[test]
+    fn an_openai_request_reads_back_with_its_cache_counted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore {
+            path: dir.path().join("s1.jsonl"),
+        };
+        let openai = Usage {
+            input_includes_cache_reads: true,
+            ..usage(1_000, 900, 0, 10, None)
+        };
+        store
+            .append(&SessionRecord::usage(1, "m", Some(&openai), None))
+            .unwrap();
+        let prices = Prices {
+            input: Some(3.0),
+            output: Some(15.0),
+            ..Prices::default()
+        };
+        let m = collect(dir.path(), &prices);
+        assert_eq!((m.input_tokens, m.cache_read_tokens), (100, 900));
+        assert_eq!(
+            cache_read_share(m.input_tokens, m.cache_read_tokens, m.cache_creation_tokens),
+            Some(0.9)
+        );
+        let expected = (100.0 * 3.0 + 900.0 * 0.3 + 10.0 * 15.0) / 1e6;
+        assert!((m.cost - expected).abs() < 1e-12, "{}", m.cost);
+    }
+
     #[test]
     fn median_and_cache_share() {
         assert_eq!(median(&[]), None);

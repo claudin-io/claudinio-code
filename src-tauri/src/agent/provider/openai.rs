@@ -258,6 +258,7 @@ fn parse_usage(v: &Value, pricing: Option<(f64, f64)>) -> Usage {
         output_tokens: output,
         cache_read_input_tokens: cached,
         cache_creation_input_tokens: 0,
+        input_includes_cache_reads: true,
         cost,
         cost_input: None,
         cost_output: None,
@@ -1017,6 +1018,30 @@ mod tests {
         assert_eq!(u.cache_read_input_tokens, 100);
         // 1M in × $1/M + 0.5M out × $2/M = $2.00 local estimate
         assert!((u.cost.unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    /// OpenAI's `prompt_tokens` already includes `cached_tokens`. The usage
+    /// record stores uncached input next to cache reads — what Anthropic
+    /// reports — so the cache share and the cost read back from a session
+    /// count every cached token once, on either protocol.
+    #[test]
+    fn an_openai_request_is_recorded_with_its_cached_tokens_counted_once() {
+        let u = parse_usage(
+            &serde_json::json!({
+                "prompt_tokens": 1_000, "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 900},
+            }),
+            None,
+        );
+        match crate::agent::persist::SessionRecord::usage(1, "m", Some(&u), None) {
+            crate::agent::persist::SessionRecord::Usage {
+                input_tokens,
+                cache_read_tokens,
+                output_tokens,
+                ..
+            } => assert_eq!((input_tokens, cache_read_tokens, output_tokens), (100, 900, 10)),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

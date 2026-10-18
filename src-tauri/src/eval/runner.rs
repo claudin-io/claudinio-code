@@ -95,10 +95,6 @@ pub(crate) fn eval_config(opts: &RunOptions, workspace: &Path) -> AgentConfig {
                 .insert(plugin.manifest.name.clone(), PluginPrefs { enabled: false });
         }
     }
-    let pricing = match (opts.prices.input, opts.prices.output) {
-        (Some(i), Some(o)) => [(opts.model.clone(), (i, o))].into_iter().collect(),
-        _ => HashMap::new(),
-    };
     config.providers.insert(
         PROVIDER_ID.into(),
         ProviderEntry {
@@ -107,7 +103,11 @@ pub(crate) fn eval_config(opts: &RunOptions, workspace: &Path) -> AgentConfig {
             protocol: opts.protocol.clone(),
             enabled_models: vec![],
             label: Some("eval".into()),
-            model_pricing: pricing,
+            // Prices are applied when the metrics are read (`Prices`, which
+            // prices cache reads and writes). Here they would make the
+            // OpenAI-protocol client bill cached tokens at the full input
+            // price and record that as the provider's cost.
+            model_pricing: HashMap::new(),
             model_output_limits: HashMap::new(),
             custom: true,
             custom_models: vec![opts.model.clone()],
@@ -598,6 +598,25 @@ reference:
             bodies[2].contains("hello world"),
             "the read-only command ran"
         );
+    }
+
+    /// With `--price-in/--price-out` the cost of a request that reports none
+    /// is estimated by `metrics::Prices`, which prices cache reads and writes.
+    /// Handing the prices to the provider entry instead would make the
+    /// OpenAI-protocol client bill `prompt_tokens` — cached tokens included —
+    /// at the full input price and record that as the reported cost.
+    #[test]
+    fn prices_are_applied_by_the_metrics_not_by_the_provider() {
+        let work = tempfile::tempdir().unwrap();
+        let mut opts = options("http://127.0.0.1:1", work.path());
+        opts.protocol = "openai".into();
+        opts.prices = Prices {
+            input: Some(3.0),
+            output: Some(15.0),
+            ..Prices::default()
+        };
+        let config = eval_config(&opts, work.path());
+        assert_eq!(config.resolve_provider("eval/m").pricing, None);
     }
 
     #[test]

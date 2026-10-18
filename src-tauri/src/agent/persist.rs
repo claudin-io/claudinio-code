@@ -359,12 +359,14 @@ pub enum SessionRecord {
     /// and the cache share are read back from the file instead of estimated
     /// from per-run totals (lean-harness plan, Phase 0: M1/M2).
     ///
-    /// Token fields are what the provider reported for that request:
-    /// `input_tokens` is uncached input on Anthropic-protocol providers (and
-    /// on claudin.io, which reports cache misses only); on OpenAI-protocol
-    /// providers it is `prompt_tokens`, which already includes
-    /// `cache_read_tokens`. A request whose response carried no usage is
-    /// still written, with zeros, because it was still a round.
+    /// Token fields are what the provider reported for that request, on one
+    /// scale: `input_tokens` is always *uncached* input. Anthropic-protocol
+    /// providers (and claudin.io, which reports cache misses only) report it
+    /// that way; for OpenAI-protocol providers it is `prompt_tokens` minus
+    /// `cached_tokens`, since `prompt_tokens` already includes them. So
+    /// uncached + cache reads + cache writes is all input, on either protocol.
+    /// A request whose response carried no usage is still written, with
+    /// zeros, because it was still a round.
     Usage {
         /// 1-based request number within its run (main loop) or subagent;
         /// 0 for the handoff document, which is asked for outside the loop.
@@ -398,7 +400,11 @@ impl SessionRecord {
         SessionRecord::Usage {
             round,
             model: model.to_string(),
-            input_tokens: u.input_tokens,
+            input_tokens: if u.input_includes_cache_reads {
+                u.input_tokens.saturating_sub(u.cache_read_input_tokens)
+            } else {
+                u.input_tokens
+            },
             cache_read_tokens: u.cache_read_input_tokens,
             cache_creation_tokens: u.cache_creation_input_tokens,
             output_tokens: u.output_tokens,

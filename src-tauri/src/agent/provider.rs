@@ -1040,6 +1040,14 @@ pub struct Usage {
     /// keeps re-warming its cache.
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
+    /// True when `input_tokens` already includes `cache_read_input_tokens`:
+    /// OpenAI-protocol providers report `prompt_tokens` as all input, cached
+    /// or not, where Anthropic reports uncached input only. The live context
+    /// and cost accounting read the fields as reported; the per-request usage
+    /// record (`SessionRecord::usage`) subtracts, so the cache share and the
+    /// cost per task read back from a session count each cached token once.
+    #[serde(skip)]
+    pub input_includes_cache_reads: bool,
     /// Cost in USD as returned by the provider (if supported), otherwise None.
     /// We calculate an estimate when the provider does not supply it.
     #[serde(default)]
