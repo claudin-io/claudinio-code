@@ -1076,11 +1076,14 @@ pub fn plan_by_age(
             break;
         }
         // A dropped call is stubbed, not removed (see `apply`): the input
-        // shrinks to `{}` and the result to the note.
-        freed += c.input.to_string().len().saturating_sub(2)
-            + c.result_chars
-                .min(CUT_RESULT_CHARS)
-                .saturating_sub(DROPPED_RESULT_NOTE.len());
+        // shrinks to `{}` and the result to the note. A call no larger than
+        // that stub would grow the history, so it stays as it is.
+        let size = c.input.to_string().len() + c.result_chars.min(CUT_RESULT_CHARS);
+        let stub = "{}".len() + DROPPED_RESULT_NOTE.len();
+        if size <= stub {
+            continue;
+        }
+        freed += size - stub;
         decision.truncate_results.retain(|id| id != &c.tool_use_id);
         decision.drop_calls.push(c.tool_use_id.clone());
     }
@@ -2039,6 +2042,32 @@ mod tests {
     // What the user said through `ask_user`, and the task list as it stands,
     // are not "old tool output": neither can be had again by re-running a tool
     // on the same terms.
+    // A dropped call becomes `{}` and a 43-character note. A call already
+    // smaller than that (`ls` answered with two names) would grow the history
+    // when stubbed, and cost prefix for nothing: it is never dropped, while a
+    // call that does shrink still is.
+    #[test]
+    fn by_age_never_stubs_a_call_smaller_than_its_stub() {
+        let big = "x".repeat(5_000);
+        let mut h = vec![user("Tidy the repo.")];
+        h.push(assistant_call("", "ls", "bash", json!({"command": "ls"})));
+        h.push(result("ls", "a\nb"));
+        h.push(assistant_call(
+            "",
+            "read",
+            "read_file",
+            json!({"path": "a"}),
+        ));
+        h.push(result("read", &big));
+        for _ in 0..4 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        let d = plan_by_age(&h, usize::MAX, usize::MAX, true);
+        assert!(!d.drop_calls.iter().any(|id| id == "ls"), "{d:?}");
+        assert!(d.drop_calls.iter().any(|id| id == "read"), "{d:?}");
+    }
+
     #[test]
     fn by_age_never_cuts_the_users_answers_or_the_current_task_list() {
         let big = "x".repeat(5_000);
@@ -2100,7 +2129,9 @@ mod tests {
                 "",
                 &format!("upd{i}"),
                 "tasks_update",
-                json!({"id": "t1"}),
+                // A journal entry: a bare status change is smaller than the
+                // stub a drop leaves, and is never dropped.
+                json!({"id": "t1", "journal": ["wired the CSV writer into the export"]}),
             ));
             h.push(result(&format!("upd{i}"), "'t1': todo -> doing"));
         }
