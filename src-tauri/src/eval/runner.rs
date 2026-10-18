@@ -9,7 +9,9 @@
 //! off, so the run measures the harness and not whatever is installed on the
 //! machine. Jev is on only when a key is given for it.
 
-use super::materialize::{CommandOutcome, Tree, exclude_from_git, materialize, run_oracle};
+use super::materialize::{
+    CommandOutcome, Tree, exclude_from_git, hide_from_git, materialize, run_oracle,
+};
 use super::metrics::{Prices, RunMetrics, collect};
 use super::policy;
 use super::task::Task;
@@ -280,7 +282,7 @@ fn prepare_workspace(task: &Task, ws: &Path) -> Result<(), String> {
         serde_json::to_string_pretty(&cfg).unwrap_or_default(),
     )
     .map_err(|e| format!("write quality config: {e}"))?;
-    exclude_from_git(ws, ".claudinio.json")?;
+    hide_from_git(ws, ".claudinio.json")?;
     exclude_from_git(ws, ".claudinio/")
 }
 
@@ -701,6 +703,30 @@ reference:
         };
         let config = eval_config(&opts, work.path());
         assert_eq!(config.resolve_provider("eval/m").pricing, None);
+    }
+
+    /// A start tree that already tracks a `.claudinio.json` (every history
+    /// task does: this repository has one) still shows a clean `git status`
+    /// once the runner has rewritten its quality section: the change is the
+    /// runner's, and the agent's diff, the quality digest and the finish-line
+    /// check must not see it.
+    #[test]
+    fn the_runner_rewriting_a_tracked_quality_config_is_not_the_agents_change() {
+        let work = tempfile::tempdir().unwrap();
+        let mut task = Task::parse(TASK, "greet").unwrap();
+        task.setup
+            .files
+            .insert(".claudinio.json".into(), "{\"ui\": {}}\n".into());
+        let ws = work.path().join("ws");
+        prepare_workspace(&task, &ws).unwrap();
+        let written = std::fs::read_to_string(ws.join(".claudinio.json")).unwrap();
+        assert!(written.contains("test_cmd"), "{written}");
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&ws)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
     }
 
     #[test]

@@ -155,6 +155,28 @@ pub(crate) fn exclude_from_git(dest: &Path, path: &str) -> Result<(), String> {
     std::fs::write(&file, current).map_err(|e| format!("git exclude: {e}"))
 }
 
+/// Keep the runner's own change to `path` out of `git status` whether or not
+/// the start tree tracks it: an untracked file is excluded, and a tracked one
+/// (a history task's own `.claudinio.json`) is marked `--skip-worktree`, since
+/// an exclude has no effect on a file git already tracks.
+pub(crate) fn hide_from_git(dest: &Path, path: &str) -> Result<(), String> {
+    let tracked = git(dest)
+        .args(["ls-files", "--error-unmatch", "--", path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if tracked {
+        run_git(
+            git(dest).args(["update-index", "--skip-worktree", "--", path]),
+            "git update-index",
+        )
+        .map(|_| ())
+    } else {
+        exclude_from_git(dest, path)
+    }
+}
+
 /// Unpack the tree of `commit` from `repo` (a local path or a clone URL) into
 /// `dest`, without its history.
 fn export_git_tree(repo: &str, commit: &str, dest: &Path) -> Result<(), String> {
