@@ -440,6 +440,19 @@ def usage_tokens(rec):
             rec.get("cache_creation_tokens") or 0, rec.get("output_tokens") or 0)
 
 
+def transcript_id(tool_use_id):
+    """A tool-use id as `persist::subagent_transcript_path` writes it into a
+    file name: every character outside [A-Za-z0-9_-] becomes '_'."""
+    return "".join(c if (c.isascii() and c.isalnum()) or c in "_-" else "_"
+                   for c in str(tool_use_id))
+
+
+# The stem prefix of a compaction summarizer's transcript (`compact-<n>.jsonl`,
+# `subagent::COMPACTION` in the Rust code), where a spawned subagent's is the
+# id of the `spawn_agents` call that started it.
+COMPACTION = "compact"
+
+
 def cost_stats(sessions_dir, since_ms=0):
     """Per-run and per-session cost, rounds and cache split from `usage` records."""
     runs, session_costs = [], []
@@ -458,8 +471,9 @@ def cost_stats(sessions_dir, since_ms=0):
         current = None
         run_of_spawn = {}   # spawn_agents tool_use id -> run
 
-        def new_run():
-            return {"cost": 0.0, "unpriced": 0, "rounds": 0, "subagent_rounds": 0}
+        def new_run(start=None):
+            return {"cost": 0.0, "unpriced": 0, "rounds": 0, "subagent_rounds": 0,
+                    "start": start}
 
         def add(run, rec, sub):
             inp, read, created_, out = usage_tokens(rec)
@@ -480,30 +494,42 @@ def cost_stats(sessions_dir, since_ms=0):
         for rec in records:
             kind = rec.get("kind")
             if kind == "user" and (current is None or current["rounds"]):
-                current = new_run()
+                current = new_run(rec.get("ts"))
                 session_runs.append(current)
             elif kind == "usage":
                 if current is None:
-                    current = new_run()
+                    current = new_run(rec.get("ts"))
                     session_runs.append(current)
                 add(current, rec, False)
             elif kind == "turn" and rec.get("role") == "assistant":
                 for block in rec.get("content") or []:
                     if block.get("type") == "tool_use" and block.get("name") == "spawn_agents":
-                        run_of_spawn[block.get("id")] = current
+                        # Keyed as the transcript's file name spells the id.
+                        run_of_spawn[transcript_id(block.get("id"))] = current
             elif kind in ("done", "error"):
                 current = None
 
         sub_dir = path[:-len(".jsonl")] + ".sub"
         for sub_path in sorted(glob.glob(os.path.join(sub_dir, "*.jsonl"))):
+            sub_records = read_records(sub_path)
             tool_use_id = os.path.basename(sub_path)[:-len(".jsonl")].rsplit("-", 1)[0]
-            run = run_of_spawn.get(tool_use_id)
+            if tool_use_id == COMPACTION:
+                # A summary has no call to point at: it belongs to the run that
+                # was under way when it started (for a manual compaction, the
+                # run whose history it summarized).
+                started = next((r.get("created_at") for r in sub_records
+                                if r.get("kind") == "meta"), None)
+                run = next((r for r in reversed(session_runs)
+                            if started is not None and r["start"] is not None
+                            and r["start"] <= started), None)
+            else:
+                run = run_of_spawn.get(tool_use_id)
             if run is None:
                 # A spawn whose call is not in this file (summarized away):
                 # still this session's cost, booked to a run of its own.
                 run = new_run()
                 session_runs.append(run)
-            for rec in read_records(sub_path):
+            for rec in sub_records:
                 if rec.get("kind") == "usage":
                     add(run, rec, True)
 

@@ -107,5 +107,60 @@ class CostReport(unittest.TestCase):
         self.assertEqual(s["runs"], [])
 
 
+class SubagentTranscriptsFindTheirRun(unittest.TestCase):
+    """Each transcript in `<id>.sub/` is booked to the run that caused it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_tool_use_id_the_file_name_had_to_sanitize_still_finds_its_spawn(self):
+        d = self.tmp.name
+        write(os.path.join(d, "s.jsonl"), [
+            {"kind": "meta", "session_id": "s", "created_at": 1, "workspace": None},
+            {"kind": "user", "text": "go", "ts": 1},
+            usage(1, 10, 0, 0, 1, cost=0.01),
+            {"kind": "turn", "role": "assistant", "ts": 2, "content": [
+                {"type": "tool_use", "id": "call:7.a", "name": "spawn_agents", "input": {}}]},
+            {"kind": "done", "input_tokens": 10, "output_tokens": 1, "ts": 3},
+        ])
+        # persist::subagent_transcript_path writes "call:7.a" as "call_7_a".
+        write(os.path.join(d, "s.sub", "call_7_a-0.jsonl"), [
+            {"kind": "meta", "session_id": "s:sub", "created_at": 2, "workspace": None},
+            usage(1, 5, 0, 0, 1, cost=0.002, subagent="call_7_a-0"),
+        ])
+        s = session_stats.cost_stats(d)
+        self.assertEqual(len(s["runs"]), 1, "the subagent belongs to the run that spawned it")
+        self.assertEqual(s["runs"][0]["subagent_rounds"], 1)
+        self.assertAlmostEqual(s["runs"][0]["cost"], 0.012)
+
+    def test_a_compaction_summary_is_booked_to_the_run_it_compacted(self):
+        d = self.tmp.name
+        write(os.path.join(d, "s.jsonl"), [
+            {"kind": "meta", "session_id": "s", "created_at": 1, "workspace": None},
+            {"kind": "user", "text": "first", "ts": 10},
+            usage(11, 10, 0, 0, 1, cost=0.01),
+            {"kind": "compacted", "summary": "...", "tail_turns": 2, "ts": 15},
+            usage(16, 10, 0, 0, 1, cost=0.01),
+            {"kind": "done", "input_tokens": 20, "output_tokens": 2, "ts": 20},
+            {"kind": "user", "text": "second", "ts": 30},
+            usage(31, 10, 0, 0, 1, cost=0.01),
+            {"kind": "done", "input_tokens": 10, "output_tokens": 1, "ts": 32},
+        ])
+        write(os.path.join(d, "s.sub", "compact-0.jsonl"), [
+            {"kind": "meta", "session_id": "s-summarizer", "created_at": 12, "workspace": None},
+            usage(1, 100, 0, 0, 30, cost=0.004, subagent="compact-0"),
+            usage(2, 120, 0, 0, 40, cost=0.005, subagent="compact-0"),
+        ])
+        s = session_stats.cost_stats(d)
+        self.assertEqual(len(s["runs"]), 2, "a compaction is not a run of its own")
+        first, second = s["runs"]
+        self.assertEqual((first["rounds"], first["subagent_rounds"]), (2, 2))
+        self.assertAlmostEqual(first["cost"], 0.029)
+        self.assertEqual(second["subagent_rounds"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
