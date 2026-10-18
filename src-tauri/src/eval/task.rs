@@ -403,6 +403,34 @@ max_rounds: 12
         assert!(Task::parse(&unlinked, "greet").is_ok());
     }
 
+    /// The task set the repository ships (`eval/tasks/`) must keep loading:
+    /// task files refuse unknown keys, so a format change that forgets them
+    /// fails here instead of at the start of a paid run. `validate` is what
+    /// proves each one fails and then passes; this only proves they parse.
+    #[test]
+    fn the_shipped_task_set_loads() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../eval/tasks");
+        let tasks = load_taskset(&dir, None).unwrap();
+        assert!(tasks.len() >= 25, "{} tasks", tasks.len());
+        for tag in [
+            "bugfix",
+            "feature",
+            "refactor",
+            "multi-edit",
+            "independent-edits",
+            "long",
+            "search",
+            "document",
+            "brain",
+            "history",
+        ] {
+            assert!(
+                tasks.iter().any(|t| t.tags.iter().any(|g| g == tag)),
+                "no task tagged {tag}"
+            );
+        }
+    }
+
     #[test]
     fn a_taskset_loads_in_file_order_and_can_be_narrowed() {
         let dir = tempfile::tempdir().unwrap();

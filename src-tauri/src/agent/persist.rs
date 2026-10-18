@@ -2557,6 +2557,48 @@ mod tests {
         }
     }
 
+    /// Subagent transcripts sit in `<id>.sub/` beside the session files. They
+    /// are not sessions: the sidebar must list the parent once, with its own
+    /// turns only, and never a subagent's transcript as a conversation.
+    #[test]
+    fn list_sessions_ignores_subagent_transcript_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_string_lossy().to_string();
+        let parent = SessionStore::create("parent", Some(&ws)).unwrap();
+        parent
+            .append(&SessionRecord::User {
+                text: "fix the pager".into(),
+                ts: 10,
+            })
+            .unwrap();
+        let sub = subagent_transcript_path(&parent.path, "tu_1", 0);
+        std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
+        let sub_store = SessionStore { path: sub.clone() };
+        for (i, text) in ["read pager.py", "edit pager.py"].iter().enumerate() {
+            sub_store
+                .append(&SessionRecord::User {
+                    text: (*text).into(),
+                    ts: 20 + i as u64,
+                })
+                .unwrap();
+        }
+        assert!(sub.exists());
+
+        let sessions = list_sessions(Some(&ws)).unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["parent"]
+        );
+        assert_eq!(sessions[0].title, "fix the pager");
+        assert_eq!(
+            sessions[0].turn_count, 1,
+            "the subagent's turns are not the parent's"
+        );
+    }
+
     #[test]
     fn list_sessions_includes_new_records_without_panic() {
         // Verify the match arms also handle LinkedFrom, HandoffTo, Handoff
