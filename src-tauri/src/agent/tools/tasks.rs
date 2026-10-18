@@ -124,6 +124,17 @@ pub fn parse_update_args(mut args: serde_json::Value) -> Result<Vec<UpdateTaskAr
         || args
             .get("journal")
             .is_some_and(|j| j.as_array().is_none_or(|a| !a.is_empty()));
+    // Nor does an empty `updates` beside the single form: the same model
+    // fills an unused array with `[]` instead of null.
+    if single_form
+        && args
+            .get("updates")
+            .and_then(|u| u.as_array())
+            .is_some_and(|a| a.is_empty())
+        && let Some(fields) = args.as_object_mut()
+    {
+        fields.remove("updates");
+    }
     match args.get("updates") {
         Some(_) if single_form => Err(format!("tasks_update: {SHAPES}, not both.")),
         Some(updates) => {
@@ -1500,6 +1511,20 @@ mod quality_gate_tests {
         // Both null names no task at all.
         let err = parse_update_args(json!({"id": null, "updates": null})).unwrap_err();
         assert!(err.contains("no task named"), "{err}");
+    }
+
+    // The same model fills an unused array with its empty default instead of
+    // null. An empty `updates` beside a single-form call names no task, as
+    // an empty journal does: the call means its single form, not a refusal
+    // that costs a retry round. Alone, it still names nothing.
+    #[test]
+    fn an_empty_updates_beside_the_single_form_is_read_as_absent() {
+        use serde_json::json;
+        let one = parse_update_args(json!({"id": "t1", "status": "done", "updates": []})).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].id, "t1");
+        assert_eq!(one[0].status.as_deref(), Some("done"));
+        assert!(parse_update_args(json!({"updates": []})).is_err());
     }
 
     // A top-level status or journal beside `updates` belongs to no task in the
