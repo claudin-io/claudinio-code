@@ -106,6 +106,39 @@ fn state_path(store_path: &Path) -> PathBuf {
     store_path.with_extension("doc.json")
 }
 
+/// Where `rel` points, if it is a file the harness may own: a `.md` file
+/// under `<workspace>/.claudinio/docs/`, named with plain components (no
+/// `..`, no root), that does not resolve outside that folder through a
+/// link. The path comes from the session file, which is workspace data like
+/// any other — a crafted or corrupted `document_linked` record must not make
+/// the harness rewrite `Cargo.toml` at the next run start (every `[word]`
+/// line of an INI or TOML file reads as a placeholder), so anything else
+/// leaves the session with no document. A file that does not exist (yet)
+/// passes: reading it fails, as before, and a dangling link is refused,
+/// since writing through it would create its target.
+fn document_path(workspace: &Path, rel: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let path = Path::new(rel);
+    let plain = path.components().all(|c| matches!(c, Component::Normal(_)));
+    let md = path.extension().is_some_and(|e| e == "md");
+    if !(plain && path.starts_with(DOCS_DIR) && md) {
+        return None;
+    }
+    let abs = workspace.join(path);
+    if std::fs::symlink_metadata(&abs).is_ok() {
+        let real = std::fs::canonicalize(&abs).ok()?;
+        // One component at a time: inside a Windows verbatim path
+        // (`\\?\C:\...`, what canonicalize returns) `/` is no separator.
+        let docs = DOCS_DIR
+            .split('/')
+            .fold(std::fs::canonicalize(workspace).ok()?, |p, c| p.join(c));
+        if !real.starts_with(docs) {
+            return None;
+        }
+    }
+    Some(abs)
+}
+
 fn linked_from(
     workspace: &Path,
     store_path: &Path,
@@ -113,7 +146,7 @@ fn linked_from(
 ) -> Option<Linked> {
     let rel = crate::agent::persist::linked_document(records)?;
     Some(Linked {
-        abs: workspace.join(&rel),
+        abs: document_path(workspace, &rel)?,
         rel,
         state: state_path(store_path),
     })
@@ -965,6 +998,72 @@ mod tests {
         assert_eq!(again, ".claudinio/docs/pudim-de-leite-2.md");
         assert!(create(&ws.root, Some(&ws.store()), " ", &topics).is_err());
         assert!(create(&ws.root, Some(&ws.store()), "T", &[]).is_err());
+    }
+
+    /// The session file is workspace data, and the harness rewrites the
+    /// linked document at every run start without asking: a
+    /// `document_linked` record naming anything but a `.md` file under
+    /// `.claudinio/docs/` (a crafted or corrupted session) must leave the
+    /// session with no document, and the file it names untouched.
+    #[test]
+    fn a_document_link_outside_claudinio_docs_is_ignored_and_never_written() {
+        let outside = std::env::temp_dir().join(format!(
+            "claudinio-doc-outside-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        let toml = "[package]\nname = \"x\"\n\n[dependencies]\n";
+        let outside_md = outside.join("notes.md");
+        let outside_name = outside.file_name().unwrap().to_string_lossy().to_string();
+        let mut hostile: Vec<(String, &str)> = vec![
+            ("Cargo.toml".into(), "Cargo.toml"),
+            (".claudinio/docs/../../Cargo.toml".into(), "Cargo.toml"),
+            (".claudinio/docs/../x.md".into(), ".claudinio/x.md"),
+            (
+                ".claudinio/docs/notes.txt".into(),
+                ".claudinio/docs/notes.txt",
+            ),
+            (format!("../{outside_name}/notes.md"), ""),
+            (outside_md.to_string_lossy().into(), ""),
+        ];
+        if cfg!(unix) {
+            hostile.push((".claudinio/docs/link.md".into(), "Cargo.toml"));
+        }
+        for (rel, target) in hostile {
+            let ws = Ws::new("hostile");
+            let file = if target.is_empty() {
+                outside_md.clone()
+            } else {
+                ws.root.join(target)
+            };
+            std::fs::create_dir_all(ws.root.join(DOCS_DIR)).unwrap();
+            std::fs::write(&file, toml).unwrap();
+            #[cfg(unix)]
+            if rel.ends_with("link.md") {
+                std::os::unix::fs::symlink(&file, ws.root.join(&rel)).unwrap();
+            }
+            SessionStore { path: ws.store() }
+                .append(&SessionRecord::DocumentLinked {
+                    path: rel.clone(),
+                    ts: now_ms(),
+                })
+                .unwrap();
+            assert!(!has_document(&ws.ctx), "{rel}");
+            assert!(run_start_blocks(&ws.ctx).is_empty(), "{rel}");
+            assert_eq!(
+                write(&ws.ctx, "s1", Some("x"), Status::Done),
+                Err(NO_DOCUMENT.to_string()),
+                "{rel}"
+            );
+            assert_eq!(view(&ws.root, &ws.store()), None, "{rel}");
+            assert!(
+                save_human(&ws.root, &ws.store(), toml, "[a]\n").is_err(),
+                "{rel}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), toml, "{rel}");
+        }
+        std::fs::remove_dir_all(&outside).ok();
     }
 
     #[test]
