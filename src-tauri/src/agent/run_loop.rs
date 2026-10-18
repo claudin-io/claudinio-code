@@ -2449,29 +2449,36 @@ pub(crate) mod surface_tests {
     // Stop pressed while a run of reads is under way: whatever had started
     // finishes and keeps its result, the rest are reported as not run, and the
     // model's turn is answered call for call, in order, once each.
+    //
+    // Six reads, four at a time (`MAX_CONCURRENT_TOOLS`), and the pause comes
+    // with the first result: the four already started finish and keep what
+    // they read, the two still waiting for a slot never start. The test
+    // runtime is single-threaded, so the four jobs are all started before any
+    // of them can report — the split is the same on every run.
     #[tokio::test]
-    async fn a_pause_during_parallel_reads_answers_every_call_once() {
+    async fn a_pause_during_parallel_reads_keeps_what_ran_and_answers_the_rest_as_not_run() {
+        assert_eq!(crate::agent::tool_batch::MAX_CONCURRENT_TOOLS, 4);
         let steering = Arc::new(SteeringCtl::new());
         let run = run_script_steered(
             "batch-pause",
             None,
             None,
             |path| {
+                let read = || ("read_file", serde_json::json!({ "path": path }));
+                let grep = || {
+                    (
+                        "grep",
+                        serde_json::json!({ "pattern": "hello", "path": path }),
+                    )
+                };
                 vec![
-                    Reply::Tools(vec![
-                        ("read_file", serde_json::json!({ "path": path })),
-                        (
-                            "grep",
-                            serde_json::json!({ "pattern": "hello", "path": path }),
-                        ),
-                        ("read_file", serde_json::json!({ "path": path })),
-                    ]),
+                    Reply::Tools(vec![read(), grep(), read(), grep(), read(), grep()]),
                     Reply::Text("should not be asked for"),
                 ]
             },
             steering,
             |event, steering| {
-                if matches!(event, AgentEvent::ToolCall { tool_id, .. } if tool_id == "tu_0_0") {
+                if matches!(event, AgentEvent::ToolResult { .. }) {
                     steering.interrupt.store(true, Ordering::SeqCst);
                 }
             },
@@ -2495,25 +2502,58 @@ pub(crate) mod surface_tests {
                 _ => None,
             })
             .collect();
-        let ids = |m: &Message, want_use: bool| -> Vec<String> {
-            m.content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, .. } if want_use => Some(id.clone()),
-                    ContentBlock::ToolResult { tool_use_id, .. } if !want_use => {
-                        Some(tool_use_id.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
         let [.., asked, answered] = &turns[..] else {
             panic!("no tool round recorded: {turns:?}");
         };
-        assert_eq!(ids(asked, true), ["tu_0_0", "tu_0_1", "tu_0_2"]);
-        assert_eq!(ids(answered, false), ["tu_0_0", "tu_0_1", "tu_0_2"]);
-        for id in ["tu_0_0", "tu_0_1", "tu_0_2"] {
-            event_at(&run, false, id);
+        let all: Vec<String> = (0..6).map(|i| format!("tu_0_{i}")).collect();
+        let asked_ids: Vec<String> = asked
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked_ids, all);
+        let answers: Vec<(String, String)> = answered
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => Some((tool_use_id.clone(), content.as_text().into_owned())),
+                _ => None,
+            })
+            .collect();
+        let answered_ids: Vec<&String> = answers.iter().map(|(id, _)| id).collect();
+        assert_eq!(
+            answered_ids,
+            all.iter().collect::<Vec<_>>(),
+            "once each, in order"
+        );
+        for (id, text) in &answers[..4] {
+            assert!(
+                text.contains("hello world"),
+                "{id} had started, so it keeps what it read: {text}"
+            );
+        }
+        for (id, text) in &answers[4..] {
+            assert_eq!(
+                text,
+                crate::agent::tool_batch::INTERRUPTED,
+                "{id} was still waiting for a slot"
+            );
+        }
+        // One ToolResult event per call: a kept call is not answered again.
+        for id in &all {
+            let n = run
+                .events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolResult { tool_id, .. } if tool_id == id))
+                .count();
+            assert_eq!(n, 1, "{id}: {n} results");
         }
         std::fs::remove_dir_all(&run.root).ok();
     }
