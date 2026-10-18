@@ -115,9 +115,16 @@ pub fn parse_update_args(mut args: serde_json::Value) -> Result<Vec<UpdateTaskAr
     if let Some(fields) = args.as_object_mut() {
         fields.retain(|_, v| !v.is_null());
     }
+    // A top-level status or journal beside `updates` names no task of the
+    // batch: refused, not silently dropped. An empty journal says nothing.
     let has_id = args.get("id").is_some();
+    let single_form = has_id
+        || args.get("status").is_some()
+        || args
+            .get("journal")
+            .is_some_and(|j| j.as_array().is_none_or(|a| !a.is_empty()));
     match args.get("updates") {
-        Some(_) if has_id => Err(format!("tasks_update: {SHAPES}, not both.")),
+        Some(_) if single_form => Err(format!("tasks_update: {SHAPES}, not both.")),
         Some(updates) => {
             let items: Vec<UpdateTaskArgs> = serde_json::from_value(updates.clone())
                 .map_err(|e| format!("tasks_update: invalid updates ({e}); {SHAPES}."))?;
@@ -1300,6 +1307,30 @@ mod quality_gate_tests {
         // Both null names no task at all.
         let err = parse_update_args(json!({"id": null, "updates": null})).unwrap_err();
         assert!(err.contains("no task named"), "{err}");
+    }
+
+    // A top-level status or journal beside `updates` belongs to no task in the
+    // batch: the call's intent is clear but its target is not, so it is
+    // refused with both shapes instead of being dropped and answered with
+    // "No change" (Phase 4 review). An empty journal says nothing and is
+    // read as absent, like a null.
+    #[test]
+    fn a_top_level_status_or_journal_beside_updates_is_refused() {
+        use serde_json::json;
+        for bad in [
+            json!({"updates": [{"id": "t1"}], "status": "done"}),
+            json!({"updates": [{"id": "t1"}], "journal": ["found it"]}),
+        ] {
+            let err = parse_update_args(bad.clone()).unwrap_err();
+            assert!(
+                err.contains("updates") && err.contains("\"id\""),
+                "{bad}: {err}"
+            );
+        }
+        let many =
+            parse_update_args(json!({"updates": [{"id": "t1", "status": "done"}], "journal": []}))
+                .unwrap();
+        assert_eq!(many.len(), 1);
     }
 }
 
