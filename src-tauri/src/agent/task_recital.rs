@@ -73,10 +73,21 @@ pub fn session_tasks(ctx: &ToolContext) -> Vec<TaskItem> {
 /// run (in Brain, work it cannot even do). The run's `<tasks>` block already
 /// shows it as `doing`, so it is not lost. Only a task this run moved to
 /// `doing`, or wrote to while it was `doing`, is named.
+///
+/// That is read off the status and the journal's length against the start
+/// snapshot, by id — not the whole task: a reworded title or description is
+/// not work on the task (Phase 4 final review). What a snapshot cannot see
+/// stays unseen: a task this run moved `doing` → `todo` → `doing` and wrote
+/// nothing to looks exactly as it started, and is not named.
 pub fn still_doing_nudge(ctx: &ToolContext, at_start: &[TaskItem]) -> Option<String> {
+    let worked_on = |t: &TaskItem| {
+        !at_start
+            .iter()
+            .any(|s| s.id == t.id && s.status == t.status && s.journal.len() == t.journal.len())
+    };
     let doing: Vec<TaskItem> = session_tasks(ctx)
         .into_iter()
-        .filter(|t| t.status == "doing" && !at_start.contains(t))
+        .filter(|t| t.status == "doing" && worked_on(t))
         .collect();
     (!doing.is_empty()).then(|| crate::agent::nudges::still_doing(&doing))
 }
@@ -685,6 +696,37 @@ mod loop_tests {
         let nudge = nudges_in(&bodies[2]);
         assert_eq!(nudge.len(), 1, "{nudge:?}");
         assert!(nudge[0].contains("'t1'"), "{}", nudge[0]);
+    }
+
+    // "Worked on" means moved to `doing` or written to while `doing` — a
+    // status or a journal entry. A task an earlier run left `doing` whose
+    // title this run only rewords (resending the list through `tasks_set`)
+    // has had no work done on it here, so the answer is not sent back.
+    #[tokio::test]
+    async fn rewording_a_task_left_doing_by_an_earlier_run_does_not_nudge() {
+        let ws = workspace("doing-reworded", &[doing("t1", "wire the UI")]);
+        let (outcome, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "rename that task",
+            vec![
+                Reply::Tool {
+                    name: "tasks_set",
+                    input: serde_json::json!({"tasks": [{
+                        "id": "t1", "title": "wire the settings UI",
+                        "description": "", "journal": [], "status": "doing"
+                    }]}),
+                },
+                Reply::Text("renamed it"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        assert_eq!(bodies.len(), 2, "the rename and the answer, no nudge");
     }
 
     // A model that closes the task when nudged ends the run on its answer.
