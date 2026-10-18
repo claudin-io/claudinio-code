@@ -159,6 +159,70 @@ pub(crate) fn normalize_spawn_input(tool_input: Value) -> Value {
     }
 }
 
+/// A subagent's transcript file (`persist::subagent_transcript_path`): its
+/// turns and one `Usage` record per provider request.
+///
+/// Before this, a subagent kept nothing but a `subagent_run` summary in its
+/// parent's file, so the share of a task's tokens spent re-exploring in a
+/// fresh context — the cost the lean-harness plan's C3 is about — had never
+/// been measured. Best-effort like every other session write: a transcript
+/// that cannot be written never fails the subagent.
+pub(crate) struct Transcript {
+    store: crate::agent::persist::SessionStore,
+    /// `<parent_tool_use_id>-<index>`, stamped on each `Usage` record.
+    label: String,
+}
+
+impl Transcript {
+    /// Open the transcript of subagent `index` of the `spawn_agents` call
+    /// `parent_tool_use_id`, or `None` when the parent has no session file.
+    pub(crate) fn open(
+        ctx: &ToolContext,
+        parent_tool_use_id: &str,
+        index: usize,
+        subagent_id: &str,
+    ) -> Option<Self> {
+        let parent = std::path::Path::new(ctx.session_store_path.as_deref()?);
+        let path =
+            crate::agent::persist::subagent_transcript_path(parent, parent_tool_use_id, index);
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        let label = path.file_stem()?.to_str()?.to_string();
+        let store = crate::agent::persist::SessionStore { path };
+        store.try_append(&crate::agent::persist::SessionRecord::Meta {
+            session_id: subagent_id.to_string(),
+            created_at: crate::agent::persist::now_ms(),
+            workspace: ctx.workspace_root.clone(),
+        });
+        Some(Self { store, label })
+    }
+
+    fn turn(&self, message: &Message) {
+        self.store
+            .try_append(&crate::agent::persist::SessionRecord::Turn {
+                message: message.clone(),
+                ts: crate::agent::persist::now_ms(),
+            });
+    }
+
+    fn usage(&self, round: u32, model: &str, usage: Option<&provider::Usage>) {
+        self.store
+            .try_append(&crate::agent::persist::SessionRecord::usage(
+                round,
+                model,
+                usage,
+                Some(self.label.clone()),
+            ));
+    }
+}
+
+/// Record `message` in the transcript, if there is one, and push it.
+fn push_recorded(history: &mut Vec<Message>, transcript: Option<&Transcript>, message: Message) {
+    if let Some(t) = transcript {
+        t.turn(&message);
+    }
+    history.push(message);
+}
+
 /// Spawn 1-4 parallel subagents, each with their own fresh context.
 /// Returns a combined ContentBlock with each agent's report and aggregated
 /// token usage.
@@ -253,8 +317,20 @@ pub async fn run_spawn_agents(
             },
         });
 
+        let transcript = Transcript::open(ctx, parent_tool_use_id, i, &subagent_id);
         handles.push(tokio::spawn(async move {
-            run_subagent(&cfg, &ctx_clone, &spec, &tx, &appr, &ans, &sid, &steer).await
+            run_subagent_recorded(
+                &cfg,
+                &ctx_clone,
+                &spec,
+                &tx,
+                &appr,
+                &ans,
+                &sid,
+                &steer,
+                transcript.as_ref(),
+            )
+            .await
         }));
     }
 
@@ -340,7 +416,8 @@ fn subagent_system_prompt(workspace_root: Option<&str>, skills_hint: &str) -> St
 }
 
 /// Run a single subagent: a simplified enxuto version of `run_workflow`.
-/// No steering injection, no persistence, no `AgentEvent::Done`.
+/// No steering injection, no `AgentEvent::Done`, and no transcript — see
+/// `run_subagent_recorded` for the one `spawn_agents` keeps.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_subagent(
     config: &AgentConfig,
@@ -351,6 +428,25 @@ pub async fn run_subagent(
     answers: &AnswerMap,
     session_id: &str,
     steering: &Arc<SteeringCtl>,
+) -> SubagentResult {
+    run_subagent_recorded(
+        config, ctx, spec, event_tx, approvals, answers, session_id, steering, None,
+    )
+    .await
+}
+
+/// `run_subagent`, writing its turns and per-request usage to `transcript`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_subagent_recorded(
+    config: &AgentConfig,
+    ctx: &ToolContext,
+    spec: &SubagentSpec,
+    event_tx: &Channel<AgentEvent>,
+    approvals: &ApprovalMap,
+    answers: &AnswerMap,
+    session_id: &str,
+    steering: &Arc<SteeringCtl>,
+    transcript: Option<&Transcript>,
 ) -> SubagentResult {
     let mcp_defs = ctx
         .mcp
@@ -397,17 +493,22 @@ pub async fn run_subagent(
         };
     }
 
-    let mut history = vec![Message {
-        role: "user".into(),
-        content: vec![ContentBlock::text(format!(
-            "Your goal:\n{goal}\n\nExpected output:\n{expected}",
-            goal = spec.goal,
-            expected = spec
-                .expected_output
-                .as_deref()
-                .unwrap_or("A concise report")
-        ))],
-    }];
+    let mut history = Vec::new();
+    push_recorded(
+        &mut history,
+        transcript,
+        Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text(format!(
+                "Your goal:\n{goal}\n\nExpected output:\n{expected}",
+                goal = spec.goal,
+                expected = spec
+                    .expected_output
+                    .as_deref()
+                    .unwrap_or("A concise report")
+            ))],
+        },
+    );
 
     let mut total_in = 0u32;
     let mut total_out = 0u32;
@@ -497,6 +598,9 @@ pub async fn run_subagent(
             }
         }
         rounds += 1;
+        if let Some(t) = transcript {
+            t.usage(rounds, &config.builder_model, stream_output.usage.as_ref());
+        }
 
         if stream_output.interrupted {
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
@@ -540,16 +644,28 @@ pub async fn run_subagent(
                 if let Some(reason) = out.blocking_message() {
                     stop_hook_active = true;
                     stop_hook_blocks += 1;
-                    history.push(Message {
-                        role: "user".into(),
-                        content: vec![ContentBlock::text(format!(
-                            "<hook-feedback>\n{reason}\n</hook-feedback>"
-                        ))],
-                    });
+                    push_recorded(
+                        &mut history,
+                        transcript,
+                        Message {
+                            role: "user".into(),
+                            content: vec![ContentBlock::text(format!(
+                                "<hook-feedback>\n{reason}\n</hook-feedback>"
+                            ))],
+                        },
+                    );
                     continue;
                 }
             }
 
+            if let Some(t) = transcript
+                && !assistant_text.is_empty()
+            {
+                t.turn(&Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text(&assistant_text)],
+                });
+            }
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
                 let est =
                     session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
@@ -704,24 +820,36 @@ pub async fn run_subagent(
             ));
         }
 
-        history.push(Message {
-            role: "assistant".into(),
-            content: tool_assistant_blocks,
-        });
+        push_recorded(
+            &mut history,
+            transcript,
+            Message {
+                role: "assistant".into(),
+                content: tool_assistant_blocks,
+            },
+        );
         let calls = history.last().map_or(&[][..], |m| m.content.as_slice());
         session::fit_round(&mut tool_result_blocks, calls, budget.round_chars);
-        history.push(Message {
-            role: "user".into(),
-            content: tool_result_blocks,
-        });
+        push_recorded(
+            &mut history,
+            transcript,
+            Message {
+                role: "user".into(),
+                content: tool_result_blocks,
+            },
+        );
         if !hook_tool_feedback.is_empty() {
             let text = hook_tool_feedback.join("\n\n");
-            history.push(Message {
-                role: "user".into(),
-                content: vec![ContentBlock::text(format!(
-                    "<hook-feedback>\n{text}\n</hook-feedback>"
-                ))],
-            });
+            push_recorded(
+                &mut history,
+                transcript,
+                Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text(format!(
+                        "<hook-feedback>\n{text}\n</hook-feedback>"
+                    ))],
+                },
+            );
         }
 
         // Subagents have no handoff and no summary: past the soft line their
@@ -1172,6 +1300,17 @@ pub(crate) mod scripted_model {
     pub async fn spawn_recording(
         script: Vec<Reply>,
     ) -> (String, Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<String>>>) {
+        spawn_with_usage(script, None).await
+    }
+
+    /// `spawn_recording`, with every reply opening on a `message_start` that
+    /// carries `usage` — the shape Anthropic reports input and cache tokens in.
+    /// Opt-in, because a reported input size feeds the context meter and would
+    /// move every test that measures it.
+    pub async fn spawn_with_usage(
+        script: Vec<Reply>,
+        usage: Option<Value>,
+    ) -> (String, Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let sizes = Arc::new(Mutex::new(Vec::new()));
@@ -1216,7 +1355,13 @@ pub(crate) mod scripted_model {
                     .push(String::from_utf8_lossy(&raw[body_start..]).into_owned());
                 let n = next.fetch_add(1, Ordering::SeqCst);
                 let reply = script.get(n).or(script.last()).expect("a script");
-                let body = render(reply, n);
+                let mut body = render(reply, n);
+                if let Some(usage) = &usage {
+                    body = sse(
+                        "message_start",
+                        json!({"message": {"role": "assistant", "usage": usage}}),
+                    ) + &body;
+                }
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1471,5 +1616,156 @@ mod context_budget_tests {
         assert!(result.report.contains("32k"), "{}", result.report);
         assert!(sizes.lock().unwrap().is_empty(), "nothing was sent");
         std::fs::remove_dir_all(root).ok();
+    }
+}
+
+/// A subagent's own transcript: the turns and per-request usage that used to
+/// vanish when it returned, so the delegation tax can finally be measured.
+#[cfg(test)]
+mod transcript_tests {
+    use super::scripted_model::{Reply, spawn_with_usage};
+    use super::*;
+    use crate::agent::persist::{SessionRecord, SessionStore, load_records};
+    use crate::agent::provider::ProviderEntry;
+
+    fn config_for(base_url: &str) -> AgentConfig {
+        let mut config = AgentConfig {
+            builder_model: "stub/m".into(),
+            ..AgentConfig::default()
+        };
+        config.providers.insert(
+            "stub".into(),
+            ProviderEntry {
+                api_key: "k".into(),
+                base_url: base_url.into(),
+                protocol: "anthropic".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("m".to_string(), 8_192u32)].into_iter().collect(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window: None,
+            },
+        );
+        config
+    }
+
+    #[tokio::test]
+    async fn a_subagent_writes_its_turns_and_usage_beside_the_session() {
+        let ws = std::env::temp_dir().join(format!(
+            "claudinio-transcript-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let file = ws.join("notes.txt");
+        std::fs::write(&file, "the answer is 42\n").unwrap();
+        let ws_str = ws.to_string_lossy().to_string();
+        let store = SessionStore::create("parent", Some(&ws_str)).unwrap();
+
+        let (base, _, _) = spawn_with_usage(
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": file.to_string_lossy() }),
+                },
+                Reply::Text("the answer is 42"),
+            ],
+            Some(serde_json::json!({"input_tokens": 50, "cache_read_input_tokens": 700})),
+        )
+        .await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str.clone()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let (_, _, _, _) = run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_parent",
+            serde_json::json!({"agents": [
+                {"name": "reader", "goal": "find the answer", "mode": "explore"}
+            ]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_parent", 0);
+        assert_eq!(
+            path,
+            store
+                .path
+                .parent()
+                .unwrap()
+                .join("parent.sub")
+                .join("tu_parent-0.jsonl")
+        );
+        let records = load_records(&path).expect("a transcript file");
+        let kinds: Vec<String> = records
+            .iter()
+            .map(|r| {
+                serde_json::to_value(r).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["meta", "turn", "usage", "turn", "turn", "usage", "turn"],
+            "goal, then per round: usage, the model's turn, the tool results"
+        );
+        let history = crate::agent::persist::history_from_records(&records);
+        assert_eq!(history.len(), 4);
+        assert!(format!("{:?}", history[0]).contains("find the answer"));
+        assert!(format!("{:?}", history[2]).contains("the answer is 42"));
+        assert!(format!("{:?}", history[3]).contains("the answer is 42"));
+        for r in &records {
+            if let SessionRecord::Usage {
+                subagent,
+                cache_read_tokens,
+                model,
+                ..
+            } = r
+            {
+                assert_eq!(subagent.as_deref(), Some("tu_parent-0"));
+                assert_eq!(*cache_read_tokens, 700);
+                assert_eq!(model, "stub/m");
+            }
+        }
+        // The parent file keeps its summary record and gains no subagent turns.
+        let parent = load_records(&store.path).unwrap();
+        assert!(
+            parent
+                .iter()
+                .any(|r| matches!(r, SessionRecord::SubagentRun { .. }))
+        );
+        assert!(
+            !parent
+                .iter()
+                .any(|r| matches!(r, SessionRecord::Turn { .. }))
+        );
+
+        // And the session list still shows one conversation, not the transcript.
+        let listed = crate::agent::persist::list_sessions(Some(&ws_str)).unwrap();
+        assert_eq!(listed.len(), 0, "the parent has no user turn of its own");
+        store
+            .append(&SessionRecord::User {
+                text: "go".into(),
+                ts: 1,
+            })
+            .unwrap();
+        let listed = crate::agent::persist::list_sessions(Some(&ws_str)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "parent");
+        std::fs::remove_dir_all(&ws).ok();
     }
 }

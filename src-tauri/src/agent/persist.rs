@@ -352,6 +352,61 @@ pub enum SessionRecord {
         tools: std::collections::BTreeMap<String, u32>,
         ts: u64,
     },
+    /// One provider request, as the provider billed it. Written once per
+    /// request — every round of the main loop, the handoff document, every
+    /// round of a subagent (into the subagent's own transcript, see
+    /// `subagent_transcript_path`) — so cost per solved task, rounds per task
+    /// and the cache share are read back from the file instead of estimated
+    /// from per-run totals (lean-harness plan, Phase 0: M1/M2).
+    ///
+    /// Token fields are what the provider reported for that request:
+    /// `input_tokens` is uncached input on Anthropic-protocol providers (and
+    /// on claudin.io, which reports cache misses only); on OpenAI-protocol
+    /// providers it is `prompt_tokens`, which already includes
+    /// `cache_read_tokens`. A request whose response carried no usage is
+    /// still written, with zeros, because it was still a round.
+    Usage {
+        /// 1-based request number within its run (main loop) or subagent;
+        /// 0 for the handoff document, which is asked for outside the loop.
+        round: u32,
+        model: String,
+        input_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+        output_tokens: u32,
+        /// Provider-reported cost in USD; `None` when the provider reports
+        /// none (no local estimate is substituted — that is the reader's call).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
+        /// `<parent_tool_use_id>-<index>` for a subagent's request; absent in
+        /// the main session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<String>,
+        ts: u64,
+    },
+}
+
+impl SessionRecord {
+    /// The `Usage` record for one provider request.
+    pub fn usage(
+        round: u32,
+        model: &str,
+        usage: Option<&crate::agent::provider::Usage>,
+        subagent: Option<String>,
+    ) -> Self {
+        let u = usage.cloned().unwrap_or_default();
+        SessionRecord::Usage {
+            round,
+            model: model.to_string(),
+            input_tokens: u.input_tokens,
+            cache_read_tokens: u.cache_read_input_tokens,
+            cache_creation_tokens: u.cache_creation_input_tokens,
+            output_tokens: u.output_tokens,
+            cost: u.cost,
+            subagent,
+            ts: now_ms(),
+        }
+    }
 }
 
 /// A `QualityRun` record, flattened for the callers that only need the verdict.
@@ -506,6 +561,41 @@ pub fn sessions_dir(workspace: Option<&str>) -> Result<PathBuf, String> {
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("create sessions dir: {e}"))?;
     Ok(dir)
+}
+
+/// Where a subagent's transcript lives: `<sessions_dir>/<session_id>.sub/
+/// <parent_tool_use_id>-<index>.jsonl`, beside the session that spawned it.
+///
+/// A directory rather than more lines in the parent file, because the parent
+/// file is the model's history — re-read on every message and replayed into
+/// the next request — and a subagent's turns are not part of it. The `.sub`
+/// suffix keeps it out of `list_sessions`, which only reads `*.jsonl` files at
+/// the top of the directory. The tool-use id comes from the provider, so
+/// anything outside `[A-Za-z0-9_-]` is replaced before it becomes a file name.
+pub fn subagent_transcript_path(
+    session_file: &Path,
+    parent_tool_use_id: &str,
+    index: usize,
+) -> PathBuf {
+    let stem = session_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session");
+    let id: String = parent_tool_use_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    session_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.sub"))
+        .join(format!("{id}-{index}.jsonl"))
 }
 
 /// Append-only handle to one session's JSONL file. Cheap to clone (holds a path);
@@ -1126,6 +1216,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::RunConfig { ts, .. }
                 | SessionRecord::ModeRoute { ts, .. }
                 | SessionRecord::SubagentRun { ts, .. }
+                | SessionRecord::Usage { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
@@ -2778,5 +2869,74 @@ mod pruned_tests {
         recs.push(turn("user", vec![ContentBlock::text("and now?")]));
         let h = history_from_records(&recs);
         assert_eq!(h.last().unwrap().content[0].get_text(), Some("and now?"));
+    }
+}
+
+/// Per-request usage records (`SessionRecord::Usage`) and the promise that
+/// session files keep loading across the format change in both directions.
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    fn tmp_file(name: &str, lines: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio_usage_{name}_{}_{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    const OLD_SESSION: [&str; 4] = [
+        r#"{"kind":"meta","session_id":"old","created_at":1,"workspace":null}"#,
+        r#"{"kind":"user","text":"fix it","ts":2}"#,
+        r#"{"kind":"turn","role":"assistant","content":[{"type":"text","text":"done"}],"ts":3}"#,
+        r#"{"kind":"done","input_tokens":10,"output_tokens":5,"ts":4}"#,
+    ];
+
+    /// A file written before per-request usage existed loads exactly as it did.
+    #[test]
+    fn a_session_written_before_usage_records_still_loads() {
+        let path = tmp_file("old", &OLD_SESSION);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(history_from_records(&records).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The current code reads the record it writes: one line per provider
+    /// request, with the cache split that cost-per-task needs.
+    #[test]
+    fn a_usage_line_loads_as_a_usage_record() {
+        let usage = r#"{"kind":"usage","round":3,"model":"stub/m","input_tokens":120,"cache_read_tokens":4000,"cache_creation_tokens":800,"output_tokens":64,"cost":0.0123,"subagent":"tu_1-0","ts":5}"#;
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(usage);
+        let path = tmp_file("new", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 5, "the usage line must not be skipped");
+        let value = serde_json::to_value(&records[4]).unwrap();
+        assert_eq!(value["kind"], "usage");
+        assert_eq!(value["round"], 3);
+        assert_eq!(value["cache_read_tokens"], 4000);
+        assert_eq!(value["cache_creation_tokens"], 800);
+        assert_eq!(value["subagent"], "tu_1-0");
+        // Usage is bookkeeping, never conversation.
+        assert_eq!(history_from_records(&records).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// A record kind this build does not know (one a later version adds) is
+    /// skipped, and everything around it still loads — the same guarantee an
+    /// older build gives a file that holds `usage` lines.
+    #[test]
+    fn an_unknown_record_kind_is_skipped_and_the_rest_loads() {
+        let mut lines = OLD_SESSION.to_vec();
+        lines.insert(2, r#"{"kind":"from_the_future","x":1,"ts":9}"#);
+        let path = tmp_file("future", &lines);
+        assert_eq!(load_records(&path).unwrap().len(), 4);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

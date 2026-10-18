@@ -446,6 +446,12 @@ pub(super) async fn maybe_context_handoff(
                 return None;
             }
         };
+        store.try_append(&SessionRecord::usage(
+            0,
+            resolved_model,
+            out.usage.as_ref(),
+            None,
+        ));
         if out.interrupted {
             // The user interrupted mid-generation: abandon the handoff and let
             // the main loop take its normal interrupted path.
@@ -738,5 +744,73 @@ mod verbatim_compaction_tests {
         assert!(b.soft < b.hard && b.hard < b.ceiling, "{b:?}");
         assert!(b.ceiling < 65_536);
         assert!(b.soft > 10_000, "the soft line is past the prefix: {b:?}");
+    }
+}
+
+/// The handoff document is a provider request like any other, and is billed.
+#[cfg(test)]
+mod handoff_usage_tests {
+    use super::*;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+
+    const DOCUMENT: &str = "## Purpose of next session\nFinish the parser refactor.\n\
+        ## Current state\nThe lexer is split; tests green.\n## Key decisions\nKeep the API.\n\
+        ## Pointers\nsrc/parser.rs\n## In-flight work\nThe expression module.\n\
+        ## Next actions\nMove the expression parser, run the tests.";
+
+    #[tokio::test]
+    async fn the_handoff_document_request_leaves_a_usage_record() {
+        let (base, _, bodies) = spawn_recording(vec![Reply::Text(DOCUMENT)]).await;
+        let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let path = std::env::temp_dir().join(format!(
+            "claudinio_handoff_usage_{}_{}.jsonl",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::write(&path, "").unwrap();
+        let store = SessionStore { path };
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let mut history = vec![
+            Message {
+                role: "user".into(),
+                content: vec![ContentBlock::text("Refactor the parser.")],
+            },
+            Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::text("Working on it.")],
+            },
+        ];
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let outcome = maybe_context_handoff(
+            &config,
+            &budget,
+            PromptProfile::Standard,
+            budget.soft,
+            &mut history,
+            "You are a test.",
+            &store,
+            &ctx,
+            &events,
+            "handoff-usage",
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+            0,
+            0,
+            0,
+        )
+        .await;
+        assert!(matches!(outcome, Some(RunOutcome::Handoff(_))));
+        assert_eq!(bodies.lock().unwrap().len(), 1);
+        let usage: Vec<u32> = crate::agent::persist::load_records(&store.path)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                SessionRecord::Usage { round, .. } => Some(round),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage, vec![0], "one request, outside the loop's rounds");
+        std::fs::remove_file(&store.path).ok();
     }
 }

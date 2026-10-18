@@ -498,6 +498,8 @@ pub async fn run_workflow_with_profile(
     }
 
     let max_rounds = config.max_rounds.unwrap_or(usize::MAX);
+    // Provider requests made by this run, for the per-request `Usage` record.
+    let mut requests: u32 = 0;
     for _ in 0..max_rounds {
         // The mode can change mid-run (human toggle, or the agent's own
         // enter/exit_plan_mode in the previous round) — refresh the prompt
@@ -694,6 +696,14 @@ pub async fn run_workflow_with_profile(
             &net_detail,
         )
         .await?;
+        requests += 1;
+        store.try_append(&SessionRecord::usage(
+            requests,
+            resolved_model,
+            stream_output.usage.as_ref(),
+            None,
+        ));
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
 
         let text_output = assistant_text;
         let tool_uses = stream_output.tool_uses;
@@ -1937,7 +1947,7 @@ mod finish_line_tests {
 }
 
 #[cfg(test)]
-mod surface_tests {
+pub(crate) mod surface_tests {
     use super::*;
     use crate::agent::handoff::shed_line;
     use crate::agent::prompt::{api_tools, system_prompt};
@@ -1952,7 +1962,7 @@ mod surface_tests {
 
     /// A provider "stub" serving model "m" as the builder, with the window the
     /// user typed for it.
-    pub(super) fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
+    pub(crate) fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
             builder_model: "stub/m".into(),
             // Edits are approved without a person, so a run can finish.
@@ -2733,5 +2743,115 @@ mod context_line_tests {
         let records = crate::agent::persist::load_records(&store.path).unwrap();
         assert_eq!(rewrites(&records), 1);
         let _ = std::fs::remove_file(&store.path);
+    }
+}
+
+/// Per-request accounting: what the eval reads cost per task and rounds from.
+#[cfg(test)]
+mod usage_record_tests {
+    use super::surface_tests::config_for;
+    use super::*;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_with_usage};
+
+    #[tokio::test]
+    async fn every_provider_request_of_a_run_leaves_one_usage_record() {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-usage-run-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("greet.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+        let path = file.to_string_lossy().to_string();
+        let store = SessionStore {
+            path: root.join("session.jsonl"),
+        };
+        std::fs::write(&store.path, "").unwrap();
+        let (base, _, bodies) = spawn_with_usage(
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": path }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "hello", "new_string": "goodbye",
+                    }),
+                },
+                Reply::Text("changed the greeting"),
+            ],
+            Some(serde_json::json!({
+                "input_tokens": 100,
+                "cache_read_input_tokens": 2_000,
+                "cache_creation_input_tokens": 300,
+            })),
+        )
+        .await;
+        // A 32k window runs the Compact profile, which edits without a subagent,
+        // so every request in this run is the main session's own.
+        let config = config_for(&base, Some(32_768));
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let outcome = run_workflow(
+            &config,
+            &mut Vec::new(),
+            "say goodbye instead".into(),
+            Vec::new(),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "usage-test",
+            &ctx,
+            &store,
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+        )
+        .await;
+        assert!(matches!(outcome, Ok(RunOutcome::Completed)));
+
+        let usage: Vec<_> = crate::agent::persist::load_records(&store.path)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                SessionRecord::Usage {
+                    round,
+                    model,
+                    input_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    output_tokens,
+                    subagent,
+                    ..
+                } => Some((
+                    round,
+                    model,
+                    input_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    output_tokens,
+                    subagent,
+                )),
+                _ => None,
+            })
+            .collect();
+        let requests = bodies.lock().unwrap().len();
+        assert_eq!(requests, 3);
+        assert_eq!(usage.len(), requests, "one record per provider request");
+        let rounds: Vec<u32> = usage.iter().map(|u| u.0).collect();
+        assert_eq!(rounds, vec![1, 2, 3]);
+        for u in &usage {
+            assert_eq!(u.1, "stub/m");
+            assert_eq!((u.2, u.3, u.4), (100, 2_000, 300));
+            assert_eq!(u.6, None, "the main session's requests carry no subagent");
+        }
+        let outputs: Vec<u32> = usage.iter().map(|u| u.5).collect();
+        assert_eq!(outputs, vec![20, 20, 5]);
+        std::fs::remove_dir_all(&root).ok();
     }
 }
