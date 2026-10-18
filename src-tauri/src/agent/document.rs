@@ -88,7 +88,9 @@ pub struct Section {
     /// rendered verbatim while the fields still match, so an untouched
     /// section keeps the user's spacing.
     header_raw: String,
-    header_fields: Option<HeaderFields>,
+    /// Boxed: only compared, and inline it made every `Block::Section`
+    /// ten times the size of a `Block::Prose`.
+    header_fields: Option<Box<HeaderFields>>,
     /// The end marker line as read, or as the harness wrote it; empty when
     /// the body runs to the next section (a file without the marker).
     end_raw: String,
@@ -121,7 +123,7 @@ impl Section {
     }
 
     fn header(&self) -> String {
-        if self.header_fields.as_ref() == Some(&self.fields()) {
+        if self.header_fields.as_deref() == Some(&self.fields()) {
             return self.header_raw.clone();
         }
         if self.written {
@@ -297,7 +299,7 @@ fn section(header_raw: String, topic: String, comment: Option<Tag>, written: boo
         header_fields: None,
         end_raw: String::new(),
     };
-    s.header_fields = Some(s.fields());
+    s.header_fields = Some(Box::new(s.fields()));
     s
 }
 
