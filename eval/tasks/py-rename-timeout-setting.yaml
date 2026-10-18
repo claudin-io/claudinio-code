@@ -1,0 +1,178 @@
+id: py-rename-timeout-setting
+title: Rename the timeout setting everywhere
+tags:
+- multi-edit
+- refactor
+- python
+prompt: |
+  Rename the `timeout` setting to `timeout_seconds` across the project, consistently:
+
+  - the config key (DEFAULTS and load(), including its validation message:
+    "timeout_seconds must be positive");
+  - the CLI flag, which becomes --timeout-seconds; the old --timeout flag must be
+    rejected (argparse must not accept it as an abbreviation of the new one);
+  - the Client attribute, client.timeout_seconds; describe() keeps its output format;
+  - the README, and the existing tests.
+
+  For one release load() must still accept the old `timeout` key in overrides and
+  treat it as timeout_seconds (the result must not contain a `timeout` key).
+setup:
+  files:
+    app/__init__.py: ''
+    app/config.py: |
+      DEFAULTS = {"timeout": 30, "retries": 2}
+
+
+      def load(overrides=None):
+          """The effective settings: defaults, then overrides."""
+          config = dict(DEFAULTS)
+          config.update(overrides or {})
+          if config["timeout"] <= 0:
+              raise ValueError("timeout must be positive")
+          return config
+    app/client.py: |
+      class Client:
+          def __init__(self, config):
+              self.timeout = config["timeout"]
+              self.retries = config["retries"]
+
+          def describe(self):
+              return f"client(timeout={self.timeout}s, retries={self.retries})"
+    app/cli.py: |
+      import argparse
+
+      from app.client import Client
+      from app.config import load
+
+
+      def build(argv):
+          parser = argparse.ArgumentParser(prog="app")
+          parser.add_argument("--timeout", type=int)
+          parser.add_argument("--retries", type=int)
+          args = parser.parse_args(argv)
+          overrides = {k: v for k, v in vars(args).items() if v is not None}
+          return Client(load(overrides))
+    README.md: |
+      # app
+
+      Settings: `timeout` (seconds, default 30) and `retries` (default 2).
+
+          python -m app --timeout 10 --retries 3
+    tests/__init__.py: ''
+    tests/test_app.py: |
+      from app.cli import build
+      from app.config import load
+
+
+      def test_defaults():
+          assert load()["timeout"] == 30
+
+
+      def test_cli_overrides():
+          client = build(["--timeout", "5"])
+          assert client.timeout == 5
+          assert client.describe() == "client(timeout=5s, retries=2)"
+check: python3 -m pytest -q -p no:cacheprovider tests
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider tests && grep -q 'timeout_seconds' README.md && grep
+    -q -- '--timeout-seconds' README.md && ! grep -qE -- '--timeout( |$)' README.md
+  timeout_s: 60
+  files:
+    tests/test_app.py: |
+      import pytest
+
+      from app.cli import build
+      from app.client import Client
+      from app.config import load
+
+
+      def test_defaults_use_the_new_key():
+          config = load()
+          assert config["timeout_seconds"] == 30
+          assert "timeout" not in config
+
+
+      def test_old_key_is_still_accepted():
+          config = load({"timeout": 7})
+          assert config["timeout_seconds"] == 7
+          assert "timeout" not in config
+
+
+      def test_validation_names_the_new_key():
+          with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+              load({"timeout_seconds": 0})
+
+
+      def test_cli_flag_and_client_attribute():
+          client = build(["--timeout-seconds", "5"])
+          assert client.timeout_seconds == 5
+          assert client.describe() == "client(timeout=5s, retries=2)"
+          assert not hasattr(client, "timeout")
+
+
+      def test_old_flag_is_gone():
+          with pytest.raises(SystemExit):
+              build(["--timeout", "5"])
+
+
+      def test_client_reads_the_new_key():
+          assert Client({"timeout_seconds": 9, "retries": 1}).timeout_seconds == 9
+reference:
+  files:
+    app/config.py: |
+      DEFAULTS = {"timeout_seconds": 30, "retries": 2}
+
+
+      def load(overrides=None):
+          """The effective settings: defaults, then overrides."""
+          overrides = dict(overrides or {})
+          if "timeout" in overrides:
+              # Deprecated spelling, accepted for one release.
+              overrides.setdefault("timeout_seconds", overrides.pop("timeout"))
+          config = dict(DEFAULTS)
+          config.update(overrides)
+          if config["timeout_seconds"] <= 0:
+              raise ValueError("timeout_seconds must be positive")
+          return config
+    app/client.py: |
+      class Client:
+          def __init__(self, config):
+              self.timeout_seconds = config["timeout_seconds"]
+              self.retries = config["retries"]
+
+          def describe(self):
+              return f"client(timeout={self.timeout_seconds}s, retries={self.retries})"
+    app/cli.py: |
+      import argparse
+
+      from app.client import Client
+      from app.config import load
+
+
+      def build(argv):
+          parser = argparse.ArgumentParser(prog="app", allow_abbrev=False)
+          parser.add_argument("--timeout-seconds", type=int)
+          parser.add_argument("--retries", type=int)
+          args = parser.parse_args(argv)
+          overrides = {k: v for k, v in vars(args).items() if v is not None}
+          return Client(load(overrides))
+    README.md: |
+      # app
+
+      Settings: `timeout_seconds` (default 30) and `retries` (default 2).
+
+          python -m app --timeout-seconds 10 --retries 3
+    tests/test_app.py: |
+      from app.cli import build
+      from app.config import load
+
+
+      def test_defaults():
+          assert load()["timeout_seconds"] == 30
+
+
+      def test_cli_overrides():
+          client = build(["--timeout-seconds", "5"])
+          assert client.timeout_seconds == 5
+          assert client.describe() == "client(timeout=5s, retries=2)"
+max_rounds: 50

@@ -1,0 +1,89 @@
+id: js-digest-local-day
+title: Digest entries land on the wrong day west of UTC
+tags:
+- search
+- bugfix
+- javascript
+prompt: |
+  Users west of UTC see their late-evening entries filed under the next day in the
+  daily digest. Entries should be grouped by the user's own calendar day. Fix it;
+  `node --test` has a failing case.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "fixture",
+        "private": true,
+        "type": "module"
+      }
+    chronicle.js: |
+      // The calendar-day key ("YYYY-MM-DD") an instant belongs to for someone
+      // whose clock is `offsetMinutes` from UTC (e.g. -300 for UTC-5).
+      export function dayKey(instant, offsetMinutes) {
+        return new Date(instant).toISOString().slice(0, 10);
+      }
+    digest.js: |
+      import { dayKey } from "./chronicle.js";
+
+      export function buildDigest(entries, user) {
+        const days = {};
+        for (const entry of entries) {
+          const key = dayKey(entry.at, user.offsetMinutes);
+          (days[key] ??= []).push(entry.title);
+        }
+        return days;
+      }
+    schedule.js: |
+      // Next reminder time, in UTC milliseconds. Uses absolute instants only.
+      export function nextReminder(lastAt, everyHours) {
+        return new Date(lastAt).getTime() + everyHours * 3_600_000;
+      }
+    calendar.js: |
+      // Month grid helper: how many days a month has (month is 1-12).
+      export function daysInMonth(year, month) {
+        return new Date(Date.UTC(year, month, 0)).getUTCDate();
+      }
+    digest.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { buildDigest } from "./digest.js";
+      import { daysInMonth } from "./calendar.js";
+
+      const entries = [
+        { at: "2026-03-01T02:30:00Z", title: "late note" },
+        { at: "2026-03-01T15:00:00Z", title: "afternoon" },
+      ];
+
+      test("UTC users", () => {
+        assert.deepEqual(buildDigest(entries, { offsetMinutes: 0 }), {
+          "2026-03-01": ["late note", "afternoon"],
+        });
+      });
+
+      test("users west of UTC keep late entries on their own day", () => {
+        assert.deepEqual(buildDigest(entries, { offsetMinutes: -300 }), {
+          "2026-02-28": ["late note"],
+          "2026-03-01": ["afternoon"],
+        });
+      });
+
+      test("users east of UTC", () => {
+        assert.deepEqual(buildDigest([{ at: "2026-03-01T20:00:00Z", title: "x" }], { offsetMinutes: 330 }), {
+          "2026-03-02": ["x"],
+        });
+      });
+
+      test("calendar is unaffected", () => assert.equal(daysInMonth(2026, 2), 28));
+oracle:
+  command: node --test
+  timeout_s: 60
+reference:
+  files:
+    chronicle.js: |
+      // The calendar-day key ("YYYY-MM-DD") an instant belongs to for someone
+      // whose clock is `offsetMinutes` from UTC (e.g. -300 for UTC-5).
+      export function dayKey(instant, offsetMinutes) {
+        const local = new Date(new Date(instant).getTime() + offsetMinutes * 60_000);
+        return local.toISOString().slice(0, 10);
+      }
+max_rounds: 40

@@ -1,0 +1,128 @@
+id: js-lru-cache
+title: Implement an LRU cache
+tags:
+- feature
+- javascript
+prompt: |
+  lru.js has an empty LRUCache class. Implement it:
+
+  - new LRUCache(capacity): capacity must be a positive integer, otherwise throw a
+    RangeError.
+  - get(key): the value, or undefined when absent. A hit makes the key the most
+    recently used.
+  - set(key, value): insert or update, making the key the most recently used; when
+    the cache grows past capacity, evict the least recently used key.
+  - has(key): whether the key is present, without changing its recency.
+  - size: a getter with the number of entries.
+
+  lru.test.js has a starting test; `node --test` runs it.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "fixture",
+        "private": true,
+        "type": "module"
+      }
+    lru.js: |
+      export class LRUCache {
+        constructor(capacity) {
+          throw new Error("not implemented");
+        }
+      }
+    lru.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { LRUCache } from "./lru.js";
+
+      test("stores and returns a value", () => {
+        const c = new LRUCache(2);
+        c.set("a", 1);
+        assert.equal(c.get("a"), 1);
+      });
+oracle:
+  command: node --test
+  timeout_s: 60
+  files:
+    lru.hidden.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { LRUCache } from "./lru.js";
+
+      test("evicts the least recently used", () => {
+        const c = new LRUCache(2);
+        c.set("a", 1);
+        c.set("b", 2);
+        c.get("a");
+        c.set("c", 3);
+        assert.equal(c.has("b"), false);
+        assert.equal(c.get("a"), 1);
+        assert.equal(c.get("c"), 3);
+        assert.equal(c.size, 2);
+      });
+
+      test("updating a key refreshes it without growing", () => {
+        const c = new LRUCache(2);
+        c.set("a", 1);
+        c.set("b", 2);
+        c.set("a", 10);
+        c.set("c", 3);
+        assert.equal(c.get("a"), 10);
+        assert.equal(c.has("b"), false);
+        assert.equal(c.size, 2);
+      });
+
+      test("has does not change recency", () => {
+        const c = new LRUCache(2);
+        c.set("a", 1);
+        c.set("b", 2);
+        assert.equal(c.has("a"), true);
+        c.set("c", 3);
+        assert.equal(c.has("a"), false);
+      });
+
+      test("missing keys and bad capacities", () => {
+        assert.equal(new LRUCache(1).get("x"), undefined);
+        for (const bad of [0, -1, 1.5, "2"]) {
+          assert.throws(() => new LRUCache(bad), RangeError);
+        }
+      });
+reference:
+  files:
+    lru.js: |
+      export class LRUCache {
+        #capacity;
+        #map = new Map();
+
+        constructor(capacity) {
+          if (!Number.isInteger(capacity) || capacity < 1) {
+            throw new RangeError("capacity must be a positive integer");
+          }
+          this.#capacity = capacity;
+        }
+
+        get(key) {
+          if (!this.#map.has(key)) return undefined;
+          const value = this.#map.get(key);
+          this.#map.delete(key);
+          this.#map.set(key, value);
+          return value;
+        }
+
+        set(key, value) {
+          this.#map.delete(key);
+          this.#map.set(key, value);
+          if (this.#map.size > this.#capacity) {
+            this.#map.delete(this.#map.keys().next().value);
+          }
+        }
+
+        has(key) {
+          return this.#map.has(key);
+        }
+
+        get size() {
+          return this.#map.size;
+        }
+      }
+max_rounds: 40

@@ -1,0 +1,200 @@
+id: brain-todo-priorities
+title: Priorities in the todo CLI (fully specified)
+tags:
+- brain
+- feature
+- python
+prompt: |
+  Add priorities to the todo CLI in todo.py. Everything you need is here; please don't
+  stop to ask me questions.
+
+  - `python3 todo.py add TEXT... --priority high|medium|low`; --priority may appear
+    anywhere after `add` and defaults to medium.
+  - `list` prints tasks sorted by priority (high, then medium, then low); tasks with the
+    same priority keep the order they were added. Each line is `[ ] (high) text`, with
+    `[x]` for done tasks.
+  - `done N` keeps referring to the N-th task in the order they were added (not the
+    listed order).
+  - An invalid priority prints `error: priority must be high, medium or low` to stderr,
+    exits with status 2 and adds nothing.
+  - Existing todo files whose tasks have no priority load as medium.
+setup:
+  files:
+    todo.py: |
+      import json
+      import os
+      import sys
+
+
+      def path():
+          return os.environ.get("TODO_FILE", "todo.json")
+
+
+      def load():
+          if not os.path.exists(path()):
+              return []
+          with open(path()) as handle:
+              return json.load(handle)
+
+
+      def save(items):
+          with open(path(), "w") as handle:
+              json.dump(items, handle)
+
+
+      def main(argv):
+          if not argv:
+              print("usage: todo.py add TEXT | list | done N", file=sys.stderr)
+              return 2
+          command, rest = argv[0], argv[1:]
+          items = load()
+          if command == "add":
+              items.append({"text": " ".join(rest), "done": False})
+              save(items)
+          elif command == "list":
+              for item in items:
+                  print(f"[{'x' if item['done'] else ' '}] {item['text']}")
+          elif command == "done":
+              items[int(rest[0]) - 1]["done"] = True
+              save(items)
+          else:
+              print(f"unknown command {command}", file=sys.stderr)
+              return 2
+          return 0
+
+
+      if __name__ == "__main__":
+          sys.exit(main(sys.argv[1:]))
+    test_todo.py: |
+      import os
+      import subprocess
+      import sys
+
+      HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+      def todo(tmp_path, *args):
+          env = dict(os.environ, TODO_FILE=str(tmp_path / "todo.json"))
+          return subprocess.run(
+              [sys.executable, os.path.join(HERE, "todo.py"), *args],
+              capture_output=True, text=True, env=env,
+          )
+      def test_add_and_done(tmp_path):
+          assert todo(tmp_path, "add", "buy", "milk").returncode == 0
+          assert todo(tmp_path, "done", "1").returncode == 0
+          assert "buy milk" in todo(tmp_path, "list").stdout
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider
+  timeout_s: 60
+  files:
+    test_priorities_hidden.py: |
+      import os
+      import subprocess
+      import sys
+
+      HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+      def todo(tmp_path, *args):
+          env = dict(os.environ, TODO_FILE=str(tmp_path / "todo.json"))
+          return subprocess.run(
+              [sys.executable, os.path.join(HERE, "todo.py"), *args],
+              capture_output=True, text=True, env=env,
+          )
+      def test_sorted_by_priority_then_insertion(tmp_path):
+          todo(tmp_path, "add", "a", "low", "one", "--priority", "low")
+          todo(tmp_path, "add", "b", "--priority", "high")
+          todo(tmp_path, "add", "c")
+          todo(tmp_path, "add", "--priority", "high", "d")
+          out = todo(tmp_path, "list").stdout.splitlines()
+          assert out == ["[ ] (high) b", "[ ] (high) d", "[ ] (medium) c", "[ ] (low) a low one"]
+
+
+      def test_done_uses_insertion_order(tmp_path):
+          todo(tmp_path, "add", "first", "--priority", "low")
+          todo(tmp_path, "add", "second", "--priority", "high")
+          todo(tmp_path, "done", "1")
+          assert todo(tmp_path, "list").stdout.splitlines() == [
+              "[ ] (high) second",
+              "[x] (low) first",
+          ]
+
+
+      def test_invalid_priority(tmp_path):
+          r = todo(tmp_path, "add", "x", "--priority", "urgent")
+          assert r.returncode == 2
+          assert r.stderr.strip() == "error: priority must be high, medium or low"
+          assert todo(tmp_path, "list").stdout == ""
+
+
+      def test_old_files_load_as_medium(tmp_path):
+          (tmp_path / "todo.json").write_text('[{"text": "legacy", "done": false}]')
+          todo(tmp_path, "add", "new", "--priority", "low")
+          assert todo(tmp_path, "list").stdout.splitlines() == [
+              "[ ] (medium) legacy",
+              "[ ] (low) new",
+          ]
+reference:
+  files:
+    todo.py: |
+      import json
+      import os
+      import sys
+
+      PRIORITIES = ["high", "medium", "low"]
+
+
+      def path():
+          return os.environ.get("TODO_FILE", "todo.json")
+
+
+      def load():
+          if not os.path.exists(path()):
+              return []
+          with open(path()) as handle:
+              return json.load(handle)
+
+
+      def save(items):
+          with open(path(), "w") as handle:
+              json.dump(items, handle)
+
+
+      def take_priority(words):
+          if "--priority" not in words:
+              return "medium", words
+          i = words.index("--priority")
+          value = words[i + 1] if i + 1 < len(words) else ""
+          return value, words[:i] + words[i + 2:]
+
+
+      def main(argv):
+          if not argv:
+              print("usage: todo.py add TEXT | list | done N", file=sys.stderr)
+              return 2
+          command, rest = argv[0], argv[1:]
+          items = load()
+          if command == "add":
+              priority, words = take_priority(rest)
+              if priority not in PRIORITIES:
+                  print("error: priority must be high, medium or low", file=sys.stderr)
+                  return 2
+              items.append({"text": " ".join(words), "done": False, "priority": priority})
+              save(items)
+          elif command == "list":
+              ranked = sorted(items, key=lambda i: PRIORITIES.index(i.get("priority", "medium")))
+              for item in ranked:
+                  mark = "x" if item["done"] else " "
+                  print(f"[{mark}] ({item.get('priority', 'medium')}) {item['text']}")
+          elif command == "done":
+              items[int(rest[0]) - 1]["done"] = True
+              save(items)
+          else:
+              print(f"unknown command {command}", file=sys.stderr)
+              return 2
+          return 0
+
+
+      if __name__ == "__main__":
+          sys.exit(main(sys.argv[1:]))
+max_rounds: 40

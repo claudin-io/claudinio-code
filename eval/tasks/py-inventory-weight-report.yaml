@@ -1,0 +1,165 @@
+id: py-inventory-weight-report
+title: The weekly stock report's total weight is wrong
+tags:
+- long
+- bugfix
+- python
+prompt: |
+  The weekly stock report gives the wrong total weight. tests/test_report.py has the
+  figure the warehouse measured on its own scale for week 42, and the report does not
+  match it. Find the cause and fix it. Don't change the test or the data file.
+setup:
+  files:
+    inventory/__init__.py: ''
+    inventory/models.py: |
+      from dataclasses import dataclass
+
+
+      @dataclass(frozen=True)
+      class Item:
+          sku: str
+          name: str
+          quantity: float
+          unit: str
+          unit_price: float  # per unit as listed
+    inventory/factors.py: |
+      # Grams per unit. Kept apart from the conversion code so the warehouse
+      # team can review the numbers without reading Python.
+      GRAMS_PER = {
+          "g": 1.0,
+          "kg": 1000.0,
+          "oz": 28.349523125,
+          "lb": 435.59237,
+          "t": 1_000_000.0,
+      }
+    inventory/units.py: |
+      from inventory.factors import GRAMS_PER
+
+
+      def to_grams(quantity, unit):
+          try:
+              return quantity * GRAMS_PER[unit]
+          except KeyError:
+              raise ValueError(f"unknown unit {unit!r}") from None
+
+
+      def grams_to_kg(grams):
+          return grams / 1000.0
+    inventory/parse.py: |
+      from inventory.models import Item
+
+
+      def parse_rows(text):
+          """sku;name;quantity;unit;unit_price lines, # comments allowed."""
+          items = []
+          for line in text.splitlines():
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              sku, name, qty, unit, price = [p.strip() for p in line.split(";")]
+              items.append(Item(sku, name, float(qty), unit, float(price)))
+          return items
+    inventory/warehouse.py: |
+      from collections import defaultdict
+
+      from inventory.units import to_grams
+
+
+      class Warehouse:
+          def __init__(self, items):
+              self.items = list(items)
+
+          def by_sku(self):
+              grouped = defaultdict(list)
+              for item in self.items:
+                  grouped[item.sku].append(item)
+              return dict(grouped)
+
+          def grams(self, sku=None):
+              return sum(
+                  to_grams(i.quantity, i.unit)
+                  for i in self.items
+                  if sku is None or i.sku == sku
+              )
+    inventory/pricing.py: |
+      def line_value(item):
+          return round(item.quantity * item.unit_price, 2)
+
+
+      def stock_value(items):
+          return round(sum(line_value(i) for i in items), 2)
+    inventory/report.py: |
+      from inventory.pricing import stock_value
+      from inventory.units import grams_to_kg
+      from inventory.warehouse import Warehouse
+
+
+      def weekly_report(items):
+          house = Warehouse(items)
+          return {
+              "skus": len(house.by_sku()),
+              "total_kg": round(grams_to_kg(house.grams()), 3),
+              "value": stock_value(items),
+          }
+    inventory/cli.py: |
+      import sys
+
+      from inventory.parse import parse_rows
+      from inventory.report import weekly_report
+
+
+      def main(path):
+          with open(path) as handle:
+              report = weekly_report(parse_rows(handle.read()))
+          for key, value in report.items():
+              print(f"{key}: {value}")
+
+
+      if __name__ == "__main__":
+          main(sys.argv[1])
+    data/week42.csv: |
+      # sku;name;quantity;unit;unit_price
+      A1;flour;25;kg;0.80
+      A2;sugar;10;lb;1.10
+      A3;salt;500;g;0.002
+      A4;cocoa;16;oz;0.75
+      A2;sugar;5;lb;1.10
+    tests/__init__.py: ''
+    tests/test_parse.py: |
+      from inventory.parse import parse_rows
+
+
+      def test_comments_and_blank_lines_are_skipped():
+          items = parse_rows("# header\n\nX;thing;1;g;2\n")
+          assert len(items) == 1 and items[0].unit == "g"
+    tests/test_report.py: |
+      from pathlib import Path
+
+      from inventory.parse import parse_rows
+      from inventory.report import weekly_report
+
+      DATA = Path(__file__).resolve().parent.parent / "data" / "week42.csv"
+
+
+      def test_week42_matches_the_warehouse_scale():
+          # The warehouse weighed this stock: 25 kg + 15 lb + 500 g + 16 oz.
+          report = weekly_report(parse_rows(DATA.read_text()))
+          assert report["skus"] == 4
+          assert report["total_kg"] == 32.757
+          assert report["value"] == 49.5
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider tests
+  timeout_s: 60
+reference:
+  files:
+    inventory/factors.py: |
+      # Grams per unit. Kept apart from the conversion code so the warehouse
+      # team can review the numbers without reading Python.
+      GRAMS_PER = {
+          "g": 1.0,
+          "kg": 1000.0,
+          "oz": 28.349523125,
+          "lb": 453.59237,
+          "t": 1_000_000.0,
+      }
+max_rounds: 50

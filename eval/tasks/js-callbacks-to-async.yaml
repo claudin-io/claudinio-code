@@ -1,0 +1,152 @@
+id: js-callbacks-to-async
+title: Convert a callback API to async/await
+tags:
+- refactor
+- javascript
+prompt: |
+  readConfig in config.js still uses a Node-style callback. Convert it to an async
+  function, readConfig(path), that returns a promise of the config — the defaults
+  merged with the file's JSON, exactly as today — and rejects with the same errors
+  (a missing file rejects with the fs error, invalid JSON with a SyntaxError).
+  loadAll(paths) in loader.js must become async as well and resolve to the configs in
+  order. Update the tests; `node --test` runs them.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "fixture",
+        "private": true,
+        "type": "module"
+      }
+    config.js: |
+      import { readFile } from "node:fs";
+
+      export const DEFAULTS = { port: 8080, debug: false };
+
+      export function readConfig(path, cb) {
+        readFile(path, "utf8", (err, text) => {
+          if (err) return cb(err);
+          let parsed;
+          try {
+            parsed = JSON.parse(text);
+          } catch (e) {
+            return cb(e);
+          }
+          cb(null, { ...DEFAULTS, ...parsed });
+        });
+      }
+    loader.js: |
+      import { readConfig } from "./config.js";
+
+      export function loadAll(paths, cb) {
+        const out = [];
+        const next = (i) => {
+          if (i === paths.length) return cb(null, out);
+          readConfig(paths[i], (err, config) => {
+            if (err) return cb(err);
+            out.push(config);
+            next(i + 1);
+          });
+        };
+        next(0);
+      }
+    config.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { mkdtempSync, writeFileSync } from "node:fs";
+      import { tmpdir } from "node:os";
+      import { join } from "node:path";
+      import { readConfig } from "./config.js";
+
+      test("merges defaults", (t, done) => {
+        const dir = mkdtempSync(join(tmpdir(), "cfg-"));
+        const file = join(dir, "a.json");
+        writeFileSync(file, '{"port": 9000}');
+        readConfig(file, (err, config) => {
+          assert.equal(err, null);
+          assert.deepEqual(config, { port: 9000, debug: false });
+          done();
+        });
+      });
+oracle:
+  command: node --test
+  timeout_s: 60
+  files:
+    config.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { mkdtempSync, writeFileSync } from "node:fs";
+      import { tmpdir } from "node:os";
+      import { join } from "node:path";
+      import { readConfig } from "./config.js";
+      import { loadAll } from "./loader.js";
+
+      const dir = mkdtempSync(join(tmpdir(), "cfg-"));
+      const file = (name, text) => {
+        const p = join(dir, name);
+        writeFileSync(p, text);
+        return p;
+      };
+
+      test("resolves to the defaults merged with the file", async () => {
+        const config = await readConfig(file("a.json", '{"port": 9000}'));
+        assert.deepEqual(config, { port: 9000, debug: false });
+      });
+
+      test("rejects on invalid JSON and on a missing file", async () => {
+        await assert.rejects(readConfig(file("b.json", "{nope")), SyntaxError);
+        await assert.rejects(readConfig(join(dir, "missing.json")), { code: "ENOENT" });
+      });
+
+      test("readConfig returns a promise", () => {
+        const p = readConfig(file("c.json", "{}"));
+        assert.equal(typeof p.then, "function");
+        return p;
+      });
+
+      test("loadAll resolves in order", async () => {
+        const configs = await loadAll([
+          file("d.json", '{"debug": true}'),
+          file("e.json", '{"port": 1}'),
+        ]);
+        assert.deepEqual(configs, [
+          { port: 8080, debug: true },
+          { port: 1, debug: false },
+        ]);
+      });
+reference:
+  files:
+    config.js: |
+      import { readFile } from "node:fs/promises";
+
+      export const DEFAULTS = { port: 8080, debug: false };
+
+      export async function readConfig(path) {
+        const text = await readFile(path, "utf8");
+        return { ...DEFAULTS, ...JSON.parse(text) };
+      }
+    loader.js: |
+      import { readConfig } from "./config.js";
+
+      export async function loadAll(paths) {
+        const out = [];
+        for (const path of paths) {
+          out.push(await readConfig(path));
+        }
+        return out;
+      }
+    config.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { mkdtempSync, writeFileSync } from "node:fs";
+      import { tmpdir } from "node:os";
+      import { join } from "node:path";
+      import { readConfig } from "./config.js";
+
+      test("merges defaults", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "cfg-"));
+        const file = join(dir, "a.json");
+        writeFileSync(file, '{"port": 9000}');
+        assert.deepEqual(await readConfig(file), { port: 9000, debug: false });
+      });
+max_rounds: 40

@@ -1,0 +1,91 @@
+id: js-two-small-features
+title: Two small helpers in different modules
+tags:
+- independent-edits
+- feature
+- javascript
+prompt: |
+  Two small additions, in different files:
+
+  1. math.js: export clamp(value, min, max) returning value limited to [min, max];
+     it throws a RangeError when min > max.
+  2. strings.js: export capitalize(s) returning s with its first character upper-cased
+     and the rest unchanged; "" stays "".
+
+  Add tests next to the existing ones; `node --test` runs them.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "fixture",
+        "private": true,
+        "type": "module"
+      }
+    math.js: |
+      export function sum(values) {
+        return values.reduce((a, b) => a + b, 0);
+      }
+    strings.js: |
+      export function reverse(s) {
+        return [...s].reverse().join("");
+      }
+    math.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { sum } from "./math.js";
+
+      test("sum", () => assert.equal(sum([1, 2, 3]), 6));
+    strings.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { reverse } from "./strings.js";
+
+      test("reverse", () => assert.equal(reverse("abc"), "cba"));
+oracle:
+  command: node --test
+  timeout_s: 60
+  files:
+    hidden.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { clamp, sum } from "./math.js";
+      import { capitalize, reverse } from "./strings.js";
+
+      test("clamp", () => {
+        assert.equal(clamp(5, 0, 10), 5);
+        assert.equal(clamp(-3, 0, 10), 0);
+        assert.equal(clamp(42, 0, 10), 10);
+        assert.equal(clamp(7, 7, 7), 7);
+        assert.throws(() => clamp(1, 5, 0), RangeError);
+      });
+
+      test("capitalize", () => {
+        assert.equal(capitalize("hello world"), "Hello world");
+        assert.equal(capitalize("hELLO"), "HELLO");
+        assert.equal(capitalize(""), "");
+      });
+
+      test("the old helpers still work", () => {
+        assert.equal(sum([2, 2]), 4);
+        assert.equal(reverse("ab"), "ba");
+      });
+reference:
+  files:
+    math.js: |
+      export function sum(values) {
+        return values.reduce((a, b) => a + b, 0);
+      }
+
+      export function clamp(value, min, max) {
+        if (min > max) throw new RangeError("min must not exceed max");
+        return Math.min(max, Math.max(min, value));
+      }
+    strings.js: |
+      export function reverse(s) {
+        return [...s].reverse().join("");
+      }
+
+      export function capitalize(s) {
+        return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
+      }
+max_rounds: 40
