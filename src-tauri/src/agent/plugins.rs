@@ -937,9 +937,12 @@ fn load_plugin_skills(
             return out;
         }
     };
+    // Path order, not `read_dir` order: two folders declaring one skill name
+    // keep a stable order through the sort by name below.
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in paths {
         if !path.is_dir() {
             continue;
         }
@@ -1016,8 +1019,12 @@ pub fn discover(workspace_root: Option<&Path>) -> Vec<PluginRecord> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        // Path order, not `read_dir` order (whatever the filesystem keeps):
+        // plugin order decides which plugin's skill wins a shared name, and
+        // that skill's description is in the cached prompt prefix.
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
             if !path.is_dir() {
                 continue;
             }
@@ -1441,6 +1448,45 @@ mod tests {
         assert!(plugin.diagnostics.is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `read_dir` order is whatever the filesystem keeps. Plugin order decides
+    /// which plugin's skill wins when two ship the same name (equal rank: the
+    /// first one found keeps it), and that skill's text is in the cached
+    /// prefix — so discovery walks the plugin directories in path order.
+    #[test]
+    fn plugins_are_discovered_in_path_order_and_the_first_keeps_a_shared_skill_name() {
+        let ws =
+            std::env::temp_dir().join(format!("claudinio-plugin-order-{}", uuid::Uuid::new_v4()));
+        let plugins = ws.join(".claudinio").join("plugins");
+        let order = ["p5", "p2", "p7", "p0", "p6", "p3", "p1", "p4"];
+        for name in order {
+            let root = plugins.join(name);
+            std::fs::create_dir_all(root.join("skills").join("shared")).unwrap();
+            std::fs::write(
+                root.join("plugin.json"),
+                format!("{{\"$schema\":\"{PLUGIN_SCHEMA_ID}\",\"name\":\"{name}\"}}"),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("skills").join("shared").join("SKILL.md"),
+                format!("---\nname: shared\ndescription: Shared from {name}\n---\n\nbody"),
+            )
+            .unwrap();
+        }
+        let records: Vec<PluginRecord> = discover(Some(&ws))
+            .into_iter()
+            .filter(|r| match r {
+                PluginRecord::Loaded(p) => p.root.starts_with(&ws),
+                PluginRecord::Rejected { root, .. } => root.starts_with(&ws),
+            })
+            .collect();
+        let names: Vec<String> = records.iter().map(|r| r.name()).collect();
+        assert_eq!(names, ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"]);
+        let skills = enabled_plugin_skills(&records, &HashMap::new());
+        assert_eq!(skills[0].description, "Shared from p0");
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

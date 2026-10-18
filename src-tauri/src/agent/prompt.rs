@@ -995,10 +995,74 @@ mod prefix_stability_tests {
                 &format!("Shared from {pkg}"),
             );
         }
+        // The plugin scope: eight project plugins, each shipping a skill under
+        // one shared name, and one under a name of its own.
+        for plugin in ["q5", "q2", "q7", "q0", "q6", "q3", "q1", "q4"] {
+            let proot = root.join(".claudinio/plugins").join(plugin);
+            std::fs::create_dir_all(&proot).unwrap();
+            std::fs::write(
+                proot.join("plugin.json"),
+                format!(
+                    "{{\"$schema\":\"{}\",\"name\":\"{plugin}\"}}",
+                    crate::agent::plugins::PLUGIN_SCHEMA_ID
+                ),
+            )
+            .unwrap();
+            skill(
+                &proot.join("skills"),
+                "plugin-shared",
+                &format!("Plugin skill from {plugin}"),
+            );
+            skill(
+                &proot.join("skills"),
+                &format!("{plugin}-own"),
+                "A plugin's own skill",
+            );
+        }
         root
     }
 
+    /// Two MCP servers' tools, as `connect_all` assembles them; `swapped`
+    /// reverses both the server arrival order and each server's tool order,
+    /// which is what a different `HashMap` seed and a server that builds its
+    /// tool list from a map produce on the next connect.
+    fn mcp_defs(swapped: bool) -> Vec<tools::ToolDef> {
+        let def = |name: &str| tools::ToolDef {
+            name: name.into(),
+            description: format!("{name} does one thing"),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}
+            }),
+        };
+        let mut servers = vec![
+            (
+                "github".to_string(),
+                vec![def("mcp__github__search"), def("mcp__github__issue")],
+            ),
+            (
+                "linear".to_string(),
+                vec![def("mcp__linear__list"), def("mcp__linear__create")],
+            ),
+        ];
+        if swapped {
+            servers.reverse();
+            for (_, defs) in &mut servers {
+                defs.reverse();
+            }
+        }
+        crate::agent::mcp::in_prefix_order(servers)
+    }
+
     fn prefix_json(root: &std::path::Path, mode: SessionMode) -> String {
+        prefix_json_with_mcp(root, mode, &[])
+    }
+
+    fn prefix_json_with_mcp(
+        root: &std::path::Path,
+        mode: SessionMode,
+        mcp_defs: &[tools::ToolDef],
+    ) -> String {
         let config = AgentConfig::default();
         let ctx = ToolContext {
             workspace_root: Some(root.to_string_lossy().to_string()),
@@ -1016,7 +1080,7 @@ mod prefix_stability_tests {
             mode,
             skills.as_deref(),
             None,
-            &[],
+            mcp_defs,
             false,
         );
         assert_eq!(profile, PromptProfile::Standard);
@@ -1031,6 +1095,55 @@ mod prefix_stability_tests {
             let second = prefix_json(&root, mode);
             assert!(first.contains("zeta-deploy") && first.contains("web-build"));
             assert_eq!(first, second, "{mode:?}: the prefix changed between builds");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Skills from the plugin scope join the catalog deterministically too:
+    /// when two plugins ship one name, the plugin that sorts first keeps it.
+    #[test]
+    fn plugin_scope_skills_are_deterministic_in_the_prefix() {
+        let root = workspace("plugins");
+        let first = prefix_json(&root, SessionMode::Builder);
+        for _ in 0..3 {
+            assert_eq!(first, prefix_json(&root, SessionMode::Builder));
+        }
+        assert!(first.contains("q4-own") && first.contains("<name>plugin-shared</name>"));
+        assert!(
+            first.contains("Plugin skill from q0") && !first.contains("Plugin skill from q5"),
+            "the first plugin in path order keeps a shared skill name"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// MCP definitions from two servers keep the prefix byte-identical however
+    /// the servers and their tools arrived, and sit after the built-in tools
+    /// in server-then-tool name order.
+    #[test]
+    fn mcp_definitions_from_two_servers_keep_the_prefix_byte_identical() {
+        let root = workspace("mcp");
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            let a = prefix_json_with_mcp(&root, mode, &mcp_defs(false));
+            let b = prefix_json_with_mcp(&root, mode, &mcp_defs(true));
+            assert_eq!(a, b, "{mode:?}: MCP arrival order moved the prefix");
+            assert_eq!(a, prefix_json_with_mcp(&root, mode, &mcp_defs(false)));
+            let tools: serde_json::Value = serde_json::from_str(&a).unwrap();
+            let names: Vec<&str> = tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t["name"].as_str())
+                .filter(|n| n.starts_with("mcp__"))
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "mcp__github__issue",
+                    "mcp__github__search",
+                    "mcp__linear__create",
+                    "mcp__linear__list"
+                ]
+            );
         }
         std::fs::remove_dir_all(&root).ok();
     }
