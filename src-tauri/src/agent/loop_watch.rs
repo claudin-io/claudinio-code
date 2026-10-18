@@ -218,13 +218,7 @@ impl LoopWatch {
             ));
         }
         self.nudges += 1;
-        LoopAction::Nudge(format!(
-            "[system] You have called {what} in the last few steps and are not \
-             making progress — you are repeating yourself. Stop repeating it. Re-read the last \
-             result carefully and change approach: try a genuinely different action, look for \
-             the root cause somewhere else, or, if you need information or a decision only the \
-             user has, call ask_user."
-        ))
+        LoopAction::Nudge(crate::agent::nudges::repeating(&what))
     }
 }
 

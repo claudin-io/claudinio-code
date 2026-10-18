@@ -404,17 +404,7 @@ pub(super) async fn maybe_context_handoff(
         history,
         store,
         ctx,
-        vec![ContentBlock::text(
-            "[system] This session's context reached its limit. Your next reply must be \
-             ONLY a handoff document for a successor session that will continue this \
-             exact work with a fresh context. Structure it with these markdown sections: \
-             ## Purpose of next session / ## Current state (what is done, and how it was \
-             verified) / ## Key decisions (and why) / ## Pointers (plan file path, key \
-             file paths, task ids - references only, never duplicate file contents) / \
-             ## In-flight work (the task mid-execution and its exact next step) / \
-             ## Next actions. Rules: no secrets, API keys, tokens or personal data; be \
-             concise; do not call tools; do not address the user.",
-        )],
+        vec![ContentBlock::text(crate::agent::nudges::HANDOFF_REQUEST)],
     );
 
     let (cur_mode, cur_origin) = mode_ctl.get();
@@ -486,11 +476,7 @@ pub(super) async fn maybe_context_handoff(
                 history,
                 store,
                 ctx,
-                vec![ContentBlock::text(
-                    "[system] That reply was not a valid handoff document. Reply with \
-                     ONLY the handoff document, using the exact markdown sections \
-                     requested above.",
-                )],
+                vec![ContentBlock::text(crate::agent::nudges::HANDOFF_RETRY)],
             );
         }
     }

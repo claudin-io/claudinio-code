@@ -9,6 +9,7 @@ pub mod jev;
 pub mod judge;
 pub mod loop_watch;
 pub mod mcp;
+pub mod nudges;
 pub mod output_trim;
 pub mod permissions;
 pub mod persist;

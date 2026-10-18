@@ -860,13 +860,7 @@ pub async fn run_workflow_with_profile(
                     history,
                     store,
                     ctx,
-                    vec![ContentBlock::text(
-                        "[system] Your previous response was cut off at the output token \
-                         limit before completing a tool call or final answer. Continue from \
-                         where you stopped, working in smaller steps — if you were emitting \
-                         a large tool call (e.g. a whole-file edit), split it into several \
-                         smaller edits.",
-                    )],
+                    vec![ContentBlock::text(crate::agent::nudges::CUT_OFF)],
                 );
                 continue;
             }
@@ -914,12 +908,7 @@ pub async fn run_workflow_with_profile(
                     history,
                     store,
                     ctx,
-                    vec![ContentBlock::text(
-                        "[system] Your previous response was empty (no text and no \
-                         tool calls). If the task is not finished, continue from \
-                         where you stopped; otherwise reply with a short final \
-                         summary of what was done.",
-                    )],
+                    vec![ContentBlock::text(crate::agent::nudges::EMPTY_REPLY)],
                 );
                 continue;
             }
@@ -1014,13 +1003,7 @@ pub async fn run_workflow_with_profile(
                         store,
                         ctx,
                         vec![ContentBlock::text(
-                            "[system] Your previous message announced a next step \
-                             but ended without taking it — no tool call followed. \
-                             Do not stop here. Continue now and actually perform the \
-                             action you described: call the appropriate tool (e.g. \
-                             ask the user, spawn the subagents, read the file, make \
-                             the edit). If the task is genuinely complete, instead \
-                             reply with a short final summary of what was done.",
+                            crate::agent::nudges::ANNOUNCED_NOT_TAKEN,
                         )],
                     );
                     continue;
@@ -1083,11 +1066,11 @@ pub async fn run_workflow_with_profile(
                         reason: HandoffReason::GoldenFlip,
                         next_mode: next,
                         next_origin: ModeOrigin::Agent,
-                        first_message: format!(
-                            "[system] Golden tasks are still pending: {}. You are now in {} mode (golden cycle {}/{max_cycles}). Read the linked session's plan file and tasks, then resume work on the pending goals — plan or execute what is missing, and only mark a golden task 'done' after verifying the goal is truly met.",
-                            golden_pending.join(", "),
+                        first_message: crate::agent::nudges::golden_flip(
+                            &golden_pending,
                             next.as_str(),
                             golden.cycle,
+                            max_cycles,
                         ),
                         golden_cycle: golden.cycle,
                         golden_stalls: golden.stalls as u32,
@@ -1191,13 +1174,9 @@ pub async fn run_workflow_with_profile(
                                 history,
                                 store,
                                 ctx,
-                                vec![ContentBlock::text(format!(
-                                    "[system] You tried to finish, but the project's own checks \
-                                     FAIL against the code as it stands. The goal is not met \
-                                     until they pass.\n\n{}\n{}\nFix the cause (not the test), \
-                                     then call run_quality again. Attempt {}/{}.",
-                                    report.summary_text(),
-                                    report.failure_detail(4_000),
+                                vec![ContentBlock::text(crate::agent::nudges::quality_failed(
+                                    &report.summary_text(),
+                                    &report.failure_detail(4_000),
                                     guards.quality_retries,
                                     MAX_QUALITY_RETRIES,
                                 ))],
@@ -1240,13 +1219,7 @@ pub async fn run_workflow_with_profile(
                             history,
                             store,
                             ctx,
-                            vec![ContentBlock::text(
-                                "[system] All goals are met. Before finishing, call \
-                                 finalize_plan with a journal of your findings — it records the \
-                                 changed files and commits into the plan for future reference. \
-                                 This is the required last step."
-                                    .to_string(),
-                            )],
+                            vec![ContentBlock::text(crate::agent::nudges::FINALIZE_PLAN)],
                         );
                         continue;
                     }
@@ -1850,15 +1823,7 @@ pub async fn run_workflow_with_profile(
                         history,
                         store,
                         ctx,
-                        vec![ContentBlock::text(
-                            "[system] You have been exploring for several consecutive rounds \
-                             in Brain mode without making progress on the required deliverables. \
-                             Brain mode is for planning — you MUST call ask_user to interview \
-                             the user, then write_plan to create the Solution Design, then \
-                             write_plan again to add the '## Low-Level Design' section, then \
-                             tasks_set to create executable tasks. Do not continue exploring \
-                             until you have gathered the information you need.",
-                        )],
+                        vec![ContentBlock::text(crate::agent::nudges::BRAIN_EXPLORING)],
                     );
                     continue;
                 }
