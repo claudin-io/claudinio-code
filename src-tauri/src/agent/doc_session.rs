@@ -1149,7 +1149,9 @@ mod tests {
         assert_eq!(v.sections[0].owner, None);
         assert_eq!(v.sections[0].line, 3);
         assert_eq!(v.sections[1].id, "s2");
-        assert_eq!(v.sections[1].line, 7);
+        // `# Pudim`, blank, `## origem`, its comment, `v2`, the end marker,
+        // blank: s2's line is the eighth.
+        assert_eq!(v.sections[1].line, 8);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         assert!(
             take_change_note(&ws.ctx).is_some(),

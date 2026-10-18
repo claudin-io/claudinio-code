@@ -21,8 +21,16 @@
 //! ```
 //!
 //! An unwritten placeholder keeps its line and gains the comment; a written
-//! section becomes a `## topic` heading, the comment on the next line, and its
-//! body up to the next section, placeholder or level-1/2 heading. Everything
+//! section becomes a `## topic` heading, the comment on the next line, its
+//! body, and an end marker (`<!-- claudinio: end -->`) the harness writes
+//! after it. The marker is what keeps a person's prose theirs: text typed
+//! under a placeholder sits right after the body once that placeholder is
+//! written, and without a boundary the next reading would take it for the
+//! section's text — and the section's next write would delete it. A file with
+//! no marker after a section (written before the marker existed, or a person
+//! removed it) still parses: the body then runs to the next section,
+//! placeholder or level-1/2 heading, and the next write adds the marker.
+//! Everything
 //! else — the title, prose the user wrote, extra headings — is carried as it
 //! was, byte for byte, which is what lets a person edit the file in any editor
 //! and the harness parse it back without losing a character
@@ -81,6 +89,9 @@ pub struct Section {
     /// section keeps the user's spacing.
     header_raw: String,
     header_fields: Option<HeaderFields>,
+    /// The end marker line as read, or as the harness wrote it; empty when
+    /// the body runs to the next section (a file without the marker).
+    end_raw: String,
 }
 
 type HeaderFields = (String, String, Status, Option<String>, bool);
@@ -203,6 +214,26 @@ fn bare(line: &str) -> &str {
     line.trim_end_matches(['\n', '\r'])
 }
 
+/// The line the harness writes after a section's body.
+const END_MARKER: &str = "<!-- claudinio: end -->";
+
+/// `<!-- claudinio: end -->`, with any spacing inside the comment.
+fn is_end_marker(line: &str) -> bool {
+    comment_inner(bare(line)) == Some("end")
+}
+
+/// What follows `claudinio:` in one of the harness's comments, trimmed.
+fn comment_inner(text: &str) -> Option<&str> {
+    Some(
+        text.trim()
+            .strip_prefix("<!--")?
+            .strip_suffix("-->")?
+            .trim()
+            .strip_prefix("claudinio:")?
+            .trim(),
+    )
+}
+
 fn is_fence(line: &str) -> bool {
     let t = line.trim_start();
     t.starts_with("```") || t.starts_with("~~~")
@@ -219,13 +250,9 @@ fn is_top_heading(line: &str) -> bool {
 type Tag = (String, Status, Option<String>);
 
 /// `<!-- claudinio: id=s1 status=done by=main -->`, read into its fields.
+/// The end marker is not a section's comment.
 fn parse_comment(text: &str) -> Option<Tag> {
-    let inner = text
-        .trim()
-        .strip_prefix("<!--")?
-        .strip_suffix("-->")?
-        .trim()
-        .strip_prefix("claudinio:")?;
+    let inner = comment_inner(text).filter(|i| *i != "end")?;
     let (mut id, mut status, mut owner) = (String::new(), Status::Todo, None);
     for pair in inner.split_whitespace() {
         match pair.split_once('=') {
@@ -268,6 +295,7 @@ fn section(header_raw: String, topic: String, comment: Option<Tag>, written: boo
         written,
         header_raw,
         header_fields: None,
+        end_raw: String::new(),
     };
     s.header_fields = Some(s.fields());
     s
@@ -318,6 +346,12 @@ pub fn parse(md: &str) -> Document {
                 i += 1;
                 continue;
             }
+            if let Some(s) = open.as_mut().filter(|_| is_end_marker(line)) {
+                s.end_raw = line.to_string();
+                flush(&mut blocks, &mut prose, &mut open);
+                i += 1;
+                continue;
+            }
             if open.is_some() && is_top_heading(line) {
                 flush(&mut blocks, &mut prose, &mut open);
             }
@@ -349,10 +383,10 @@ pub fn parse(md: &str) -> Document {
     }
 }
 
-/// One section as it is written in the file: its header line(s), then its
-/// body.
+/// One section as it is written in the file: its header line(s), its body,
+/// and its end marker when it has one.
 pub fn render_section(s: &Section) -> String {
-    format!("{}{}", s.header(), s.body)
+    format!("{}{}{}", s.header(), s.body, s.end_raw)
 }
 
 pub fn render(doc: &Document) -> String {
@@ -377,6 +411,7 @@ fn placeholder(id: String, topic: &str) -> Section {
         written: false,
         header_raw: String::new(),
         header_fields: None,
+        end_raw: String::new(),
     }
 }
 
@@ -392,7 +427,9 @@ fn clean_topic(topic: &str) -> String {
 /// A model-written body made safe to sit inside a section: a level-1/2
 /// heading would end the section early and a `[x]` line would open a new
 /// one, so outside code fences the first becomes `###` and the second is
-/// escaped (`\[x]` renders as `[x]`). A code fence the body leaves open (a
+/// escaped (`\[x]` renders as `[x]`), as is a line that reads as one of the
+/// harness's comments (the end marker would end the section early). A code
+/// fence the body leaves open (a
 /// truncated block) is closed with the opener's own marker: [`parse`] skips
 /// section boundaries inside a fence, so an open one would swallow every
 /// section after this one.
@@ -416,7 +453,10 @@ fn normalize_body(body: &str) -> String {
         } else if let Some(rest) = line.strip_prefix("## ").or_else(|| line.strip_prefix("# ")) {
             out.push_str("### ");
             out.push_str(rest);
-        } else if parse_placeholder(line).is_some() || parse_comment(line).is_some() {
+        } else if parse_placeholder(line).is_some()
+            || parse_comment(line).is_some()
+            || is_end_marker(line)
+        {
             let indent = &line[..line.len() - line.trim_start().len()];
             out.push_str(indent);
             out.push('\\');
@@ -430,7 +470,6 @@ fn normalize_body(body: &str) -> String {
         out.push_str(&mark);
         out.push('\n');
     }
-    out.push('\n');
     out
 }
 
@@ -618,6 +657,12 @@ impl Document {
         if let Some(body) = body {
             s.body = normalize_body(body);
             s.written = true;
+            // Kept as read once the section has one: the blank line written
+            // after it reads back as prose, and adding it again on every
+            // write would grow the gap.
+            if s.end_raw.is_empty() {
+                s.end_raw = format!("{END_MARKER}\n\n");
+            }
         }
         s.status = status;
         s.owner = Some(owner.to_string());
@@ -648,12 +693,15 @@ impl Document {
         };
         // After a section that ends without a newline (the file's last line),
         // the new line must start on a line of its own.
-        if let Some(Block::Section(prev)) = at.checked_sub(1).and_then(|i| self.blocks.get_mut(i))
-            && prev.written
-            && !prev.body.is_empty()
-            && !prev.body.ends_with('\n')
-        {
-            prev.body.push('\n');
+        if let Some(Block::Section(prev)) = at.checked_sub(1).and_then(|i| self.blocks.get_mut(i)) {
+            let tail = if prev.end_raw.is_empty() {
+                &mut prev.body
+            } else {
+                &mut prev.end_raw
+            };
+            if prev.written && !tail.is_empty() && !tail.ends_with('\n') {
+                tail.push('\n');
+            }
         }
         if let Some(Block::Prose(prev)) = at.checked_sub(1).and_then(|i| self.blocks.get_mut(i))
             && !prev.is_empty()
@@ -772,8 +820,57 @@ mod tests {
             .unwrap();
         assert_eq!(
             render(&doc),
-            "# T\n\n## a\n<!-- claudinio: id=s1 status=done by=sub:pesquisa -->\nfirst\nsecond\n\n\
+            "# T\n\n## a\n<!-- claudinio: id=s1 status=done by=sub:pesquisa -->\nfirst\nsecond\n\
+             <!-- claudinio: end -->\n\n\
              [b] <!-- claudinio: id=s2 status=todo -->\n"
+        );
+    }
+
+    /// A file written before the end marker existed keeps parsing (the body
+    /// runs to the next section), and its next write adds the marker once.
+    #[test]
+    fn a_section_without_an_end_marker_parses_and_gains_one_on_its_next_write() {
+        let legacy = "# T\n\n## a\n<!-- claudinio: id=s1 status=done by=main -->\nold\n\n[b] <!-- claudinio: id=s2 status=todo -->\n";
+        let mut doc = parse(legacy);
+        assert_eq!(render(&doc), legacy);
+        assert_eq!(doc.section("s1").unwrap().text(), "old");
+        doc.apply_write("s1", Some("new"), "main", Status::Done)
+            .unwrap();
+        let once = render(&doc);
+        assert!(once.contains("new\n<!-- claudinio: end -->\n"), "{once:?}");
+        let mut back = parse(&once);
+        back.apply_write("s1", Some("newer"), "main", Status::Done)
+            .unwrap();
+        let twice = render(&back);
+        assert_eq!(
+            twice,
+            once.replace("new\n", "newer\n"),
+            "a second write neither repeats the marker nor widens the gap"
+        );
+    }
+
+    /// The model writing the end marker into its body must not end its
+    /// section early: the line is escaped like a placeholder.
+    #[test]
+    fn a_body_cannot_end_its_section_early() {
+        let mut doc = scaffold("T", &["a".to_string(), "b".to_string()]);
+        doc.apply_write(
+            "s1",
+            Some("before\n<!-- claudinio: end -->\nafter"),
+            "main",
+            Status::Done,
+        )
+        .unwrap();
+        let back = parse(&render(&doc));
+        assert_eq!(back.ids(), ["s1", "s2"]);
+        assert_eq!(
+            back.section("s1").unwrap().text(),
+            "before\n\\<!-- claudinio: end -->\nafter"
+        );
+        assert!(
+            back.blocks
+                .iter()
+                .all(|b| !matches!(b, Block::Prose(p) if p.contains("after")))
         );
     }
 
@@ -827,6 +924,37 @@ mod tests {
             "Gelado.",
             "a level-2 heading ends the last section's body"
         );
+    }
+
+    /// Prose a person typed under a placeholder is theirs, outside every
+    /// section: writing the placeholder, and writing it again, must leave
+    /// that prose where it was, byte for byte, and out of the section's
+    /// text — or the second write deletes the person's words.
+    #[test]
+    fn prose_a_person_wrote_under_a_placeholder_survives_two_writes_of_it() {
+        let note = "A note the user wrote about the whole doc.\n";
+        let file = format!(
+            "# T\n\n[a] <!-- claudinio: id=s1 status=todo -->\n{note}[b] <!-- claudinio: id=s2 status=todo -->\n"
+        );
+        let mut doc = parse(&file);
+        doc.apply_write("s1", Some("first draft"), "main", Status::Done)
+            .unwrap();
+        let mut back = parse(&render(&doc));
+        assert_eq!(back.section("s1").unwrap().text(), "first draft");
+        back.apply_write("s1", Some("second draft"), "main", Status::Done)
+            .unwrap();
+        let out = render(&back);
+        let again = parse(&out);
+        assert_eq!(again.section("s1").unwrap().text(), "second draft");
+        assert!(out.contains(note), "the person's prose survives: {out:?}");
+        assert!(
+            again
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Prose(p) if p.contains(note))),
+            "and stays outside the section: {out:?}"
+        );
+        assert_eq!(again.ids(), ["s1", "s2"]);
     }
 
     #[test]
