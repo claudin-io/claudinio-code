@@ -39,6 +39,27 @@ pub(crate) fn api_error(status: reqwest::StatusCode, body: &str, api_key: &str) 
     format!("API error: HTTP {status} — {detail}")
 }
 
+/// The Anthropic one-shot calls' (the completion judge, `one_shot`) check of
+/// a response: a success passes through, a failure becomes the error they
+/// return — a plan's budget refusal on claudin.io as the budget marker,
+/// anything else as [`api_error`].
+pub(crate) async fn one_shot_checked(
+    response: reqwest::Response,
+    rp: &super::ResolvedProvider,
+) -> Result<reqwest::Response, String> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(
+        match super::budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
+            Some(m) => format!("{}{m}", super::BUDGET_EXCEEDED_MARKER),
+            None => api_error(status, &body, &rp.api_key),
+        },
+    )
+}
+
 /// `error.message` (Anthropic: `{"type":"error","error":{"type":…,"message":…}}`,
 /// OpenAI and OpenRouter: `{"error":{"message":…}}`) or a bare-string `error`.
 fn provider_message(body: &str) -> Option<String> {
@@ -238,6 +259,51 @@ mod stub_tests {
         .await
         .expect_err("refused");
         assert_eq!(err, EXPECTED);
+    }
+
+    /// The completion judge and `one_shot` resolve their provider from the
+    /// live config, so they are checked through the step they share: a
+    /// refusal carries the provider's message, a claudin.io budget refusal
+    /// the budget marker, and a success passes through.
+    #[tokio::test]
+    async fn an_anthropic_one_shot_refusal_carries_the_providers_message() {
+        const BUDGET: &str =
+            r#"{"error":{"message":"Claudinio: Budget exceeded for window '1h'."}}"#;
+        let (base, _, _) = spawn_recording(vec![
+            Reply::Status(400, REFUSAL),
+            Reply::Status(500, BUDGET),
+            Reply::Text("ok"),
+        ])
+        .await;
+        let send = || async {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/messages"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap()
+        };
+        let anthropic = provider(&base, Protocol::Anthropic);
+        let err = super::one_shot_checked(send().await, &anthropic)
+            .await
+            .expect_err("refused");
+        assert_eq!(err, EXPECTED);
+        let claudinio = ResolvedProvider {
+            provider_id: "claudinio".into(),
+            ..provider(&base, Protocol::Anthropic)
+        };
+        let err = super::one_shot_checked(send().await, &claudinio)
+            .await
+            .expect_err("over budget");
+        assert!(
+            err.starts_with(crate::agent::provider::BUDGET_EXCEEDED_MARKER),
+            "{err}"
+        );
+        assert!(
+            super::one_shot_checked(send().await, &anthropic)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

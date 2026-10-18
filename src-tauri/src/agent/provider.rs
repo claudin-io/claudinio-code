@@ -1213,14 +1213,7 @@ pub async fn classify_turn_completion_metered(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     _net_guard.set_status(response.status().as_u16());
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
-            Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
-            None => Err(http_error::api_error(status, &body, &rp.api_key)),
-        };
-    }
+    let response = http_error::one_shot_checked(response, &rp).await?;
     let json: Value = response
         .json()
         .await
@@ -1297,14 +1290,7 @@ pub async fn one_shot(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     _net_guard.set_status(response.status().as_u16());
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
-            Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
-            None => Err(http_error::api_error(status, &body, &rp.api_key)),
-        };
-    }
+    let response = http_error::one_shot_checked(response, &rp).await?;
     let json: Value = response
         .json()
         .await
