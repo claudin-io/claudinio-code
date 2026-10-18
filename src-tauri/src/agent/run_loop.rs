@@ -4185,6 +4185,18 @@ mod document_loop_tests {
     #[tokio::test]
     async fn a_new_document_handoff_carries_the_golden_loop_state() {
         let ws = workspace("doc-handoff-golden");
+        // This session itself continues a golden flip that had stalled once
+        // on a pending goal.
+        ws.store
+            .append(&SessionRecord::LinkedFrom {
+                prev_session_id: "before".into(),
+                reason: "golden_flip".into(),
+                golden_cycle: 1,
+                golden_stalls: 1,
+                golden_last_pending: vec!["golden-tests-pass-0".into()],
+                ts: now_ms(),
+            })
+            .unwrap();
         link_doc(&ws, &["origem"]);
         ws.store
             .append(&SessionRecord::GoldenCycle {
@@ -4212,6 +4224,12 @@ mod document_loop_tests {
         assert_eq!(
             spec.golden_cycle, 2,
             "the golden loop's cycle count carries over"
+        );
+        assert_eq!(spec.golden_stalls, 1, "so does its stall count");
+        assert_eq!(
+            spec.golden_last_pending,
+            vec!["golden-tests-pass-0".to_string()],
+            "and the goals it last saw pending"
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }
