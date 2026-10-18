@@ -510,7 +510,7 @@ mod loop_tests {
         )
         .await;
         let texts = last_message_texts(&bodies[0]);
-        assert_eq!(texts, [kickoff.clone()]);
+        assert_eq!(texts, std::slice::from_ref(&kickoff));
         assert!(kickoff.contains("no `<tasks>` block means"), "{kickoff}");
     }
 
