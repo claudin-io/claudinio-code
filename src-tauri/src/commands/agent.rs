@@ -775,6 +775,9 @@ pub struct SetConfigArgs {
     pub jev_route: Option<String>,
     /// One model's tool surface — see `agent::surface`.
     pub tool_surface: Option<ToolSurfaceArg>,
+    /// "v1" | "v2" — which Standard prompt sessions are sent (lean-harness
+    /// Phase 5, decision D7). See `agent::prompt::PromptVersion`.
+    pub prompt_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -866,6 +869,7 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(choice) = args.tool_surface {
         crate::agent::surface::set_for(&mut cfg, &choice.model, &choice.surface);
     }
+    crate::agent::prompt::apply_prompt_version_setting(&mut cfg, args.prompt_version.as_deref());
     if let Some(code_intel_enabled) = args.code_intel_enabled {
         cfg.code_intel_enabled = code_intel_enabled;
     }
@@ -914,7 +918,7 @@ pub async fn get_config(
     // first `SessionStats` event corrects it.
     let budget = crate::agent::budget::ContextBudget::for_model(&cfg, &cfg.builder_model, 0);
 
-    Ok(serde_json::json!({
+    let mut value = serde_json::json!({
         "baseUrl": cfg.base_url,
         "brainModel": cfg.brain_model,
         "builderModel": cfg.builder_model,
@@ -971,7 +975,10 @@ pub async fn get_config(
             }))
         }).collect::<serde_json::Map<String, Value>>(),
         "workspaceConfig": workspace_config,
-    }))
+    });
+    // Outside the literal: `json!` is at its macro recursion limit here.
+    value["promptVersion"] = Value::from(cfg.prompt_version.as_str());
+    Ok(value)
 }
 
 /// Fetch available models from the API. Calls GET {base_url}/v1/models and

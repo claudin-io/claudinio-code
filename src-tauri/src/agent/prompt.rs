@@ -62,6 +62,17 @@ impl From<PromptVersion> for String {
     }
 }
 
+/// Settings › Agent's prompt control (`set_config`'s `promptVersion`).
+/// Strict where the file reader is lenient: only "v1" and "v2" change the
+/// setting, so a value this build does not know leaves the user's choice alone.
+pub fn apply_prompt_version_setting(cfg: &mut AgentConfig, value: Option<&str>) {
+    match value {
+        Some("v1") => cfg.prompt_version = PromptVersion::V1,
+        Some("v2") => cfg.prompt_version = PromptVersion::V2,
+        _ => {}
+    }
+}
+
 /// Prompt budget for the scenario index. Enough for a real spec suite, small
 /// enough that a thousand scenarios cannot crowd out the conversation.
 const MAX_SPEC_SECTION_CHARS: usize = 4_000;
@@ -2058,6 +2069,23 @@ mod prompt_version_tests {
         );
         assert_eq!(cfg.brain_model, "b");
         assert_eq!(serde_json::to_value(&cfg).unwrap()["prompt_version"], "v2");
+    }
+
+    /// Settings › Agent sends "v1" or "v2". Unlike the lenient file reader,
+    /// the setter changes nothing on a value it does not know: a typo from
+    /// the UI must not silently switch a user who chose v1 back to v2.
+    #[test]
+    fn the_settings_control_switches_the_version_and_ignores_an_unknown_value() {
+        use super::{PromptVersion, apply_prompt_version_setting};
+        let mut cfg = AgentConfig::default();
+        apply_prompt_version_setting(&mut cfg, Some("v1"));
+        assert_eq!(cfg.prompt_version, PromptVersion::V1);
+        apply_prompt_version_setting(&mut cfg, Some("v9"));
+        assert_eq!(cfg.prompt_version, PromptVersion::V1);
+        apply_prompt_version_setting(&mut cfg, None);
+        assert_eq!(cfg.prompt_version, PromptVersion::V1);
+        apply_prompt_version_setting(&mut cfg, Some("v2"));
+        assert_eq!(cfg.prompt_version, PromptVersion::V2);
     }
 }
 

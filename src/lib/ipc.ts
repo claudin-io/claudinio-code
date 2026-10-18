@@ -123,8 +123,15 @@ export interface AgentConfig {
   /** "compact" when the builder model's window is too small for the full
    *  prompt and tools; its sessions then run a short prompt and ten tools. */
   builderProfile?: "standard" | "compact";
+  /** Which Standard system prompt sessions are sent; absent in a config
+   *  written before the setting existed, which means "v2". */
+  promptVersion?: PromptVersion;
   workspaceConfig?: Record<string, unknown> | null;
 }
+
+/** "v2" is the lean prompt (the default); "v1" the previous one, kept
+ *  selectable for one release. */
+export type PromptVersion = "v1" | "v2";
 
 /** Which tools a model is offered. "lean" leaves out the three LSP navigation
  *  tools (go_to_definition, find_references, symbol_lookup). */
@@ -188,6 +195,7 @@ export interface SetConfigArgs {
   jevApiKey?: string;
   /** Set one model's tool surface; "full" clears it. */
   toolSurface?: { model: string; surface: ToolSurface };
+  promptVersion?: PromptVersion;
 }
 
 export interface ApproveArgs {
