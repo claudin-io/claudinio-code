@@ -509,6 +509,20 @@ pub(crate) fn cost_or_estimate(
 
 #[cfg(test)]
 mod tests {
+    // The loop derives a tool call's Brain refusal and its permission to edit
+    // from one reading of the mode: for that to hold, no reading can be both
+    // Brain and a mode that edits files, under any profile.
+    #[test]
+    fn brain_never_edits_files_under_any_profile() {
+        for profile in [
+            PromptProfile::Standard,
+            PromptProfile::GitSync,
+            PromptProfile::Compact,
+        ] {
+            assert!(!profile.edits_files(SessionMode::Brain), "{profile:?}");
+        }
+    }
+
     use super::*;
     use lru::LruCache;
 

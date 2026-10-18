@@ -1453,14 +1453,19 @@ pub async fn run_workflow_with_profile(
                 hook_stop_request = Some(reason);
             }
 
-            let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
+            // One reading of the live toggle per call: every gate below comes
+            // from it. Two reads could straddle a flip to Brain and give
+            // `in_brain` with `direct_edit`, letting `edit_file` past Brain's
+            // refusal (Phase 3 final review).
+            let mode_now = mode_ctl.get().0;
+            let in_brain = mode_now == SessionMode::Brain;
             // A Builder session changes files itself (`edits_files`: Compact,
             // and Standard since decision D1). Each change is asked about — an
             // `edit_file` as always, and a shell command that writes a file
             // even when its prefix is allowlisted (`run_tool`, through
             // `RunLimits::writes_files`). Brain's read-only gates are
             // untouched — a toggle mid-round is read here, per call.
-            let direct_edit = profile.edits_files(mode_ctl.get().0);
+            let direct_edit = profile.edits_files(mode_now);
             // ...and handed to `run_tool` from this same reading. Set only at
             // round boundaries, a flip from Brain to Builder mid-batch left it
             // false while `direct_edit` was true: the write was let past the
