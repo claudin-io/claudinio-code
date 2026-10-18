@@ -1467,10 +1467,12 @@ pub async fn run_workflow_with_profile(
             // policy.
             // `load_tools` is answered here; a deferred tool called before it
             // was loaded is loaded now and then runs like any other call.
-            let load_answer = if matches!(
-                hook_verdict,
-                crate::agent::hooks::PreToolVerdict::Deny { .. }
-            ) {
+            // Only Standard defers anything.
+            let load_answer = if profile != PromptProfile::Standard
+                || matches!(
+                    hook_verdict,
+                    crate::agent::hooks::PreToolVerdict::Deny { .. }
+                ) {
                 None
             } else {
                 crate::agent::deferred::before_call(
@@ -3284,8 +3286,17 @@ mod deferred_loop_tests {
     /// One user message against a model following `script`, on `ws`'s
     /// session file. Returns the run's outcome and every request body sent.
     async fn run(ws: &Workspace, script: Vec<Reply>) -> (Result<RunOutcome, String>, Vec<String>) {
+        run_on(ws, None, script).await
+    }
+
+    /// `run`, on a model with this context window.
+    async fn run_on(
+        ws: &Workspace,
+        window: Option<u32>,
+        script: Vec<Reply>,
+    ) -> (Result<RunOutcome, String>, Vec<String>) {
         let (base, _, bodies) = spawn_recording(script).await;
-        let config = super::surface_tests::config_for(&base, None);
+        let config = super::surface_tests::config_for(&base, window);
         let ctx = ToolContext {
             workspace_root: Some(ws.root.to_string_lossy().to_string()),
             session_store_path: Some(ws.store.path.to_string_lossy().to_string()),
@@ -3440,6 +3451,33 @@ mod deferred_loop_tests {
             ["file_outline", "code_search"]
         );
         assert_eq!(tool_names(&second_run[0]), ended_with);
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// The Compact profile defers nothing: `load_tools` is a tool it was
+    /// never offered, refused the way any other one is, and nothing is
+    /// recorded.
+    #[tokio::test]
+    async fn a_compact_session_refuses_load_tools_like_any_tool_it_lacks() {
+        let ws = workspace("compact");
+        let (_, bodies) = run_on(
+            &ws,
+            Some(32_768),
+            vec![
+                Reply::Tool {
+                    name: "load_tools",
+                    input: serde_json::json!({"names": ["semantic_search"]}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        let result = last_result(&bodies[1]);
+        assert!(
+            result.contains("is not available in this session"),
+            "{result}"
+        );
+        assert!(crate::agent::deferred::loaded_names(&records_of(&ws)).is_empty());
         std::fs::remove_dir_all(&ws.root).ok();
     }
 
