@@ -1032,7 +1032,8 @@ async fn await_user_answer(answers: &AnswerMap, session_id: &str, tool_use_id: &
 /// plain strings become `{ label }`, and the richer AskUserQuestion object shape
 /// models naturally reach for (`{ label/value/title, description }`, sometimes
 /// description-only) is mapped onto that shape rather than rejected. Trims and
-/// de-duplicates on the label, and returns Err(detail) for anything the user
+/// de-duplicates on the label, drops an "Other" option (the UI adds its own),
+/// and returns Err(detail) for anything the user
 /// could not answer sensibly (empty text, <2 options, blank/duplicate options, an
 /// object with no usable text) so the caller can hand the error back to the model
 /// to retry instead of rendering a broken card. On success it returns a cleaned
@@ -1108,12 +1109,11 @@ fn normalize_ask_user_questions(questions: &Value) -> Result<Value, String> {
                 return Err(at("options must not be empty or blank"));
             }
             // The UI appends a free-text "Other" to every question; one here
-            // would be shown twice.
+            // would be shown twice, so it is dropped — not refused, which
+            // would cost the model a round for a harmless duplicate.
             let lower = label.to_lowercase();
             if lower == "other" || lower.starts_with("other (") || lower.starts_with("other:") {
-                return Err(at(
-                    "do not add an 'Other' option — the UI adds a free-text 'Other' to every question",
-                ));
+                continue;
             }
             if !seen.insert(label.to_lowercase()) {
                 return Err(at(&format!(
@@ -1126,6 +1126,11 @@ fn normalize_ask_user_questions(questions: &Value) -> Result<Value, String> {
                 opt_obj.insert("description".into(), Value::String(desc));
             }
             norm_opts.push(Value::Object(opt_obj));
+        }
+        if norm_opts.len() < 2 {
+            return Err(at(
+                "provide at least 2 options besides 'Other' — the UI adds a free-text 'Other' to every question",
+            ));
         }
         let mut new_q = serde_json::Map::new();
         new_q.insert("question".into(), Value::String(text.trim().to_string()));
@@ -1754,25 +1759,41 @@ mod tests {
     }
 
     // The UI appends a free-text "Other" to every question, so one in the
-    // options would show twice. The description used to say so on every
-    // request; the rule now costs nothing until a call breaks it.
+    // options would show twice. Before the description diet such a call was
+    // accepted, and it still is: the duplicate is dropped, not refused, so the
+    // model does not pay a round for it.
     #[test]
-    fn an_other_option_is_refused_and_the_error_says_why() {
+    fn an_other_option_is_dropped_because_the_ui_adds_its_own() {
         for other in [
             json!("Other"),
             json!(" other "),
             json!({"label": "Other (please specify)"}),
+            json!("Other: something else"),
         ] {
             let raw = json!([{"question": "q", "options": ["Yes", "No", other]}]);
-            let detail = normalize_ask_user_questions(&raw).unwrap_err();
-            assert!(
-                detail.contains("Other") && detail.contains("adds"),
-                "{detail}"
-            );
+            let out = normalize_ask_user_questions(&raw).unwrap();
+            let labels: Vec<&str> = out[0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["label"].as_str().unwrap())
+                .collect();
+            assert_eq!(labels, ["Yes", "No"]);
         }
-        // A real choice that merely starts with the word is fine.
+        // A real choice that merely starts with the word is kept.
         let ok = json!([{"question": "q", "options": ["Yes", "Otherwise keep it"]}]);
-        assert!(normalize_ask_user_questions(&ok).is_ok());
+        assert_eq!(
+            normalize_ask_user_questions(&ok).unwrap()[0]["options"][1]["label"],
+            "Otherwise keep it"
+        );
+        // Without it there must still be two real choices, and the error says
+        // why the "Other" did not count.
+        let short = json!([{"question": "q", "options": ["Yes", "Other"]}]);
+        let detail = normalize_ask_user_questions(&short).unwrap_err();
+        assert!(
+            detail.contains("2") && detail.contains("Other") && detail.contains("adds"),
+            "{detail}"
+        );
     }
 
     /// What the tool description no longer carries, the error a malformed
