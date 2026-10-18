@@ -1537,7 +1537,7 @@ pub async fn run_workflow_with_profile(
                     &mut pending_handoff,
                 )
             } else if tool_name == "doc_create" && profile == PromptProfile::Standard {
-                crate::agent::doc_session::create_call(
+                let block = crate::agent::doc_session::create_call(
                     &tool_use_id,
                     &tool_input,
                     &user_message,
@@ -1547,7 +1547,9 @@ pub async fn run_workflow_with_profile(
                     event_tx,
                     session_id,
                     &mut pending_handoff,
-                )
+                );
+                crate::agent::doc_session::join_tools(ctx, &mut loaded);
+                block
             } else if tool_name == "spawn_agents" {
                 // Brain may only spawn read-only subagents.
                 let tool_input = if in_brain {
@@ -3971,6 +3973,46 @@ mod document_loop_tests {
             "{text}"
         );
         assert!(last_result(&bodies[2]).contains("s1 \u{b7} done \u{b7} main"));
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    // The document tools join with the document that gives them a use. A
+    // `doc_create` that creates nothing (no section topics here) must not
+    // load them: that would be a cache break, and three tool definitions on
+    // every later request — kept on resume by the `tools_loaded` record —
+    // that can only answer NO_DOCUMENT.
+    #[tokio::test]
+    async fn a_doc_create_that_fails_loads_no_document_tools() {
+        let ws = workspace("doc-create-fails");
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Pudim de leite", "sections": []}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        assert!(last_result(&bodies[1]).contains("at least one section"));
+        let second = tool_names(&bodies[1]);
+        for name in DOCUMENT_TOOLS {
+            assert!(!second.contains(&name.to_string()), "{name}: {second:?}");
+        }
+        let records = records_of(&ws);
+        assert!(crate::agent::deferred::loaded_names(&records).is_empty());
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(r, SessionRecord::CacheBreak { .. })),
+            "no cache break for a load that did not happen"
+        );
         std::fs::remove_dir_all(&ws.root).ok();
     }
 

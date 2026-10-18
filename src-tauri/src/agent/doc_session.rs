@@ -802,16 +802,26 @@ pub fn seed_tools(
     store: &crate::agent::persist::SessionStore,
     loaded: &mut Vec<String>,
 ) {
+    let from = loaded.len();
+    join_tools(ctx, loaded);
+    crate::agent::deferred::record(store, ctx, &loaded[from..]);
+}
+
+/// After a `doc_create`: the document tools join `loaded` when the session
+/// now has a document, in the same round (one cache break, recorded with the
+/// round's other loads). A `doc_create` that created nothing — no topics, no
+/// title, no workspace — loads nothing: three definitions that could only
+/// answer NO_DOCUMENT would ride on every later request, and on resume
+/// (Phase 4b final review; they used to join before the call ran).
+pub fn join_tools(ctx: &crate::agent::tools::ToolContext, loaded: &mut Vec<String>) {
     if !has_document(ctx) {
         return;
     }
-    let missing: Vec<String> = crate::agent::deferred::DOCUMENT_TOOLS
-        .iter()
-        .filter(|t| !loaded.iter().any(|l| l == *t))
-        .map(|t| t.to_string())
-        .collect();
-    loaded.extend(missing.iter().cloned());
-    crate::agent::deferred::record(store, ctx, &missing);
+    for name in crate::agent::deferred::DOCUMENT_TOOLS {
+        if !loaded.iter().any(|l| l == name) {
+            loaded.push(name.to_string());
+        }
+    }
 }
 
 /// Before the round's tool results become the next user message: a change

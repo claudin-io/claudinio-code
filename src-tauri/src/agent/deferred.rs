@@ -361,17 +361,6 @@ pub(crate) fn before_call(
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
 ) -> Option<crate::agent::provider::ContentBlock> {
-    if tool_name == "doc_create" {
-        // The document tools join with the document that gives them a use,
-        // in the same round: one cache break, never a load later on.
-        let deferred = deferred();
-        for name in DOCUMENT_TOOLS {
-            if deferred.iter().any(|t| t.name == *name) && !loaded.iter().any(|n| n == name) {
-                loaded.push(name.to_string());
-            }
-        }
-        return None;
-    }
     if tool_name != "load_tools" {
         if is_deferred(tool_name) && !loaded.iter().any(|n| n == tool_name) {
             let deferred = deferred();
