@@ -2025,6 +2025,7 @@ pub(crate) mod surface_tests {
             mode,
             PromptProfile::Standard,
             4,
+            false,
         )
     }
 

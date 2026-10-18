@@ -61,29 +61,16 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 - `<hook-feedback>` is a correction from one of those programs about what just happened. Act on it before continuing.
 
 # 6. LINKS (Markdown)
-Your text responses are rendered as Markdown. Use standard Markdown links to make files, images, and URLs clickable. The chat UI detects the link type from the extension and opens it with the appropriate viewer or external browser.
-
-Link types (auto-detected by extension):
-- **External URLs**: `[label](https://example.com)` — opens in the default browser.
-- **File links**: `[label](src/lib/ipc.ts)` or `[label](./relative/path.rs)` — relative to workspace root; opens a text viewer with Monaco editor.
-- **Image links**: `[label](src/assets/screenshot.png)` — opens the image in a viewer; supported: png, jpg, jpeg, gif, webp, svg.
-- **Video links**: `[label](demo.mp4)` — opens a video player; supported: mp4, webm, mov.
-- **Audio links**: `[label](sound.mp3)` — opens an audio player; supported: mp3, wav, ogg, flac.
-
-Examples:
-```
-See the main component: [ChatPanel.tsx](src/components/ChatPanel.tsx)
-System prompt ref: [session.rs](src-tauri/src/agent/session.rs)
-Architecture diagram: [diagram.png](docs/architecture.png)
-Landing page: [Claudinio Code](https://claudin.io)
-```
-Use relative paths from the workspace root (no leading `/`). The file icon next to linked items is automatic — you just write the Markdown link.
+Your replies render as Markdown: a link to a workspace file by its relative path (`[ipc.ts](src/lib/ipc.ts)`, no leading `/`) opens it in the app, and URLs open in the browser.
+Links to images (png, jpg, gif, webp, svg), video (mp4, webm, mov) and audio (mp3, wav, ogg, flac) open in a viewer.
 
 # LANGUAGE POLICY
 - Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message."#;
 
-/// Appended to the system prompt in BOTH modes: golden tasks are mandatory
-/// goals the session must reach before it is allowed to finish for real.
+/// Appended to the system prompt in both modes when the session has golden
+/// tasks at run start: golden tasks are mandatory goals the session must
+/// reach before it is allowed to finish for real. A session without one is
+/// not sent the rules (lean-harness plan, Phase 2).
 const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS (MANDATORY GOALS)\n\
 Tasks whose id starts with 'golden-' are mandatory goals set by the user via <goal> tags:\n\
 - They are the success criteria of the session: work is only finished when every golden task has status='done'.\n\
@@ -156,6 +143,9 @@ pub(super) fn system_prompt(
     mode: SessionMode,
     profile: PromptProfile,
     max_parallel: usize,
+    // Whether the session has golden tasks at run start: only then are the
+    // golden-task rules sent.
+    has_golden_goals: bool,
 ) -> String {
     if profile == PromptProfile::GitSync {
         return match workspace_root {
@@ -204,6 +194,7 @@ File tools take absolute paths inside this root."
         _ => ".claudinio/plans".to_string(),
     };
     let base = base.replace("{max_parallel}", &max_parallel.to_string());
+    let golden = if has_golden_goals { GOLDEN_PROMPT } else { "" };
 
     match mode {
         SessionMode::Brain => {
@@ -293,7 +284,7 @@ File tools take absolute paths inside this root."
                 "- Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message.\n"
             );
             let brain_prompt = brain_text.replace("{plans_subdir}", &plans_subdir);
-            format!("{base}{GOLDEN_PROMPT}{brain_prompt}")
+            format!("{base}{golden}{brain_prompt}")
         }
         SessionMode::Builder => {
             #[rustfmt::skip]
@@ -337,7 +328,7 @@ File tools take absolute paths inside this root."
                 "- Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message.\n"
             );
             let builder_prompt = builder_text.replace("{plans_subdir}", &plans_subdir);
-            format!("{base}{GOLDEN_PROMPT}{builder_prompt}")
+            format!("{base}{golden}{builder_prompt}")
         }
     }
 }
@@ -370,6 +361,7 @@ pub(super) fn run_prefix(
         mode,
         profile,
         subagent::effective_max_parallel(config),
+        has_golden_goals,
     );
     let system = if profile == PromptProfile::Standard {
         crate::agent::surface::prompt_for(
@@ -495,6 +487,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
                     mode,
                     profile,
                     subagent::MAX_PARALLEL_AGENTS,
+                    false,
                 );
                 assert!(!sys.contains("MUST be in English"), "{profile:?}/{mode:?}");
                 assert!(!sys.contains("default to English"), "{profile:?}/{mode:?}");
@@ -533,6 +526,60 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         }
     }
 
+    /// The golden-task rules are instructions about tasks that exist only
+    /// when the user set `<goal>`s; a session without one was paying ~1.3k
+    /// characters on every request for rules it could not apply. Read once at
+    /// run start (`has_golden_goals`), so the prefix stays fixed for the run.
+    #[test]
+    fn golden_rules_are_sent_only_to_a_session_that_has_golden_goals() {
+        let ctx = crate::agent::tools::tests_support::ctx();
+        for mode in [SessionMode::Brain, SessionMode::Builder] {
+            for golden in [false, true] {
+                let (profile, system, _) = run_prefix(
+                    &AgentConfig::default(),
+                    &ctx,
+                    PromptProfile::Standard,
+                    mode,
+                    None,
+                    None,
+                    &[],
+                    golden,
+                );
+                assert_eq!(profile, PromptProfile::Standard);
+                assert_eq!(
+                    system.contains("## GOLDEN TASKS"),
+                    golden,
+                    "{mode:?} with golden goals = {golden}"
+                );
+            }
+        }
+    }
+
+    /// Links are rendering facts, not instructions: two lines, no examples.
+    #[test]
+    fn the_links_section_is_two_lines() {
+        let sys = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            None,
+            SessionMode::Builder,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+            false,
+        );
+        let start = sys.find("# 6. LINKS").expect("links section");
+        let section: Vec<&str> = sys[start..]
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.starts_with('#') && !l.is_empty())
+            .collect();
+        assert_eq!(section.len(), 2, "{section:?}");
+        assert!(section[0].contains("relative") && section[0].contains("workspace"));
+        assert!(section[1].contains("image") && section[1].contains("video"));
+        assert!(!sys.contains("Examples:"));
+    }
+
     #[test]
     fn brain_prompt_mandates_size_and_verbatim_assets() {
         let sys = system_prompt(
@@ -543,6 +590,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Brain,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         // Size/dimensions must be a mandatory interview item.
         assert!(
@@ -570,6 +618,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Brain,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         assert!(
             sys.contains("## Low-Level Design"),
@@ -602,6 +651,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
                 mode,
                 PromptProfile::Standard,
                 subagent::MAX_PARALLEL_AGENTS,
+                false,
             );
             assert!(sys.contains("Update in real time with `tasks_update`"));
             assert!(sys.contains("Never resend the list just to change a status"));
@@ -623,6 +673,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Builder,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         assert!(builder.contains("call `tasks_update` to mark THAT task status='doing'"));
         assert!(builder.contains("call `tasks_update` to mark THAT task status='done'"));
@@ -646,6 +697,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Brain,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         assert!(
             sys.contains("mermaid"),
@@ -668,6 +720,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Builder,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         assert!(
             sys.contains("Low-Level Design"),
@@ -685,6 +738,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Builder,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         assert!(
             sys.contains("COMPLETE technical spec"),
@@ -724,6 +778,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Brain,
             PromptProfile::Standard,
             4,
+            false,
         );
         assert!(
             sys.contains("Ten percent off"),
@@ -753,6 +808,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Builder,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         assert!(
             sys.contains("similar to"),
@@ -774,6 +830,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Builder,
             PromptProfile::GitSync,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         assert!(
             !sys.contains("tasks_get") && !sys.contains("tasks_set"),
@@ -837,6 +894,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             SessionMode::Brain,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
         let user = format!(
@@ -907,6 +965,7 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
             SessionMode::Builder,
             PromptProfile::Standard,
             subagent::MAX_PARALLEL_AGENTS,
+            false,
         );
         let model = cfg
             .model_for_mode(SessionMode::Builder.as_str())
