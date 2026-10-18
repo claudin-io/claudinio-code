@@ -121,6 +121,9 @@ export const ChatPanel: Component<{
   /// Global thinking-effort setting shown/edited by the toolbar slider.
   thinkingEffort: () => ThinkingEffort;
   onThinkingEffortChange: (v: ThinkingEffort) => void;
+  /// Told whether the panel shows a conversation: App opens the task column
+  /// for one even without a task list, to show the "single step" note.
+  onConversationChange?: (has: boolean) => void;
 }> = (props) => {
   const [input, setInput] = createSignal("");
   // Another panel (Settings) can hand this workspace a prepared prompt. It
@@ -136,6 +139,8 @@ export const ChatPanel: Component<{
     });
   });
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
+  const hasConversation = createMemo(() => messages().length > 0);
+  createEffect(() => props.onConversationChange?.(hasConversation()));
   const [status, setStatus] = createSignal<Status>("idle");
   const [pendingApprovals, setPendingApprovals] = createSignal<(ToolCallData & { subagentName?: string })[]>([]);
   const [currentAskUser, setCurrentAskUser] = createSignal<AskUserData | null>(null);

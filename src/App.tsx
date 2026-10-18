@@ -97,6 +97,15 @@ export function addRecent(projects: () => string[], setter: (v: string[]) => voi
   saveRecent(updated);
 }
 
+/// Whether the task column takes its 40px. Single-step work gets no task
+/// list since lean-harness Phase 4, and the panel then says "Single step";
+/// that note is worth the width once there is a conversation it describes.
+/// A workspace with neither a list nor a conversation keeps the column
+/// collapsed, as it always was.
+export function taskColumnOpen(taskCount: number, hasConversation: boolean): boolean {
+  return taskCount > 0 || hasConversation;
+}
+
 function App() {
   const [openWorkspaces, setOpenWorkspaces] = createSignal<string[]>([]);
   const [activeWorkspace, setActiveWorkspace] = createSignal<string | null>(null);
@@ -143,6 +152,8 @@ function App() {
   const [settingsApiKeyError, setSettingsApiKeyError] = createSignal<string | null>(null);
   const [showTree, setShowTree] = createSignal(false);
   const [contextPos, setContextPos] = createSignal<{ x: number; y: number; path: string } | null>(null);
+  const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
+  const [conversations, setConversations] = createSignal<Record<string, boolean>>({});
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
   const [onboardingSignInError, setOnboardingSignInError] = createSignal<string | null>(null);
   // Easter egg "iddqd" — override de URL e API Key para LLM
@@ -211,6 +222,10 @@ function App() {
     if (!ws) return null;
     const v = indexStatusMap()[ws];
     return v ?? null;
+  };
+  const taskColumn = () => {
+    const ws = activeWorkspace();
+    return ws ? taskColumnOpen(taskCounts()[ws] ?? 0, conversations()[ws] ?? false) : false;
   };
   const setWsProgress = (ws: string, p: IndexProgress | null) =>
     setProgressMap((m) => ({ ...m, [ws]: p }));
@@ -1244,7 +1259,7 @@ function App() {
             <For each={openWorkspaces()}>
               {(ws) => (
                 <div class="h-full" style={{ display: activeWorkspace() === ws ? "block" : "none" }}>
-                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} thinkingEffort={configThinkingEffort} onThinkingEffortChange={changeThinkingEffort} />
+                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} thinkingEffort={configThinkingEffort} onThinkingEffortChange={changeThinkingEffort} onConversationChange={(has) => setConversations((m) => ({ ...m, [ws]: has }))} />
                 </div>
               )}
             </For>
@@ -1253,13 +1268,17 @@ function App() {
 
         <Show when={activeWorkspace()}>
           <aside
-            class="w-10 shrink-0 border-l border-border-subtle bg-surface-1 overflow-hidden"
+            class="shrink-0 border-l border-border-subtle bg-surface-1 overflow-hidden transition-[width] duration-100"
+            classList={{ "w-10": taskColumn(), "w-0": !taskColumn() }}
           >
             <For each={openWorkspaces()}>
               {(ws) => (
                 <Show when={activeWorkspace() === ws}>
                   <div class="h-full">
-                    <TasksPanel workspace={ws} />
+                    <TasksPanel
+                      workspace={ws}
+                      onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
+                    />
                   </div>
                 </Show>
               )}

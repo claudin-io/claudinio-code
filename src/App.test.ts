@@ -28,6 +28,7 @@ import {
   loadOpenWorkspaces,
   saveOpenWorkspaces,
   addRecent,
+  taskColumnOpen,
 } from "./App";
 
 beforeEach(() => {
@@ -142,5 +143,21 @@ describe("addRecent", () => {
     // The oldest (last in the original list, /path-9) should be discarded
     expect(projects).not.toContain("/path-9");
     expect(projects).toContain("/path-0");
+  });
+});
+
+// ── taskColumnOpen ──────────────────────────────────────────────────
+
+// The task column takes no width until it has something to say: a list, or
+// a conversation whose work needed none ("single step"). A fresh workspace
+// keeps the layout it had before the lean-harness Phase 4 empty state.
+describe("taskColumnOpen", () => {
+  it("stays collapsed for a workspace with no tasks and no conversation", () => {
+    expect(taskColumnOpen(0, false)).toBe(false);
+  });
+
+  it("opens for a task list, and for a conversation without one", () => {
+    expect(taskColumnOpen(3, false)).toBe(true);
+    expect(taskColumnOpen(0, true)).toBe(true);
   });
 });
