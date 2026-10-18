@@ -4,6 +4,7 @@ pub mod browser;
 pub mod code_intel;
 mod commands;
 pub mod download;
+pub mod eval;
 pub(crate) mod http;
 pub(crate) mod imageutil;
 pub mod llama;

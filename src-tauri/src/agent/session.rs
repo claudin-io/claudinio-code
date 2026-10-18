@@ -527,6 +527,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,

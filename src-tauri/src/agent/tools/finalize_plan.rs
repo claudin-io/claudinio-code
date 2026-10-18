@@ -322,6 +322,7 @@ mod tests {
             plan_save_path: plan_save_path.map(|s| s.to_string()),
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,

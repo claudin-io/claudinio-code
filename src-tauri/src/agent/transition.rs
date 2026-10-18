@@ -271,6 +271,7 @@ pub fn rebuild_tool_context(
         plan_save_path: old_ctx.plan_save_path.clone(),
         base_commit: old_ctx.base_commit.clone(),
         auto_approve_git: old_ctx.auto_approve_git,
+        shell_gate: old_ctx.shell_gate.clone(),
         mcp: old_ctx.mcp.clone(),
         mode_ctl: Some(new_mode_ctl),
         index_progress: old_ctx.index_progress.clone(),

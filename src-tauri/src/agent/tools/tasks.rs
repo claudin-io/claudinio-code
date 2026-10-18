@@ -453,6 +453,7 @@ mod lld_gate_tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: mode.map(|m| Arc::new(ModeCtl::new(m, ModeOrigin::Human))),
             index_progress: None,

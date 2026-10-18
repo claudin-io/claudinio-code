@@ -341,6 +341,14 @@ pub(crate) async fn run_tool(
             } else {
                 permissions::bash_permission(command, ctx.auto_approve_git)
             };
+            // An unattended caller decides every command itself; see
+            // `ToolContext::shell_gate`.
+            let resolved = match resolved {
+                permissions::PermissionLevel::Auto if ctx.shell_gate.is_some() => {
+                    permissions::PermissionLevel::RequiresApproval
+                }
+                other => other,
+            };
             match resolved {
                 permissions::PermissionLevel::Denied => {
                     let msg = format!("Command blocked by security policy: {command}");
@@ -456,7 +464,11 @@ pub(crate) async fn run_tool(
                             }
                         }
                         Ok(false) => {
-                            let msg = "Command rejected by user".to_string();
+                            let msg = ctx
+                                .shell_gate
+                                .as_ref()
+                                .map_or("Command rejected by user", |g| g.rejection.as_str())
+                                .to_string();
                             let _ = event_tx.send(AgentEvent::ToolResult {
                                 tool_id: tool_use_id.to_string(),
                                 tool_name: tool_name.to_string(),
@@ -1594,6 +1606,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1723,5 +1736,100 @@ mod tests {
         // Shows a concrete corrected example with plain-string options.
         assert!(msg.contains("First concrete choice"));
         assert!(msg.to_lowercase().contains("example"));
+    }
+
+    /// Answer the first approval request that appears with `answer`; report
+    /// whether one appeared.
+    fn answer_first(approvals: &ApprovalMap, answer: bool) -> tokio::task::JoinHandle<bool> {
+        let approvals = approvals.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                let pending = {
+                    let mut map = approvals.lock().await;
+                    let key = map.keys().next().cloned();
+                    key.and_then(|k| map.remove(&k))
+                };
+                if let Some(tx) = pending {
+                    let _ = tx.send(answer);
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            false
+        })
+    }
+
+    async fn bash(ctx: &ToolContext, approvals: &ApprovalMap, command: &str) -> String {
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let block = run_tool(
+            "bash",
+            "t1",
+            json!({ "command": command }),
+            PermissionLevel::RequiresApproval,
+            &events,
+            approvals,
+            &AnswerMap::default(),
+            "s",
+            ctx,
+            &AgentConfig::default(),
+            &verdict_none(),
+        )
+        .await;
+        match block {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            other => panic!("a tool result, got {other:?}"),
+        }
+    }
+
+    // An unattended caller cannot let the allowlist decide for it: `echo` and
+    // `node ` are allowlisted because a person sees them run. With a shell
+    // gate every command reaches the approval channel, and a refusal says
+    // what the gate says.
+    #[tokio::test]
+    async fn with_a_shell_gate_even_an_allowlisted_command_asks_first() {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio-shell-gate-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gated = ToolContext {
+            workspace_root: Some(dir.to_string_lossy().to_string()),
+            shell_gate: Some(crate::agent::tools::ShellGate {
+                rejection: "Not run: use run_quality for checks.".into(),
+            }),
+            ..dummy_ctx()
+        };
+
+        let approvals = ApprovalMap::default();
+        let asked = answer_first(&approvals, false);
+        let refused = bash(&gated, &approvals, "echo gate-was-here").await;
+        assert!(
+            asked.await.unwrap(),
+            "the command was put to the approval channel"
+        );
+        assert_eq!(refused, "Not run: use run_quality for checks.");
+
+        let asked = answer_first(&approvals, true);
+        let approved = bash(&gated, &approvals, "echo gate-was-here").await;
+        assert!(asked.await.unwrap());
+        assert!(approved.contains("gate-was-here"), "{approved}");
+
+        // The denylist still wins: nothing is asked, nothing runs.
+        let asked = answer_first(&approvals, true);
+        let denied = bash(&gated, &approvals, "rm -rf /").await;
+        assert!(denied.contains("blocked by security policy"), "{denied}");
+        assert!(!asked.await.unwrap());
+
+        // Without a gate the allowlist decides, as it always has.
+        let open = ToolContext {
+            shell_gate: None,
+            ..gated.clone()
+        };
+        let asked = answer_first(&approvals, false);
+        let ran = bash(&open, &approvals, "echo gate-was-here").await;
+        assert!(ran.contains("gate-was-here"));
+        assert!(!asked.await.unwrap());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

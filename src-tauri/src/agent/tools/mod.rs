@@ -58,6 +58,15 @@ pub struct ToolContext {
     /// Default false for normal chat sessions; set true for dedicated
     /// commit-and-push workflows.
     pub auto_approve_git: bool,
+    /// `Some` puts every `bash` command the denylist lets through to the
+    /// approval channel — even one the allowlist would run unasked — and
+    /// answers a refusal with the gate's own text. `None` in the app, where the
+    /// allowlist is a convenience for a person watching. The eval runner sets
+    /// it: its "person" is a policy that approves only read-only commands,
+    /// because it executes model-chosen commands on the host with nobody
+    /// watching (see `crate::eval`). Stricter only — it can add a prompt, never
+    /// remove one, and `Denied` stays denied.
+    pub shell_gate: Option<ShellGate>,
     /// Handle to connected MCP servers for this workspace, if any. Populated
     /// before the agent loop starts so `mcp__` tool calls can dispatch
     /// synchronously through `tools::execute`.
@@ -84,6 +93,14 @@ pub struct ToolContext {
     pub hooks: Option<Arc<crate::agent::hooks::HookCtx>>,
 }
 
+/// See `ToolContext::shell_gate`.
+#[derive(Debug, Clone)]
+pub struct ShellGate {
+    /// The tool result a refused command gets, in place of "Command rejected
+    /// by user": tells the model what to do instead.
+    pub rejection: String,
+}
+
 /// A bare `ToolContext` for tests: no workspace, no index, no mode handle, so
 /// every gate that keys off those is inert unless the test opts in.
 #[cfg(test)]
@@ -106,6 +123,7 @@ pub(crate) mod tests_support {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1248,6 +1266,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1668,6 +1687,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1698,6 +1718,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1728,6 +1749,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1756,6 +1778,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1807,6 +1830,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1845,6 +1869,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1887,6 +1912,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1918,6 +1944,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1949,6 +1976,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1979,6 +2007,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -2012,6 +2041,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
