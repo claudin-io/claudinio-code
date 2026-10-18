@@ -515,6 +515,9 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             ("session.rs", include_str!("session.rs")),
             ("prompt.rs", include_str!("prompt.rs")),
             ("events.rs", include_str!("events.rs")),
+            ("judge.rs", include_str!("judge.rs")),
+            ("handoff.rs", include_str!("handoff.rs")),
+            ("retry.rs", include_str!("retry.rs")),
         ];
         let gate = ["reject_non", "_english("].concat();
         let refusal = ["Only English", " is supported"].concat();

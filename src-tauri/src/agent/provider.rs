@@ -14,7 +14,7 @@ pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Sentinel prefix for budget-exhausted errors. The frontend keys off it to
 /// swap the retry error bar for an upgrade banner, and the retry loop
-/// (`is_retryable_error` in session.rs) treats it as non-retryable.
+/// (`is_retryable_error` in retry.rs) treats it as non-retryable.
 pub const BUDGET_EXCEEDED_MARKER: &str = "BUDGET_EXCEEDED::";
 
 /// Extract `error.message` from an Anthropic/LiteLLM-style error body; if
