@@ -1,5 +1,6 @@
 pub mod app_sign;
 pub mod budget;
+pub mod events;
 pub mod hooks;
 pub mod install_id;
 pub mod jev;
@@ -9,6 +10,7 @@ pub mod output_trim;
 pub mod permissions;
 pub mod persist;
 pub mod plugins;
+pub mod prompt;
 pub mod provider;
 pub mod prune;
 pub mod route;
