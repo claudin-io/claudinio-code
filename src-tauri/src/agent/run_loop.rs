@@ -1013,6 +1013,17 @@ pub async fn run_workflow_with_profile(
                     continue;
                 }
             }
+            // A task left `doing`: one reminder, then the finish goes on
+            // (lean-harness Phase 4 — the prompt no longer demands a final
+            // update, so the harness looks for itself).
+            if profile.is_chat()
+                && !guards.doing_nudged
+                && let Some(nudge) = crate::agent::task_recital::still_doing_nudge(ctx)
+            {
+                guards.doing_nudged = true;
+                push_user_blocks(history, store, ctx, vec![ContentBlock::text(nudge)]);
+                continue;
+            }
             // Golden verification: an end_turn with golden tasks still pending
             // is not a real finish — flip Brain↔Builder and send the model
             // back to work, bounded by the cycle and stall caps.

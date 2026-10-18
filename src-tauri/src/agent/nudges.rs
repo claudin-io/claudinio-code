@@ -82,6 +82,23 @@ pub fn quality_failed(summary: &str, detail: &str, attempt: u32, max_attempts: u
     )
 }
 
+/// The model ended its turn with tasks still marked `doing`. Sent once per
+/// run (`GuardState::doing_nudged`): the prompt no longer demands a final
+/// `tasks_update` before the answer (lean-harness Phase 4), so the harness
+/// checks at the finish line instead, and then lets the run end either way.
+pub fn still_doing(tasks: &[crate::agent::persist::TaskItem]) -> String {
+    let named: Vec<String> = tasks
+        .iter()
+        .map(|t| format!("'{}' ({})", t.id, t.title))
+        .collect();
+    format!(
+        "[system] You ended your turn with {} still marked 'doing'. If that work is \
+         finished and verified, mark it 'done' with `tasks_update` (several tasks go in \
+         one call); if it is not, finish it. Then give your final answer.",
+        named.join(", ")
+    )
+}
+
 /// The loop watch saw the same call repeated without progress.
 pub fn repeating(what: &str) -> String {
     format!(

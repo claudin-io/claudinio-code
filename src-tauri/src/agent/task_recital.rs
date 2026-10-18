@@ -58,6 +58,15 @@ pub fn run_start_block(ctx: &ToolContext) -> Option<String> {
     tasks_block(&tasks)
 }
 
+/// The nudge for a turn that ended with tasks still `doing`, or `None` when
+/// none is (or the session has no list).
+pub fn still_doing_nudge(ctx: &ToolContext) -> Option<String> {
+    let path = ctx.session_store_path.as_deref()?;
+    let tasks = crate::agent::persist::load_last_tasks(std::path::Path::new(path)).ok()?;
+    let doing: Vec<TaskItem> = tasks.into_iter().filter(|t| t.status == "doing").collect();
+    (!doing.is_empty()).then(|| crate::agent::nudges::still_doing(&doing))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +350,105 @@ mod loop_tests {
         let texts = last_message_texts(&bodies[0]);
         assert_eq!(texts.first(), Some(&kickoff));
         assert_eq!(texts.last(), tasks_block(&tasks).as_ref());
+    }
+
+    fn doing(id: &str, title: &str) -> TaskItem {
+        TaskItem {
+            status: "doing".into(),
+            ..todo(id, title)
+        }
+    }
+
+    /// The `[system]` texts of the last message of a request body.
+    fn nudges_in(body: &str) -> Vec<String> {
+        last_message_texts(body)
+            .into_iter()
+            .filter(|t| t.starts_with("[system]"))
+            .collect()
+    }
+
+    // The finish line used to be held by a prompt rule ("a final
+    // `tasks_update` before your final text"). Now the harness checks: a turn
+    // that ends with a task still `doing` is sent back once, naming the task.
+    #[tokio::test]
+    async fn a_turn_that_ends_with_a_task_still_doing_is_nudged_once() {
+        let ws = workspace(
+            "doing-nudge",
+            &[doing("t1", "wire the UI"), todo("t2", "add the test")],
+        );
+        let (outcome, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "go on",
+            vec![Reply::Text("all done"), Reply::Text("really done")],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        // One nudge, then the run is let finish even though t1 is still doing.
+        assert_eq!(bodies.len(), 2, "one nudge, one more request, then done");
+        let nudge = nudges_in(&bodies[1]);
+        assert_eq!(nudge.len(), 1, "{nudge:?}");
+        assert!(nudge[0].contains("'t1' (wire the UI)"), "{}", nudge[0]);
+        assert!(nudge[0].contains("doing") && nudge[0].contains("`tasks_update`"));
+        assert!(
+            !nudge[0].contains("'t2'"),
+            "only the task left doing: {}",
+            nudge[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_ends_with_nothing_doing_is_not_nudged() {
+        let mut closed = doing("t1", "wire the UI");
+        closed.status = "done".into();
+        let ws = workspace("no-doing", &[closed, todo("t2", "add the test")]);
+        let (outcome, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "go on",
+            vec![Reply::Text("all done")],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        assert_eq!(bodies.len(), 1);
+    }
+
+    // A model that closes the task when nudged ends the run on its answer.
+    #[tokio::test]
+    async fn a_nudged_model_that_closes_the_task_finishes_normally() {
+        let ws = workspace("doing-closed", &[doing("t1", "wire the UI")]);
+        let (outcome, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "go on",
+            vec![
+                Reply::Text("all done"),
+                Reply::Tool {
+                    name: "tasks_update",
+                    input: serde_json::json!({"id": "t1", "status": "done"}),
+                },
+                Reply::Text("closed it"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        assert_eq!(bodies.len(), 3);
+        let path = std::path::Path::new(&ws.store.path);
+        assert_eq!(
+            crate::agent::persist::load_last_tasks(path).unwrap()[0].status,
+            "done"
+        );
     }
 }

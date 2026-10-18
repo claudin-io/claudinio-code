@@ -1535,6 +1535,13 @@ mod deferred_prefix_tests {
             nudges::golden_flip(&["g1".into()], "builder", 1, 3),
             nudges::quality_failed("1 failing", "detail", 1, 3),
             nudges::repeating("`read_file`"),
+            nudges::still_doing(&[crate::agent::persist::TaskItem {
+                id: "t1".into(),
+                title: "wire the UI".into(),
+                description: String::new(),
+                journal: vec![],
+                status: "doing".into(),
+            }]),
             transition::compose_builder_kickoff(Some("docs/plans/p.md"), Some("plan")),
             transition::compose_builder_kickoff(None, None),
             transition::compose_context_handoff_message("handoff", Some("docs/plans/p.md")),
@@ -1628,6 +1635,16 @@ mod deferred_prefix_tests {
                 nudges::golden_flip(&["g".into()], "builder", 1, 3),
             ),
             ("finalize", nudges::FINALIZE_PLAN.to_string()),
+            (
+                "still doing",
+                nudges::still_doing(&[crate::agent::persist::TaskItem {
+                    id: "t1".into(),
+                    title: "wire the UI".into(),
+                    description: String::new(),
+                    journal: vec![],
+                    status: "doing".into(),
+                }]),
+            ),
             ("handoff request", nudges::HANDOFF_REQUEST.to_string()),
         ] {
             texts.push((name.into(), text));
