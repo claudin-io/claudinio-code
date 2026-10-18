@@ -280,6 +280,8 @@ export interface SessionLinkedData {
   sessionId: string;
   reason: HandoffReason;
   mode: SessionMode;
+  /** Who the successor's mode belongs to, as the backend built its ModeCtl. */
+  origin?: ModeOrigin;
   firstMessage: string;
 }
 

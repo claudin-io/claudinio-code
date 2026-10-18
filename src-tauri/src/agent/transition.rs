@@ -181,6 +181,7 @@ pub async fn link_session(
         session_id: new_id.clone(),
         reason: spec.reason.as_str().into(),
         mode: spec.next_mode.as_str().into(),
+        origin: spec.next_origin.as_str().into(),
         first_message: spec.first_message.clone(),
     });
 

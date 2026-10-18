@@ -181,6 +181,11 @@ pub enum AgentEvent {
         session_id: String,
         reason: String,
         mode: String,
+        /// Who the successor's mode belongs to (`human` | `agent`), as its
+        /// `ModeCtl` was built: the UI takes it from here rather than
+        /// deriving it from `reason`.
+        #[serde(default)]
+        origin: String,
         #[serde(rename = "firstMessage")]
         first_message: String,
     },
@@ -293,6 +298,21 @@ mod tests {
     use crate::agent::session::{COMPACT_THRESHOLD, MAX_CONTEXT_TOKENS};
 
     use serde_json::json;
+
+    // A successor's mode origin is the backend's call (a new-document or a
+    // context handoff keeps the predecessor's, a plan execution is the
+    // agent's, the Builder button the person's): the event carries it, so
+    // the UI follows it instead of guessing from the reason.
+    #[test]
+    fn session_linked_carries_the_successors_mode_origin() {
+        let json = json!({"event": "SessionLinked", "data": {
+            "prevSessionId": "a", "sessionId": "b", "reason": "new_document",
+            "mode": "brain", "origin": "human", "firstMessage": "go"
+        }});
+        let ev: AgentEvent = serde_json::from_value(json).unwrap();
+        let back = serde_json::to_value(&ev).unwrap();
+        assert_eq!(back["data"]["origin"], "human", "{back}");
+    }
 
     #[test]
     fn agent_event_round_trip_text_step() {

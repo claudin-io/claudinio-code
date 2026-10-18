@@ -1,4 +1,4 @@
-import type { JevStatus, SessionMode } from "./ipc";
+import type { JevStatus, ModeOrigin, SessionLinkedData, SessionMode } from "./ipc";
 
 /** What the mode control can send with a prompt. "auto" is not a mode a
  *  session is ever in: it hands the choice of starting phase to the harness,
@@ -29,4 +29,15 @@ export function autoAvailable(jev: JevStatus | undefined, sessionIsFresh: boolea
  */
 export function modeToSend(mode: SessionMode, armed: boolean, jev: JevStatus | undefined): ModeChoice {
   return armed && routerOn(jev) ? "auto" : mode;
+}
+
+/** The mode origin of the session a handoff just linked: the one the
+ *  backend built its ModeCtl with. Deriving it from the reason (`agent` for
+ *  everything but the Builder button) was wrong for a new-document or a
+ *  context handoff, which keep the predecessor's origin: a person's Brain
+ *  session continued that way lost its "Read Plan / Continue with Builder"
+ *  buttons, which show only for a human-origin Brain. The reason is only
+ *  the fallback for an event that carries no origin. */
+export function linkedModeOrigin(data: SessionLinkedData): ModeOrigin {
+  return data.origin ?? (data.reason === "manual_builder" ? "human" : "agent");
 }

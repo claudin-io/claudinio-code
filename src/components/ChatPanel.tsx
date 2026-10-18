@@ -53,6 +53,7 @@ import {
 } from "../lib/ipc";
 import { createAutoMode } from "../lib/autoMode";
 import type { ModeChoice } from "../lib/modeChoice";
+import { linkedModeOrigin } from "../lib/modeChoice";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
 import { renderMarkdown, renderLiveMarkdown } from "../lib/markdown";
@@ -1085,7 +1086,7 @@ export const ChatPanel: Component<{
       ]);
       setActiveSessionId(data.sessionId);
       setMode(data.mode);
-      setModeOrigin(data.reason === "manual_builder" ? "human" : "agent");
+      setModeOrigin(linkedModeOrigin(data));
       setStatus("thinking");
       scrollToBottom();
     } else if (event.event === "SteeringInjected") {
