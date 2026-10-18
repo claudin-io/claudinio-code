@@ -2988,3 +2988,45 @@ mod usage_tests {
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }
+
+/// The frontend's `SessionRecord` type (`src/lib/ipc.ts`) names every `kind`
+/// `load_session` can hand it. Nothing in TypeScript fails when a variant is
+/// added here and not there, so the list is checked from this side: every
+/// variant of the enum, snake-cased as serde tags it, must be in the union.
+#[cfg(test)]
+mod frontend_kind_tests {
+    #[test]
+    fn every_record_kind_is_in_the_frontend_union() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rust = std::fs::read_to_string(manifest.join("src/agent/persist.rs")).unwrap();
+        let ts = std::fs::read_to_string(manifest.join("../src/lib/ipc.ts")).unwrap();
+        let body = rust
+            .split("pub enum SessionRecord {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the enum");
+        let snake = |name: &str| {
+            let mut out = String::new();
+            for (i, c) in name.chars().enumerate() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_lowercase());
+            }
+            out
+        };
+        let kinds: Vec<String> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+            .filter_map(|rest| rest.split([' ', '{', '(', ',']).next())
+            .map(snake)
+            .collect();
+        assert!(kinds.len() > 20, "{kinds:?}");
+        let missing: Vec<&String> = kinds
+            .iter()
+            .filter(|k| !ts.contains(&format!("\"{k}\"")))
+            .collect();
+        assert!(missing.is_empty(), "missing from ipc.ts: {missing:?}");
+    }
+}
