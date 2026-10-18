@@ -59,13 +59,14 @@ pub(crate) fn approves(tool_name: &str, input: &Value) -> bool {
 }
 
 /// Every `path` string anywhere in a tool input (one for `edit_file`, one
-/// per entry for a batch).
+/// per entry for a batch). `file_path` counts too: `edit_file` accepts it as
+/// an alias of `path`, and the approval event carries the raw input.
 fn collect_paths<'a>(input: &'a Value, out: &mut Vec<&'a str>) {
     match input {
         Value::Object(map) => {
             for (key, value) in map {
                 match value {
-                    Value::String(path) if key == "path" => out.push(path),
+                    Value::String(path) if key == "path" || key == "file_path" => out.push(path),
                     _ => collect_paths(value, out),
                 }
             }
@@ -211,6 +212,26 @@ mod tests {
             "one protected path refuses the whole batch"
         );
         assert!(!approves("edit_file", &json!({})), "an edit with no path");
+    }
+
+    /// `edit_file` accepts `file_path` as an alias of `path` (models trained on
+    /// other harnesses send it), and the approval event carries the raw input:
+    /// an edit sent through the alias must be judged exactly like one sent
+    /// through `path` — approved inside the workspace, refused in `.git/`.
+    #[test]
+    fn an_edit_through_the_file_path_alias_is_judged_like_one_through_path() {
+        assert!(approves(
+            "edit_file",
+            &json!({"file_path": "a.py", "old_string": "x", "new_string": "y"})
+        ));
+        assert!(!approves(
+            "edit_file",
+            &json!({"file_path": ".git/config", "old_string": "", "new_string": "x"})
+        ));
+        assert!(!approves(
+            "edit_file",
+            &json!({"file_path": ".claudinio.json", "old_string": "", "new_string": "x"})
+        ));
     }
 
     #[test]

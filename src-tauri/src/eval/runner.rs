@@ -201,6 +201,13 @@ impl Responder {
 
 /// Materialize `task`, run one session on it, run its oracle, and read the
 /// session files back into metrics.
+/// The round cap one task runs under: an explicit `--max-rounds` is the
+/// operator's override for the whole run, and a task's own `max_rounds` is
+/// the default when the command line names none.
+fn effective_max_rounds(cli: Option<usize>, task: Option<usize>) -> Option<usize> {
+    cli.or(task)
+}
+
 pub(crate) async fn run_task(task: &Task, opts: &RunOptions) -> TaskResult {
     let started = Instant::now();
     let root = opts.work_root.join(&task.id);
@@ -222,9 +229,7 @@ pub(crate) async fn run_task(task: &Task, opts: &RunOptions) -> TaskResult {
     }
 
     let mut opts = opts.clone();
-    if task.max_rounds.is_some() {
-        opts.max_rounds = task.max_rounds;
-    }
+    opts.max_rounds = effective_max_rounds(opts.max_rounds, task.max_rounds);
     let steering = Arc::new(SteeringCtl::new());
     let index_db = root.join("index.db");
     let session = run_session(task, &opts, &ws, &index_db, steering.clone());
@@ -753,5 +758,15 @@ reference:
         assert!(crate::agent::jev::backend(&config).is_none());
         assert!(config.plugins.values().all(|p| !p.enabled));
         assert_eq!(config.known_context_window("eval/m"), Some(32_768));
+    }
+
+    /// `--max-rounds` is the operator's override for one run; a task's own
+    /// `max_rounds` is the default when the command line names none.
+    #[test]
+    fn an_explicit_max_rounds_on_the_command_line_wins_over_the_task() {
+        assert_eq!(effective_max_rounds(Some(60), Some(12)), Some(60));
+        assert_eq!(effective_max_rounds(None, Some(12)), Some(12));
+        assert_eq!(effective_max_rounds(Some(60), None), Some(60));
+        assert_eq!(effective_max_rounds(None, None), None);
     }
 }
