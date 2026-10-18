@@ -138,6 +138,17 @@ fn linked(ctx: &crate::agent::tools::ToolContext) -> Option<Linked> {
     )
 }
 
+/// Whether `path` (absolute, or relative to the workspace) is the session's
+/// living document.
+pub fn is_linked_document(ctx: &crate::agent::tools::ToolContext, path: &str) -> bool {
+    let (Some(l), Some(ws)) = (linked(ctx), ctx.workspace_root.as_deref()) else {
+        return false;
+    };
+    let given = Path::new(ws).join(path);
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(&given) == canon(&l.abs)
+}
+
 /// Whether the session `ctx` writes to has a document.
 pub fn has_document(ctx: &crate::agent::tools::ToolContext) -> bool {
     linked(ctx).is_some()
@@ -485,6 +496,19 @@ pub fn run_start_blocks(ctx: &crate::agent::tools::ToolContext) -> Vec<String> {
         return Vec::new();
     };
     with_doc(&l, |doc, state| {
+        // No subagent of this session outlives the run that spawned it, so
+        // a claim one still holds here is left over (the app was closed
+        // mid-call) and would refuse every other writer.
+        for s in doc.sections_mut() {
+            if s.status == Status::Doing
+                && s.owner.as_deref().is_some_and(|o| o.starts_with("sub:"))
+            {
+                s.status = Status::Todo;
+                if s.text().is_empty() {
+                    s.owner = None;
+                }
+            }
+        }
         let mut blocks = vec![format!(
             "<document path=\"{}\">\n{}\n</document>",
             l.rel,
@@ -1172,6 +1196,50 @@ mod tests {
         for bad in ["", "../s", "s/../../etc", "a b", "s.jsonl"] {
             assert_eq!(session_file(&ws.root, bad), None, "{bad:?}");
         }
+    }
+
+    /// A subagent runs inside one `spawn_agents` call of a run, so when a
+    /// run starts none of this session's subagents is alive: a section one
+    /// still holds (the app was closed mid-call) would otherwise stay
+    /// `doing` forever and refuse every other writer.
+    #[test]
+    fn a_run_frees_the_sections_subagents_left_claimed() {
+        let (ws, path) = Ws::with_doc("stale", &["origem", "servir"]);
+        write(&ws.sub("s1", "sub:gone"), "s1", None, Status::Doing).unwrap();
+        write(&ws.ctx, "s2", None, Status::Doing).unwrap();
+        run_start_blocks(&ws.ctx);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[origem] <!-- claudinio: id=s1 status=todo -->"),
+            "{text}"
+        );
+        assert!(
+            text.contains("id=s2 status=doing by=main"),
+            "the main session's own stays"
+        );
+        write(&ws.ctx, "s1", Some("now mine"), Status::Done).unwrap();
+    }
+
+    /// The document is written through `doc_write`, never `edit_file`: an
+    /// agent's edit to the file would read as the person's and lock the
+    /// agent out of its own section.
+    #[tokio::test]
+    async fn edit_file_on_the_document_is_refused_and_points_at_doc_write() {
+        let (ws, path) = Ws::with_doc("edit-file", &["origem"]);
+        let err = crate::agent::tools::execute(
+            "edit_file",
+            serde_json::json!({"path": path.to_string_lossy(), "old_string": "[origem]", "new_string": "x"}),
+            &ws.ctx,
+        )
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.contains("doc_write"), "{err}");
+        assert!(is_linked_document(&ws.ctx, &path.to_string_lossy()));
+        assert!(!is_linked_document(
+            &ws.ctx,
+            &ws.root.join("other.md").to_string_lossy()
+        ));
     }
 
     #[test]

@@ -770,6 +770,14 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let a: edit_file::EditFileArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             validate_editable_path(&a.path, ctx)?;
+            if crate::agent::doc_session::is_linked_document(ctx, &a.path) {
+                return Err(
+                    "this is the session's living document: write a section with \
+                            doc_write (doc_add adds one), so the user's edits and yours are \
+                            told apart"
+                        .into(),
+                );
+            }
             // Enforce read-before-edit
             {
                 let tracker = ctx.read_tracker.lock().await;
