@@ -351,6 +351,10 @@ pub(super) fn run_prefix(
     spec_section: Option<&str>,
     mcp_defs: &[tools::ToolDef],
     has_golden_goals: bool,
+    // Deferred tools the session has loaded, in load order (its
+    // `tools_loaded` records). Appended to the tool list; ignored by the
+    // profiles that defer nothing.
+    loaded: &[String],
 ) -> (PromptProfile, String, Vec<ToolDescription>) {
     let profile =
         crate::agent::surface::effective_profile(requested, config, mode, has_golden_goals);
@@ -373,7 +377,34 @@ pub(super) fn run_prefix(
         system
     };
     let tools = api_tools(mode, profile, mcp_defs, config);
+    if profile != PromptProfile::Standard {
+        return (profile, system, tools);
+    }
+    // Standard defers what is rarely called (`agent::deferred`): the catalog
+    // joins the prompt whatever is loaded, so loading only ever grows the
+    // tool list at its end.
+    let (mut core, deferred) = crate::agent::deferred::split(tools);
+    core.push(crate::agent::deferred::load_tools_def().into());
+    let system = match crate::agent::deferred::catalog_section(&deferred) {
+        Some(catalog) => format!("{system}{catalog}"),
+        None => system,
+    };
+    let tools = crate::agent::deferred::materialize(core, &deferred, loaded);
     (profile, system, tools)
+}
+
+/// The tools a run in `mode` defers — what `load_tools` (or a direct call)
+/// can add to its list. Empty for the profiles that defer nothing.
+pub(super) fn deferred_tools(
+    mode: SessionMode,
+    profile: PromptProfile,
+    mcp_defs: &[tools::ToolDef],
+    config: &AgentConfig,
+) -> Vec<ToolDescription> {
+    if profile != PromptProfile::Standard {
+        return Vec::new();
+    }
+    crate::agent::deferred::split(api_tools(mode, profile, mcp_defs, config)).1
 }
 
 /// Tools offered to the model for a given mode/profile. `GitSync` gets only
@@ -545,6 +576,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
                     None,
                     &[],
                     golden,
+                    &[],
                 );
                 assert_eq!(profile, PromptProfile::Standard);
                 assert_eq!(
@@ -1144,6 +1176,7 @@ mod prefix_stability_tests {
             None,
             mcp_defs,
             false,
+            &[],
         );
         assert_eq!(profile, PromptProfile::Standard);
         serde_json::to_string(&serde_json::json!({ "system": system, "tools": tools })).unwrap()
@@ -1179,8 +1212,8 @@ mod prefix_stability_tests {
     }
 
     /// MCP definitions from two servers keep the prefix byte-identical however
-    /// the servers and their tools arrived, and sit after the built-in tools
-    /// in server-then-tool name order.
+    /// the servers and their tools arrived, and are listed in the deferred
+    /// catalog in server-then-tool name order.
     #[test]
     fn mcp_definitions_from_two_servers_keep_the_prefix_byte_identical() {
         let root = workspace("mcp");
@@ -1189,12 +1222,13 @@ mod prefix_stability_tests {
             let b = prefix_json_with_mcp(&root, mode, &mcp_defs(true));
             assert_eq!(a, b, "{mode:?}: MCP arrival order moved the prefix");
             assert_eq!(a, prefix_json_with_mcp(&root, mode, &mcp_defs(false)));
-            let tools: serde_json::Value = serde_json::from_str(&a).unwrap();
-            let names: Vec<&str> = tools["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|t| t["name"].as_str())
+            // MCP tools are deferred (Phase 2): their order is the catalog's.
+            let prefix: serde_json::Value = serde_json::from_str(&a).unwrap();
+            let system = prefix["system"].as_str().unwrap();
+            let names: Vec<&str> = system
+                .lines()
+                .filter_map(|l| l.strip_prefix("- "))
+                .filter_map(|l| l.split(' ').next())
                 .filter(|n| n.starts_with("mcp__"))
                 .collect();
             assert_eq!(
@@ -1252,5 +1286,183 @@ mod prefix_stability_tests {
             "and so does p0 among the eight"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// Deferred tools in the prefix (lean-harness Phase 2): a Standard main
+/// session sends a core set, names the rest in the system prompt, and appends
+/// what the session loaded.
+#[cfg(test)]
+mod deferred_prefix_tests {
+    use super::*;
+
+    fn names(tools: &[ToolDescription]) -> Vec<&str> {
+        tools.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    fn prefix(
+        config: &AgentConfig,
+        mode: SessionMode,
+        mcp: &[tools::ToolDef],
+        loaded: &[&str],
+    ) -> (PromptProfile, String, Vec<ToolDescription>) {
+        let loaded: Vec<String> = loaded.iter().map(|s| s.to_string()).collect();
+        run_prefix(
+            config,
+            &crate::agent::tools::tests_support::ctx(),
+            PromptProfile::Standard,
+            mode,
+            None,
+            None,
+            mcp,
+            false,
+            &loaded,
+        )
+    }
+
+    fn mcp(name: &str) -> tools::ToolDef {
+        tools::ToolDef {
+            name: name.into(),
+            description: format!("{name} does one thing"),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn catalog_names(system: &str) -> Vec<String> {
+        let start = system.find("## DEFERRED TOOLS").expect("a catalog");
+        system[start..]
+            .lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| l.split(' ').next().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_standard_builder_sends_the_core_tools_and_lists_the_rest() {
+        let (profile, system, tools) =
+            prefix(&AgentConfig::default(), SessionMode::Builder, &[], &[]);
+        assert_eq!(profile, PromptProfile::Standard);
+        assert_eq!(
+            names(&tools),
+            [
+                "read_file",
+                "list_dir",
+                "grep",
+                "bash",
+                "run_quality",
+                "ask_user",
+                "tasks_set",
+                "tasks_update",
+                "spawn_agents",
+                "skills",
+                "load_tools"
+            ]
+        );
+        assert_eq!(
+            catalog_names(&system),
+            [
+                "semantic_search",
+                "code_search",
+                "symbol_lookup",
+                "file_outline",
+                "go_to_definition",
+                "find_references",
+                "browser",
+                "browser_inspect",
+                "browser_screenshot",
+                "tasks_get",
+                "finalize_plan",
+                "enter_plan_mode"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_standard_brain_keeps_its_plan_tools_in_the_core() {
+        let (_, system, tools) = prefix(&AgentConfig::default(), SessionMode::Brain, &[], &[]);
+        let sent = names(&tools);
+        assert!(sent.contains(&"write_plan") && sent.contains(&"exit_plan_mode"));
+        assert_eq!(sent.last(), Some(&"load_tools"));
+        let listed = catalog_names(&system);
+        assert!(!listed.contains(&"finalize_plan".to_string()));
+        assert!(!listed.contains(&"enter_plan_mode".to_string()));
+        assert!(listed.contains(&"semantic_search".to_string()));
+    }
+
+    /// A feature that is off takes its tools out of the catalog as well as
+    /// the list: a line for a tool that cannot run is a failed call waiting.
+    #[test]
+    fn a_tool_whose_feature_is_off_is_neither_sent_nor_listed() {
+        let mut cfg = AgentConfig::default();
+        cfg.browser.enabled = false;
+        let (_, system, tools) = prefix(&cfg, SessionMode::Builder, &[], &[]);
+        let listed = catalog_names(&system);
+        for gone in [
+            "browser",
+            "browser_inspect",
+            "browser_screenshot",
+            "web_search",
+        ] {
+            assert!(!listed.contains(&gone.to_string()), "{gone} is listed");
+            assert!(!names(&tools).contains(&gone), "{gone} is sent");
+        }
+        let (_, system, tools) = prefix(&cfg, SessionMode::Builder, &[], &["browser"]);
+        assert!(!names(&tools).contains(&"browser"), "loaded but off");
+        assert!(!system.contains("- browser "));
+    }
+
+    #[test]
+    fn every_mcp_tool_is_deferred() {
+        let defs = [mcp("mcp__gh__issue"), mcp("mcp__gh__search")];
+        let (_, system, tools) = prefix(&AgentConfig::default(), SessionMode::Builder, &defs, &[]);
+        assert!(names(&tools).iter().all(|n| !n.starts_with("mcp__")));
+        let listed = catalog_names(&system);
+        assert!(listed.ends_with(&["mcp__gh__issue".to_string(), "mcp__gh__search".to_string()]));
+    }
+
+    /// The point of the design: loading grows the tool list at its end and
+    /// moves nothing else — the system prompt is the same bytes it was.
+    #[test]
+    fn loaded_tools_join_the_end_of_the_list_and_the_system_prompt_does_not_move() {
+        let defs = [mcp("mcp__gh__issue"), mcp("mcp__gh__search")];
+        let cfg = AgentConfig::default();
+        let (_, before_system, before) = prefix(&cfg, SessionMode::Builder, &defs, &[]);
+        let (_, system, tools) = prefix(
+            &cfg,
+            SessionMode::Builder,
+            &defs,
+            &["mcp__gh__search", "semantic_search"],
+        );
+        assert_eq!(system, before_system);
+        assert_eq!(names(&tools)[..before.len()], names(&before)[..]);
+        assert_eq!(
+            names(&tools)[before.len()..],
+            ["mcp__gh__search", "semantic_search"]
+        );
+        // The definition sent is the tool's own, schema and all.
+        let sem = tools.iter().find(|t| t.name == "semantic_search").unwrap();
+        assert!(sem.input_schema["properties"]["query"].is_object());
+        // And it comes out the same twice.
+        let again = prefix(
+            &cfg,
+            SessionMode::Builder,
+            &defs,
+            &["mcp__gh__search", "semantic_search"],
+        );
+        assert_eq!(
+            serde_json::to_string(&again.2).unwrap(),
+            serde_json::to_string(&tools).unwrap()
+        );
+    }
+
+    /// A tool loaded in Builder that Brain does not defer stays out of Brain's
+    /// list, and comes back when the session returns to Builder.
+    #[test]
+    fn a_loaded_tool_the_mode_does_not_offer_is_left_out() {
+        let cfg = AgentConfig::default();
+        let (_, _, brain) = prefix(&cfg, SessionMode::Brain, &[], &["finalize_plan"]);
+        assert!(!names(&brain).contains(&"finalize_plan"));
+        let (_, _, builder) = prefix(&cfg, SessionMode::Builder, &[], &["finalize_plan"]);
+        assert_eq!(names(&builder).last(), Some(&"finalize_plan"));
     }
 }

@@ -15,7 +15,7 @@ use crate::agent::judge::{
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
-use crate::agent::prompt::{build_spec_prompt_section, run_prefix};
+use crate::agent::prompt::{build_spec_prompt_section, deferred_tools, run_prefix};
 use crate::agent::provider::{AgentConfig, ContentBlock, Message};
 use crate::agent::retry::stream_message_with_retry;
 use crate::agent::route::route_first_prompt;
@@ -249,6 +249,13 @@ pub async fn run_workflow_with_profile(
     // asked for is kept to derive it again when the mode — and with it the
     // model and its window — changes.
     let requested_profile = profile;
+    // Deferred tools this session loaded in earlier runs, in load order: the
+    // tool array starts where the last request left it (`agent::deferred`).
+    let mut loaded = crate::agent::deferred::loaded_names(
+        &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+            .unwrap_or_default(),
+    );
+    let mut prefix_loaded = loaded.len();
     let (mut profile, mut system, mut tools) = run_prefix(
         config,
         ctx,
@@ -258,6 +265,7 @@ pub async fn run_workflow_with_profile(
         spec_section.as_deref(),
         &mcp_defs,
         has_golden_goals,
+        &loaded,
     );
     ctx.limits
         .set_writes_files(profile == PromptProfile::Compact);
@@ -505,9 +513,11 @@ pub async fn run_workflow_with_profile(
         // The mode can change mid-run (human toggle, or the agent's own
         // enter/exit_plan_mode in the previous round) — refresh the prompt
         // and tool list before each request.
+        // A deferred-tool load in the last round grows the list the same way.
         let (mode_now, _) = mode_ctl.get();
-        if mode_now != cur_mode {
+        if mode_now != cur_mode || loaded.len() != prefix_loaded {
             cur_mode = mode_now;
+            prefix_loaded = loaded.len();
             (profile, system, tools) = run_prefix(
                 config,
                 ctx,
@@ -517,6 +527,7 @@ pub async fn run_workflow_with_profile(
                 spec_section.as_deref(),
                 &mcp_defs,
                 has_golden_goals,
+                &loaded,
             );
             ctx.limits
                 .set_writes_files(profile == PromptProfile::Compact);
@@ -609,6 +620,7 @@ pub async fn run_workflow_with_profile(
                             spec_section.as_deref(),
                             &mcp_defs,
                             has_golden_goals,
+                            &loaded,
                         );
                         ctx.limits
                             .set_writes_files(profile == PromptProfile::Compact);
@@ -1453,7 +1465,29 @@ pub async fn run_workflow_with_profile(
             // run. An `allow` or `ask` does NOT short-circuit: the mode gates
             // still apply. Hooks may relax a prompt; they may never relax a
             // policy.
+            // `load_tools` is answered here; a deferred tool called before it
+            // was loaded is loaded now and then runs like any other call.
+            let load_answer = if matches!(
+                hook_verdict,
+                crate::agent::hooks::PreToolVerdict::Deny { .. }
+            ) {
+                None
+            } else {
+                crate::agent::deferred::before_call(
+                    &tool_name,
+                    &tool_use_id,
+                    &tool_input,
+                    || deferred_tools(cur_mode, profile, &mcp_defs, config),
+                    &mut loaded,
+                    store,
+                    ctx,
+                    event_tx,
+                    session_id,
+                )
+            };
             let block = if let Some(block) = ready[ti].take() {
+                block
+            } else if let Some(block) = load_answer {
                 block
             } else if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_verdict {
                 deny_tool(
@@ -2075,13 +2109,20 @@ pub(crate) mod surface_tests {
                 None,
                 &[],
                 false,
+                &[],
             )
         };
+        // symbol_lookup is deferred (Phase 2): offered means listed in the
+        // catalog and loadable, not sent.
+        let deferred =
+            |mode| crate::agent::prompt::deferred_tools(mode, PromptProfile::Standard, &[], &cfg);
         let (profile, system, tools) = prefix(SessionMode::Builder);
         assert_eq!(profile, PromptProfile::Standard);
         assert!(!system.contains("symbol_lookup") && !names(&tools).contains(&"symbol_lookup"));
-        let (_, system, tools) = prefix(SessionMode::Brain);
-        assert!(system.contains("symbol_lookup") && names(&tools).contains(&"symbol_lookup"));
+        assert!(!names(&deferred(SessionMode::Builder)).contains(&"symbol_lookup"));
+        let (_, system, _) = prefix(SessionMode::Brain);
+        assert!(system.contains("symbol_lookup"));
+        assert!(names(&deferred(SessionMode::Brain)).contains(&"symbol_lookup"));
     }
 
     // With nothing set, nothing moves: the prefix every existing session
@@ -2103,14 +2144,27 @@ pub(crate) mod surface_tests {
                 Some(SPECS),
                 &[],
                 false,
+                &[],
             );
             assert_eq!(profile, PromptProfile::Standard);
-            assert_eq!(system, standard(mode));
-            assert_eq!(
-                names(&tools),
-                names(&api_tools(mode, PromptProfile::Standard, &[], &cfg))
+            // Phase 2 appends the deferred catalog to the prompt and sends the
+            // core of the surface plus `load_tools`; with no surface set the
+            // surface itself is the full one.
+            let catalog = system
+                .strip_prefix(standard(mode).as_str())
+                .expect("the prompt, then the catalog");
+            assert!(catalog.starts_with("\n\n## DEFERRED TOOLS"));
+            assert!(catalog.contains("- go_to_definition "));
+            let mut core: Vec<&str> = Vec::new();
+            let surface = api_tools(mode, PromptProfile::Standard, &[], &cfg);
+            core.extend(
+                names(&surface)
+                    .into_iter()
+                    .filter(|n| !crate::agent::deferred::is_deferred(n)),
             );
-            assert!(names(&tools).contains(&"go_to_definition"));
+            core.push("load_tools");
+            assert_eq!(names(&tools), core);
+            assert!(names(&surface).contains(&"go_to_definition"));
         }
     }
 
@@ -2135,6 +2189,7 @@ pub(crate) mod surface_tests {
             Some(SPECS),
             &mcp,
             false,
+            &[],
         );
         assert_eq!(profile, PromptProfile::Compact);
         let mut offered = names(&tools);
@@ -2176,6 +2231,7 @@ pub(crate) mod surface_tests {
             None,
             &[],
             false,
+            &[],
         );
         assert_eq!(profile, PromptProfile::Standard);
         assert!(system.contains("CURRENT MODE: BRAIN"));
@@ -2824,6 +2880,7 @@ mod context_line_tests {
             None,
             &[],
             false,
+            &[],
         );
         let prefix = estimate_tokens(&[], &system, &tools);
         (
@@ -3190,5 +3247,221 @@ mod usage_record_tests {
             "the judge's stub reply reports no output"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// Deferred tools through the real loop (lean-harness Phase 2): what
+/// `load_tools` and a direct call to a deferred tool do to the next request,
+/// and that a later run of the same session sends the same tool array.
+#[cfg(test)]
+mod deferred_loop_tests {
+    use super::*;
+    use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SteeringCtl};
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+
+    struct Workspace {
+        root: std::path::PathBuf,
+        store: SessionStore,
+    }
+
+    fn workspace(tag: &str) -> Workspace {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-deferred-{tag}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("greet.txt"), "hello world\n").unwrap();
+        let store = SessionStore {
+            path: root.join("session.jsonl"),
+        };
+        std::fs::write(&store.path, "").unwrap();
+        Workspace { root, store }
+    }
+
+    /// One user message against a model following `script`, on `ws`'s
+    /// session file. Returns the run's outcome and every request body sent.
+    async fn run(ws: &Workspace, script: Vec<Reply>) -> (Result<RunOutcome, String>, Vec<String>) {
+        let (base, _, bodies) = spawn_recording(script).await;
+        let config = super::surface_tests::config_for(&base, None);
+        let ctx = ToolContext {
+            workspace_root: Some(ws.root.to_string_lossy().to_string()),
+            session_store_path: Some(ws.store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let mut history = crate::agent::persist::history_from_records(
+            &crate::agent::persist::load_records(&ws.store.path).unwrap_or_default(),
+        );
+        let outcome = run_workflow(
+            &config,
+            &mut history,
+            "go".into(),
+            Vec::new(),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "deferred-test",
+            &ctx,
+            &ws.store,
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+        )
+        .await;
+        let bodies = bodies.lock().unwrap().clone();
+        (outcome, bodies)
+    }
+
+    fn tool_names(body: &str) -> Vec<String> {
+        let body: Value = serde_json::from_str(body).unwrap();
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn last_result(body: &str) -> String {
+        let body: Value = serde_json::from_str(body).unwrap();
+        let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+        last["content"][0]["content"].to_string()
+    }
+
+    fn records_of(ws: &Workspace) -> Vec<SessionRecord> {
+        crate::agent::persist::load_records(&ws.store.path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn load_tools_appends_the_definitions_to_the_next_request_and_records_the_load() {
+        let ws = workspace("load");
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "load_tools",
+                    input: serde_json::json!({"names": ["semantic_search", "tasks_get"]}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        let first = tool_names(&bodies[0]);
+        let second = tool_names(&bodies[1]);
+        assert!(!first.contains(&"semantic_search".to_string()));
+        assert_eq!(second[..first.len()], first[..], "nothing before moves");
+        assert_eq!(second[first.len()..], ["semantic_search", "tasks_get"]);
+        // The system prompt is the same bytes on both requests.
+        let system = |b: &str| serde_json::from_str::<Value>(b).unwrap()["system"].clone();
+        assert_eq!(system(&bodies[0]), system(&bodies[1]));
+        assert!(last_result(&bodies[1]).contains("Loaded: semantic_search, tasks_get"));
+        let records = records_of(&ws);
+        assert_eq!(
+            crate::agent::deferred::loaded_names(&records),
+            ["semantic_search", "tasks_get"]
+        );
+        assert!(records.iter().any(|r| matches!(
+            r,
+            SessionRecord::CacheBreak { reason, .. } if reason == "tools_loaded"
+        )));
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// A model that calls a deferred tool it never loaded gets the call run —
+    /// refusing it would cost a round to learn the name it already knew — and
+    /// the definition from then on.
+    #[tokio::test]
+    async fn a_deferred_tool_called_without_loading_runs_and_joins_the_list() {
+        let ws = workspace("direct");
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "tasks_get",
+                    input: serde_json::json!({}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        let result = last_result(&bodies[1]);
+        assert!(!result.contains("Error"), "the call ran: {result}");
+        assert_eq!(tool_names(&bodies[1]).last().unwrap(), "tasks_get");
+        assert!(!tool_names(&bodies[0]).contains(&"tasks_get".to_string()));
+        assert_eq!(
+            crate::agent::deferred::loaded_names(&records_of(&ws)),
+            ["tasks_get"]
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// The next message of the session — or the session reopened after a
+    /// restart, which reads the same file — starts from the tool array the
+    /// last request ended with, so the provider's cached prefix still matches.
+    #[tokio::test]
+    async fn a_later_run_of_the_session_sends_the_tools_it_loaded_in_the_same_order() {
+        let ws = workspace("resume");
+        let (_, first_run) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "load_tools",
+                    input: serde_json::json!({"names": ["file_outline"]}),
+                },
+                Reply::Tool {
+                    name: "code_search",
+                    input: serde_json::json!({"query": "greet"}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        let (outcome, second_run) = run(&ws, vec![Reply::Text("again")]).await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        let ended_with = tool_names(first_run.last().unwrap());
+        assert_eq!(
+            &ended_with[ended_with.len() - 2..],
+            ["file_outline", "code_search"]
+        );
+        assert_eq!(tool_names(&second_run[0]), ended_with);
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[tokio::test]
+    async fn loading_a_tool_that_is_not_deferred_here_is_an_error_that_lists_what_is() {
+        let ws = workspace("unknown");
+        let (_, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "load_tools",
+                    input: serde_json::json!({"names": ["write_plan"]}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        let result = last_result(&bodies[1]);
+        assert!(
+            result.contains("Error") && result.contains("semantic_search"),
+            "{result}"
+        );
+        assert_eq!(tool_names(&bodies[1]), tool_names(&bodies[0]));
+        assert!(crate::agent::deferred::loaded_names(&records_of(&ws)).is_empty());
+        std::fs::remove_dir_all(&ws.root).ok();
     }
 }

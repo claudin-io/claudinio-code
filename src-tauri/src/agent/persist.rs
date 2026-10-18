@@ -392,6 +392,12 @@ pub enum SessionRecord {
     /// `CacheBreakReason`, written as text so a reader never needs this
     /// build's enum. Bookkeeping only; never part of the conversation.
     CacheBreak { reason: String, ts: u64 },
+    /// Deferred tools whose definitions joined the tool list, in the order
+    /// they were loaded (lean-harness Phase 2): by `load_tools`, or because
+    /// the model called one directly. A later run of the session and a
+    /// resumed session append them in the same order, so the tool array — the
+    /// head of the cached prefix — comes out identical. Bookkeeping only.
+    ToolsLoaded { names: Vec<String>, ts: u64 },
 }
 
 /// Why the history a provider had cached was rewritten. Counted per session by
@@ -406,6 +412,10 @@ pub enum CacheBreakReason {
     /// The context crossed the soft line and the session hands off to a
     /// successor that starts from a document (`handoff::maybe_context_handoff`).
     Handoff,
+    /// Deferred tool definitions were appended to the tool list
+    /// (`deferred`): the tools precede everything else in the cache order, so
+    /// the next request is read cold from the first appended byte on.
+    ToolsLoaded,
 }
 
 impl CacheBreakReason {
@@ -414,6 +424,7 @@ impl CacheBreakReason {
             CacheBreakReason::Prune => "prune",
             CacheBreakReason::Compaction => "compaction",
             CacheBreakReason::Handoff => "handoff",
+            CacheBreakReason::ToolsLoaded => "tools_loaded",
         }
     }
 }
@@ -1262,6 +1273,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::SubagentRun { ts, .. }
                 | SessionRecord::Usage { ts, .. }
                 | SessionRecord::CacheBreak { ts, .. }
+                | SessionRecord::ToolsLoaded { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
@@ -3041,6 +3053,32 @@ mod usage_tests {
                 (Some("cache_break"), Some(text))
             );
         }
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The deferred-tool loads of a session (lean-harness Phase 2) are a
+    /// record of their own: a later run and a resumed session rebuild the
+    /// tool list from them, and they never enter the conversation. A file
+    /// written before them loads unchanged (`OLD_SESSION` has none).
+    #[test]
+    fn a_tools_loaded_line_loads_and_stays_out_of_the_history() {
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"tools_loaded","names":["code_search","mcp__gh__issue"],"ts":7}"#);
+        let path = tmp_file("tools_loaded", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(
+            records.len(),
+            5,
+            "the tools_loaded line must not be skipped"
+        );
+        assert!(matches!(
+            &records[4],
+            SessionRecord::ToolsLoaded { names, .. } if names == &["code_search", "mcp__gh__issue"]
+        ));
+        assert_eq!(history_from_records(&records).len(), 1);
+        let v = serde_json::to_value(SessionRecord::cache_break(CacheBreakReason::ToolsLoaded))
+            .unwrap();
+        assert_eq!(v["reason"], "tools_loaded");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

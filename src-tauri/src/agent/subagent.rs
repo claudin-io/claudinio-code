@@ -89,8 +89,11 @@ pub fn subagent_defs(
         .into_iter()
         .filter(|t| t.name != "spawn_agents" && t.name != "ask_user")
         .collect();
-    // A subagent runs on the builder model, so that model's surface is its own.
-    crate::agent::surface::retain_for(config.tool_surface_for(&config.builder_model), &mut tools);
+    // Never the three LSP tools (lean-harness Phase 2): a subagent defers
+    // nothing, so what it is given it carries on every round, and those three
+    // were called 12 times in 16,945. This is the Lean surface whatever the
+    // builder model's setting, which can only ever have asked for the same.
+    crate::agent::surface::retain_for(crate::agent::surface::ToolSurface::Lean, &mut tools);
     tools.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     match mode {
         // Explore subagents are read-only by design (no edit_file/bash);
@@ -435,11 +438,16 @@ pub async fn run_spawn_agents(
 
 /// The system prompt every subagent runs with.
 fn subagent_system_prompt(workspace_root: Option<&str>, skills_hint: &str) -> String {
-    format!(
-        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}\
-         \n\nLANGUAGE: any language is valid. Write your final report in the language of your goal.",
-        workspace_root.unwrap_or("(none)"),
-        skills_hint,
+    // Lean, like the tool list: the prompt must not send a subagent after an
+    // LSP tool it does not have (`subagent_defs`).
+    crate::agent::surface::prompt_for(
+        crate::agent::surface::ToolSurface::Lean,
+        format!(
+            "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}\
+             \n\nLANGUAGE: any language is valid. Write your final report in the language of your goal.",
+            workspace_root.unwrap_or("(none)"),
+            skills_hint,
+        ),
     )
 }
 
@@ -1120,6 +1128,40 @@ mod tests {
         }
     }
 
+    // Phase 2 of the lean-harness plan: subagents defer nothing (a fresh
+    // context has no earlier load to build on, and a load round would be a
+    // second round trip in every one of them), but the three LSP tools —
+    // 12 calls in 16,945 measured — leave their list and their prompt. The
+    // index searches stay: they are what an explorer reads with.
+    #[test]
+    fn subagents_never_get_the_three_lsp_tools_but_keep_the_index_searches() {
+        use crate::agent::surface::LEAN_DROPPED;
+        let config = AgentConfig::default();
+        for (label, mode) in [
+            ("explore", SubagentMode::Explore),
+            ("code", SubagentMode::Code),
+        ] {
+            let defs = subagent_defs(mode, &[], MAX_PARALLEL_AGENTS, &config);
+            let has = |n: &str| defs.iter().any(|d| d.name == n);
+            for tool in LEAN_DROPPED {
+                assert!(!has(tool), "{label} has {tool}");
+                assert!(
+                    defs.iter().all(|d| !d.description.contains(tool)),
+                    "{label}: a description still points at {tool}"
+                );
+            }
+            for keep in ["file_outline", "code_search", "semantic_search", "skills"] {
+                assert!(has(keep), "{label} lacks {keep}");
+            }
+            assert!(!has("load_tools"), "{label} defers nothing");
+        }
+        let prompt = subagent_system_prompt(Some("/ws"), "");
+        for tool in LEAN_DROPPED {
+            assert!(!prompt.contains(tool), "the prompt still names {tool}");
+        }
+        assert!(prompt.contains("file_outline") && prompt.contains("semantic_search"));
+    }
+
     // A subagent runs on the builder model: when that model is lean, so is it —
     // in what it is offered and in what its prompt sends it after.
     #[test]
@@ -1145,9 +1187,11 @@ mod tests {
         let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &brain_only);
         assert_eq!(defs.len(), full.len());
 
+        // The prompt is built lean since Phase 2; the rewrite is what does it.
+        assert!(TOOL_PREFERENCE.contains("symbol_lookup") && TOOL_PREFERENCE.contains("LSP tools"));
         let prompt = subagent_system_prompt(Some("/ws"), "");
-        assert!(prompt.contains("symbol_lookup") && prompt.contains("LSP tools"));
-        let lean = prompt_for(ToolSurface::Lean, prompt);
+        let lean = prompt_for(ToolSurface::Lean, prompt.clone());
+        assert_eq!(lean, prompt);
         for tool in LEAN_DROPPED {
             assert!(!lean.contains(tool), "the lean prompt still names {tool}");
         }
