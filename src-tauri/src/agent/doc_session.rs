@@ -28,8 +28,6 @@ use std::path::{Path, PathBuf};
 /// What a context may do to the session's document. `Main` by default:
 /// every context the app builds is a session's own; a subagent's is set
 /// where it is spawned (`subagent::run_subagent_recorded`).
-// `Section` and `None` are built by the subagent grant (next commit).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum DocAccess {
     /// The session itself: any section, owner `main`.
@@ -339,6 +337,60 @@ pub fn write(
     })
 }
 
+/// The owner a subagent writes as: `sub:<name>`, spaces as dashes so the
+/// harness's comment stays one token per field.
+pub fn subagent_owner(name: &str) -> String {
+    format!(
+        "sub:{}",
+        name.split_whitespace().collect::<Vec<_>>().join("-")
+    )
+}
+
+/// Claim section `id` for a subagent before it starts (`doing`, under
+/// `owner`), so two agents never hold it and the panel shows who has it.
+/// Returns the section's topic.
+pub fn claim(
+    ctx: &crate::agent::tools::ToolContext,
+    id: &str,
+    owner: &str,
+) -> Result<String, String> {
+    let l = linked(ctx).ok_or(NO_DOCUMENT)?;
+    with_doc(&l, |doc, _| {
+        doc.apply_write(id, None, owner, Status::Doing)
+            .map_err(|e| match e {
+                document::WriteError::Claimed { owner } => {
+                    format!("{id} is being written by {owner}")
+                }
+                _ => format!(
+                    "the document has no section '{id}'; its ids are: {}",
+                    doc.ids().join(", ")
+                ),
+            })?;
+        Ok(doc.section(id).map(|s| s.topic.clone()).unwrap_or_default())
+    })
+}
+
+/// After the subagent ends: a section it still holds as `doing` (it never
+/// finished it) goes back to `todo`, so nobody waits on an agent that is
+/// gone.
+pub fn release(ctx: &crate::agent::tools::ToolContext, id: &str, owner: &str) {
+    let Some(l) = linked(ctx) else {
+        return;
+    };
+    let _ = with_doc(&l, |doc, _| {
+        if let Some(s) = doc.section_mut(id)
+            && s.status == Status::Doing
+            && s.owner.as_deref() == Some(owner)
+        {
+            s.status = Status::Todo;
+            if s.text().is_empty() {
+                s.owner = None;
+            }
+        }
+        Ok(())
+    });
+}
+
 /// `doc_read`: one section's text, or the outline when `id` is `None`.
 pub fn read(ctx: &crate::agent::tools::ToolContext, id: Option<&str>) -> Result<String, String> {
     owner_for(&ctx.doc_access, id)?;
@@ -513,7 +565,7 @@ pub fn save_human(
 
 // ── The run loop's side ─────────────────────────────────────────────────
 
-fn send_update(
+pub(crate) fn send_update(
     ctx: &crate::agent::tools::ToolContext,
     event_tx: &tauri::ipc::Channel<crate::agent::events::AgentEvent>,
     session_id: &str,

@@ -47,6 +47,11 @@ pub struct SubagentSpec {
     /// mode but has a report shape of its own.
     #[serde(skip)]
     pub reports_to_parent: bool,
+    /// A section of the session's living document this subagent writes
+    /// (lean-harness Phase 4b, decision D9). Claimed for it when it is
+    /// spawned; it gets `doc_write`/`doc_read` for that section only.
+    #[serde(default)]
+    pub section: Option<String>,
 }
 
 pub struct SubagentResult {
@@ -338,6 +343,9 @@ pub async fn run_spawn_agents(
 
     let parent_tx = event_tx.clone();
     let mut handles = Vec::new();
+    // Sections claimed for this call's subagents, by spec index: released
+    // when each one ends (`doc_session::release`).
+    let mut claimed: Vec<Option<(String, String)>> = vec![None; specs.len()];
     // Every code subagent of the call starts from the same facts.
     let brief = if specs.iter().any(|s| matches!(s.mode, SubagentMode::Code)) {
         crate::agent::delegation::brief_for(ctx).await
@@ -373,6 +381,42 @@ pub async fn run_spawn_agents(
             SubagentMode::Code => {
                 if let Some(brief) = &brief {
                     spec.goal = format!("{brief}\n\n{}", spec.goal);
+                }
+            }
+        }
+        // A section is claimed before the subagent starts; one that cannot
+        // be (held by another agent, given twice in this call, no such id)
+        // means this subagent does not run.
+        if let Some(id) = spec.section.clone() {
+            let owner = crate::agent::doc_session::subagent_owner(&spec.name);
+            let twice = specs[..i].iter().any(|s| s.section.as_deref() == Some(&id));
+            let claim = if twice {
+                Err(format!("{id} is given to another agent in this call"))
+            } else {
+                crate::agent::doc_session::claim(ctx, &id, &owner)
+            };
+            match claim {
+                Ok(topic) => {
+                    crate::agent::doc_session::send_update(ctx, &parent_tx, session_id);
+                    spec.goal
+                        .push_str(&crate::agent::delegation::section_brief(&id, &topic));
+                    spec.reports_to_parent = false;
+                    claimed[i] = Some((id, owner));
+                }
+                Err(e) => {
+                    let report = format!("not started: {e}. Two agents cannot hold one section.");
+                    handles.push(tokio::spawn(async move {
+                        SubagentResult {
+                            status: "failed",
+                            report,
+                            rounds: 0,
+                            in_tok: 0,
+                            out_tok: 0,
+                            cost: 0.0,
+                            tools: Default::default(),
+                        }
+                    }));
+                    continue;
                 }
             }
         }
@@ -414,6 +458,10 @@ pub async fn run_spawn_agents(
         };
 
         let subagent_id = format!("{session_id}:sub:{parent_tool_use_id}:{i}");
+        if let Some((id, owner)) = &claimed[i] {
+            crate::agent::doc_session::release(ctx, id, owner);
+            crate::agent::doc_session::send_update(ctx, &parent_tx, session_id);
+        }
         let _ = parent_tx.send(AgentEvent::SubagentDone {
             subagent_id: subagent_id.clone(),
             status: result.status.into(),
@@ -533,7 +581,12 @@ pub(crate) async fn run_subagent_recorded(
         .as_ref()
         .map(|m| m.cached_defs())
         .unwrap_or_default();
-    let tools = api_tools(spec.mode, &mcp_defs, config);
+    let mut tools = api_tools(spec.mode, &mcp_defs, config);
+    // The section grant (decision D9): the two tools for one section.
+    if spec.section.is_some() {
+        tools.push(tools::doc::doc_write_def().into());
+        tools.push(tools::doc::doc_read_def().into());
+    }
     let skill_mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
         &config.plugins,
@@ -563,6 +616,15 @@ pub(crate) async fn run_subagent_recorded(
     );
     let ctx = &ToolContext {
         limits: Arc::new(crate::agent::budget::RunLimits::for_budget(&budget)),
+        // Never the parent's `Main`: a subagent writes only a section it
+        // was given, and without one none.
+        doc_access: match &spec.section {
+            Some(id) => crate::agent::doc_session::DocAccess::Section {
+                id: id.clone(),
+                owner: crate::agent::doc_session::subagent_owner(&spec.name),
+            },
+            None => crate::agent::doc_session::DocAccess::None,
+        },
         ..ctx.clone()
     };
     if budget.prefix_overflows(prefix_tokens) {
@@ -1131,6 +1193,7 @@ pub async fn run_summary_agent(
                 .into(),
         ),
         reports_to_parent: false,
+        section: None,
     };
 
     let transcript = Transcript::open_compaction(ctx, &format!("{session_id}-summarizer"));
@@ -1690,6 +1753,7 @@ mod context_budget_tests {
             mode: SubagentMode::Explore,
             expected_output: None,
             reports_to_parent: false,
+            section: None,
         };
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
         run_subagent(
@@ -1826,6 +1890,7 @@ mod context_budget_tests {
             mode: SubagentMode::Explore,
             expected_output: None,
             reports_to_parent: false,
+            section: None,
         };
         let result = run_subagent(
             &config_for(&base, None),
@@ -1926,6 +1991,7 @@ mod context_budget_tests {
             mode: SubagentMode::Explore,
             expected_output: None,
             reports_to_parent: false,
+            section: None,
         };
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
         let result = run_subagent(
@@ -2188,6 +2254,7 @@ mod transcript_tests {
             mode: SubagentMode::Explore,
             expected_output: None,
             reports_to_parent: false,
+            section: None,
         };
         let transcript = Transcript::open(&ctx, "tu_par", 0, "sub");
         let result = run_subagent_recorded(
@@ -2475,7 +2542,16 @@ mod delegation_tests {
         reply: &'static str,
         agents: Value,
     ) -> (String, Vec<AgentEvent>, Vec<String>) {
-        let (base, _, bodies) = spawn_recording(vec![Reply::Text(reply)]).await;
+        spawn_script(ctx, vec![Reply::Text(reply)], agents).await
+    }
+
+    /// `spawn`, against a model that follows `script`.
+    async fn spawn_script(
+        ctx: &ToolContext,
+        script: Vec<Reply>,
+        agents: Value,
+    ) -> (String, Vec<AgentEvent>, Vec<String>) {
+        let (base, _, bodies) = spawn_recording(script).await;
         let config = config_for(&base);
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let events: Channel<AgentEvent> = {
@@ -2688,6 +2764,165 @@ mod delegation_tests {
             started.contains(&"change the greeting".to_string()),
             "{started:?}"
         );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// A workspace whose session has a living document with these topics.
+    fn doc_workspace(tag: &str, topics: &[&str]) -> (std::path::PathBuf, ToolContext) {
+        let (ws, ws_str, store) = workspace(tag);
+        let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
+        let (rel, _) =
+            crate::agent::doc_session::create(&ws, &store.path, "Pudim de leite", &topics).unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        crate::agent::doc_session::link(&store, &ctx.records_cache, &rel);
+        (ws, ctx)
+    }
+
+    fn doc_text(ws: &std::path::Path) -> String {
+        std::fs::read_to_string(ws.join(".claudinio/docs/pudim-de-leite.md")).unwrap()
+    }
+
+    fn tool_names(body: &str) -> Vec<String> {
+        let body: Value = serde_json::from_str(body).unwrap();
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Decision D9: an explore subagent given a section writes it itself —
+    /// with `doc_write`/`doc_read` and nothing else of the document — so the
+    /// parent reads the section, not a report about it.
+    #[tokio::test]
+    async fn a_subagent_given_a_section_writes_it_under_its_own_name() {
+        let (ws, ctx) = doc_workspace("section", &["origem", "ingredientes"]);
+        let (text, events, bodies) = spawn_script(
+            &ctx,
+            vec![
+                Reply::Tool {
+                    name: "doc_write",
+                    input: serde_json::json!({"id": "s2", "body": "leite condensado, ovos"}),
+                },
+                Reply::Text("Wrote s2."),
+            ],
+            serde_json::json!([{"name": "ingredientes", "goal": "list the ingredients", "mode": "explore", "section": "s2"}]),
+        )
+        .await;
+        let names = tool_names(&bodies[0]);
+        assert!(
+            names.contains(&"doc_write".to_string()) && names.contains(&"doc_read".to_string())
+        );
+        assert!(
+            !names.iter().any(|n| n == "doc_create" || n == "doc_add"),
+            "{names:?}"
+        );
+        let goal: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let goal = goal["messages"][0].to_string();
+        assert!(
+            goal.contains("s2") && goal.contains("ingredientes"),
+            "{goal}"
+        );
+        assert!(
+            doc_text(&ws).contains(
+                "## ingredientes\n<!-- claudinio: id=s2 status=done by=sub:ingredientes -->\nleite condensado, ovos"
+            ),
+            "{}",
+            doc_text(&ws)
+        );
+        assert!(text.contains("Wrote s2."), "{text}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::DocumentUpdated { .. })),
+            "the panel hears of the claim"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn a_subagent_cannot_write_a_section_it_was_not_given() {
+        let (ws, ctx) = doc_workspace("other-section", &["origem", "ingredientes"]);
+        let (_, _, bodies) = spawn_script(
+            &ctx,
+            vec![
+                Reply::Tool {
+                    name: "doc_write",
+                    input: serde_json::json!({"id": "s1", "body": "not mine"}),
+                },
+                Reply::Text("tried"),
+            ],
+            serde_json::json!([{"name": "ingredientes", "goal": "list them", "mode": "explore", "section": "s2"}]),
+        )
+        .await;
+        assert!(!doc_text(&ws).contains("not mine"));
+        assert!(
+            bodies[1].contains("you were given section s2 only"),
+            "{}",
+            bodies[1]
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn two_agents_cannot_claim_the_same_section() {
+        let (ws, ctx) = doc_workspace("same-section", &["origem"]);
+        let (text, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("done")],
+            serde_json::json!([
+                {"name": "a", "goal": "write it", "mode": "explore", "section": "s1"},
+                {"name": "b", "goal": "write it too", "mode": "explore", "section": "s1"}
+            ]),
+        )
+        .await;
+        assert_eq!(bodies.len(), 1, "only one of them ran");
+        assert!(
+            text.contains("not started") && text.contains("s1"),
+            "{text}"
+        );
+        // A section the main session holds is not given away either.
+        crate::agent::doc_session::write(&ctx, "s1", None, crate::agent::document::Status::Doing)
+            .unwrap();
+        let (text, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("done")],
+            serde_json::json!([{"name": "c", "goal": "write it", "mode": "explore", "section": "s1"}]),
+        )
+        .await;
+        assert!(bodies.is_empty(), "{bodies:?}");
+        assert!(text.contains("main"), "{text}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn a_section_left_unwritten_is_released_and_one_without_a_section_gets_no_document_tools()
+    {
+        let (ws, ctx) = doc_workspace("release", &["origem"]);
+        let (_, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("gave up")],
+            serde_json::json!([{"name": "a", "goal": "write it", "mode": "explore", "section": "s1"}]),
+        )
+        .await;
+        assert_eq!(bodies.len(), 1);
+        assert!(
+            doc_text(&ws).contains("[origem] <!-- claudinio: id=s1 status=todo -->"),
+            "{}",
+            doc_text(&ws)
+        );
+        let (_, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("looked")],
+            serde_json::json!([{"name": "r", "goal": "look around", "mode": "explore"}]),
+        )
+        .await;
+        assert!(!tool_names(&bodies[0]).iter().any(|n| n.starts_with("doc_")));
         std::fs::remove_dir_all(&ws).ok();
     }
 }

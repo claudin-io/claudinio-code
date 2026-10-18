@@ -25,6 +25,19 @@ sees of your work. Keep it under about 1,500 tokens, in three sections:\n\
 ## Open questions\nWhat you could not establish, or `none`.\n\
 A longer report is cut in the middle.";
 
+/// Appended to the goal of a subagent spawned with a `section` (decision
+/// D9): the section is the deliverable and the parent reads it in the
+/// document, so the report that comes back through the parent's context can
+/// be two lines instead of the three-section explore report.
+pub(crate) fn section_brief(id: &str, topic: &str) -> String {
+    format!(
+        "\n\nYOUR SECTION: {id} ({topic}) of the session's document. Write it with doc_write \
+         {{\"id\": \"{id}\", \"body\": \"...\"}} (status 'done' when finished): it is your \
+         deliverable, and the parent reads it there. Your final message can then be one or two \
+         lines: what the section covers and what is still open."
+    )
+}
+
 /// The most of a subagent's report the parent carries, in characters. A
 /// report the ~1,500-token request above produces fits with room to spare;
 /// past it the middle goes, never the head or the tail.
