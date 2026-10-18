@@ -1226,14 +1226,15 @@ mod tests {
     #[tokio::test]
     async fn edit_file_on_the_document_is_refused_and_points_at_doc_write() {
         let (ws, path) = Ws::with_doc("edit-file", &["origem"]);
-        let err = crate::agent::tools::execute(
+        let Err(err) = crate::agent::tools::execute(
             "edit_file",
             serde_json::json!({"path": path.to_string_lossy(), "old_string": "[origem]", "new_string": "x"}),
             &ws.ctx,
         )
         .await
-        .err()
-        .expect("refused");
+        else {
+            panic!("edit_file on the document was not refused");
+        };
         assert!(err.contains("doc_write"), "{err}");
         assert!(is_linked_document(&ws.ctx, &path.to_string_lossy()));
         assert!(!is_linked_document(

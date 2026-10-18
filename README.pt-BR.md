@@ -121,7 +121,7 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   subagentes e sem planos — cerca de 2,4k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
   cerca de 4,8k.
 - **Ferramentas e skills chegam quando são necessárias.** Uma sessão Builder
-  Standard envia treze ferramentas centrais; as demais — as buscas do índice e do LSP, as
+  Standard envia catorze ferramentas centrais; as demais — as buscas do índice e do LSP, as
   ferramentas de web e browser, a troca para o modo de plano, a leitura completa
   das tarefas e toda ferramenta MCP — aparecem no prompt em uma linha cada, e o modelo carrega as que a
   tarefa pede (`load_tools`, ou simplesmente chamando uma). Uma ferramenta
@@ -203,6 +203,46 @@ no máximo 6.000 caracteres de qualquer relatório (o meio de um mais longo é
 cortado; a timeline guarda tudo). Todo subagente code de uma chamada parte do
 mesmo briefing: a tarefa em andamento, o caminho do plano e os arquivos que a
 sessão já leu, como caminhos.
+
+### Um documento vivo por sessão
+
+Um trabalho com várias partes distintas — uma pesquisa, um texto, uma feature
+em várias etapas — ganha um arquivo Markdown que pertence à sessão, em
+`.claudinio/docs/`. O agente escreve primeiro o esqueleto, um título e um
+placeholder por parte:
+
+```md
+# Pudim de leite
+
+[origem do pudim de leite]
+[ingredientes originais]
+[Modo de preparo clássico]
+[Como servir o pudim]
+[Como armazenar o pudim]
+```
+
+e depois preenche cada placeholder com `doc_write`, em ordem ou em paralelo:
+um subagente explore criado com `"section": "s2"` escreve essa seção ele mesmo,
+e só ela. O harness marca cada seção com um comentário HTML que é dele
+(`<!-- claudinio: id=s2 status=doing by=sub:ingredientes -->`), invisível na
+renderização; todo o resto do arquivo é seu e é preservado byte a byte.
+
+- **Você pode editar a qualquer momento, no app ou em qualquer editor, e a sua
+  edição vence.** Uma seção cujo texto você mudou fica marcada *Edited by you*;
+  um agente que tente escrevê-la antes de ler a sua versão é recusado e recebe
+  o seu texto para mesclar. Uma linha de placeholder que você acrescenta
+  (`[caramelo]`) vira uma seção. O agente fica sabendo o que mudou numa nota
+  curta na próxima mensagem — ids e tópicos, nunca o seu texto.
+- **O painel mostra quem está em quê.** No lugar do Task Panel, uma sessão com
+  documento lista as seções com status e dono (`main`, ou o subagente, cujo
+  nome abre a timeline dele). Clique numa linha para editar o documento naquela
+  seção.
+- **Cada execução começa com o esboço** (`id · status · dono · tópico`), não com
+  os corpos: o agente lê uma seção quando precisa (`doc_read`).
+- **Um novo tópico de primeiro nível é um novo documento, e uma nova sessão.**
+  Pedir um quando a sessão já tem documento abre uma sessão encadeada que é dona
+  do novo arquivo; a antiga mantém o seu. Um handoff de contexto leva o
+  documento junto.
 
 ### Nada é caixa-preta
 
@@ -346,6 +386,8 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `spawn_agents` | automático | sempre | Dispara subagentes paralelos |
 | `skills` | automático | sempre | Lista as skills instaladas ou lê uma |
 | `load_tools` | automático | sempre | Acrescenta ferramentas adiadas à lista pelo resto da sessão |
+| `doc_create` | automático | sempre | Inicia o documento vivo da sessão (um novo tópico abre uma nova sessão) |
+| `doc_write` / `doc_read` / `doc_add` | automático | com documento | Escreve, lê ou acrescenta uma seção do documento |
 | Ferramentas MCP | **requer aprovação** | adiada | O que os servidores conectados oferecem |
 | **`browser`** | **barrado por origem** | adiada | Navega e interage com uma página (endereços locais são automáticos; outras origens perguntam) |
 | **`edit_file`** | **requer aprovação** | sempre (Builder, subagentes code) | Propõe uma edição, exibida como diff |

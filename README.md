@@ -118,7 +118,7 @@ requests several times its size.
   plans — about 2.4k tokens before the conversation starts, where the
   Standard prompt and tools take about 4.8k.
 - **Tools and skills arrive when they are needed.** A Standard Builder
-  session sends thirteen core tools; the rest — the index and LSP searches, the web and browser
+  session sends fourteen core tools; the rest — the index and LSP searches, the web and browser
   tools, the switch to plan mode, the full task reader and every MCP tool — are listed in the prompt
   one line each, and the model loads the ones a task needs (`load_tools`, or
   simply by calling one). A loaded tool is appended and stays for the session,
@@ -208,6 +208,47 @@ agent's context carries at most 6,000 characters of any report (the middle of a
 longer one is cut; the timeline keeps all of it). Every code subagent of a call
 starts from the same brief: the task in progress, the plan's path and the files
 the session has read, as paths.
+
+### A living document per session
+
+Work with several distinct parts — a piece of research, a write-up, a
+multi-part feature — gets a Markdown file the session owns, under
+`.claudinio/docs/`. The agent writes the scaffold first, a title and one
+placeholder per part:
+
+```md
+# Pudim de leite
+
+[origem do pudim de leite]
+[ingredientes originais]
+[Modo de preparo clássico]
+[Como servir o pudim]
+[Como armazenar o pudim]
+```
+
+and then fills each placeholder with `doc_write`, in order or in parallel: an
+explore subagent spawned with `"section": "s2"` writes that section itself,
+and only that one, so its report back can be two lines. The harness tags each
+section with an HTML comment it owns (`<!-- claudinio: id=s2 status=doing
+by=sub:ingredientes -->`), invisible when the file is rendered; everything else
+in the file is yours and is kept byte for byte.
+
+- **You can edit it at any time, in the app or any editor, and your edit
+  wins.** A section whose text you changed is marked *Edited by you*; an agent
+  that tries to write it before reading your version is refused and handed
+  your text to merge. A placeholder line you add (`[caramelo]`) becomes a
+  section. The agent hears what changed as one short note in its next message
+  — section ids and topics, never your text.
+- **The panel shows who is on what.** Where the Task Panel sits, a session
+  with a document lists its sections with their status and owner (`main`, or
+  the subagent, whose name opens its timeline). Click a row to edit the
+  document at that section.
+- **Each run starts with the outline** (`id · status · owner · topic`), not the
+  bodies: the agent reads a section when it needs it (`doc_read`).
+- **A new top-level topic is a new document, and a new session.** Asking for
+  one while the session already has a document opens a linked session that
+  owns the new file; the old one keeps its own. A context handoff carries the
+  document along.
 
 ### Nothing is a black box
 
@@ -347,6 +388,8 @@ resident, context used against context served, and the current token rate.
 | `spawn_agents` | auto | always | Launch parallel subagents |
 | `skills` | auto | always | List the installed skills, or read one |
 | `load_tools` | auto | always | Add deferred tools to the list for the rest of the session |
+| `doc_create` | auto | always | Start the session's living document (a new topic opens a new session) |
+| `doc_write` / `doc_read` / `doc_add` | auto | with a document | Write, read or add a section of the document |
 | MCP tools | **requires approval** | deferred | Whatever the connected servers offer |
 | **`browser`** | **origin-gated** | deferred | Navigate and interact with a page (local addresses are automatic; other origins ask) |
 | **`edit_file`** | **requires approval** | always (Builder, code subagents) | Propose an edit, shown as a diff |
@@ -355,7 +398,10 @@ resident, context used against context served, and the current token rate.
 *Sent* is what a Standard session puts in every request. A *deferred* tool is
 named in the system prompt in one line and its definition joins the request
 once the model loads it with `load_tools` — or calls it, which loads it too.
-Subagents defer nothing; they leave out only the three LSP tools.
+The three document tools are not listed: they join with the document
+(`doc_create` loads them, and a session that has one starts with them).
+Subagents defer nothing; they leave out only the three LSP tools, and get
+`doc_write` / `doc_read` only when spawned with a section.
 
 Calls to the read-only tools (`read_file`, `list_dir`, `grep`, the index and
 LSP searches, `web_search` and `tasks_get`) that the model makes side by side

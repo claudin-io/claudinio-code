@@ -182,7 +182,7 @@ first user message, never in a prefix.
 `list_dir`, `grep`, `bash`, `run_quality`, `ask_user`,
 `tasks_set`, `tasks_update`, `spawn_agents`, `skills`, `load_tools`,
 `edit_file` and `finalize_plan` in Builder and `write_plan` / `exit_plan_mode`
-in Brain — and
+in Brain, and `doc_create` in both — and
 names everything else in a `DEFERRED TOOLS` section of the system prompt, one
 line each: the index and LSP searches, `web_search`, the browser tools,
 `enter_plan_mode`, `tasks_get`, and every MCP tool (its own description cut to 100
@@ -210,8 +210,8 @@ model loads a tool to obey, and a load late in a session rewrites the cached
 prefix in front of the whole conversation. That is why `finalize_plan`, the
 Builder's last call, stays core; `tasks_get` was core for the same reason (the
 first call) until the task protocol stopped asking for it (below). The default
-Builder prefix measures 4,843 tokens on the harness's meter (12,337 before),
-and 6,320 with ten skills and a twenty-tool MCP server
+Builder prefix measures 4,985 tokens on the harness's meter (12,337 before),
+and 6,462 with ten skills and a twenty-tool MCP server
 (17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
 10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
 the definitions actually sent.
@@ -253,6 +253,49 @@ reminder per run, then finishes; a task an earlier run left `doing` is not
 named. `prompt.rs` pins the absence of mandated round-trips
 (`no_prompt_mandates_a_task_round_trip`) across the Standard prompts, Compact,
 the kickoffs and the nudges.
+
+**The living document** (`agent/document.rs`, `agent/doc_session.rs`,
+`agent/tools/doc.rs`; lean-harness Phase 4b). A session may own one Markdown
+file under `.claudinio/docs/`, linked by a `document_linked` record (the latest
+wins). `document.rs` is the format and nothing else: a placeholder is a line
+whose trimmed content is `[topic]`; the harness tags each section with an HTML
+comment it owns (`<!-- claudinio: id=s2 status=doing by=sub:x -->`, status
+`todo | doing | done | human`); a written section is `## topic`, the comment,
+and its body up to the next section or level-1/2 heading (a body cannot open
+one: such lines are demoted or escaped on write); everything else is carried
+byte for byte, so `parse` then `render` is the file. Ids are never reused, not
+even a deleted section's. `doc_session.rs` owns the file: one process-wide
+lock around every read-modify-write (parallel subagents and the app's save
+share the file), and a memory beside the session (`<session>.doc.json`: the
+text last seen, the sections a person changed that no agent has read since,
+and the changes not yet told to the model). It is not in the JSONL because
+that file is replayed into every request. Every read first compares the file
+with that memory: a section whose text changed is marked `human`, and an
+agent's `doc_write` to it is refused with the current text until the agent has
+read it (`doc_read`, or that refusal) — the human wins. The model carries the
+outline, never the bodies: a run's user turn ends with a `<document path>`
+block (`id · status · owner · topic`, beside `<tasks>`), every `doc_*` write
+answers with it, and a person's edit found after a round joins that round's
+persisted tool-results message as one `<doc-changed>` note (ids and topics)
+— never a per-request injection, which would rewrite the cached prefix.
+`doc_create` is core in a Standard main session and answered by the loop; the
+other three tools are deferred but never listed, loaded by `doc_create` in the
+same round (one cache break) or seeded as loaded when a session starts with a
+document (a successor's `tools_loaded` record). `doc_create` in a session that
+already has a document hands off (`HandoffReason::NewDocument`,
+`HandoffSpec.document`): the successor owns the new file and starts without the
+old task list; any other successor carries the predecessor's document and its
+memory. A subagent spawned with `section` gets that section claimed for it
+(`doing`, owner `sub:<name>`; one held by another agent is not given) and
+`doc_write`/`doc_read` for it alone; every subagent context is
+`DocAccess::Section` or `::None`, never the parent's `Main`. The UI hears of
+every write and every detected edit through `AgentEvent::DocumentUpdated`
+and loads the panel with `get_document`; `save_document` merges a person's
+save from the app with what agents wrote while the editor was open
+(`document::merge_human_save`). Both commands take a session id only as a
+plain file name of an existing session (`doc_session::session_file`), and
+write only the document that session links. The Task Panel stays for sessions
+without a document; Brain's `write_plan` plan file is still its own mechanism.
 
 The prefix only stays cheap if the provider caches it. OpenAI-protocol
 servers cache automatically, but on the Anthropic Messages API a prefix is
