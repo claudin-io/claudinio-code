@@ -1380,6 +1380,12 @@ pub async fn run_workflow_with_profile(
                     event_tx,
                     &mut tool_assistant_blocks,
                     &mut tool_result_blocks,
+                    |name, input, block| {
+                        if let ContentBlock::ToolResult { content, .. } = &block {
+                            guards.loop_watch.record(name, input, &content.as_text());
+                        }
+                        crate::agent::prune::history_copy(history, name, input, block)
+                    },
                 );
                 break;
             }
@@ -2478,6 +2484,75 @@ pub(crate) mod surface_tests {
         for id in ["tu_0_0", "tu_0_1", "tu_0_2"] {
             event_at(&run, false, id);
         }
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    // A read a pause let finish is carried like any other: a repeat of what
+    // the conversation already holds goes in as the pointer, not a second
+    // copy of the file.
+    #[tokio::test]
+    async fn a_read_kept_after_a_pause_still_becomes_the_repeated_read_pointer() {
+        let steering = Arc::new(SteeringCtl::new());
+        let run = run_script_steered(
+            "batch-pause-repeat",
+            None,
+            None,
+            |path| {
+                // Long enough to be worth a pointer.
+                std::fs::write(path, "a line worth carrying once\n".repeat(200)).unwrap();
+                let root = std::path::Path::new(path)
+                    .parent()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                vec![
+                    Reply::Tools(vec![("read_file", serde_json::json!({ "path": path }))]),
+                    Reply::Tools(vec![
+                        ("read_file", serde_json::json!({ "path": path })),
+                        ("list_dir", serde_json::json!({ "path": root })),
+                    ]),
+                    Reply::Text("should not be asked for"),
+                ]
+            },
+            steering,
+            |event, steering| {
+                if matches!(event, AgentEvent::ToolResult { tool_id, .. } if tool_id == "tu_1_0") {
+                    steering.interrupt.store(true, Ordering::SeqCst);
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        let answered = crate::agent::persist::load_records(&run.store.path)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find_map(|r| match r {
+                SessionRecord::Turn { message, .. } if message.role == "user" => Some(message),
+                _ => None,
+            })
+            .expect("the paused round was recorded");
+        let repeat = answered
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "tu_1_0" => Some(content.as_text().into_owned()),
+                _ => None,
+            })
+            .expect("the repeated read was answered");
+        assert!(
+            repeat.starts_with(crate::agent::prune::UNCHANGED_MARK),
+            "{}",
+            &repeat[..repeat.len().min(200)]
+        );
         std::fs::remove_dir_all(&run.root).ok();
     }
 

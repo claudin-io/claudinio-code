@@ -249,6 +249,11 @@ async fn run_bounded<T: Send + 'static>(
 /// Answer every call in `tool_uses` after a pause: the ones a parallel run
 /// already finished keep their result (their `ToolResult` event went out when
 /// they finished), the rest get `message` and a `ToolResult` event now.
+///
+/// A kept result ran like any other call, so it goes through `keep` — the
+/// caller's in-order bookkeeping (loop watch, the repeated-read pointer, the
+/// subagent's call count) — with its tool name and input, in the model's
+/// order, before it is appended.
 pub(crate) fn answer_unrun(
     tool_uses: &[Value],
     ready: &mut [Option<ContentBlock>],
@@ -256,12 +261,14 @@ pub(crate) fn answer_unrun(
     event_tx: &Channel<AgentEvent>,
     calls: &mut Vec<ContentBlock>,
     results: &mut Vec<ContentBlock>,
+    mut keep: impl FnMut(&str, &Value, ContentBlock) -> ContentBlock,
 ) {
     for (tool_use, slot) in tool_uses.iter().zip(ready.iter_mut()) {
         let (id, name) = (field(tool_use, "id"), field(tool_use, "name"));
-        calls.push(ContentBlock::tool_use(id, name, input_of(tool_use)));
+        let input = input_of(tool_use);
+        calls.push(ContentBlock::tool_use(id, name, input.clone()));
         if let Some(block) = slot.take() {
-            results.push(block);
+            results.push(keep(name, &input, block));
             continue;
         }
         let _ = event_tx.send(AgentEvent::ToolResult {
@@ -603,6 +610,7 @@ mod tests {
             &events,
             &mut uses,
             &mut results,
+            |_, _, block| block,
         );
         let use_ids: Vec<_> = uses
             .iter()
@@ -628,6 +636,47 @@ mod tests {
         // sends nothing); the two kept from starting are reported once each,
         // here.
         assert_eq!(tool_result_ids(&seen), ["tu_4", "tu_5"]);
+    }
+
+    // The loop's bookkeeping sees each kept result once, in the model's order,
+    // and never a call that did not run.
+    #[test]
+    fn a_kept_result_goes_through_the_callers_bookkeeping() {
+        let calls = vec![
+            call(0, "read_file", serde_json::json!({ "path": "/a" })),
+            call(1, "grep", serde_json::json!({ "pattern": "x" })),
+            call(2, "list_dir", serde_json::json!({ "path": "/" })),
+        ];
+        let mut ready = vec![
+            Some(ContentBlock::tool_result("tu_0", "a")),
+            None,
+            Some(ContentBlock::tool_result("tu_2", "listing")),
+        ];
+        let (events, _) = recording_channel();
+        let (mut uses, mut results) = (Vec::new(), Vec::new());
+        let mut seen = Vec::new();
+        answer_unrun(
+            &calls,
+            &mut ready,
+            INTERRUPTED,
+            &events,
+            &mut uses,
+            &mut results,
+            |name, input, block| {
+                seen.push((name.to_string(), input.clone()));
+                let (id, body) = text(&block);
+                ContentBlock::tool_result(id, format!("kept {body}"))
+            },
+        );
+        assert_eq!(
+            seen,
+            [
+                ("read_file".to_string(), serde_json::json!({ "path": "/a" })),
+                ("list_dir".to_string(), serde_json::json!({ "path": "/" })),
+            ]
+        );
+        let answered: Vec<_> = results.iter().map(|b| text(b).1).collect();
+        assert_eq!(answered, ["kept a", INTERRUPTED, "kept listing"]);
     }
 
     // The real tools do their work synchronously and report their own result
@@ -670,6 +719,7 @@ mod tests {
             &events,
             &mut uses,
             &mut results,
+            |_, _, block| block,
         );
         // Long enough for any body still running to have reported.
         tokio::time::sleep(Duration::from_millis(400)).await;

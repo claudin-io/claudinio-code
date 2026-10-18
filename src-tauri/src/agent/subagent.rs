@@ -772,6 +772,13 @@ pub(crate) async fn run_subagent_recorded(
                     event_tx,
                     &mut tool_assistant_blocks,
                     &mut tool_result_blocks,
+                    |name, input, block| {
+                        *tool_calls.entry(name.to_string()).or_default() += 1;
+                        if let ContentBlock::ToolResult { content, .. } = &block {
+                            loop_watch.record(name, input, &content.as_text());
+                        }
+                        crate::agent::prune::history_copy(&history, name, input, block)
+                    },
                 );
                 break;
             }
@@ -2021,6 +2028,120 @@ mod transcript_tests {
         let ws_str = ws.to_string_lossy().to_string();
         let store = SessionStore::create("parent", Some(&ws_str)).unwrap();
         (ws, ws_str, store)
+    }
+
+    // Stop pressed while a subagent's reads run together: the reads already
+    // under way finish, keep their results and count as calls made; the ones
+    // the pause kept from starting are answered as not run. Every call of the
+    // turn gets exactly one result, in the transcript and on the timeline.
+    #[tokio::test]
+    async fn a_pause_during_a_subagents_parallel_reads_answers_every_call_once() {
+        let (ws, ws_str, store) = session_in("parallel-pause");
+        let file = ws.join("notes.txt");
+        std::fs::write(&file, "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+        let path = file.to_string_lossy().to_string();
+        let reads: Vec<(&str, Value)> = (1..=6)
+            .map(|line| {
+                (
+                    "read_file",
+                    serde_json::json!({ "path": path, "start_line": line, "end_line": line }),
+                )
+            })
+            .collect();
+        let (base, _, _) =
+            spawn_with_usage(vec![Reply::Tools(reads), Reply::Text("unreachable")], None).await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let steering = Arc::new(SteeringCtl::new());
+        let results = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let events: Channel<AgentEvent> = {
+            let (results, stop) = (results.clone(), steering.interrupt.clone());
+            Channel::new(
+                move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
+                    if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                        && let Ok(AgentEvent::ToolResult {
+                            tool_id, output, ..
+                        }) = serde_json::from_str::<AgentEvent>(json)
+                    {
+                        // The first read to finish is when the user stops.
+                        stop.store(true, Ordering::SeqCst);
+                        results.lock().unwrap().push((tool_id, output));
+                    }
+                    Ok(())
+                },
+            )
+        };
+        let spec = SubagentSpec {
+            name: "reader".into(),
+            goal: "read the notes".into(),
+            mode: SubagentMode::Explore,
+            expected_output: None,
+        };
+        let transcript = Transcript::open(&ctx, "tu_par", 0, "sub");
+        let result = run_subagent_recorded(
+            &config,
+            &ctx,
+            &spec,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &steering,
+            transcript.as_ref(),
+        )
+        .await;
+        assert_eq!(result.status, "interrupted", "{}", result.report);
+
+        const NOT_RUN: &str = "Interrupted by user — tool not executed.";
+        let ids: Vec<String> = (0..6).map(|k| format!("tu_0_{k}")).collect();
+        let mut reported = results.lock().unwrap().clone();
+        reported.sort();
+        assert_eq!(
+            reported
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
+            ids,
+            "one ToolResult each: {reported:?}"
+        );
+        let not_run: Vec<&str> = reported
+            .iter()
+            .filter(|(_, out)| out == NOT_RUN)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(not_run, ["tu_0_4", "tu_0_5"], "the two kept from starting");
+        assert_eq!(
+            result.tools.get("read_file"),
+            Some(&4),
+            "the four reads that ran are counted"
+        );
+
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_par", 0);
+        let answered: Vec<String> = load_records(&path)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find_map(|r| match r {
+                SessionRecord::Turn { message, .. } if message.role == "user" => Some(message),
+                _ => None,
+            })
+            .expect("the answered turn")
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answered, ids,
+            "the turn is answered call for call, in order"
+        );
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     // What the model said before the user stopped it is part of the
