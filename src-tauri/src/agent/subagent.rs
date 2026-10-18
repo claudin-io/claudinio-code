@@ -633,6 +633,16 @@ pub(crate) async fn run_subagent_recorded(
         }
 
         if stream_output.interrupted {
+            // What the model said before the stop is part of the conversation
+            // the transcript records, as the main loop keeps it in its file.
+            if let Some(t) = transcript
+                && !assistant_text.is_empty()
+            {
+                t.turn(&Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text(&assistant_text)],
+                });
+            }
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
                 let est =
                     session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
@@ -656,6 +666,19 @@ pub(crate) async fn run_subagent_recorded(
         }
 
         if stream_output.tool_uses.is_empty() {
+            // The terminal turn joins the history before SubagentStop fires,
+            // as it does in the main loop: a blocking hook's feedback answers
+            // this turn, and the model has to see the turn it is answering for.
+            if !assistant_text.is_empty() {
+                push_recorded(
+                    &mut history,
+                    transcript,
+                    Message {
+                        role: "assistant".into(),
+                        content: vec![ContentBlock::text(&assistant_text)],
+                    },
+                );
+            }
             // ── Hooks: SubagentStop ─────────────────────────────────────────
             //
             // Here rather than after `SubagentDone` in `run_spawn_agents`,
@@ -688,14 +711,6 @@ pub(crate) async fn run_subagent_recorded(
                 }
             }
 
-            if let Some(t) = transcript
-                && !assistant_text.is_empty()
-            {
-                t.turn(&Message {
-                    role: "assistant".into(),
-                    content: vec![ContentBlock::text(&assistant_text)],
-                });
-            }
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
                 let est =
                     session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
@@ -1281,6 +1296,10 @@ pub(crate) mod scripted_model {
         /// The inner reply, sent after this many milliseconds: a slow
         /// provider, for tests about what happens while a request is in flight.
         Delayed(u64, Box<Reply>),
+        /// This text, and then nothing: the response is never finished and the
+        /// connection stays open, as a provider mid-generation does when the
+        /// user presses stop.
+        Hang(&'static str),
     }
 
     fn sse(event: &str, data: Value) -> String {
@@ -1315,6 +1334,12 @@ pub(crate) mod scripted_model {
                     out += &tool_use(index, name, input);
                 }
                 out += &stop;
+            }
+            Reply::Hang(text) => {
+                out += &sse(
+                    "content_block_delta",
+                    json!({"index": 0, "delta": {"type": "text_delta", "text": text}}),
+                );
             }
             Reply::Text(text) => {
                 out += &sse(
@@ -1419,6 +1444,22 @@ pub(crate) mod scripted_model {
                             "message_start",
                             json!({"message": {"role": "assistant", "usage": usage}}),
                         ) + &body;
+                    }
+                    if let Reply::Hang(_) = reply {
+                        // Promise more than is sent, then hold the line.
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                             Content-Length: {}\r\n\r\n",
+                            body.len() + 1_000_000
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.flush().await;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            drop(socket);
+                        });
+                        continue;
                     }
                     ("text/event-stream", body)
                 };
@@ -1826,6 +1867,184 @@ mod transcript_tests {
         let listed = crate::agent::persist::list_sessions(Some(&ws_str)).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "parent");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    fn kinds_and_texts(path: &std::path::Path) -> Vec<String> {
+        load_records(path)
+            .expect("a transcript file")
+            .iter()
+            .map(|r| match r {
+                SessionRecord::Turn { message, .. } => {
+                    let text: String = message
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    // The goal message is wrapped in boilerplate; keep the goal.
+                    let text = text
+                        .strip_prefix("Your goal:\n")
+                        .and_then(|t| t.split("\n\n").next())
+                        .unwrap_or(&text);
+                    format!("{}:{}", message.role, text)
+                }
+                other => serde_json::to_value(other).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            })
+            .collect()
+    }
+
+    fn session_in(tag: &str) -> (std::path::PathBuf, String, SessionStore) {
+        let ws = std::env::temp_dir().join(format!(
+            "claudinio-transcript-{tag}-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws_str = ws.to_string_lossy().to_string();
+        let store = SessionStore::create("parent", Some(&ws_str)).unwrap();
+        (ws, ws_str, store)
+    }
+
+    // What the model said before the user stopped it is part of the
+    // subagent's conversation, and the transcript is that conversation.
+    #[tokio::test]
+    async fn an_interrupted_subagent_keeps_what_it_had_said_in_its_transcript() {
+        let (ws, ws_str, store) = session_in("interrupted");
+        let (base, _, _) = spawn_with_usage(vec![Reply::Hang("halfway through the")], None).await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let steering = Arc::new(SteeringCtl::new());
+        let stop = steering.interrupt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            stop.store(true, Ordering::SeqCst);
+        });
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let (block, _, _, _) = run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_stop",
+            serde_json::json!({"agents": [{"name": "r", "goal": "explain", "mode": "explore"}]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &steering,
+        )
+        .await;
+        assert!(format!("{block:?}").contains("interrupted"), "{block:?}");
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_stop", 0);
+        assert_eq!(
+            kinds_and_texts(&path),
+            [
+                "meta",
+                "user:explain",
+                "usage",
+                "assistant:halfway through the"
+            ]
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // A blocking SubagentStop answers the turn the model just finished; the
+    // transcript holds that turn before the feedback, never two user turns
+    // in a row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_hook_block_follows_the_turn_it_answers_in_the_transcript() {
+        use std::os::unix::fs::PermissionsExt;
+        let (ws, ws_str, store) = session_in("stophook");
+        let mark = ws.join("blocked-once");
+        let script = ws.join("stop.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ -e '{m}' ]; then exit 0; fi\ntouch '{m}'\n\
+                 echo 'cite the file' >&2\nexit 2\n",
+                m = mark.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            ws.join(".claudinio.json"),
+            format!(
+                r#"{{"hooks":{{"SubagentStop":[{{"hooks":[{{"type":"command","command":"{}"}}]}}]}}}}"#,
+                script.display()
+            ),
+        )
+        .unwrap();
+        let hook_cfg = AgentConfig {
+            hooks_enabled: true,
+            ..Default::default()
+        };
+        let set = Arc::new(crate::agent::hooks::discovery::resolve_with_home(
+            Some(&ws),
+            &hook_cfg,
+            Some(&ws.join("_home")),
+        ));
+        let trust = Arc::new(crate::agent::hooks::TrustStore::with_path(
+            ws.join("trust.json"),
+        ));
+        trust
+            .approve(&ws.display().to_string(), &set.fingerprint, vec![], 1)
+            .unwrap();
+        let hooks = Arc::new(crate::agent::hooks::HookCtx::new(
+            set,
+            trust,
+            "parent",
+            store.path.clone(),
+            ws.clone(),
+        ));
+
+        let (base, _, _) = spawn_with_usage(
+            vec![Reply::Text("first answer"), Reply::Text("second answer")],
+            None,
+        )
+        .await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            hooks: Some(hooks),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_hook",
+            serde_json::json!({"agents": [{"name": "r", "goal": "explain", "mode": "explore"}]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_hook", 0);
+        assert_eq!(
+            kinds_and_texts(&path),
+            [
+                "meta",
+                "user:explain",
+                "usage",
+                "assistant:first answer",
+                "user:<hook-feedback>\ncite the file\n</hook-feedback>",
+                "usage",
+                "assistant:second answer",
+            ]
+        );
         std::fs::remove_dir_all(&ws).ok();
     }
 }
