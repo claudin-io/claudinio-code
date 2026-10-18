@@ -4101,6 +4101,43 @@ mod document_loop_tests {
         std::fs::remove_dir_all(&ws.root).ok();
     }
 
+    /// A new document is a new topic, not a way out of the user's mandatory
+    /// goals: the golden loop's counters travel with the handoff, so its
+    /// caps never reset, exactly as on a context handoff.
+    #[tokio::test]
+    async fn a_new_document_handoff_carries_the_golden_loop_state() {
+        let ws = workspace("doc-handoff-golden");
+        link_doc(&ws, &["origem"]);
+        ws.store
+            .append(&SessionRecord::GoldenCycle {
+                cycle: 2,
+                mode: "builder".into(),
+                goals: vec!["golden-tests-pass-0".into()],
+                ts: now_ms(),
+            })
+            .unwrap();
+        let (outcome, _) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                },
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        let Ok(RunOutcome::Handoff(spec)) = outcome else {
+            panic!("expected a handoff");
+        };
+        assert_eq!(spec.reason, HandoffReason::NewDocument);
+        assert_eq!(
+            spec.golden_cycle, 2,
+            "the golden loop's cycle count carries over"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
     /// The predecessor keeps its own document — and its memory of it: a
     /// person's edit no agent has read must still win when the old session
     /// is reopened after a second `doc_create`.

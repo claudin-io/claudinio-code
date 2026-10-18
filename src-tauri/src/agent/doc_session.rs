@@ -765,14 +765,22 @@ pub(crate) fn create_call(
         }
         Some(old) => {
             let (mode, origin) = mode_ctl.get();
+            // The golden loop's state carries over, as on a context handoff,
+            // so its caps never reset; the golden tasks go along too
+            // (`transition::tasks_for_successor`).
+            let records =
+                crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                    .unwrap_or_default();
+            let (linked_cycle, golden_stalls, golden_last_pending) =
+                crate::agent::persist::linked_golden_state(&records);
             *pending_handoff = Some(crate::agent::handoff::HandoffSpec {
                 reason: crate::agent::handoff::HandoffReason::NewDocument,
                 next_mode: mode,
                 next_origin: origin,
                 first_message: new_document_kickoff(user_message, &rel),
-                golden_cycle: 0,
-                golden_stalls: 0,
-                golden_last_pending: Vec::new(),
+                golden_cycle: crate::agent::persist::golden_cycle_count(&records).max(linked_cycle),
+                golden_stalls,
+                golden_last_pending,
                 document: Some(rel.clone()),
             });
             format!(

@@ -489,12 +489,12 @@ fn link_session(
     if let Some((sha, ts)) = crate::agent::persist::earliest_base_commit_at(&old_records) {
         new.try_append(&SessionRecord::BaseCommit { sha, ts });
     }
-    // A new top-level topic starts its own list (lean-harness Phase 4b).
-    if spec.reason != crate::agent::session::HandoffReason::NewDocument
-        && let Ok(tasks) = crate::agent::persist::load_last_tasks(&old.path)
-        && !tasks.is_empty()
-    {
-        let _ = crate::agent::persist::append_tasks(&new.path, &tasks);
+    // A new top-level topic keeps only the golden tasks (lean-harness Phase 4b).
+    if let Ok(tasks) = crate::agent::persist::load_last_tasks(&old.path) {
+        let tasks = crate::agent::transition::tasks_for_successor(tasks, &spec.reason);
+        if !tasks.is_empty() {
+            let _ = crate::agent::persist::append_tasks(&new.path, &tasks);
+        }
     }
     crate::agent::doc_session::carry_into(&old.path, &old_records, &new, spec.document.as_deref());
     new.try_append(&SessionRecord::Mode {
@@ -719,9 +719,11 @@ reference:
 
     /// A successor in the eval is linked like the app's: the living document
     /// travels with a context handoff, and a new top-level topic starts its
-    /// own list instead of inheriting the old session's tasks.
+    /// own list instead of inheriting the old session's tasks — except the
+    /// golden ones, which are the user's mandatory goals: a new document is
+    /// not a way out of them.
     #[test]
-    fn a_successor_carries_the_document_and_a_new_topic_starts_without_the_old_tasks() {
+    fn a_successor_carries_the_document_and_a_new_topic_keeps_only_the_golden_tasks() {
         let work = tempfile::tempdir().unwrap();
         let ws = work.path().to_str().unwrap();
         let old = SessionStore::create("old", Some(ws)).unwrap();
@@ -731,13 +733,22 @@ reference:
         });
         crate::agent::persist::append_tasks(
             &old.path,
-            &[crate::agent::persist::TaskItem {
-                id: "t1".into(),
-                title: "old work".into(),
-                description: String::new(),
-                journal: vec![],
-                status: "todo".into(),
-            }],
+            &[
+                crate::agent::persist::TaskItem {
+                    id: "t1".into(),
+                    title: "old work".into(),
+                    description: String::new(),
+                    journal: vec![],
+                    status: "todo".into(),
+                },
+                crate::agent::persist::TaskItem {
+                    id: "golden-tests-pass-0".into(),
+                    title: "the tests pass".into(),
+                    description: String::new(),
+                    journal: vec![],
+                    status: "todo".into(),
+                },
+            ],
         )
         .unwrap();
         let spec = |reason, document: Option<&str>| crate::agent::session::HandoffSpec {
@@ -765,7 +776,7 @@ reference:
             crate::agent::persist::load_last_tasks(&carried.path)
                 .unwrap()
                 .len(),
-            1
+            2
         );
 
         let fresh = link_session(
@@ -782,11 +793,12 @@ reference:
             crate::agent::persist::linked_document(&records).as_deref(),
             Some(".claudinio/docs/b.md")
         );
-        assert!(
-            crate::agent::persist::load_last_tasks(&fresh.path)
-                .unwrap()
-                .is_empty()
-        );
+        let ids: Vec<String> = crate::agent::persist::load_last_tasks(&fresh.path)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, vec!["golden-tests-pass-0".to_string()]);
     }
 
     /// With `--price-in/--price-out` the cost of a request that reports none

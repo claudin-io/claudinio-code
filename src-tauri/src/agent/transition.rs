@@ -25,6 +25,26 @@ pub struct TransitionMaps {
     pub records_cache: RecordsCache,
 }
 
+/// The predecessor's tasks a successor starts with. Every handoff carries
+/// the whole list, except a new top-level topic (`NewDocument`): its work is
+/// a new document with a list of its own, so the old topic's tasks stay
+/// behind — but the golden ones go along. They are the user's mandatory
+/// goals (`<goal>` tags), and the golden gate only lets the work finish when
+/// each is done; dropping them would let a second `doc_create` end the run
+/// with goals still pending.
+pub fn tasks_for_successor(
+    tasks: Vec<persist::TaskItem>,
+    reason: &HandoffReason,
+) -> Vec<persist::TaskItem> {
+    if *reason != HandoffReason::NewDocument {
+        return tasks;
+    }
+    tasks
+        .into_iter()
+        .filter(|t| t.id.starts_with("golden-"))
+        .collect()
+}
+
 /// Create a new linked session and wire it as the workspace's active session.
 /// Returns the new session handle so the caller can rebuild the ToolContext and
 /// continue the run loop.
@@ -76,13 +96,13 @@ pub async fn link_session(
         new_store.try_append(&SessionRecord::BaseCommit { sha, ts });
     }
 
-    // 5. Copy tasks snapshot (golden tasks included) — except for a new
-    // top-level topic, which is a new document and starts its own list.
-    if spec.reason != HandoffReason::NewDocument
-        && let Ok(tasks) = tasks_store::load_last_tasks(&old_handle.store_path)
-        && !tasks.is_empty()
-    {
-        let _ = tasks_store::append_tasks(&new_path, &tasks);
+    // 5. Copy tasks snapshot (golden tasks included; a new top-level topic
+    // keeps only those — see `tasks_for_successor`).
+    if let Ok(tasks) = tasks_store::load_last_tasks(&old_handle.store_path) {
+        let tasks = tasks_for_successor(tasks, &spec.reason);
+        if !tasks.is_empty() {
+            let _ = tasks_store::append_tasks(&new_path, &tasks);
+        }
     }
 
     // 5½. The living document: the predecessor's travels with it, or the new
