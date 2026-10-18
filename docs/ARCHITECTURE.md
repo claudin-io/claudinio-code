@@ -128,9 +128,11 @@ the profile's ten is refused rather than run.
 
 Each run writes a `run_config` record (model, window, lines, prefix by part,
 profile), each subagent a `subagent_run`, each routing decision a `mode_route`,
-and every provider request a `usage` record (round, model, input, cache-read,
-cache-creation and output tokens, the provider's cost when it reports one, and
-which subagent asked). A subagent's own turns and usage go to
+and every provider request a `usage` record (round, model, uncached input,
+cache-read, cache-creation and output tokens, the provider's cost when it
+reports one, and which subagent asked; OpenAI's `prompt_tokens` includes its
+`cached_tokens`, so the record subtracts them and the three input kinds add up
+to all input on either protocol). A subagent's own turns and usage go to
 `<session>.sub/<parent_tool_use_id>-<n>.jsonl` beside the session file, not
 into it: the session file is the model's history and is replayed into the next
 request. `scripts/session-stats.py` aggregates them (`--cost` for cost, rounds
