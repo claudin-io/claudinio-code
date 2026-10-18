@@ -392,15 +392,26 @@ fn clean_topic(topic: &str) -> String {
 /// A model-written body made safe to sit inside a section: a level-1/2
 /// heading would end the section early and a `[x]` line would open a new
 /// one, so outside code fences the first becomes `###` and the second is
-/// escaped (`\[x]` renders as `[x]`).
+/// escaped (`\[x]` renders as `[x]`). A code fence the body leaves open (a
+/// truncated block) is closed with the opener's own marker: [`parse`] skips
+/// section boundaries inside a fence, so an open one would swallow every
+/// section after this one.
 fn normalize_body(body: &str) -> String {
     let mut out = String::new();
-    let mut in_fence = false;
+    // The open fence's marker (its run of backticks or tildes), if any.
+    let mut open_fence: Option<String> = None;
     for line in body.trim_end().lines() {
         if is_fence(line) {
-            in_fence = !in_fence;
+            open_fence = match open_fence {
+                Some(_) => None,
+                None => {
+                    let t = line.trim_start();
+                    let mark = t.chars().next().unwrap_or('`');
+                    Some(t.chars().take_while(|&c| c == mark).collect())
+                }
+            };
             out.push_str(line);
-        } else if in_fence {
+        } else if open_fence.is_some() {
             out.push_str(line);
         } else if let Some(rest) = line.strip_prefix("## ").or_else(|| line.strip_prefix("# ")) {
             out.push_str("### ");
@@ -413,6 +424,10 @@ fn normalize_body(body: &str) -> String {
         } else {
             out.push_str(line);
         }
+        out.push('\n');
+    }
+    if let Some(mark) = open_fence {
+        out.push_str(&mark);
         out.push('\n');
     }
     out.push('\n');
@@ -884,6 +899,30 @@ mod tests {
             back.section("s1").unwrap().text(),
             "### Big heading\n\\[1]\n### Top\n```\n## kept in code\n```"
         );
+    }
+
+    /// A truncated code block must stay inside its section: the parser
+    /// skips section boundaries inside a fence, so a fence the body leaves
+    /// open would swallow every section after it.
+    #[test]
+    fn a_body_with_an_unclosed_code_fence_does_not_swallow_the_next_sections() {
+        let mut doc = scaffold("T", &["a".to_string(), "b".to_string(), "c".to_string()]);
+        doc.apply_write(
+            "s1",
+            Some("Code:\n~~~~python\nprint(1)"),
+            "main",
+            Status::Done,
+        )
+        .unwrap();
+        doc.apply_write("s3", Some("still here"), "main", Status::Done)
+            .unwrap();
+        let back = parse(&render(&doc));
+        assert_eq!(back.ids(), ["s1", "s2", "s3"]);
+        assert_eq!(
+            back.section("s1").unwrap().text(),
+            "Code:\n~~~~python\nprint(1)\n~~~~"
+        );
+        assert_eq!(back.section("s3").unwrap().text(), "still here");
     }
 
     #[test]
