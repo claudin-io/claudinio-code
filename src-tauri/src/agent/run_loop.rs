@@ -3894,9 +3894,13 @@ mod document_loop_tests {
 
     fn link_doc(ws: &Workspace, topics: &[&str]) -> std::path::PathBuf {
         let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
-        let (rel, _) =
-            crate::agent::doc_session::create(&ws.root, &ws.store.path, "Pudim de leite", &topics)
-                .unwrap();
+        let (rel, _) = crate::agent::doc_session::create(
+            &ws.root,
+            Some(&ws.store.path),
+            "Pudim de leite",
+            &topics,
+        )
+        .unwrap();
         ws.store
             .append(&SessionRecord::DocumentLinked {
                 path: rel.clone(),
@@ -4093,6 +4097,65 @@ mod document_loop_tests {
             crate::agent::persist::linked_document(&records_of(&ws)).as_deref(),
             Some(".claudinio/docs/pudim-de-leite.md"),
             "this session keeps its own document"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// The predecessor keeps its own document — and its memory of it: a
+    /// person's edit no agent has read must still win when the old session
+    /// is reopened after a second `doc_create`.
+    #[tokio::test]
+    async fn a_second_doc_create_leaves_the_old_sessions_document_memory_alone() {
+        let ws = workspace("doc-handoff-memory");
+        let path = link_doc(&ws, &["origem"]);
+        let ctx = ToolContext {
+            workspace_root: Some(ws.root.to_string_lossy().to_string()),
+            session_store_path: Some(ws.store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        crate::agent::doc_session::write(
+            &ctx,
+            "s1",
+            Some("Veio de Portugal."),
+            crate::agent::document::Status::Done,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            text.replace(
+                "Veio de Portugal.",
+                "Veio de Portugal, no s\u{e9}culo XVIII.",
+            ),
+        )
+        .unwrap();
+        let (outcome, _) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                },
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        assert!(matches!(outcome, Ok(RunOutcome::Handoff(_))));
+
+        let refused = crate::agent::doc_session::write(
+            &ctx,
+            "s1",
+            Some("Outra coisa."),
+            crate::agent::document::Status::Done,
+        );
+        assert!(
+            refused.is_err(),
+            "the person's unread edit to the old document still wins: {refused:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("no s\u{e9}culo XVIII.")
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }

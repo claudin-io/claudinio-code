@@ -253,10 +253,19 @@ pub fn slug(title: &str) -> String {
 
 /// Write a new document for `title` with one placeholder per topic under
 /// `<workspace>/.claudinio/docs/`, never over an existing file, and start its
-/// memory beside `store_path`. Returns the relative path and the document.
+/// memory beside `memory_of` (a session file) when given. Returns the
+/// relative path and the document.
+///
+/// `memory_of` is `None` for a new top-level topic: the session calling
+/// `doc_create` keeps its own document, and its `<session>.doc.json` — the
+/// unread edits of a person, the pending notes, the id floor — is about that
+/// one. Overwriting it with the new document's would make the old session
+/// forget an edit no agent has read, and the next `doc_write` there would
+/// overwrite the person. The successor that owns the new document starts its
+/// memory at its first read instead (`load_state`).
 pub fn create(
     workspace: &Path,
-    store_path: &Path,
+    memory_of: Option<&Path>,
     title: &str,
     topics: &[String],
 ) -> Result<(String, Document), String> {
@@ -283,6 +292,9 @@ pub fn create(
     let text = document::render(&doc);
     std::fs::write(dir.join(&name), &text).map_err(|e| format!("cannot write {name}: {e}"))?;
     let rel = format!("{DOCS_DIR}/{name}");
+    let Some(store_path) = memory_of else {
+        return Ok((rel, doc));
+    };
     let _guard = DOC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     save_state(
         &Linked {
@@ -733,7 +745,12 @@ pub(crate) fn create_call(
     let existing = linked(ctx);
     let result = match ctx.workspace_root.as_deref() {
         None => Err("doc_create needs an open workspace".to_string()),
-        Some(ws) => create(Path::new(ws), &store.path, title, &topics),
+        Some(ws) => create(
+            Path::new(ws),
+            existing.is_none().then_some(store.path.as_path()),
+            title,
+            &topics,
+        ),
     }
     .map(|(rel, doc)| match existing {
         None => {
@@ -860,7 +877,7 @@ mod tests {
         fn with_doc(tag: &str, topics: &[&str]) -> (Ws, PathBuf) {
             let ws = Ws::new(tag);
             let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
-            let (rel, _) = create(&ws.root, &ws.store(), "Pudim de leite", &topics).unwrap();
+            let (rel, _) = create(&ws.root, Some(&ws.store()), "Pudim de leite", &topics).unwrap();
             SessionStore { path: ws.store() }
                 .append(&SessionRecord::DocumentLinked {
                     path: rel.clone(),
@@ -900,16 +917,16 @@ mod tests {
     fn create_writes_the_scaffold_under_claudinio_docs_and_never_over_a_file() {
         let ws = Ws::new("create");
         let topics = vec!["origem".to_string(), "ingredientes".to_string()];
-        let (rel, doc) = create(&ws.root, &ws.store(), "Pudim de leite", &topics).unwrap();
+        let (rel, doc) = create(&ws.root, Some(&ws.store()), "Pudim de leite", &topics).unwrap();
         assert_eq!(rel, ".claudinio/docs/pudim-de-leite.md");
         assert_eq!(
             std::fs::read_to_string(ws.root.join(&rel)).unwrap(),
             document::render(&doc)
         );
-        let (again, _) = create(&ws.root, &ws.store(), "Pudim de leite", &topics).unwrap();
+        let (again, _) = create(&ws.root, Some(&ws.store()), "Pudim de leite", &topics).unwrap();
         assert_eq!(again, ".claudinio/docs/pudim-de-leite-2.md");
-        assert!(create(&ws.root, &ws.store(), " ", &topics).is_err());
-        assert!(create(&ws.root, &ws.store(), "T", &[]).is_err());
+        assert!(create(&ws.root, Some(&ws.store()), " ", &topics).is_err());
+        assert!(create(&ws.root, Some(&ws.store()), "T", &[]).is_err());
     }
 
     #[test]

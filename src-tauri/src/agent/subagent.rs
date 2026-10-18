@@ -2772,7 +2772,8 @@ mod delegation_tests {
         let (ws, ws_str, store) = workspace(tag);
         let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
         let (rel, _) =
-            crate::agent::doc_session::create(&ws, &store.path, "Pudim de leite", &topics).unwrap();
+            crate::agent::doc_session::create(&ws, Some(&store.path), "Pudim de leite", &topics)
+                .unwrap();
         let ctx = ToolContext {
             workspace_root: Some(ws_str),
             session_store_path: Some(store.path.to_string_lossy().to_string()),
