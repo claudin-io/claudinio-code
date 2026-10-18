@@ -408,3 +408,69 @@ describe("ToolBody", () => {
     dispose();
   });
 });
+
+// The two tools Phase 2 of the lean-harness plan added: a deferred-tool load
+// and a skill read are bookkeeping, so each renders as compact rows rather
+// than a key-value dump of its arguments.
+describe("load_tools and skills", () => {
+  it("titles and summarizes a load by the tools it asked for", () => {
+    const call = makeCall("load_tools", { names: ["semantic_search", "mcp__github__list_issues"] });
+    expect(toolHeader(call).title).toBe("Loaded tools");
+    expect(toolSummary(call)).toBe("semantic_search, mcp__github__list_issues");
+  });
+
+  it("titles a skill read and a skill listing apart", () => {
+    const read = makeCall("skills", { action: "read", name: "deploy" });
+    expect(toolHeader(read).title).toBe("Read a skill");
+    expect(toolSummary(read)).toBe("deploy");
+    const list = makeCall("skills", { action: "list" });
+    expect(toolHeader(list).title).toBe("Listed skills");
+    expect(toolSummary(list)).toBe("");
+  });
+
+  it("renders one row per loaded tool, by its human name", () => {
+    const call = makeCall("load_tools", { names: ["semantic_search", "mcp__github__list_issues"] });
+    const result = makeResult("load_tools", "Loaded: semantic_search, mcp__github__list_issues.");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    const rows = document.body.querySelectorAll("[data-loaded-tool]");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("Searched code");
+    expect(rows[0].textContent).toContain("semantic_search");
+    expect(rows[1].textContent).toContain("list issues");
+    dispose();
+  });
+
+  it("shows why a load failed", () => {
+    const call = makeCall("load_tools", { names: ["nope"] });
+    const result = makeResult("load_tools", "", "Not a deferred tool here: nope.");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.textContent).toContain("Not a deferred tool here: nope.");
+    dispose();
+  });
+
+  it("renders a skill listing as rows with their scope", () => {
+    const call = makeCall("skills", { action: "list" });
+    const result = makeResult(
+      "skills",
+      "2 skills, the user's own first:\n" +
+        "- deploy [project] /ws/.agents/skills/deploy/SKILL.md\n  Ship the app\n" +
+        "- find-skills [builtin] <built-in>\n  Helps users discover skills\n",
+    );
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    const rows = document.body.querySelectorAll("[data-skill-row]");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("deploy");
+    expect(rows[0].textContent).toContain("project");
+    expect(rows[0].textContent).toContain("Ship the app");
+    expect(rows[1].textContent).toContain("builtin");
+    dispose();
+  });
+
+  it("renders a skill read as its instructions", () => {
+    const call = makeCall("skills", { action: "read", name: "deploy" });
+    const result = makeResult("skills", "# Skill: deploy\nDirectory: /ws/x\n\nRun **the script**.");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.querySelector("strong")?.textContent).toBe("the script");
+    dispose();
+  });
+});

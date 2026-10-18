@@ -20,11 +20,11 @@ hljs.registerLanguage("xml", langXml);
 hljs.registerLanguage("css", langCss);
 hljs.registerLanguage("markdown", langMarkdown);
 import type { ToolCallData, ToolImageData, ToolResultData } from "../../lib/ipc";
-import { Icon, type IconName } from "../Icon";
+import { Icon, toolIcon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
 import { renderMarkdown, escapeHtml } from "../../lib/markdown";
-import { detectLanguageFromPath } from "./toolPresentation";
+import { detectLanguageFromPath, toolTitle } from "./toolPresentation";
 import { parseLineList, UNCHANGED_MARK, type ListRow } from "./lineResults";
 
 // The result goes straight to `innerHTML`, and both inputs are untrusted: the
@@ -478,6 +478,82 @@ const ToolImagesBody: Component<{ images?: ToolImageData[] }> = (props) => (
   </Show>
 );
 
+// ── load_tools ──────────────────────────────────────────────────────
+// A deferred-tool load: which tools joined the model's list. One row per
+// requested name, by the name the timeline gives that tool elsewhere.
+const LoadToolsBody: Component<{ names: string[]; result?: ToolResultData }> = (props) => (
+  <div class="flex flex-col gap-1">
+    <For each={props.names}>
+      {(name) => (
+        <div class="flex items-center gap-2" data-loaded-tool>
+          <Icon name={toolIcon(name)} class="h-3 w-3 shrink-0 text-ink-faint" />
+          <span class="text-[12px] text-ink">{toolTitle(name)}</span>
+          <span class="truncate font-mono text-[11px] text-ink-faint">{name}</span>
+        </div>
+      )}
+    </For>
+    <Show when={props.result?.error}>
+      <div class="text-[11px] text-danger">{props.result!.error}</div>
+    </Show>
+  </div>
+);
+
+// ── skills ──────────────────────────────────────────────────────────
+// `list` answers "- name [scope] location" lines, each followed by an
+// indented description (agent/tools/skills_tool.rs); `read` answers the
+// skill's Markdown.
+interface SkillRow {
+  name: string;
+  scope: string;
+  description: string;
+}
+
+export function parseSkillList(output: string): SkillRow[] {
+  const rows: SkillRow[] = [];
+  for (const line of output.split("\n")) {
+    const head = /^- (\S+) \[(\w+)\]/.exec(line);
+    if (head) {
+      rows.push({ name: head[1], scope: head[2], description: "" });
+    } else if (line.startsWith("  ") && rows.length > 0) {
+      rows[rows.length - 1].description = line.trim();
+    }
+  }
+  return rows;
+}
+
+const SkillsBody: Component<{ action: string; result?: ToolResultData }> = (props) => (
+  <Show
+    when={!props.result?.error}
+    fallback={<div class="text-[11px] text-danger">{props.result?.error}</div>}
+  >
+    <Show
+      when={props.action === "read"}
+      fallback={
+        <div class="flex flex-col gap-1">
+          <For each={parseSkillList(props.result?.output ?? "")}>
+            {(skill) => (
+              <div class="min-w-0" data-skill-row>
+                <div class="flex items-center gap-2">
+                  <span class="text-[12px] font-medium text-ink">{skill.name}</span>
+                  <span class="rounded bg-accent/15 px-1 text-[10px] font-medium text-accent">{skill.scope}</span>
+                </div>
+                <div class="truncate text-[11px] text-ink-faint">{skill.description}</div>
+              </div>
+            )}
+          </For>
+        </div>
+      }
+    >
+      <div class="max-h-72 overflow-y-auto">
+        <ProseContent
+          class="prose-content text-[12px] leading-[1.6] text-ink-muted"
+          html={renderMarkdown(props.result?.output ?? "")}
+        />
+      </div>
+    </Show>
+  </Show>
+);
+
 export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }> = (props) => {
   const name = () => props.call.toolName;
 
@@ -525,6 +601,12 @@ export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }
       </Match>
       <Match when={name() === "spawn_agents"}>
         <SpawnAgentsBody agents={(props.call.args.agents as AgentSpec[]) ?? []} />
+      </Match>
+      <Match when={name() === "load_tools"}>
+        <LoadToolsBody names={(props.call.args.names as string[]) ?? []} result={props.result} />
+      </Match>
+      <Match when={name() === "skills"}>
+        <SkillsBody action={String(props.call.args.action ?? "")} result={props.result} />
       </Match>
       <Match when={JSON_LIST_TOOLS.has(name())}>
         <JsonListBody toolName={name()} result={props.result} />

@@ -42,6 +42,8 @@ const TITLES: Record<string, string> = {
   finalize_plan: "Finalized plan",
   enter_plan_mode: "Entered plan mode",
   exit_plan_mode: "Exited plan mode",
+  load_tools: "Loaded tools",
+  skills: "Listed skills",
 };
 
 export function toolTitle(name: string): string {
@@ -101,6 +103,9 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
     };
     const title = byAction[String(call.args.action ?? "")];
     if (title) return { icon: "globe", title };
+  }
+  if (call.toolName === "skills" && call.args.action === "read") {
+    return { icon: toolIcon("skills"), title: "Read a skill" };
   }
   return { icon: toolIcon(call.toolName), title: toolTitle(call.toolName) };
 }
@@ -193,6 +198,10 @@ export function toolSummary(call: ToolCallData): string {
       return truncate(String(args.summary ?? ""), 80);
     case "enter_plan_mode":
       return truncate(String(args.reason ?? ""), 80);
+    case "load_tools":
+      return truncate(((args.names as string[] | undefined) ?? []).join(", "), 80);
+    case "skills":
+      return args.action === "read" ? String(args.name ?? "") : "";
     default: {
       const path = args.path as string | undefined;
       if (path) return path;
