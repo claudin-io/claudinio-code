@@ -57,7 +57,7 @@ pub fn execute_set(
 }
 
 /// Change one task: its status, its journal, or both.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct UpdateTaskArgs {
     pub id: String,
     #[serde(default)]
@@ -92,8 +92,53 @@ fn lock_task_list() -> std::sync::MutexGuard<'static, ()> {
 /// The gates are the ones `tasks_set` goes through, on the list as it would be
 /// after the change: a status update is exactly how a goal gets closed, so it
 /// must not be a way around them.
+///
+/// The one-task shorthand of [`execute_updates`]; the dispatcher parses
+/// either form (`parse_update_args`) and calls that directly.
+#[cfg(test)]
 pub fn execute_update(
     args: UpdateTaskArgs,
+    ctx: &crate::agent::tools::ToolContext,
+) -> Result<String, String> {
+    execute_updates(vec![args], ctx)
+}
+
+/// The arguments of a `tasks_update` call, in either form: one task (`id`,
+/// `status`, `journal`) or several (`updates: [{id, status?, journal?}]`).
+/// A call in neither form, or in both at once, is refused with both shapes
+/// spelled out, so the retry is the right one.
+pub fn parse_update_args(args: serde_json::Value) -> Result<Vec<UpdateTaskArgs>, String> {
+    const SHAPES: &str = "pass either one task as {\"id\", \"status\"?, \"journal\"?} \
+                          or several as {\"updates\": [{\"id\", \"status\"?, \"journal\"?}, ...]}";
+    let has_id = args.get("id").is_some();
+    match args.get("updates") {
+        Some(_) if has_id => Err(format!("tasks_update: {SHAPES}, not both.")),
+        Some(updates) => {
+            let items: Vec<UpdateTaskArgs> = serde_json::from_value(updates.clone())
+                .map_err(|e| format!("tasks_update: invalid updates ({e}); {SHAPES}."))?;
+            if items.is_empty() {
+                return Err(format!("tasks_update: updates is empty; {SHAPES}."));
+            }
+            Ok(items)
+        }
+        None if has_id => serde_json::from_value(args)
+            .map(|one| vec![one])
+            .map_err(|e| format!("tasks_update: invalid args ({e}); {SHAPES}.")),
+        None => Err(format!("tasks_update: no task named; {SHAPES}.")),
+    }
+}
+
+/// Apply one or more updates as one change of the list: a model that closes
+/// a task and starts the next says so in one call (lean-harness Phase 4: the
+/// prompt used to say "never batch", which cost a round per state change).
+/// Every item is checked first — the id exists, the status is one of the
+/// three — and the quality gate then sees the list as the whole batch leaves
+/// it, so a goal cannot be closed on a claim by tucking it beside an ordinary
+/// task. If anything fails, nothing is written and the error names the task
+/// and the reason. Items apply in the order given; one list record is written
+/// for the whole call.
+pub fn execute_updates(
+    items: Vec<UpdateTaskArgs>,
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
     check_brain_lld_gate(ctx, "tasks_update")?;
@@ -101,66 +146,110 @@ pub fn execute_update(
         .session_store_path
         .as_ref()
         .ok_or("session_store_path not set")?;
+    let batch = items.len() > 1;
+    let none_applied = if batch {
+        " The batch was refused: nothing was applied."
+    } else {
+        ""
+    };
     let _writing = lock_task_list();
     let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
-    let id = args.id.trim();
-    let Some(index) = prev.iter().position(|t| t.id == id) else {
-        // The ids are what the model needs to recover, so they come back in
-        // the error instead of costing it a tasks_get round.
-        let ids: Vec<&str> = prev.iter().map(|t| t.id.as_str()).collect();
-        return Err(if ids.is_empty() {
-            format!(
-                "tasks_update: there is no task '{id}' — the task list is empty. Create it with tasks_set."
-            )
-        } else {
-            format!(
-                "tasks_update: there is no task '{id}'. Task ids: {}. Use tasks_set to add a task.",
-                ids.join(", ")
-            )
-        });
-    };
-    if let Some(status) = args.status.as_deref()
-        && !TASK_STATUSES.contains(&status)
-    {
-        return Err(format!(
-            "tasks_update: status must be one of todo, doing, done — got '{status}'."
-        ));
-    }
-    let journal: Vec<String> = args
-        .journal
-        .into_iter()
-        .filter(|entry| !entry.trim().is_empty())
-        .collect();
 
     let mut merged = prev.clone();
-    let before = merged[index].status.clone();
-    if let Some(status) = args.status {
-        merged[index].status = status;
+    // Per task, in the order first named: how many journal entries it got.
+    let mut touched: Vec<(String, usize)> = Vec::new();
+    for args in items {
+        let id = args.id.trim().to_string();
+        let Some(index) = merged.iter().position(|t| t.id == id) else {
+            // The ids are what the model needs to recover, so they come back in
+            // the error instead of costing it a round to read the list.
+            let ids: Vec<&str> = prev.iter().map(|t| t.id.as_str()).collect();
+            return Err(if ids.is_empty() {
+                format!(
+                    "tasks_update: there is no task '{id}' — the task list is empty. Create it with tasks_set.{none_applied}"
+                )
+            } else {
+                format!(
+                    "tasks_update: there is no task '{id}'. Task ids: {}. Use tasks_set to add a task.{none_applied}",
+                    ids.join(", ")
+                )
+            });
+        };
+        if let Some(status) = args.status.as_deref()
+            && !TASK_STATUSES.contains(&status)
+        {
+            return Err(if batch {
+                format!(
+                    "tasks_update: '{id}': status must be one of todo, doing, done — got '{status}'.{none_applied}"
+                )
+            } else {
+                format!("tasks_update: status must be one of todo, doing, done — got '{status}'.")
+            });
+        }
+        let journal: Vec<String> = args
+            .journal
+            .into_iter()
+            .filter(|entry| !entry.trim().is_empty())
+            .collect();
+        if let Some(status) = args.status {
+            merged[index].status = status;
+        }
+        let added = journal.len();
+        merged[index].journal.extend(journal);
+        match touched.iter_mut().find(|(t, _)| *t == id) {
+            Some((_, n)) => *n += added,
+            None => touched.push((id, added)),
+        }
     }
-    merged[index].journal.extend(journal.iter().cloned());
-    let after = merged[index].status.clone();
-    if before == after && journal.is_empty() {
-        return Ok(format!(
-            "No change: '{id}' is already {after}. {}",
-            board(&merged)
-        ));
+
+    let status_of = |tasks: &[TaskItem], id: &str| {
+        tasks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.status.clone())
+            .unwrap_or_default()
+    };
+    if merged == prev {
+        return Ok(if batch {
+            format!(
+                "No change: every task is already as asked. {}",
+                board(&merged)
+            )
+        } else {
+            let id = &touched[0].0;
+            format!(
+                "No change: '{id}' is already {}. {}",
+                status_of(&merged, id),
+                board(&merged)
+            )
+        });
     }
     check_quality_gate(&prev, &merged, ctx)?;
     crate::agent::persist::append_tasks(Path::new(path), &merged)?;
 
-    let mut what = if before == after {
-        format!("'{id}' stays {after}")
+    let whats: Vec<String> = touched
+        .iter()
+        .map(|(id, added)| {
+            let (before, after) = (status_of(&prev, id), status_of(&merged, id));
+            let mut what = if before == after {
+                format!("'{id}' stays {after}")
+            } else {
+                format!("'{id}': {before} -> {after}")
+            };
+            if *added > 0 {
+                what.push_str(&format!(
+                    ", {added} journal entr{} added",
+                    if *added == 1 { "y" } else { "ies" }
+                ));
+            }
+            what
+        })
+        .collect();
+    Ok(if batch {
+        format!("Tasks updated — {}. {}", whats.join("; "), board(&merged))
     } else {
-        format!("'{id}': {before} -> {after}")
-    };
-    if !journal.is_empty() {
-        what.push_str(&format!(
-            ", {} journal entr{} added",
-            journal.len(),
-            if journal.len() == 1 { "y" } else { "ies" }
-        ));
-    }
-    Ok(format!("Task updated — {what}. {}", board(&merged)))
+        format!("Task updated — {}. {}", whats[0], board(&merged))
+    })
 }
 
 /// Where the whole list stands, in one line: enough for the model to pick its
@@ -596,6 +685,24 @@ mod lld_gate_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // The LLD gate holds for the batch form as for the single one.
+    #[test]
+    fn brain_batch_update_before_the_lld_is_rejected() {
+        let (ctx, root) = ctx_for("batch-nold", Some(SessionMode::Brain));
+        let err = execute_updates(
+            vec![UpdateTaskArgs {
+                id: "t1".into(),
+                status: Some("done".into()),
+                journal: vec![],
+            }],
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("tasks_update rejected"), "{err}");
+        assert!(err.contains("Low-Level Design"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn builder_mode_not_gated() {
         let (ctx, root) = ctx_for("builder", Some(SessionMode::Builder));
@@ -969,6 +1076,199 @@ mod quality_gate_tests {
         let goal = saved.iter().find(|t| t.id == "golden-g-1").unwrap();
         assert_eq!(goal.status, "doing", "the rejected close must not stick");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── tasks_update, batched: several tasks, one write, all or nothing ──────
+
+    fn item(id: &str, status: Option<&str>, journal: &[&str]) -> UpdateTaskArgs {
+        UpdateTaskArgs {
+            id: id.into(),
+            status: status.map(str::to_string),
+            journal: journal.iter().map(|j| j.to_string()).collect(),
+        }
+    }
+
+    fn task_records(ctx: &crate::agent::tools::ToolContext) -> usize {
+        let store = ctx.session_store_path.clone().unwrap();
+        crate::agent::persist::load_records(std::path::Path::new(&store))
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r, crate::agent::persist::SessionRecord::Tasks { .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_batch_moves_several_tasks_in_one_write() {
+        let (ctx, root) = setup(
+            "batch",
+            "{}",
+            &[
+                task("task-1", "doing"),
+                task("task-2", "todo"),
+                task("task-3", "todo"),
+            ],
+        );
+        let before = task_records(&ctx);
+        let out = execute_updates(
+            vec![
+                item("task-1", Some("done"), &["it was the cache"]),
+                item("task-2", Some("doing"), &[]),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(task_records(&ctx), before + 1, "one list written, not two");
+        assert!(out.contains("'task-1': doing -> done"), "{out}");
+        assert!(out.contains("'task-2': todo -> doing"), "{out}");
+        assert!(out.contains("1 done, 1 doing, 1 todo"), "{out}");
+        let tasks = stored(&ctx);
+        assert_eq!(tasks[0].status, "done");
+        assert_eq!(tasks[0].journal, ["it was the cache"]);
+        assert_eq!(tasks[1].status, "doing");
+        assert_eq!(tasks[2].status, "todo");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_batch_with_an_unknown_id_applies_nothing_and_names_it() {
+        let (ctx, root) = setup(
+            "batch-unknown",
+            "{}",
+            &[task("task-1", "doing"), task("task-2", "todo")],
+        );
+        let before = task_records(&ctx);
+        let err = execute_updates(
+            vec![
+                item("task-1", Some("done"), &[]),
+                item("task-9", Some("doing"), &[]),
+            ],
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("'task-9'"), "{err}");
+        assert!(err.contains("task-1, task-2"), "the ids that exist: {err}");
+        assert!(err.contains("nothing was applied"), "{err}");
+        assert_eq!(task_records(&ctx), before);
+        assert_eq!(stored(&ctx)[0].status, "doing", "task-1 did not move");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_batch_with_a_status_that_does_not_exist_applies_nothing_and_names_the_task() {
+        let (ctx, root) = setup(
+            "batch-status",
+            "{}",
+            &[task("task-1", "doing"), task("task-2", "todo")],
+        );
+        let err = execute_updates(
+            vec![
+                item("task-1", Some("done"), &[]),
+                item("task-2", Some("finished"), &[]),
+            ],
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("'task-2'") && err.contains("'finished'"),
+            "{err}"
+        );
+        assert!(err.contains("nothing was applied"), "{err}");
+        assert_eq!(stored(&ctx)[0].status, "doing");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // The quality gate sees the list as the whole batch would leave it: a
+    // batch is not a way to close a goal on a claim, and the task beside the
+    // goal does not move either.
+    #[test]
+    fn a_batch_that_closes_a_goal_without_evidence_applies_nothing() {
+        let (ctx, root) = setup(
+            "batch-gate",
+            "{}",
+            &[
+                task("task-1", "doing"),
+                task("golden-g-0", "done"),
+                task("golden-g-1", "doing"),
+            ],
+        );
+        let err = execute_updates(
+            vec![
+                item("task-1", Some("done"), &[]),
+                item("golden-g-1", Some("done"), &[]),
+            ],
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("golden-g-1") && err.contains("run_quality"),
+            "{err}"
+        );
+        let tasks = stored(&ctx);
+        assert_eq!(tasks[0].status, "doing");
+        assert_eq!(tasks[2].status, "doing");
+
+        record_run(&ctx, &root, true);
+        let out = execute_updates(
+            vec![
+                item("task-1", Some("done"), &[]),
+                item("golden-g-1", Some("done"), &[]),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        assert!(out.contains("All 3 tasks are done."), "{out}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Updates apply in the order given, so one task can go todo -> doing ->
+    // done in one call, and a batch that changes nothing writes nothing.
+    #[test]
+    fn a_batch_applies_in_order_and_one_that_changes_nothing_writes_nothing() {
+        let (ctx, root) = setup("batch-order", "{}", &[task("task-1", "todo")]);
+        let out = execute_updates(
+            vec![
+                item("task-1", Some("doing"), &[]),
+                item("task-1", Some("done"), &["verified"]),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        assert!(out.contains("'task-1': todo -> done"), "{out}");
+        let before = task_records(&ctx);
+        let out = execute_updates(vec![item("task-1", Some("done"), &[])], &ctx).unwrap();
+        assert!(out.starts_with("No change"), "{out}");
+        assert_eq!(task_records(&ctx), before);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn both_forms_parse_and_a_call_in_neither_or_both_is_refused() {
+        use serde_json::json;
+        let one = parse_update_args(json!({"id": "t1", "status": "doing"})).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].id, "t1");
+        assert_eq!(one[0].status.as_deref(), Some("doing"));
+        let many = parse_update_args(json!({"updates": [
+            {"id": "t1", "status": "done", "journal": ["why"]},
+            {"id": "t2", "status": "doing"}
+        ]}))
+        .unwrap();
+        assert_eq!(many.len(), 2);
+        assert_eq!(many[0].journal, ["why"]);
+        assert_eq!(many[1].id, "t2");
+
+        for bad in [
+            json!({}),
+            json!({"updates": []}),
+            json!({"id": "t1", "updates": [{"id": "t2"}]}),
+            json!({"updates": [{"status": "done"}]}),
+        ] {
+            let err = parse_update_args(bad.clone()).unwrap_err();
+            assert!(
+                err.contains("updates") && err.contains("id"),
+                "{bad}: {err}"
+            );
+        }
     }
 }
 

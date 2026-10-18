@@ -592,15 +592,27 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_update".into(),
-            description: "Change ONE task without resending the list: its status (todo -> doing -> done) and/or journal entries to append. Returns where the whole list stands.".into(),
+            description: "Change tasks without resending the list: status (todo -> doing -> done) and/or journal entries to append. One task: id, status, journal. Several at once: updates: [{id, status?, journal?}]; all are checked first, and if one fails none is applied. Returns where the whole list stands.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
                     "status": { "type": "string", "enum": ["todo", "doing", "done"] },
-                    "journal": { "type": "array", "items": { "type": "string" }, "description": "Appended: findings, decisions, the 'why'" }
-                },
-                "required": ["id"]
+                    "journal": { "type": "array", "items": { "type": "string" }, "description": "Appended: findings, decisions, the 'why'" },
+                    "updates": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "status": { "type": "string", "enum": ["todo", "doing", "done"] },
+                                "journal": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["id"]
+                        }
+                    }
+                }
             }),
         },
         ToolDef {
@@ -950,9 +962,8 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::Text { content })
         }
         "tasks_update" => {
-            let a: tasks::UpdateTaskArgs =
-                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            let content = tasks::execute_update(a, ctx)?;
+            let items = tasks::parse_update_args(args)?;
+            let content = tasks::execute_updates(items, ctx)?;
             Ok(ToolOutput::Text { content })
         }
         "write_plan" => {
@@ -1343,6 +1354,79 @@ mod tests {
             .map(|t| (t.name.clone(), t.description.chars().count()))
             .collect();
         assert!(over.is_empty(), "over 400 characters: {over:?}");
+    }
+
+    /// `tasks_update` takes one task or a batch (lean-harness Phase 4): the
+    /// schema offers both, and a batch sent through the dispatcher moves
+    /// every task it names in one call.
+    #[tokio::test]
+    async fn tasks_update_takes_one_task_or_a_batch() {
+        let def = get_defs(4)
+            .into_iter()
+            .find(|t| t.name == "tasks_update")
+            .unwrap();
+        let props = &def.input_schema["properties"];
+        assert!(props["id"].is_object() && props["updates"].is_object());
+        assert_eq!(
+            props["updates"]["items"]["required"],
+            serde_json::json!(["id"])
+        );
+        let required = def.input_schema["required"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            required.is_empty(),
+            "neither form may be required: {required:?}"
+        );
+        assert!(def.description.contains("updates"), "{}", def.description);
+
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-tasks-batch-exec-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = root.join("session.jsonl");
+        std::fs::write(&store, "").unwrap();
+        let task = |id: &str| crate::agent::persist::TaskItem {
+            id: id.into(),
+            title: id.into(),
+            description: "d".into(),
+            journal: vec![],
+            status: "todo".into(),
+        };
+        crate::agent::persist::append_tasks(&store, &[task("a"), task("b")]).unwrap();
+        let ctx = ToolContext {
+            session_store_path: Some(store.to_string_lossy().to_string()),
+            ..tests_support::ctx()
+        };
+        let out = execute(
+            "tasks_update",
+            serde_json::json!({"updates": [
+                {"id": "a", "status": "done", "journal": ["why"]},
+                {"id": "b", "status": "doing"}
+            ]}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("text expected")
+        };
+        assert!(content.contains("'a': todo -> done") && content.contains("'b': todo -> doing"));
+        let out = execute(
+            "tasks_update",
+            serde_json::json!({"id": "b", "status": "done"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("text expected")
+        };
+        assert!(content.contains("All 2 tasks are done."), "{content}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A skill in the workspace is what `skills` answers with — the same scan
