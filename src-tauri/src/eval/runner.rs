@@ -413,8 +413,12 @@ async fn run_session(
             Ok(RunOutcome::Handoff(spec)) => {
                 handoffs += 1;
                 let mut spec = *spec;
-                spec.first_message =
-                    crate::agent::transition::resolve_first_message(&spec, Some(&workspace), None);
+                spec.first_message = crate::agent::transition::resolve_first_message(
+                    &spec,
+                    Some(&workspace),
+                    None,
+                    &crate::agent::task_recital::session_tasks(&ctx),
+                );
                 let next = link_session(&store, &workspace, &spec)?;
                 mode_ctl = Arc::new(ModeCtl::new(spec.next_mode, spec.next_origin));
                 ctx = crate::agent::transition::rebuild_tool_context(

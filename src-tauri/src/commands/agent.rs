@@ -484,6 +484,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
                         &spec,
                         ctx.workspace_root.as_deref(),
                         ctx.plan_save_path.as_deref(),
+                        &crate::agent::task_recital::session_tasks(&ctx),
                     );
                     match transition::link_session(&maps, &ws, &handle, &spec, &chan).await {
                         Ok(new_handle) => {
@@ -1272,6 +1273,7 @@ pub async fn continue_with_builder(
         &spec,
         workspace_root.as_deref(),
         config.plan_save_path.as_deref(),
+        &crate::agent::persist::load_last_tasks(&old_handle.store_path).unwrap_or_default(),
     );
 
     let maps = transition_maps(&state);

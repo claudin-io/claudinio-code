@@ -243,7 +243,10 @@ nothing if any check fails, naming the task and the reason. Because the block
 carries no descriptions or journals, a `tasks_set` that resends an existing task
 with an empty description or journal keeps the stored one
 (`tasks::keep_stored_details`): a list rewritten from the block alone does not
-erase what Brain wrote or the findings recorded since. A turn that ends
+erase what Brain wrote or the findings recorded since. A Builder kickoff with
+no plan file to inline carries each task's description and journal itself
+(`transition::compose_task_details`), since the block names the tasks and the
+plan is not there to describe them. A turn that ends
 with a task still `doing` that this run set `doing` or wrote to (the loop keeps
 the list it read at run start and compares) gets one `nudges::still_doing`
 reminder per run, then finishes; a task an earlier run left `doing` is not

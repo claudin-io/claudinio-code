@@ -164,6 +164,7 @@ pub fn resolve_first_message(
     spec: &HandoffSpec,
     workspace_root: Option<&str>,
     plan_save_path: Option<&str>,
+    tasks: &[persist::TaskItem],
 ) -> String {
     match spec.reason {
         HandoffReason::PlanExecution | HandoffReason::ManualBuilder => {
@@ -172,7 +173,11 @@ pub fn resolve_first_message(
             });
             let path = plan.as_ref().map(|p| p.to_string_lossy().to_string());
             let content = plan.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
-            compose_builder_kickoff(path.as_deref(), content.as_deref())
+            let mut msg = compose_builder_kickoff(path.as_deref(), content.as_deref());
+            if content.is_none() {
+                msg.push_str(&compose_task_details(tasks));
+            }
+            msg
         }
         HandoffReason::GoldenFlip | HandoffReason::ContextHandoff => spec.first_message.clone(),
     }
@@ -203,9 +208,46 @@ pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&st
             "\n--- PLAN START ---\n{content}\n--- PLAN END ---\n"
         ));
     } else if plan_file.is_none() {
-        msg.push_str("\nNo plan file was found on disk - continue from the task list alone.\n");
+        msg.push_str("\nNo plan file was found on disk - continue from the task list.\n");
     }
     msg
+}
+
+/// What Brain wrote for each task — its description and journal — for a
+/// Builder kickoff that has no plan to carry it. The run's `<tasks>` block
+/// names each task (`id · status · title`) and nothing more, and `tasks_get`
+/// is deferred, so without this a Builder started from the task list alone
+/// would work from titles (Phase 4 review). Empty when no task has anything
+/// to add. With a plan inline the plan is the detail, and this is not sent.
+fn compose_task_details(tasks: &[persist::TaskItem]) -> String {
+    let mut out = String::new();
+    for t in tasks {
+        let description = t.description.trim();
+        let journal: Vec<&str> = t
+            .journal
+            .iter()
+            .map(|j| j.trim())
+            .filter(|j| !j.is_empty())
+            .collect();
+        if description.is_empty() && journal.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n### {} \u{b7} {}\n", t.id, t.title.trim()));
+        if !description.is_empty() {
+            out.push_str(description);
+            out.push('\n');
+        }
+        for entry in journal {
+            out.push_str(&format!("- {entry}\n"));
+        }
+    }
+    if out.is_empty() {
+        return out;
+    }
+    format!(
+        "\nWhat was written for each task (descriptions, then journal entries):\n\
+         --- TASK DETAILS START ---{out}--- TASK DETAILS END ---\n"
+    )
 }
 
 /// Wraps the model-generated handoff document as the first user message of
@@ -309,6 +351,61 @@ mod tests {
     fn builder_kickoff_without_plan_falls_back_to_tasks() {
         let msg = compose_builder_kickoff(None, None);
         assert!(msg.contains("No plan file was found"));
+    }
+
+    fn manual_builder_spec() -> HandoffSpec {
+        HandoffSpec {
+            reason: HandoffReason::ManualBuilder,
+            next_mode: crate::agent::session::SessionMode::Builder,
+            next_origin: crate::agent::session::ModeOrigin::Human,
+            first_message: String::new(),
+            golden_cycle: 0,
+            golden_stalls: 0,
+            golden_last_pending: Vec::new(),
+        }
+    }
+
+    fn brain_task() -> persist::TaskItem {
+        persist::TaskItem {
+            id: "t1".into(),
+            title: "Parse the config".into(),
+            description: "Use the nom grammar from the spike".into(),
+            journal: vec!["the spike lives in spikes/nom.rs".into()],
+            status: "todo".into(),
+        }
+    }
+
+    // With no plan file the Builder works from the task list, and the run's
+    // `<tasks>` block carries only id, status and title. The descriptions and
+    // findings Brain wrote must reach it in the kickoff, or it starts from
+    // titles alone with `tasks_get` deferred (Phase 4 review).
+    #[test]
+    fn a_builder_kickoff_without_a_plan_carries_the_task_descriptions_and_journals() {
+        let msg = resolve_first_message(&manual_builder_spec(), None, None, &[brain_task()]);
+        assert!(msg.contains("No plan file was found"), "{msg}");
+        assert!(msg.contains("Use the nom grammar from the spike"), "{msg}");
+        assert!(msg.contains("the spike lives in spikes/nom.rs"), "{msg}");
+        assert!(!msg.contains("tasks_get"), "{msg}");
+    }
+
+    // With a plan inline the plan is the handoff document (its Low-Level
+    // Design is where the detail lives): the kickoff does not repeat the
+    // task descriptions beside it.
+    #[test]
+    fn a_builder_kickoff_with_a_plan_does_not_repeat_the_task_descriptions() {
+        let root = std::env::temp_dir().join(format!("kickoff-plan-{}", std::process::id()));
+        let plans = root.join(".claudinio/plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        std::fs::write(plans.join("p.md"), "# Plan\nDo X").unwrap();
+        let msg = resolve_first_message(
+            &manual_builder_spec(),
+            Some(root.to_str().unwrap()),
+            None,
+            &[brain_task()],
+        );
+        assert!(msg.contains("--- PLAN START ---"), "{msg}");
+        assert!(!msg.contains("Use the nom grammar from the spike"), "{msg}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
