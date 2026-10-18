@@ -106,9 +106,12 @@ fn state_path(store_path: &Path) -> PathBuf {
     store_path.with_extension("doc.json")
 }
 
-fn linked_at(workspace: &Path, store_path: &Path) -> Option<Linked> {
-    let records = crate::agent::persist::load_records(store_path).ok()?;
-    let rel = crate::agent::persist::linked_document(&records)?;
+fn linked_from(
+    workspace: &Path,
+    store_path: &Path,
+    records: &[crate::agent::persist::SessionRecord],
+) -> Option<Linked> {
+    let rel = crate::agent::persist::linked_document(records)?;
     Some(Linked {
         abs: workspace.join(&rel),
         rel,
@@ -116,10 +119,22 @@ fn linked_at(workspace: &Path, store_path: &Path) -> Option<Linked> {
     })
 }
 
+fn linked_at(workspace: &Path, store_path: &Path) -> Option<Linked> {
+    let records = crate::agent::persist::load_records(store_path).ok()?;
+    linked_from(workspace, store_path, &records)
+}
+
+/// Through the run's records cache: the loop asks after every round, and
+/// re-parsing the whole session file each time would be the cost of a
+/// feature most sessions do not use.
 fn linked(ctx: &crate::agent::tools::ToolContext) -> Option<Linked> {
-    linked_at(
+    let store_path = Path::new(ctx.session_store_path.as_deref()?);
+    let records =
+        crate::agent::persist::load_records_cached(store_path, &ctx.records_cache).ok()?;
+    linked_from(
         Path::new(ctx.workspace_root.as_deref()?),
-        Path::new(ctx.session_store_path.as_deref()?),
+        store_path,
+        &records,
     )
 }
 
