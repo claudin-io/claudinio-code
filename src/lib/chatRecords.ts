@@ -325,7 +325,7 @@ export function closingText(doneText: string, pending: string | null, committed:
 }
 
 // The question/answer pairs in an `ask_user` tool result. Mirrors the format
-// `await_user_answer` writes in session.rs ("Pergunta: …\nResposta: …", pairs
+// `await_user_answer` writes in agent/tool_exec.rs ("Pergunta: …\nResposta: …", pairs
 // separated by a blank line). Anything else — a cancelled prompt, an error —
 // yields no pairs, and the result simply stays a tool row.
 export function parseAskUserAnswers(output: string): { question: string; answer: string }[] {

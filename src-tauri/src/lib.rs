@@ -199,7 +199,7 @@ mod architecture_tests {
             "src/lsp",
             "src/quality",
         ] {
-            visit(Path::new(dir), &mut |path, body| {
+            visit_src(dir, &mut |path, body| {
                 if body.contains("crate::commands") {
                     offenders.push(path.display().to_string());
                 }
@@ -218,7 +218,7 @@ mod architecture_tests {
     #[test]
     fn code_intel_is_the_shared_crate_not_a_copy() {
         let mut copies = Vec::new();
-        visit(Path::new("src/code_intel"), &mut |path, _| {
+        visit_src("src/code_intel", &mut |path, _| {
             if path.file_name().is_none_or(|n| n != "mod.rs") {
                 copies.push(path.display().to_string());
             }
@@ -243,7 +243,7 @@ mod architecture_tests {
     #[test]
     fn no_agent_file_carries_more_than_two_thousand_production_lines() {
         let mut oversized = Vec::new();
-        visit(Path::new("src/agent"), &mut |path, body| {
+        visit_src("src/agent", &mut |path, body| {
             let lines = production_lines(body);
             if lines > MAX_AGENT_FILE_PRODUCTION_LINES {
                 oversized.push(format!("{} ({lines})", path.display()));
@@ -303,6 +303,26 @@ mod architecture_tests {
             i += 1;
         }
         count
+    }
+
+    /// Every `.rs` file under `rel` (a path from the crate root), however the
+    /// tests are started. A scan that finds nothing fails: a rule checked over
+    /// zero files passes no matter what the code does, which is what happened
+    /// whenever these tests ran from a directory other than `src-tauri/`.
+    fn visit_src(rel: &str, f: &mut impl FnMut(&Path, &str)) {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let mut files = 0;
+        visit(&dir, &mut |path, body| {
+            files += 1;
+            f(path, body);
+        });
+        assert!(files > 0, "no .rs file under {}", dir.display());
+    }
+
+    #[test]
+    fn a_scan_over_a_missing_directory_fails_instead_of_passing_vacuously() {
+        let scan = std::panic::catch_unwind(|| visit_src("src/no_such_module", &mut |_, _| {}));
+        assert!(scan.is_err());
     }
 
     fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {

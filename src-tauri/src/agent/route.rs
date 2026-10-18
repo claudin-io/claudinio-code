@@ -254,7 +254,6 @@ pub(super) async fn route_first_prompt(
     mode_ctl: &Arc<ModeCtl>,
     event_tx: &Channel<AgentEvent>,
 ) -> f64 {
-    use crate::agent::route::{self, RouteMode};
     // Read unconditionally: an Auto request is for this prompt and must not
     // survive to route a later one.
     let auto = mode_ctl.take_auto();
@@ -284,7 +283,7 @@ pub(super) async fn route_first_prompt(
     let chosen = mode_ctl.get();
     let (ran_as, _) = chosen;
     let backend = crate::agent::jev::backend(config);
-    let record = move |v: &route::Verdict, shadow: bool| SessionRecord::ModeRoute {
+    let record = move |v: &Verdict, shadow: bool| SessionRecord::ModeRoute {
         verdict: v.mode.as_str().into(),
         ran_as: ran_as.as_str().into(),
         source: v.source.into(),
@@ -296,7 +295,7 @@ pub(super) async fn route_first_prompt(
     };
 
     if route_mode == RouteMode::On && auto {
-        let verdict = route::route(prompt, backend.as_ref()).await;
+        let verdict = route(prompt, backend.as_ref()).await;
         // The verdict was awaited, and the mode toggle works meanwhile. A
         // choice the user made in that time is theirs: writing over it would
         // also hand the agent the right to leave a Brain the user turned on.
@@ -331,8 +330,8 @@ pub(super) async fn route_first_prompt(
     // having next to that choice, and must not cost the first request a wait.
     // What the rules decide costs none, so it is written here, in order with
     // everything else this run writes.
-    if route::rules(prompt).is_some() {
-        let verdict = route::route(prompt, None).await;
+    if rules(prompt).is_some() {
+        let verdict = route(prompt, None).await;
         store.try_append(&record(&verdict, true));
         crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
         return 0.0;
@@ -341,11 +340,11 @@ pub(super) async fn route_first_prompt(
     let path = store.path.clone();
     let cache = ctx.records_cache.clone();
     tokio::spawn(async move {
-        let verdict = route::route(&prompt, backend.as_ref()).await;
+        let verdict = route(&prompt, backend.as_ref()).await;
         // Nobody answered: there is nothing to compare with the user's choice.
         // And a session deleted while Jev was thinking is not brought back as
         // a file holding one verdict.
-        if verdict.source == route::SOURCE_UNAVAILABLE || !path.exists() {
+        if verdict.source == SOURCE_UNAVAILABLE || !path.exists() {
             return;
         }
         SessionStore { path: path.clone() }.try_append(&record(&verdict, true));
