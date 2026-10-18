@@ -10,7 +10,7 @@ use crate::agent::handoff::{
     maybe_context_handoff, try_verbatim_compaction,
 };
 use crate::agent::judge::{
-    TurnVerdict, judge_terminal_turn, judge_with_jev, loop_verdict, should_nudge_terminal,
+    TurnVerdict, judge_terminal_turn_metered, judge_with_jev, loop_verdict, should_nudge_terminal,
 };
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
@@ -958,10 +958,22 @@ pub async fn run_workflow_with_profile(
                 ledger.jev_cost += jev_cost;
                 let (verdict, judge) = match jev_verdict {
                     Some(v) => (v, "jev"),
-                    None => (
-                        judge_terminal_turn(config, judge_model, &last_text).await,
-                        "llm",
-                    ),
+                    None => {
+                        let (verdict, usage) =
+                            judge_terminal_turn_metered(config, judge_model, &last_text).await;
+                        // A judge request that reported usage was a billed
+                        // request of this run; one that failed is not counted.
+                        if usage.is_some() {
+                            requests += 1;
+                            store.try_append(&SessionRecord::usage(
+                                requests,
+                                judge_model,
+                                usage.as_ref(),
+                                None,
+                            ));
+                        }
+                        (verdict, "llm")
+                    }
                 };
                 // Structural backstop on top of the judge's verdict: a message
                 // ending in a question mark or a trailing colon ("the core
@@ -2790,8 +2802,11 @@ mod usage_record_tests {
         )
         .await;
         // A 32k window runs the Compact profile, which edits without a subagent,
-        // so every request in this run is the main session's own.
-        let config = config_for(&base, Some(32_768));
+        // so every request in this run is the main session's own. The judge
+        // (the Brain model, asked whether the final turn is finished) is
+        // pointed at the same stub, so its request is counted too.
+        let mut config = config_for(&base, Some(32_768));
+        config.brain_model = "stub/m".into();
         let ctx = ToolContext {
             workspace_root: Some(root.to_string_lossy().to_string()),
             session_store_path: Some(store.path.to_string_lossy().to_string()),
@@ -2841,17 +2856,21 @@ mod usage_record_tests {
             })
             .collect();
         let requests = bodies.lock().unwrap().len();
-        assert_eq!(requests, 3);
+        assert_eq!(requests, 4, "three rounds and the completion judge");
         assert_eq!(usage.len(), requests, "one record per provider request");
         let rounds: Vec<u32> = usage.iter().map(|u| u.0).collect();
-        assert_eq!(rounds, vec![1, 2, 3]);
+        assert_eq!(rounds, vec![1, 2, 3, 4]);
         for u in &usage {
             assert_eq!(u.1, "stub/m");
             assert_eq!((u.2, u.3, u.4), (100, 2_000, 300));
             assert_eq!(u.6, None, "the main session's requests carry no subagent");
         }
         let outputs: Vec<u32> = usage.iter().map(|u| u.5).collect();
-        assert_eq!(outputs, vec![20, 20, 5]);
+        assert_eq!(
+            outputs,
+            vec![20, 20, 5, 0],
+            "the judge's stub reply reports no output"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }

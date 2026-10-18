@@ -710,6 +710,19 @@ pub async fn complete(
     max_tokens: u32,
     net_source: crate::net_activity::NetSource,
 ) -> Result<String, String> {
+    complete_metered(rp, system, user, max_tokens, net_source)
+        .await
+        .map(|(reply, _)| reply)
+}
+
+/// `complete`, with the usage the response reported.
+pub async fn complete_metered(
+    rp: &ResolvedProvider,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    net_source: crate::net_activity::NetSource,
+) -> Result<(String, Option<Usage>), String> {
     let _net_guard = crate::net_activity::NetGuard::begin(net_source, rp.model.as_str());
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -753,7 +766,8 @@ pub async fn complete(
         .and_then(|c| c.as_str())
         .unwrap_or_default()
         .to_string();
-    Ok(reply)
+    let usage = json.get("usage").map(|u| parse_usage(u, rp.pricing));
+    Ok((reply, usage))
 }
 
 #[cfg(test)]

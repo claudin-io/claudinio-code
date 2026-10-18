@@ -1353,17 +1353,31 @@ pub(crate) mod scripted_model {
                 kept.lock()
                     .unwrap()
                     .push(String::from_utf8_lossy(&raw[body_start..]).into_owned());
-                let n = next.fetch_add(1, Ordering::SeqCst);
-                let reply = script.get(n).or(script.last()).expect("a script");
-                let mut body = render(reply, n);
-                if let Some(usage) = &usage {
-                    body = sse(
-                        "message_start",
-                        json!({"message": {"role": "assistant", "usage": usage}}),
-                    ) + &body;
-                }
+                let request = String::from_utf8_lossy(&raw[body_start..]);
+                // A non-streaming request is the completion judge asking
+                // whether a terminal turn is finished. It gets a plain JSON
+                // "DONE" and does not consume a scripted reply — the script is
+                // the conversation, and the judge is not part of it.
+                let (content_type, body) = if request.contains("\"stream\":false") {
+                    let mut message = json!({"content": [{"type": "text", "text": "DONE"}]});
+                    if let Some(usage) = &usage {
+                        message["usage"] = usage.clone();
+                    }
+                    ("application/json", message.to_string())
+                } else {
+                    let n = next.fetch_add(1, Ordering::SeqCst);
+                    let reply = script.get(n).or(script.last()).expect("a script");
+                    let mut body = render(reply, n);
+                    if let Some(usage) = &usage {
+                        body = sse(
+                            "message_start",
+                            json!({"message": {"role": "assistant", "usage": usage}}),
+                        ) + &body;
+                    }
+                    ("text/event-stream", body)
+                };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body

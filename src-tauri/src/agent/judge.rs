@@ -1,5 +1,5 @@
 //! The verdicts a run asks for about itself: is a terminal turn really finished
-//! (`judge_terminal_turn`, with Jev answering first when it can — `judge_with_jev`),
+//! (`judge_terminal_turn_metered`, with Jev answering first when it can — `judge_with_jev`),
 //! and is the tool loop stuck (`loop_verdict`). Every path fails safe: a judge
 //! outage ends the turn or leaves the loop alone, it never wedges the run.
 
@@ -47,14 +47,20 @@ fn parse_turn_verdict(reply: &str) -> TurnVerdict {
 /// Uses the LLM instead of hardcoded phrases so it works in any language the UI
 /// ever adds. Fails safe toward `Done` on any error — a judge outage must never
 /// wedge the loop or fabricate an infinite continuation.
-pub(super) async fn judge_terminal_turn(
+///
+/// Returns the verdict with the usage the judge's request reported (`None`
+/// when the request failed or the response carried none): the judge is a
+/// billed request of the run, and is recorded as one.
+pub(super) async fn judge_terminal_turn_metered(
     config: &AgentConfig,
     model: &str,
     assistant_text: &str,
-) -> TurnVerdict {
-    match crate::agent::provider::classify_turn_completion(config, model, assistant_text).await {
-        Ok(reply) => parse_turn_verdict(&reply),
-        Err(_) => TurnVerdict::Done,
+) -> (TurnVerdict, Option<crate::agent::provider::Usage>) {
+    match crate::agent::provider::classify_turn_completion_metered(config, model, assistant_text)
+        .await
+    {
+        Ok((reply, usage)) => (parse_turn_verdict(&reply), usage),
+        Err(_) => (TurnVerdict::Done, None),
     }
 }
 
@@ -241,7 +247,7 @@ mod tests {
 #[cfg(test)]
 mod judge_backend_tests {
     use super::*;
-    use crate::agent::provider::{AgentConfig, classify_turn_completion};
+    use crate::agent::provider::{AgentConfig, classify_turn_completion_metered};
     use crate::agent::session::SessionMode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -250,6 +256,14 @@ mod judge_backend_tests {
     /// given `content` text wrapped in an Anthropic messages response. Returns
     /// the base URL to point the client at.
     async fn spawn_stub(content: &'static str) -> String {
+        spawn_stub_with(serde_json::json!({
+            "content": [ { "type": "text", "text": content } ]
+        }))
+        .await
+    }
+
+    /// `spawn_stub`, answering with `body` verbatim.
+    async fn spawn_stub_with(body: serde_json::Value) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -263,10 +277,7 @@ mod judge_backend_tests {
                 // don't need the body for the stub.
                 let mut buf = [0u8; 4096];
                 let _ = socket.read(&mut buf).await;
-                let body = serde_json::json!({
-                    "content": [ { "type": "text", "text": content } ]
-                })
-                .to_string();
+                let body = body.to_string();
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -291,21 +302,50 @@ mod judge_backend_tests {
     async fn judge_backend_mock_continue() {
         let base = spawn_stub("CONTINUE").await;
         let cfg = cfg_for(base);
-        let reply = classify_turn_completion(&cfg, "claudinio", "Primeiro vou confirmar:")
-            .await
-            .unwrap();
+        let (reply, _) =
+            classify_turn_completion_metered(&cfg, "claudinio", "Primeiro vou confirmar:")
+                .await
+                .unwrap();
         assert_eq!(parse_turn_verdict(&reply), TurnVerdict::Continue);
         assert_eq!(
-            judge_terminal_turn(&cfg, "claudinio", "Primeiro vou confirmar:").await,
+            judge_terminal_turn_metered(&cfg, "claudinio", "Primeiro vou confirmar:")
+                .await
+                .0,
             TurnVerdict::Continue
         );
+    }
+
+    /// The judge is a billed request like any other: its usage comes back
+    /// with the verdict so the run can record it.
+    #[tokio::test]
+    async fn the_judge_reports_what_its_request_cost() {
+        let base = spawn_stub_with(serde_json::json!({
+            "content": [ { "type": "text", "text": "DONE" } ],
+            "usage": { "input_tokens": 310, "output_tokens": 2, "cache_read_input_tokens": 0 }
+        }))
+        .await;
+        let cfg = cfg_for(base);
+        let (verdict, usage) =
+            judge_terminal_turn_metered(&cfg, "claudinio", "All done, tests pass.").await;
+        assert_eq!(verdict, TurnVerdict::Done);
+        let usage = usage.expect("the response carried usage");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (310, 2));
+
+        // An unreachable judge still fails safe, and reports no usage.
+        let (verdict, usage) =
+            judge_terminal_turn_metered(&cfg_for("http://127.0.0.1:1".into()), "claudinio", "x")
+                .await;
+        assert_eq!((verdict, usage.is_none()), (TurnVerdict::Done, true));
     }
 
     #[tokio::test]
     async fn judge_backend_mock_done() {
         let base = spawn_stub("DONE").await;
         let cfg = cfg_for(base);
-        let verdict = judge_terminal_turn(&cfg, "claudinio", "Tudo pronto, testes passaram.").await;
+        let verdict =
+            judge_terminal_turn_metered(&cfg, "claudinio", "Tudo pronto, testes passaram.")
+                .await
+                .0;
         assert_eq!(verdict, TurnVerdict::Done);
     }
 
@@ -314,7 +354,10 @@ mod judge_backend_tests {
         // Nothing listening here — the request errors and the judge must NOT
         // wedge the loop: it falls back to Done.
         let cfg = cfg_for("http://127.0.0.1:1".into());
-        let verdict = judge_terminal_turn(&cfg, "claudinio", "Vou explorar com subagentes:").await;
+        let verdict =
+            judge_terminal_turn_metered(&cfg, "claudinio", "Vou explorar com subagentes:")
+                .await
+                .0;
         assert_eq!(verdict, TurnVerdict::Done);
     }
 
@@ -373,7 +416,7 @@ mod judge_backend_tests {
         };
         // Judge with the Brain model, exactly as the harness does.
         let brain = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
-        let reply = classify_turn_completion(&cfg, &brain, &dangling)
+        let (reply, _) = classify_turn_completion_metered(&cfg, &brain, &dangling)
             .await
             .expect("live judge call");
         eprintln!("--- live judge reply: {reply:?} ---");

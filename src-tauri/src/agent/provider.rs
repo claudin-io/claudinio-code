@@ -180,7 +180,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub max_parallel_agents: Option<usize>,
     /// Override base URL for LLM inference calls only (stream_message,
-    /// classify_turn_completion, one_shot). When set, `/v1/messages` is sent
+    /// classify_turn_completion_metered, one_shot). When set, `/v1/messages` is sent
     /// here instead of `base_url`. Does NOT affect login, websearch, or
     /// list_models.
     #[serde(default)]
@@ -1145,14 +1145,18 @@ The message may be in any language; your one-word answer must still be CONTINUE 
 /// Returns the model's raw reply (expected to contain CONTINUE or DONE); the
 /// caller maps it to a verdict. Kept small (tiny max_tokens, no tools) so it is
 /// cheap enough to run on every terminal turn.
-pub async fn classify_turn_completion(
+///
+/// The usage the response reported comes back with the reply: the judge is a
+/// billed request, and a cost-per-task number that leaves it out undercounts
+/// every run whose turns end without Jev.
+pub async fn classify_turn_completion_metered(
     config: &AgentConfig,
     model: &str,
     assistant_text: &str,
-) -> Result<String, String> {
+) -> Result<(String, Option<Usage>), String> {
     let rp = resolve_provider_live(config, model).await?;
     if rp.protocol == Protocol::OpenAiChat {
-        return openai::complete(
+        return openai::complete_metered(
             &rp,
             COMPLETION_JUDGE_SYSTEM,
             &format!("Assistant's final message of the turn:\n\n{assistant_text}"),
@@ -1211,6 +1215,10 @@ pub async fn classify_turn_completion(
         .json()
         .await
         .map_err(|e| format!("failed to parse judge response: {e}"))?;
+    let mut usage = None;
+    if let Some(u) = json.get("usage") {
+        merge_usage(&mut usage, u);
+    }
     // Anthropic-shaped response: { "content": [ { "type": "text", "text": "..." } ] }
     let reply = json
         .get("content")
@@ -1223,7 +1231,7 @@ pub async fn classify_turn_completion(
                 .join("")
         })
         .unwrap_or_default();
-    Ok(reply)
+    Ok((reply, usage))
 }
 
 /// Single-shot, non-streaming completion: send one `system` + one `user`
