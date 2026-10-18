@@ -525,9 +525,14 @@ pub fn fit_state(history: &[Message], calls: &[ToolCall]) -> Option<(String, &'s
 /// does not read it as a failure and run the call again.
 pub const DROPPED_RESULT_NOTE: &str = "[dropped to save context: no longer needed]";
 
-/// Stub dropped calls, cut truncated results to a head and a note, drop
-/// messages left empty, and merge neighbours left with the same role so the
-/// roles still alternate.
+/// Stub dropped calls and cut truncated results to a head and a note.
+/// Neither removes a block, so no decision empties a message or breaks the
+/// role alternation; the pass that skips empty messages and merges
+/// same-role neighbours is a safeguard for a history that came in malformed,
+/// not a consequence of a drop.
+///
+/// The price of the stub is also a size floor: a call no larger than `{}`
+/// plus the note is never chosen for a drop (`plan_by_age`).
 ///
 /// **A dropped call is stubbed, never removed.** Its `tool_use` block stays in
 /// the assistant message with the same id and name and its input replaced by
