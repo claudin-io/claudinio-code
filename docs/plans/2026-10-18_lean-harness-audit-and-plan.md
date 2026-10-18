@@ -369,3 +369,38 @@ Primary texts, in the order they appear above. Figures marked *(secondary)* in t
 - Adopt an agent framework or a vector store for retrieval (0 of 11 production harnesses do; our FTS5 + ONNX index is already the better version of that idea).
 - Rewrite history early on a cached provider (unchanged from the 2026-10-05/06 plans).
 - Trust any estimate in §6 over a Phase 0 measurement.
+
+---
+
+## Implementation Log (lean harness, 2026-10-18)
+
+### Phase 8 — `session.rs` split by responsibility (no behaviour change)
+
+**Commits.** `7436fb2` prompt + events · `c181ade` judge + retry + handoff · `7dba5d8` tool_exec · `15e300e` run_loop + first-prompt routing into `route.rs` · `9d646fa` the 2,000-line architecture test · and the docs commit that adds this entry. Each commit compiles, is clippy/fmt clean and passes `cargo test --lib` on its own (1022 passed / 8 ignored until the last code commit, 1024 / 8 after it — the two new architecture tests).
+
+**What was built.** `agent/session.rs` went from 8,446 lines (5,326 production) to 746 (464 production in the old counting; 498 by the test's rule, which also counts module docs and imports). The code moved verbatim; `git diff` is moves plus imports, module docs, and `pub(super)` on items another file now needs (visible inside `agent/` only). A line-multiset comparison against the original file shows nothing else changed except the items listed under deviations.
+
+| File | Production lines | Holds |
+|---|---|---|
+| `run_loop.rs` | 1,855 | `run_workflow`, `run_workflow_with_profile`, golden/quality caps, `run_finish_line_checks`; `finish_line_tests`, `surface_tests`, `context_line_tests` |
+| `tool_exec.rs` | 1,417 | `effective_permission`, `run_tool`, `execute_and_report`, approval gate, `deny_tool`, `ask_user`, mode switches, `fit_round`/`tool_result_block`/`rich_result_block`, `truncate` |
+| `handoff.rs` | 557 | `HandoffReason`/`HandoffSpec`/`RunOutcome`, `compact_history`, `compute_tail_turns`, `shed_line`, `accept_prune`, `shed_options`, `try_verbatim_compaction`, `maybe_context_handoff` |
+| `prompt.rs` | ~460 | `SYSTEM_PROMPT`, `GOLDEN_PROMPT`, `GIT_SYNC_PROMPT`, mode blocks, `system_prompt`, `build_spec_prompt_section`, `run_prefix`, `api_tools` |
+| `events.rs` | ~280 | `AgentEvent`, `QualityLayerView`, `EditProposalData` |
+| `judge.rs` | ~165 | `TurnVerdict`, `parse_turn_verdict`, `judge_terminal_turn`, Jev completion questions/thresholds, `judge_with_jev`, `loop_verdict`, `should_nudge_terminal` |
+| `retry.rs` | ~110 | `is_retryable_error`, `stream_message_with_retry` |
+| `session.rs` | 498 | `SessionMode`, `PromptProfile`, `ModeOrigin`, `ModeCtl`, `SteeringCtl`, approval/answer maps, token estimation, `push_turn`/`push_user_blocks`/`inject_steering`, `write_status`, pricing; re-exports the names other modules reach through `agent::session` |
+
+`architecture_tests::no_agent_file_carries_more_than_two_thousand_production_lines` fails the build when any `.rs` under `src/agent/` (recursive) passes 2,000 lines outside its `#[cfg(test)]` modules. It was written first and seen red ("src/agent/session.rs (5350)"). "From the first `#[cfg(test)]` to end of file" does not hold — `tools/mod.rs` opens `tests_support` at line 90 — so each gated `mod … {` is skipped up to its column-0 `}` (rustfmt's shape); `production_lines_leave_out_only_the_test_modules` pins that rule.
+
+**Deviations from the plan and the brief, and why.**
+
+- **Two more files than suggested: `tool_exec.rs` and `retry.rs`.** The brief put tool execution in `run_loop.rs`, but the loop alone is ~1,770 lines and tool dispatch ~1,400: together they would be ~3,200, over the 2,000-line rule this phase adds. Retries (`stream_message_with_retry`) are used by both the loop and the handoff, so they got their own small file instead of making `handoff.rs` depend on `run_loop.rs`.
+- **`route_first_prompt` moved to `route.rs`, not `run_loop.rs`.** It is the session side of the router `route.rs` already holds ("this one judgement, once, on the first prompt of a fresh session"), and in `run_loop.rs` it would push that file to ~1,970 lines, leaving no room for the next phase's changes. Its `route_tests` moved with it. The plan named the file `loop.rs`; it is `run_loop.rs` as the brief suggested.
+- **Facade, not call-site updates.** `session.rs` re-exports `AgentEvent`, `HandoffReason`, `HandoffSpec`, `RunOutcome`, `compact_history`, `run_workflow(_with_profile)` (pub) and `accept_prune`, `shed_options`, `loop_verdict`, `run_tool`, `deny_tool`, `fit_round`, `MAX_STOP_HOOK_BLOCKS`, `tool_response_for_hook` (pub(crate)), so `commands/`, `subagent.rs`, `transition.rs`, `state.rs` and the tests compile unchanged.
+- **The source-scanning test** (`a_message_in_any_language_is_never_refused`, which read `include_str!("session.rs")`) now scans every file holding a piece of the old `session.rs` (session, run_loop, tool_exec, handoff, judge, prompt, events, retry, route). Checked that it still bites: planting the refusal string in `run_loop.rs` makes it fail naming that file.
+- **`dummy_ctx` is copied, not shared.** The permission tests (now in `tool_exec.rs`) and the `push_user_blocks` tests (still in `session.rs`) both use it. Copying the 25-line helper verbatim kept the tests a pure move, and `tools/mod.rs` already has the same shape (`tests_support::ctx` and its own `test_ctx`).
+- **Test imports.** A moved test module that reached a name through `use super::*` from the old file now imports it explicitly (e.g. `surface_tests` imports `tools`, `api_tools`, `system_prompt`, `shed_line`). The redundant `use crate::agent::route::RouteMode;` in `route_tests` was dropped, since that module now lives in `route.rs`. No assertion changed.
+- **Not done, by decision: the Jev `Judge` trait.** Every call site is already a fail-open `Option<&JevBackend>` (`judge_with_jev`, `loop_verdict`, `prune::shed`, `route::route`); a trait would add a concept without removing one.
+- **Not done, by decision: GitSync as a skill.** GitSync's tool restriction (`bash` + `ask_user` only, `api_tools`) is a policy enforced in code. Turning it into a skill would move that policy into prose, against design rule 4 ("policy lives in code; the prompt explains, it does not enforce"). `PromptProfile` keeps its three variants.
+- **Flake seen once, unrelated:** `hooks::runner::tests::hooks_run_in_parallel_and_keep_their_order` (wall-clock) failed once on this host, which also serves production traffic; it passed on three isolated reruns and on the next full run.

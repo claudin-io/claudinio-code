@@ -48,17 +48,28 @@ the shapes that tempt you back:
 
 ```
 send_message (commands/agent.rs)
-   └─ agent/session.rs :: run_workflow
-        ├─ route_first_prompt          (Auto: Brain or Builder, fresh sessions only)
-        ├─ run_prefix                  (profile for the model's window → prompt + tools)
+   └─ agent/run_loop.rs :: run_workflow
+        ├─ route::route_first_prompt   (Auto: Brain or Builder, fresh sessions only)
+        ├─ prompt::run_prefix          (profile for the model's window → prompt + tools)
         ├─ ContextBudget::for_model    (the lines this run is held to)
-        ├─ shed / handoff / compaction if the context is over a line
+        ├─ handoff::*                  shed / handoff / compaction if the context is over a line
         └─ loop, per round:
-             ├─ provider::stream_message   (SSE → AgentEvent over a Channel)
-             ├─ no tool calls? → judge_terminal_turn, then done
-             └─ tool calls  → permissions → [approval gate] → tools::execute
-                                └─ results appended, next round
+             ├─ retry::stream_message_with_retry → provider::stream_message
+             │                              (SSE → AgentEvent over a Channel)
+             ├─ no tool calls? → judge::judge_terminal_turn, then done
+             └─ tool calls  → tool_exec::run_tool: permissions → [approval gate]
+                                → tools::execute → results appended, next round
 ```
+
+The loop is split by responsibility, one file each under `agent/`: `prompt.rs`
+(the prompt text and the tool list beside it), `run_loop.rs` (the loop above),
+`tool_exec.rs` (one tool call, from permission to `tool_result`), `judge.rs`
+(is a terminal turn finished, is the loop stuck), `handoff.rs` (what happens at
+a context line), `retry.rs`, and `events.rs` (`AgentEvent`). `session.rs` keeps
+the controls a session shares with the UI — mode, steering, approvals, answers —
+and re-exports the loop's public names, so `agent::session::run_workflow` still
+resolves. `architecture_tests` fails the build when any file under `agent/`
+passes 2,000 production lines: `session.rs` was 8,446 before the split.
 
 Every step is persisted as a line of JSONL under `.claudinio/sessions/`. That
 file is the source of truth, not memory: it is re-read on each message, so a
@@ -154,7 +165,7 @@ a config file, and a config file can arrive in a `git clone`. Two rules bound
 them. Nothing spawns until the user has approved that exact set of resolved
 commands, hashed in `~/.claudinio/hook-trust.json` — never in the repository,
 where an approval could arrive pre-approved in a pull request. And a hook's
-`PreToolUse` verdict feeds `session.rs::effective_permission`, which treats an
+`PreToolUse` verdict feeds `tool_exec.rs::effective_permission`, which treats an
 `allow` exactly as it treats YOLO mode: it skips the approval prompt and still
 runs the bash denylist and the browser scheme check. A hook may relax a prompt;
 it may never relax a policy.
@@ -298,7 +309,8 @@ in Rust, which is why the CSP can keep `connect-src` closed.
   in that directory.
 - **`src-tauri` is the Cargo workspace root.** There is no manifest at the
   repository root.
-- **Portuguese test fixtures** in `agent/session.rs` are verbatim captures of
+- **Portuguese test fixtures** in `agent/prompt.rs`, `agent/judge.rs` and the
+  other modules split out of `session.rs` are verbatim captures of
   sessions that broke something. Translating them would destroy the regression.
 - **`ContentBlock` is `#[serde(untagged)]` and its variant order matters.**
   Deserialization takes the first structural match, and the same enum is both
