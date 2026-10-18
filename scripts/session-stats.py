@@ -27,7 +27,10 @@ to it, and the share of all tokens spent by subagents. A run is the requests
 between a `user` record and the `done` (or `error`) that ends it; a subagent's
 requests count toward the run whose `spawn_agents` call started it. Costs are
 what the provider reported — a request that reported none is counted as
-unpriced, never estimated.
+unpriced, never estimated. It also counts `cache_break` records per session
+(written since the lean-harness Phase 1, one each time the harness rewrites a
+history the provider had cached: an accepted prune, a compaction, a context
+handoff); sessions from earlier builds count zero.
 
 Limits worth knowing before quoting a number:
 - Thinking is not persisted, and before `subagent_run` records existed nothing
@@ -455,7 +458,8 @@ COMPACTION = "compact"
 
 def cost_stats(sessions_dir, since_ms=0):
     """Per-run and per-session cost, rounds and cache split from `usage` records."""
-    runs, session_costs = [], []
+    runs, session_costs, cache_breaks = [], [], []
+    break_reasons = Counter()
     totals = Counter()
     sessions = without_usage = 0
     for path in sorted(glob.glob(os.path.join(sessions_dir, "*.jsonl"))):
@@ -467,6 +471,9 @@ def cost_stats(sessions_dir, since_ms=0):
             without_usage += 1
             continue
         sessions += 1
+        breaks = [r.get("reason") or "unknown" for r in records if r.get("kind") == "cache_break"]
+        cache_breaks.append(len(breaks))
+        break_reasons.update(breaks)
         session_runs = []
         current = None
         run_of_spawn = {}   # spawn_agents tool_use id -> run
@@ -551,6 +558,8 @@ def cost_stats(sessions_dir, since_ms=0):
         "cache_read_share": totals["cache_read"] / processed if processed else None,
         "cache_creation_share": totals["cache_creation"] / processed if processed else None,
         "subagent_share": totals["subagent"] / everything if everything else None,
+        "cache_breaks": cache_breaks,
+        "cache_break_reasons": dict(break_reasons),
     }
 
 
@@ -583,6 +592,10 @@ def cost_report(s):
     lines.append(f"  cache-read share {share(s['cache_read_share'])} | cache-creation share "
                  f"{share(s['cache_creation_share'])} (of input processed)")
     lines.append(f"  subagent share {share(s['subagent_share'])} (of all tokens)")
+    breaks = s["cache_breaks"]
+    reasons = ", ".join(f"{k} {v}" for k, v in sorted(s["cache_break_reasons"].items())) or "none"
+    lines.append(f"  cache breaks per session median {quantile(breaks, .5)} max {max(breaks)} "
+                 f"| by reason: {reasons}")
     return "\n".join(lines) + "\n"
 
 

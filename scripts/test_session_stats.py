@@ -107,6 +107,52 @@ class CostReport(unittest.TestCase):
         self.assertEqual(s["runs"], [])
 
 
+class CacheBreaks(unittest.TestCase):
+    """`cache_break` records — one per history rewrite — are counted per session."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        write(os.path.join(d, "a.jsonl"), [
+            {"kind": "meta", "session_id": "a", "created_at": 1, "workspace": None},
+            {"kind": "user", "text": "go", "ts": 1},
+            usage(1, 10, 0, 0, 1, cost=0.01),
+            {"kind": "pruned", "drop_calls": [], "truncate_results": [], "ts": 2},
+            {"kind": "cache_break", "reason": "prune", "ts": 2},
+            usage(2, 10, 0, 0, 1, cost=0.01),
+            {"kind": "compacted", "summary": "...", "tail_turns": 2, "ts": 3},
+            {"kind": "cache_break", "reason": "compaction", "ts": 3},
+            usage(3, 10, 0, 0, 1, cost=0.01),
+            {"kind": "cache_break", "reason": "handoff", "ts": 4},
+            {"kind": "done", "input_tokens": 30, "output_tokens": 3, "ts": 5},
+        ])
+        write(os.path.join(d, "b.jsonl"), [
+            {"kind": "meta", "session_id": "b", "created_at": 1, "workspace": None},
+            {"kind": "user", "text": "go", "ts": 1},
+            usage(1, 10, 0, 0, 1, cost=0.01),
+            {"kind": "done", "input_tokens": 10, "output_tokens": 1, "ts": 2},
+        ])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_cache_breaks_are_counted_per_session_and_by_reason(self):
+        s = session_stats.cost_stats(self.tmp.name)
+        self.assertEqual(sorted(s["cache_breaks"]), [0, 3], "one count per session, zero included")
+        self.assertEqual(s["cache_break_reasons"], {"prune": 1, "compaction": 1, "handoff": 1})
+
+    def test_the_report_names_the_cache_breaks(self):
+        text = session_stats.cost_report(session_stats.cost_stats(self.tmp.name))
+        self.assertIn("cache breaks per session median", text)
+        self.assertIn("compaction 1", text)
+        self.assertIn("handoff 1", text)
+        self.assertIn("prune 1", text)
+
+    def test_a_session_from_before_cache_breaks_were_recorded_counts_zero(self):
+        s = session_stats.cost_stats(self.tmp.name)
+        self.assertIn(0, s["cache_breaks"])
+
+
 class SubagentTranscriptsFindTheirRun(unittest.TestCase):
     """Each transcript in `<id>.sub/` is booked to the run that caused it."""
 

@@ -6,7 +6,7 @@
 
 use crate::agent::budget::ContextBudget;
 use crate::agent::events::AgentEvent;
-use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
+use crate::agent::persist::{CacheBreakReason, SessionRecord, SessionStore, now_ms};
 use crate::agent::provider::{AgentConfig, ContentBlock, Message, ToolDescription};
 use crate::agent::retry::stream_message_with_retry;
 use crate::agent::session::{
@@ -115,6 +115,7 @@ pub async fn compact_history(
         tail_turns,
         ts: now_ms(),
     })?;
+    store.try_append(&SessionRecord::cache_break(CacheBreakReason::Compaction));
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
 
     // Record the post-compaction context size so the UI meter drops even for
@@ -309,6 +310,7 @@ pub(super) async fn try_verbatim_compaction(
             ts: now_ms(),
         })
         .ok()?;
+    store.try_append(&SessionRecord::cache_break(CacheBreakReason::Prune));
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
     // The decision applied to the history in memory, not a rebuild from the
     // file: `push_user_blocks` merges into the last user turn without writing
@@ -504,6 +506,7 @@ pub(super) async fn maybe_context_handoff(
         text: handoff_text.clone(),
         ts: now_ms(),
     });
+    store.try_append(&SessionRecord::cache_break(CacheBreakReason::Handoff));
     store.try_append(&SessionRecord::Done {
         input_tokens: run_in + gen_in,
         output_tokens: run_out + gen_out,
@@ -924,5 +927,190 @@ mod compaction_usage_tests {
         assert_eq!(m.subagents, 0, "a summarizer is not a spawned subagent");
         assert_eq!(m.compactions, 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Every time the harness rewrites the history a provider has cached, the
+/// next request pays for the whole context again. The session file says so,
+/// one `cache_break` per rewrite, so a phase that adds a rewrite (a deferred
+/// tool load, say) can be held to a budget.
+#[cfg(test)]
+mod cache_break_tests {
+    use super::*;
+    use crate::agent::persist::load_records;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+
+    fn breaks(path: &std::path::Path) -> Vec<String> {
+        load_records(path)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| match r {
+                SessionRecord::CacheBreak { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn temp_store(tag: &str) -> SessionStore {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio_cache_break_{tag}_{}_{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, "").unwrap();
+        SessionStore { path }
+    }
+
+    fn turn(role: &str, content: ContentBlock) -> Message {
+        Message {
+            role: role.into(),
+            content: vec![content],
+        }
+    }
+
+    #[tokio::test]
+    async fn an_accepted_prune_records_a_cache_break() {
+        let config = AgentConfig::default();
+        let store = temp_store("prune");
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let mut history = vec![turn("user", ContentBlock::text("Refactor the parser."))];
+        for i in 0..30 {
+            let id = format!("r{i}");
+            history.push(turn(
+                "assistant",
+                ContentBlock::tool_use(
+                    &id,
+                    "read_file",
+                    serde_json::json!({ "path": format!("/ws/f{i}.rs") }),
+                ),
+            ));
+            history.push(turn(
+                "user",
+                ContentBlock::tool_result(&id, format!("// {i}\n").repeat(3_000)),
+            ));
+        }
+        let estimated = estimate_tokens(&history, "s", &[]);
+        try_verbatim_compaction(
+            &config,
+            &budget,
+            PromptProfile::Standard,
+            estimated,
+            &mut history,
+            "s",
+            &[],
+            &store,
+            &ctx,
+            &events,
+        )
+        .await
+        .expect("thirty old reads are worth cutting");
+        assert_eq!(breaks(&store.path), ["prune"]);
+        std::fs::remove_dir_all(store.path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_prune_that_is_not_taken_records_nothing() {
+        let config = AgentConfig::default();
+        let store = temp_store("no-prune");
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let mut history = vec![turn("user", ContentBlock::text("hi"))];
+        let taken = try_verbatim_compaction(
+            &config,
+            &budget,
+            PromptProfile::Standard,
+            10,
+            &mut history,
+            "s",
+            &[],
+            &store,
+            &ctx,
+            &events,
+        )
+        .await;
+        assert!(taken.is_none());
+        assert!(breaks(&store.path).is_empty());
+        std::fs::remove_dir_all(store.path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_compaction_records_a_cache_break() {
+        let store = temp_store("compact");
+        store
+            .append(&SessionRecord::User {
+                text: "Refactor the parser.".into(),
+                ts: now_ms(),
+            })
+            .unwrap();
+        let (base, _, _) =
+            spawn_recording(vec![Reply::Text("## Task & intent\nRefactor the parser.")]).await;
+        let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let ctx = ToolContext {
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        compact_history(
+            &config,
+            &store,
+            &ctx,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "cache-break-compact",
+            &Arc::new(SteeringCtl::new()),
+            crate::agent::hooks::CompactTrigger::Manual,
+            10_000,
+        )
+        .await
+        .expect("the compaction");
+        assert_eq!(breaks(&store.path), ["compaction"]);
+        std::fs::remove_dir_all(store.path.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_context_handoff_records_a_cache_break() {
+        let (base, _, _) = spawn_recording(vec![Reply::Text(
+            "## Purpose of next session\nFinish the parser refactor.\n\
+             ## Current state\nThe lexer is split; tests green.\n## Key decisions\nKeep the API.\n\
+             ## Pointers\nsrc/parser.rs\n## In-flight work\nThe expression module.\n\
+             ## Next actions\nMove the expression parser, run the tests.",
+        )])
+        .await;
+        let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let store = temp_store("handoff");
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let mut history = vec![
+            turn("user", ContentBlock::text("Refactor the parser.")),
+            turn("assistant", ContentBlock::text("Working on it.")),
+        ];
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let outcome = maybe_context_handoff(
+            &config,
+            &budget,
+            PromptProfile::Standard,
+            budget.soft,
+            &mut history,
+            "s",
+            &store,
+            &ctx,
+            &events,
+            "cache-break-handoff",
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+            0,
+            0,
+            0,
+        )
+        .await;
+        assert!(matches!(outcome, Some(RunOutcome::Handoff(_))));
+        assert_eq!(breaks(&store.path), ["handoff"]);
+        std::fs::remove_dir_all(store.path.parent().unwrap()).ok();
     }
 }

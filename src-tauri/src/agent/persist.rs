@@ -386,9 +386,47 @@ pub enum SessionRecord {
         subagent: Option<String>,
         ts: u64,
     },
+    /// The harness rewrote the history a provider had cached, so the next
+    /// request re-reads the context from the first changed byte on, at the
+    /// full input price (lean-harness Phase 1). `reason` is a
+    /// `CacheBreakReason`, written as text so a reader never needs this
+    /// build's enum. Bookkeeping only; never part of the conversation.
+    CacheBreak { reason: String, ts: u64 },
+}
+
+/// Why the history a provider had cached was rewritten. Counted per session by
+/// `scripts/session-stats.py --cost`, so a change that adds a rewrite — a
+/// deferred tool load growing the tool list, say — can be held to a budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheBreakReason {
+    /// A verbatim prune was accepted (`handoff::try_verbatim_compaction`).
+    Prune,
+    /// Earlier turns were replaced by a summary (`handoff::compact_history`).
+    Compaction,
+    /// The context crossed the soft line and the session hands off to a
+    /// successor that starts from a document (`handoff::maybe_context_handoff`).
+    Handoff,
+}
+
+impl CacheBreakReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheBreakReason::Prune => "prune",
+            CacheBreakReason::Compaction => "compaction",
+            CacheBreakReason::Handoff => "handoff",
+        }
+    }
 }
 
 impl SessionRecord {
+    /// The `CacheBreak` record for a rewrite made now.
+    pub fn cache_break(reason: CacheBreakReason) -> Self {
+        SessionRecord::CacheBreak {
+            reason: reason.as_str().to_string(),
+            ts: now_ms(),
+        }
+    }
+
     /// The `Usage` record for one provider request.
     pub fn usage(
         round: u32,
@@ -1223,6 +1261,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::ModeRoute { ts, .. }
                 | SessionRecord::SubagentRun { ts, .. }
                 | SessionRecord::Usage { ts, .. }
+                | SessionRecord::CacheBreak { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
@@ -2973,6 +3012,35 @@ mod usage_tests {
         assert_eq!(value["subagent"], "tu_1-0");
         // Usage is bookkeeping, never conversation.
         assert_eq!(history_from_records(&records).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// A cache break (the harness rewrote the history the provider had cached)
+    /// is bookkeeping: it loads, it is never part of the conversation, and a
+    /// file written before the record existed loads as it always did (that is
+    /// `a_session_written_before_usage_records_still_loads`, above).
+    #[test]
+    fn a_cache_break_line_loads_and_stays_out_of_the_history() {
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"cache_break","reason":"prune","ts":6}"#);
+        let path = tmp_file("cache_break", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 5, "the cache_break line must not be skipped");
+        let value = serde_json::to_value(&records[4]).unwrap();
+        assert_eq!(value["kind"], "cache_break");
+        assert_eq!(value["reason"], "prune");
+        assert_eq!(history_from_records(&records).len(), 1);
+        for (reason, text) in [
+            (CacheBreakReason::Prune, "prune"),
+            (CacheBreakReason::Compaction, "compaction"),
+            (CacheBreakReason::Handoff, "handoff"),
+        ] {
+            let v = serde_json::to_value(SessionRecord::cache_break(reason)).unwrap();
+            assert_eq!(
+                (v["kind"].as_str(), v["reason"].as_str()),
+                (Some("cache_break"), Some(text))
+            );
+        }
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
