@@ -223,16 +223,14 @@ pub async fn run_workflow_with_profile(
     // fetching it (`agent::task_recital`). Not for the git operator. The
     // snapshot is kept: the finish line nudges only for what this run moved.
     let tasks_at_start = crate::agent::task_recital::session_tasks(ctx);
-    if profile == PromptProfile::Standard
-        && let Some(block) = crate::agent::task_recital::tasks_block(&tasks_at_start)
-    {
-        crate::agent::task_recital::take_trailing_recital(history, &block);
-        blocks.push(ContentBlock::text(block));
-    }
-    // The living document's outline rides the same way (`agent::doc_session`).
     if profile == PromptProfile::Standard {
-        let doc_blocks = crate::agent::doc_session::run_start_blocks(ctx);
-        blocks.extend(doc_blocks.into_iter().map(ContentBlock::text));
+        let mut recital: Vec<String> = crate::agent::task_recital::tasks_block(&tasks_at_start)
+            .into_iter()
+            .collect();
+        // The living document's outline rides the same way (`agent::doc_session`).
+        recital.extend(crate::agent::doc_session::run_start_blocks(ctx));
+        crate::agent::task_recital::take_trailing_recitals(history, &recital);
+        blocks.extend(recital.into_iter().map(ContentBlock::text));
     }
     push_user_blocks(history, store, ctx, blocks);
 

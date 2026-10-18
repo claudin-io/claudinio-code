@@ -97,6 +97,10 @@ pub fn still_doing_nudge(ctx: &ToolContext, at_start: &[TaskItem]) -> Option<Str
 /// highest (Manus's recitation). `persist::history_from_records` calls it at
 /// the compaction point with the list as it stood then, so the loop's rebuild
 /// right after compacting and any later reload produce the same history.
+/// A session with a living document gets its `<document>` outline after the
+/// list, as the compaction recorded it (`Compacted::document`, read from the
+/// file when the compaction ran — the freshest outline there is), in the
+/// order a run's turn carries them (lean-harness Phase 4f).
 ///
 /// Only a context that ends on a user message gets it: a compaction inside
 /// a run (the tail ends on the round's tool results, or on the run's own
@@ -105,28 +109,51 @@ pub fn still_doing_nudge(ctx: &ToolContext, at_start: &[TaskItem]) -> Option<Str
 /// alone. A context that ends on the model's answer was compacted between
 /// runs, and the next run's user turn carries the list anyway; adding a user
 /// message after the answer would put words in the conversation no loop
-/// wrote. A tail that already ends with this exact list — the run's user
-/// turn, when a run compacts before its first request — is left as it is.
+/// wrote. A tail that already ends with this exact list (and outline) — the
+/// run's user turn, when a run compacts before its first request — is left
+/// as it is.
 /// In the tailless between-runs case the next run's user turn merges into
-/// the summary's message, and [`take_trailing_recital`] keeps the list from
+/// the summary's message, and [`take_trailing_recitals`] keeps the list from
 /// being said twice.
 pub fn recite_after_compaction(
     history: &mut [crate::agent::provider::Message],
     tasks: &[TaskItem],
+    document: Option<&str>,
 ) {
-    let Some(block) = tasks_block(tasks) else {
+    let blocks: Vec<String> = tasks_block(tasks)
+        .into_iter()
+        .chain(document.map(str::to_string))
+        .collect();
+    if blocks.is_empty() {
         return;
-    };
+    }
     let Some(last) = history.last_mut().filter(|m| m.role == "user") else {
         return;
     };
-    let already = matches!(
-        last.content.last(),
-        Some(crate::agent::provider::ContentBlock::Text { text, .. }) if *text == block
-    );
-    if !already {
+    // What the message already ends with — all of the recital, or its first
+    // blocks (a run turn sent before the document existed) — is not said
+    // again; the rest follows it.
+    let texts: Vec<Option<&str>> = last
+        .content
+        .iter()
+        .map(|b| match b {
+            crate::agent::provider::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let said = (1..=blocks.len())
+        .rev()
+        .find(|&k| {
+            texts.len() >= k
+                && texts[texts.len() - k..]
+                    .iter()
+                    .zip(&blocks[..k])
+                    .all(|(t, b)| *t == Some(b.as_str()))
+        })
+        .unwrap_or(0);
+    for block in &blocks[said..] {
         last.content
-            .push(crate::agent::provider::ContentBlock::text(block));
+            .push(crate::agent::provider::ContentBlock::text(block.clone()));
     }
 }
 
@@ -137,17 +164,21 @@ pub fn recite_after_compaction(
 /// appends the list again. The model then reads it once, last, after the
 /// new message. Only the in-memory copy changes: the recital is rebuilt
 /// from the compaction record on every replay.
-pub fn take_trailing_recital(history: &mut [crate::agent::provider::Message], block: &str) {
-    let Some(last) = history
-        .last_mut()
-        .filter(|m| m.role == "user" && m.content.len() > 1)
-    else {
+///
+/// The same for every block the run appends that a compaction restates —
+/// the list, then the document's outline: the trailing ones that equal one
+/// of `blocks` are removed, last first, so `[summary, list, outline]`
+/// followed by the run's turn reads each once.
+pub fn take_trailing_recitals(history: &mut [crate::agent::provider::Message], blocks: &[String]) {
+    let Some(last) = history.last_mut().filter(|m| m.role == "user") else {
         return;
     };
-    if matches!(
-        last.content.last(),
-        Some(crate::agent::provider::ContentBlock::Text { text, .. }) if text == block
-    ) {
+    while last.content.len() > 1
+        && matches!(
+            last.content.last(),
+            Some(crate::agent::provider::ContentBlock::Text { text, .. }) if blocks.contains(text)
+        )
+    {
         last.content.pop();
     }
 }
@@ -530,6 +561,66 @@ mod loop_tests {
     // the summary, then the recited list. The next run's user turn merges
     // into that message, and the model must still read the list once, not
     // twice (Phase 4 review).
+    // The same holds for the document's outline: after a tailless
+    // compaction the next run's turn merges into the summary's message, and
+    // the outline the compaction restated is not read a second time before
+    // the run's own, fresh one.
+    #[tokio::test]
+    async fn a_run_after_a_tailless_compaction_sees_the_outline_once() {
+        let tasks = [todo("t1", "wire the UI")];
+        let ws = workspace("tailless-doc", &tasks);
+        let (rel, _) = crate::agent::doc_session::create(
+            &ws.root,
+            Some(&ws.store.path),
+            "Pudim",
+            &["origem".to_string()],
+        )
+        .unwrap();
+        ws.store.try_append(&SessionRecord::DocumentLinked {
+            path: rel.clone(),
+            ts: now_ms(),
+        });
+        let ctx = crate::agent::tools::ToolContext {
+            workspace_root: Some(ws.root.to_string_lossy().to_string()),
+            session_store_path: Some(ws.store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let outline = crate::agent::doc_session::outline_block(&ctx).unwrap();
+        ws.store.try_append(&SessionRecord::Compacted {
+            summary: "## Summary\nwork started".into(),
+            tail_turns: 0,
+            document: Some(outline.clone()),
+            ts: now_ms(),
+        });
+        let (_, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "what next?",
+            vec![Reply::Text("t1")],
+        )
+        .await;
+        let body: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let outlines = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+            .filter(|b| {
+                b["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("<document "))
+            })
+            .count();
+        assert_eq!(outlines, 1, "{body}");
+        let texts = last_message_texts(&bodies[0]);
+        assert_eq!(texts.last(), Some(&outline), "{texts:?}");
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with(TASKS_OPEN)).count(),
+            1,
+            "{texts:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_run_after_a_tailless_compaction_sees_the_list_once() {
         let tasks = [todo("t1", "wire the UI")];
@@ -546,6 +637,7 @@ mod loop_tests {
         ws.store.try_append(&SessionRecord::Compacted {
             summary: "## Summary\nwork started".into(),
             tail_turns: 0,
+            document: None,
             ts: now_ms(),
         });
         let (_, bodies) = run(
@@ -802,6 +894,7 @@ mod compaction_tests {
         SessionRecord::Compacted {
             summary: "## Summary\nwhat happened".into(),
             tail_turns,
+            document: None,
             ts: 2,
         }
     }
@@ -852,6 +945,93 @@ mod compaction_tests {
             ContentBlock::ToolResult { .. }
         ));
         assert_eq!(count_blocks(&history), 1);
+    }
+
+    // A session with a living document gets its outline restated the same
+    // way, after the list: the compaction recorded the outline as the file
+    // stood then, and a mid-run context ends on it. An idle compaction ends
+    // on the model's answer and leaves both to the next run.
+    #[test]
+    fn a_compaction_mid_run_restates_the_document_outline_after_the_list() {
+        let tasks = list();
+        let outline = "<document path=\".claudinio/docs/p.md\">\n# P\ns1 \u{b7} done \u{b7} main \u{b7} origem\n</document>".to_string();
+        let compacted_with_doc = |tail_turns| match compacted(tail_turns) {
+            SessionRecord::Compacted { summary, ts, .. } => SessionRecord::Compacted {
+                summary,
+                tail_turns,
+                document: Some(outline.clone()),
+                ts,
+            },
+            other => other,
+        };
+        let mid_run = vec![
+            tasks_record(&tasks),
+            turn("user", vec![ContentBlock::text("do it")]),
+            turn(
+                "assistant",
+                vec![ContentBlock::tool_use(
+                    "r1",
+                    "read_file",
+                    serde_json::json!({}),
+                )],
+            ),
+            turn("user", vec![ContentBlock::tool_result("r1", "contents")]),
+            compacted_with_doc(3),
+        ];
+        let history = history_from_records(&mid_run);
+        let last = &history.last().unwrap().content;
+        let texts: Vec<&str> = last
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [tasks_block(&tasks).unwrap().as_str(), outline.as_str()],
+            "the list, then the outline, last"
+        );
+        let idle = vec![
+            turn("user", vec![ContentBlock::text("do it")]),
+            turn("assistant", vec![ContentBlock::text("done")]),
+            compacted_with_doc(2),
+        ];
+        assert_eq!(
+            history_from_records(&idle).last().unwrap().role,
+            "assistant"
+        );
+    }
+
+    // A compaction at a run's start keeps the run's user turn, which already
+    // ends with the list and the outline it was sent with: neither is said
+    // twice.
+    #[test]
+    fn a_tail_that_already_ends_with_the_list_and_the_outline_gets_neither_again() {
+        let tasks = list();
+        let block = tasks_block(&tasks).unwrap();
+        let outline = "<document path=\".claudinio/docs/p.md\">\n# P\n</document>".to_string();
+        let records = vec![
+            tasks_record(&tasks),
+            turn(
+                "user",
+                vec![
+                    ContentBlock::text("go on"),
+                    ContentBlock::text(block.clone()),
+                    ContentBlock::text(outline.clone()),
+                ],
+            ),
+            SessionRecord::Compacted {
+                summary: "## Summary\nwhat happened".into(),
+                tail_turns: 1,
+                document: Some(outline.clone()),
+                ts: 2,
+            },
+        ];
+        let history = history_from_records(&records);
+        assert_eq!(count_blocks(&history), 1);
+        assert_eq!(history.last().unwrap().content.len(), 3, "{history:?}");
+        assert_eq!(last_block_text(&history), Some(outline));
     }
 
     // No tail kept: the list follows the summary, in the same message.

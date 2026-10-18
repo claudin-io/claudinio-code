@@ -113,6 +113,7 @@ pub async fn compact_history(
     store.append(&SessionRecord::Compacted {
         summary: summary.clone(),
         tail_turns,
+        document: crate::agent::doc_session::outline_block(ctx),
         ts: now_ms(),
     })?;
     store.try_append(&SessionRecord::cache_break(CacheBreakReason::Compaction));
@@ -1066,6 +1067,81 @@ mod cache_break_tests {
         .expect("the compaction");
         assert_eq!(breaks(&store.path), ["compaction"]);
         std::fs::remove_dir_all(store.path.parent().unwrap()).ok();
+    }
+
+    /// A compaction records the session document's outline as the file
+    /// stands at that moment — the freshest one, not the run's start — so
+    /// the rebuilt context can restate it after the summary.
+    #[tokio::test]
+    async fn a_compaction_records_the_documents_outline_as_the_file_stands() {
+        let store = temp_store("compact-doc");
+        let root = store.path.parent().unwrap().to_path_buf();
+        store
+            .append(&SessionRecord::User {
+                text: "Write the recipe.".into(),
+                ts: now_ms(),
+            })
+            .unwrap();
+        let (rel, _) = crate::agent::doc_session::create(
+            &root,
+            Some(&store.path),
+            "Pudim",
+            &["origem".to_string(), "servir".to_string()],
+        )
+        .unwrap();
+        store
+            .append(&SessionRecord::DocumentLinked {
+                path: rel.clone(),
+                ts: now_ms(),
+            })
+            .unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        crate::agent::doc_session::write(
+            &ctx,
+            "s1",
+            Some("Veio de Portugal."),
+            crate::agent::document::Status::Done,
+        )
+        .unwrap();
+        let (base, _, _) =
+            spawn_recording(vec![Reply::Text("## Task & intent\nWrite the recipe.")]).await;
+        let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        compact_history(
+            &config,
+            &store,
+            &ctx,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "compact-doc",
+            &Arc::new(SteeringCtl::new()),
+            crate::agent::hooks::CompactTrigger::Manual,
+            10_000,
+        )
+        .await
+        .expect("the compaction");
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        let document = records.iter().rev().find_map(|r| match r {
+            SessionRecord::Compacted { document, .. } => Some(document.clone()),
+            _ => None,
+        });
+        let Some(Some(block)) = document else {
+            panic!("no outline on the compaction: {document:?}");
+        };
+        assert!(
+            block.starts_with(&format!("<document path=\"{rel}\">")),
+            "{block}"
+        );
+        assert!(
+            block.contains("s1 \u{b7} done \u{b7} main \u{b7} origem"),
+            "{block}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]

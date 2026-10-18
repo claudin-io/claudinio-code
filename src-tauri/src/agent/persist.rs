@@ -112,6 +112,12 @@ pub enum SessionRecord {
         summary: String,
         #[serde(default)]
         tail_turns: usize,
+        /// The session's `<document>` outline block as the file stood at the
+        /// compaction, restated after the summary like the task list
+        /// (`history_from_records`). None without a document, and on every
+        /// record written before lean-harness Phase 4f.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        document: Option<String>,
         ts: u64,
     },
     /// A verbatim compaction (`agent::prune`): tool calls dropped with their
@@ -920,13 +926,14 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     match compact_idx {
         Some(idx) => {
-            let (summary, tail_turns) = match &records[idx] {
+            let (summary, tail_turns, document) = match &records[idx] {
                 SessionRecord::Compacted {
                     summary,
                     tail_turns,
+                    document,
                     ..
-                } => (summary.clone(), *tail_turns),
-                _ => (String::new(), 0),
+                } => (summary.clone(), *tail_turns, document.clone()),
+                _ => (String::new(), 0, None),
             };
             if !summary.is_empty() {
                 out.push(Message {
@@ -938,12 +945,14 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
                 });
             }
             // Kept-verbatim tail before the marker, the task list as it stood
-            // at the compaction (`agent::task_recital`), then everything after.
+            // at the compaction (`agent::task_recital`) and the document's
+            // outline as the compaction recorded it, then everything after.
             let tail_start = tail_start_index(records, idx, tail_turns);
             fold_into_history(&mut out, records[tail_start..idx].iter());
             crate::agent::task_recital::recite_after_compaction(
                 &mut out,
                 &last_tasks_in(&records[..idx]),
+                document.as_deref(),
             );
             fold_into_history(&mut out, records.iter().skip(idx + 1));
         }
@@ -1839,6 +1848,7 @@ mod tests {
         let rec = SessionRecord::Compacted {
             summary: "User asked to implement feature X. Files changed: src/foo.rs.".into(),
             tail_turns: 0,
+            document: None,
             ts: 100,
         };
         let json = serde_json::to_string(&rec).unwrap();
@@ -1852,6 +1862,7 @@ mod tests {
                 summary,
                 tail_turns,
                 ts,
+                ..
             } => {
                 assert_eq!(
                     summary,
@@ -1862,6 +1873,23 @@ mod tests {
             }
             _ => panic!("expected Compacted, got {:?}", back),
         }
+    }
+    // A compaction written before the outline field existed still parses,
+    // with no outline to restate.
+    #[test]
+    fn a_compacted_record_without_a_document_still_parses() {
+        let old = r#"{"kind":"compacted","summary":"S","tail_turns":2,"ts":5}"#;
+        let rec: SessionRecord = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            rec,
+            SessionRecord::Compacted {
+                tail_turns: 2,
+                document: None,
+                ..
+            }
+        ));
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(!json.contains("document"), "{json}");
     }
 
     #[test]
@@ -2045,6 +2073,7 @@ mod tests {
         compacted.push(SessionRecord::Compacted {
             summary: "…".into(),
             tail_turns: 0,
+            document: None,
             ts: 3,
         });
         assert_eq!(last_context_tokens(&compacted), None);
@@ -2103,6 +2132,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "S".into(),
                 tail_turns: 2,
+                document: None,
                 ts: 5,
             },
             user_turn("post-compact", 6),
@@ -2133,6 +2163,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "S".into(),
                 tail_turns: 2,
+                document: None,
                 ts: 5,
             },
         ];
@@ -2150,6 +2181,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "S".into(),
                 tail_turns: 1,
+                document: None,
                 ts: 2,
             },
         ];
@@ -2182,6 +2214,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "User greeted the agent.".into(),
                 tail_turns: 0,
+                document: None,
                 ts: 3,
             },
             SessionRecord::Turn {
@@ -2254,6 +2287,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "First compact".into(),
                 tail_turns: 0,
+                document: None,
                 ts: 2,
             },
             // Between compacts
@@ -2267,6 +2301,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "Second compact".into(),
                 tail_turns: 0,
+                document: None,
                 ts: 4,
             },
             // After last compact

@@ -636,6 +636,21 @@ pub fn take_change_note(ctx: &crate::agent::tools::ToolContext) -> Option<String
         .flatten()
 }
 
+fn document_block(rel: &str, doc: &Document) -> String {
+    format!("<document path=\"{rel}\">\n{}\n</document>", doc.outline())
+}
+
+/// The `<document>` outline block as the file stands now, for a compaction
+/// to record and restate after its summary (lean-harness Phase 4f: Phase 4b
+/// left the outline out of the compaction recital). A read like any other —
+/// a person's edit found here is recorded — but it frees no claim (a
+/// compaction runs mid-run, while subagents may hold sections) and tells no
+/// note (that belongs to the round's tool results).
+pub fn outline_block(ctx: &crate::agent::tools::ToolContext) -> Option<String> {
+    let l = linked(ctx)?;
+    with_doc(&l, |doc, _| Ok(document_block(&l.rel, doc))).ok()
+}
+
 /// What a run's user turn ends with when the session has a document: the
 /// `<document>` outline block, then a `<doc-changed>` note when a person
 /// edited it since the model last heard.
@@ -655,11 +670,7 @@ pub fn run_start_blocks(ctx: &crate::agent::tools::ToolContext) -> Vec<String> {
             }
         }
         state.claimed.clear();
-        let mut blocks = vec![format!(
-            "<document path=\"{}\">\n{}\n</document>",
-            l.rel,
-            doc.outline()
-        )];
+        let mut blocks = vec![document_block(&l.rel, doc)];
         blocks.extend(drain_note(state));
         Ok(blocks)
     })
