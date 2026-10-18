@@ -184,15 +184,15 @@ pub fn resolve_first_message(
 pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&str>) -> String {
     let mut msg = String::from(
         "[system] You are in Builder mode, in a fresh session that continues a \
-         planning session. The plan below and the carried-over task list are your \
-         worklist - execute them exactly:\n\n\
-         1. Call `tasks_get` FIRST to load the task list.\n\
-         2. Follow the plan (Solution Design + Low-Level Design).\n\
-         3. Execute ONE task at a time in dependency order:\n\
-           - Mark it 'doing' BEFORE touching code.\n\
+         planning session. The plan below and the carried-over task list (the \
+         `<tasks>` block that ends this message) are your worklist - execute them exactly:\n\n\
+         1. Follow the plan (Solution Design + Low-Level Design).\n\
+         2. Take the tasks in dependency order:\n\
+           - Mark one 'doing' in the same round as your first tool call for it.\n\
            - Implement it: edit directly; delegate only as the Builder rules say.\n\
-           - Mark it 'done' AFTER verifying with evidence.\n\
-         4. After all tasks, verify the whole build and call `finalize_plan`.\n",
+           - Mark it 'done' once verified with evidence; closing one task and starting \
+         the next is one `tasks_update` call.\n\
+         3. After all tasks, verify the whole build and call `finalize_plan`.\n",
     );
     if let Some(path) = plan_file {
         msg.push_str(&format!("\nPlan file: {path}\n"));
@@ -202,23 +202,20 @@ pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&st
             "\n--- PLAN START ---\n{content}\n--- PLAN END ---\n"
         ));
     } else if plan_file.is_none() {
-        msg.push_str(
-            "\nNo plan file was found on disk - call `tasks_get` and continue from \
-             the task list alone.\n",
-        );
+        msg.push_str("\nNo plan file was found on disk - continue from the task list alone.\n");
     }
     msg
 }
 
 /// Wraps the model-generated handoff document as the first user message of
-/// the successor session. Tells the model to read the handoff, load tasks,
-/// and continue.
+/// the successor session. Tells the model to read the handoff and the task
+/// list the run appends after it (`agent::task_recital`), and continue.
 pub fn compose_context_handoff_message(handoff_text: &str, plan_file: Option<&str>) -> String {
     let mut msg = String::from(
         "[system] This is a fresh session that continues previous work whose context \
-         reached its limit. The predecessor wrote the handoff document below. Read it, \
-         then call `tasks_get` FIRST and continue the in-flight work exactly where it \
-         stopped.\n\n",
+         reached its limit. The predecessor wrote the handoff document below; the \
+         current task list is the `<tasks>` block that ends this message. Read both and \
+         continue the in-flight work exactly where it stopped.\n\n",
     );
     if let Some(path) = plan_file {
         msg.push_str(&format!("Plan file: {path}\n\n"));
@@ -286,7 +283,10 @@ mod tests {
     #[test]
     fn builder_kickoff_mentions_contract() {
         let msg = compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X"));
-        assert!(msg.contains("tasks_get"));
+        // Phase 4: the run appends the list; the kickoff points at it instead
+        // of ordering a round to fetch it.
+        assert!(!msg.contains("tasks_get"), "{msg}");
+        assert!(msg.contains("`<tasks>` block"), "{msg}");
         assert!(msg.contains("/tmp/plan.md"));
         assert!(msg.contains("--- PLAN START ---"));
         assert!(msg.contains("finalize_plan"));
@@ -313,6 +313,7 @@ mod tests {
         assert!(msg.contains("--- HANDOFF DOCUMENT START ---"));
         assert!(msg.contains("finish it"));
         assert!(msg.contains("/p/plan.md"));
-        assert!(msg.contains("tasks_get"));
+        assert!(!msg.contains("tasks_get"), "{msg}");
+        assert!(msg.contains("`<tasks>` block"), "{msg}");
     }
 }

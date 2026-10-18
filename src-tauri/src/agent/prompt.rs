@@ -20,12 +20,11 @@ const MAX_SPEC_SECTION_CHARS: usize = 4_000;
 const SYSTEM_PROMPT: &str = r#"Role: Claudinio, AI coding agent inside Claudinio Code.
 UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in text.
 
-# 1. TASK SYSTEM (STRICT WORKFLOW)
-- You MUST call `tasks_get` first.
-- Call `tasks_set` to create tasks (id, title, description, journal: [], status: 'todo'). 1 logical step = 1 task.
-- Update in real time with `tasks_update` (one task: its id, the new status, journal entries to append): strictly follow `todo` -> `doing` -> append to `journal` -> `done`. Never batch updates.
-- `tasks_set` is a full replacement — you must pass ALL tasks — so use it only to create the list or to add, remove or reword tasks. Never resend the list just to change a status.
-- Before your final text response, the task list MUST be up to date: make a final `tasks_update` (or `tasks_set`) call.
+# 1. TASK SYSTEM
+- For anything beyond a one-step change, create tasks with `tasks_set` (id, title, description, journal: [], status: 'todo'), 1 logical step = 1 task. A one-step change needs no list.
+- Each run brings the current list as a `<tasks>` block (`id · status · title`): no need to read it back.
+- Mark a task `doing` with `tasks_update` in the same round as the first tool call for it, and `done` once verified, with journal entries for findings. Batch status changes into one call (`updates`).
+- `tasks_set` is a full replacement (pass ALL tasks): use it only to create the list or to add, remove or reword tasks. Never resend the list just to change a status.
 - If the user asks about progress, guide them to the Task Panel.
 
 # 2. CODE TOOLS
@@ -283,27 +282,20 @@ File tools take absolute paths inside this root."
             let builder_text = concat!(
                 "\n\n## CURRENT MODE: BUILDER (EXECUTION)\n",
                 "You are in Builder mode: you execute the plan Brain prepared. The task list (normally created in Brain mode) ",
-                "IS your worklist - every edit MUST be driven through it, exactly as the base ## TASK SYSTEM requires. ",
-                "Working without updating the tasks in real time is a defect, not a shortcut.\n",
-                "1. Call `tasks_get` FIRST - before any state-changing command. This is not optional even when tasks ",
-                "already exist: you must load them and follow them in order, respecting dependencies. They ARE the plan.\n",
-                "2. Also read the most recent plan file in `{plans_subdir}/` (`list_dir`) before executing - it carries ",
+                "IS your worklist, taken in dependency order, and is driven as ## TASK SYSTEM says.\n",
+                "1. Read the most recent plan file in `{plans_subdir}/` (`list_dir`) before executing - it carries ",
                 "the Solution Design (requirements) and the `## Low-Level Design` (the technical spec - files, symbols, ",
                 "data flow, schemas) the tasks refer to.\n",
-                "3. Execute ONE task at a time, in dependency order. BEFORE you touch any file or spawn a subagent for a task, ",
-                "call `tasks_update` to mark THAT task status='doing'. NEVER implement or edit a task that is still ",
-                "'todo' - mark it 'doing' first, always.\n",
-                "4. Implement the task yourself with `edit_file`. Delegate only when it clearly pays: 'explore' subagents for a broad ",
+                "2. Implement each task yourself with `edit_file`. Delegate only when it clearly pays: 'explore' subagents for a broad ",
                 "read-only investigation across many files, or parallel research; 'code' subagents only for two or more changes to ",
                 "disjoint files when parallelism pays. Otherwise edit directly.\n",
                 "   A delegated goal is a COMPLETE technical spec: every concrete value from the plan/task VERBATIM (paths, symbols, ",
                 "sizes, a user asset's real URL, icon id or SVG) - a subagent starts empty and cannot ask, so it guesses what is missing. ",
                 "An asset that isn't yet concrete data is fetched and pasted in - never 'similar to' it.\n",
-                "5. When a task's work is verified, call `tasks_update` to mark THAT task status='done', with journal entries for the findings and the 'why'. ",
-                "Do this task by task, as you go - NEVER batch several tasks into a single 'done' call at the end. Then move to the next task (back to step 3).\n",
-                "6. After all tasks, verify the whole: call `run_quality` and report its result - the harness re-checks it before ",
+                "3. Verified work closes its task with journal entries for the findings and the 'why'; closing one task and starting the next is one `tasks_update` call.\n",
+                "4. After all tasks, verify the whole: call `run_quality` and report its result - the harness re-checks it before ",
                 "the run may finish. If it is red, fix the cause and run it again.\n",
-                "7. As your LAST step, call `finalize_plan` with a journal of findings: decisions, gotchas, the 'why'.\n",
+                "5. As your LAST step, call `finalize_plan` with a journal of findings: decisions, gotchas, the 'why'.\n",
                 "\n# LANGUAGE POLICY\n",
                 "- Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message.\n"
             );
@@ -686,7 +678,11 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
                 subagent::MAX_PARALLEL_AGENTS,
                 false,
             );
-            assert!(sys.contains("Update in real time with `tasks_update`"));
+            // Phase 4: `doing` rides with the task's first tool call rather
+            // than taking a round of its own.
+            assert!(sys.contains(
+                "Mark a task `doing` with `tasks_update` in the same round as the first tool call for it"
+            ));
             assert!(sys.contains("Never resend the list just to change a status"));
             assert!(!sys.contains("you MUST make a final `tasks_set` call"));
             let names: Vec<String> =
@@ -708,8 +704,10 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             subagent::MAX_PARALLEL_AGENTS,
             false,
         );
-        assert!(builder.contains("call `tasks_update` to mark THAT task status='doing'"));
-        assert!(builder.contains("call `tasks_update` to mark THAT task status='done'"));
+        // Phase 4: closing one task and starting the next is one call.
+        assert!(
+            builder.contains("closing one task and starting the next is one `tasks_update` call")
+        );
         // The git profile has no task system at all.
         let git = api_tools(
             SessionMode::Builder,
@@ -1390,7 +1388,8 @@ mod deferred_prefix_tests {
         let (profile, system, tools) =
             prefix(&AgentConfig::default(), SessionMode::Builder, &[], &[]);
         assert_eq!(profile, PromptProfile::Standard);
-        // `edit_file` is core in Builder since decision D1 (Phase 3).
+        // `edit_file` is core in Builder since decision D1 (Phase 3);
+        // `tasks_get` is deferred since Phase 4 (the run recites the list).
         assert_eq!(
             names(&tools),
             [
@@ -1401,7 +1400,6 @@ mod deferred_prefix_tests {
                 "bash",
                 "run_quality",
                 "ask_user",
-                "tasks_get",
                 "tasks_set",
                 "tasks_update",
                 "spawn_agents",
@@ -1422,7 +1420,8 @@ mod deferred_prefix_tests {
                 "browser",
                 "browser_inspect",
                 "browser_screenshot",
-                "enter_plan_mode"
+                "enter_plan_mode",
+                "tasks_get"
             ]
         );
     }
@@ -1548,6 +1547,126 @@ mod deferred_prefix_tests {
                 );
             }
         }
+    }
+
+    /// The lines of `text` that make the model spend a round on the task
+    /// list alone (lean-harness Phase 4): fetching it first, a standalone
+    /// `doing` before the work, a final update before the answer, or a ban
+    /// on batching.
+    fn mandated_task_round_trips(text: &str) -> Vec<String> {
+        text.lines()
+            .filter(|line| {
+                let low = line.to_lowercase();
+                (low.contains("tasks_get") && (low.contains("first") || low.contains("call ")))
+                    || low.contains("never batch")
+                    || low.contains("final `tasks_update`")
+                    || low.contains("final tasks_update")
+                    || (low.contains("doing") && low.contains("before"))
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_round_trip_detector_finds_the_old_mandates() {
+        for old in [
+            "- You MUST call `tasks_get` first.",
+            "1. Call `tasks_get` FIRST to load the task list.",
+            "strictly follow `todo` -> `doing` -> `done`. Never batch updates.",
+            "- Before your final text response, make a final `tasks_update` (or `tasks_set`) call.",
+            "  - Mark it 'doing' BEFORE touching code.",
+            "- Move each task with `tasks_update`: 'doing' before you start it.",
+        ] {
+            assert_eq!(mandated_task_round_trips(old).len(), 1, "{old}");
+        }
+    }
+
+    /// The gate of Phase 4: no prompt, kickoff or nudge mandates a round
+    /// spent on the task list. The list comes with the run (`<tasks>`),
+    /// `doing` rides with the first tool call of the task, and status
+    /// changes are batched.
+    #[test]
+    fn no_prompt_mandates_a_task_round_trip() {
+        use crate::agent::{nudges, transition};
+        let config = AgentConfig::default();
+        let mut texts: Vec<(String, String)> = Vec::new();
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            for golden in [false, true] {
+                let (_, system, _) = run_prefix(
+                    &config,
+                    &crate::agent::tools::tests_support::ctx(),
+                    PromptProfile::Standard,
+                    mode,
+                    None,
+                    None,
+                    &[],
+                    golden,
+                    &[],
+                );
+                texts.push((format!("{mode:?} golden={golden}"), system));
+            }
+        }
+        texts.push((
+            "compact".into(),
+            crate::agent::surface::COMPACT_PROMPT.to_string(),
+        ));
+        for (name, text) in [
+            (
+                "builder kickoff",
+                transition::compose_builder_kickoff(Some("p.md"), Some("plan")),
+            ),
+            (
+                "builder kickoff, no plan",
+                transition::compose_builder_kickoff(None, None),
+            ),
+            (
+                "context handoff",
+                transition::compose_context_handoff_message("doc", Some("p.md")),
+            ),
+            (
+                "golden flip",
+                nudges::golden_flip(&["g".into()], "builder", 1, 3),
+            ),
+            ("finalize", nudges::FINALIZE_PLAN.to_string()),
+            ("handoff request", nudges::HANDOFF_REQUEST.to_string()),
+        ] {
+            texts.push((name.into(), text));
+        }
+        let found: Vec<(String, Vec<String>)> = texts
+            .into_iter()
+            .map(|(name, text)| (name, mandated_task_round_trips(&text)))
+            .filter(|(_, lines)| !lines.is_empty())
+            .collect();
+        assert!(found.is_empty(), "mandated task round-trips: {found:#?}");
+    }
+
+    /// What replaced the mandates: the prompt says the list comes with the
+    /// run, that `doing` goes with the first tool call, that changes are
+    /// batched, and that a one-step change needs no list.
+    #[test]
+    fn the_standard_prompt_says_how_tasks_work_without_round_trips() {
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            let sys = system_prompt(
+                Some("/ws"),
+                None,
+                None,
+                None,
+                mode,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                false,
+            );
+            for said in [
+                "`<tasks>`",
+                "in the same round as the first tool call",
+                "one-step change",
+                "`updates`",
+            ] {
+                assert!(sys.contains(said), "{mode:?} does not say {said:?}");
+            }
+        }
+        let compact = crate::agent::surface::COMPACT_PROMPT;
+        assert!(compact.contains("`<tasks>`") && compact.contains("same round"));
     }
 
     /// A feature that is off takes its tools out of the catalog as well as

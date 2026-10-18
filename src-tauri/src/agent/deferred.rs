@@ -44,23 +44,23 @@ use tauri::ipc::Channel;
 /// The built-in tools a Standard main session does not send until they are
 /// loaded, each with the line the catalog shows for it. Everything else
 /// built in is core: `read_file`, `list_dir`, `grep`, `bash`, `ask_user`,
-/// `tasks_get`, `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`,
-/// `skills`, `load_tools`, and the mode's own (`edit_file` and
-/// `finalize_plan` in Builder, `write_plan`, `exit_plan_mode` in Brain). Every MCP tool is deferred too. The order here is the catalog's
-/// order.
+/// `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`, `skills`,
+/// `load_tools`, and the mode's own (`edit_file` and `finalize_plan` in
+/// Builder, `write_plan`, `exit_plan_mode` in Brain). Every MCP tool is
+/// deferred too. The order here is the catalog's order.
 ///
-/// `tasks_get` is core although the brief listed it here: the Builder prompt
-/// and every handoff kickoff (`agent::transition`) make it the session's
-/// first call — the Builder has no other way to read the task descriptions
-/// Brain wrote — so deferring it bought ~70 tokens of prefix for a
-/// `tools_loaded` cache break in nearly every Builder session.
+/// `tasks_get` is deferred again since lean-harness Phase 4. Phase 2's review
+/// had made it core because the Builder prompt and every handoff kickoff
+/// (`agent::transition`) made it the session's first call; Phase 4 removed
+/// that mandate — each run's user turn now ends with the list as a `<tasks>`
+/// block (`agent::task_recital`) — so it is left for the rare "show me task
+/// 3's journal".
 ///
-/// `finalize_plan` is core in Builder (the only mode that has it) for the
-/// same reason at the other end: the Builder prompt makes it the last step,
-/// the plan kickoff ends on it and the loop's last nudge
-/// (`nudges::FINALIZE_PLAN`) orders it. A load at the end of a session
-/// rewrites the cached prefix in front of the whole conversation — the most
-/// expensive cache write a session can make. The rule is pinned by
+/// `finalize_plan` is core in Builder (the only mode that has it): the
+/// Builder prompt makes it the last step, the plan kickoff ends on it and the
+/// loop's last nudge (`nudges::FINALIZE_PLAN`) orders it. A load at the end of
+/// a session rewrites the cached prefix in front of the whole conversation —
+/// the most expensive cache write a session can make. The rule is pinned by
 /// `prompt::tests::no_harness_text_orders_a_deferred_tool` and
 /// `no_standard_prompt_line_makes_a_deferred_tool_mandatory_or_first`: no
 /// text the harness or the prompt puts in front of the model orders a
@@ -106,6 +106,10 @@ pub const DEFERRED_BUILTIN: &[(&str, &str)] = &[
     (
         "enter_plan_mode",
         "switch to Brain (planning) mode when a task needs a design before code",
+    ),
+    (
+        "tasks_get",
+        "every task's full description and journal (the run's <tasks> block lists id, status and title)",
     ),
 ];
 
@@ -435,6 +439,8 @@ mod tests {
             assert!(!purpose.is_empty() && purpose.len() <= 160, "{name}");
         }
         assert!(is_deferred("mcp__github__search"));
+        // Phase 4: the run recites the list, so reading it back is rare.
+        assert!(is_deferred("tasks_get"));
         for core in [
             "read_file",
             "list_dir",
@@ -447,7 +453,6 @@ mod tests {
             "spawn_agents",
             "skills",
             "load_tools",
-            "tasks_get",
             "edit_file",
             "write_plan",
             "exit_plan_mode",
