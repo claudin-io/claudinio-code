@@ -654,13 +654,13 @@ pub fn write_plan_def() -> ToolDef {
 pub fn finalize_plan_def() -> ToolDef {
     ToolDef {
         name: "finalize_plan".into(),
-        description: "Append an Implementation Log to the plan file once its implementation is DONE and verified. Records the CHANGED FILES and COMMITS automatically (read from git), so your `journal` should focus on findings, decisions, and gotchas — not a file list. Call this as the LAST step of a Builder run, after all tasks are done. Defaults to the most recent plan in the plans directory.".into(),
+        description: "Append the Implementation Log to the plan once all tasks are done and verified: the last step of a Builder run. Changed files and commits are read from git, so `journal` holds findings, decisions and gotchas, not a file list.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "journal": { "type": "string", "description": "Findings, decisions, and gotchas from the implementation (the 'why' and what was learned)." },
-                "plan_file": { "type": "string", "description": "Optional target plan file (basename like '2026-07-09_x.md' or a path). Defaults to the most recently modified plan." },
-                "summary": { "type": "string", "description": "Optional one-line summary of the implementation." }
+                "journal": { "type": "string", "description": "Findings, decisions and gotchas: the 'why'." },
+                "plan_file": { "type": "string", "description": "Plan basename or path; default: the latest plan." },
+                "summary": { "type": "string", "description": "One-line summary." }
             },
             "required": ["journal"]
         }),
@@ -1332,6 +1332,7 @@ mod tests {
         let mut defs = get_defs(4);
         defs.push(write_plan_def());
         defs.push(exit_plan_mode_def());
+        defs.push(finalize_plan_def());
         defs.push(crate::agent::deferred::load_tools_def());
         let over: Vec<(String, usize)> = defs
             .iter()

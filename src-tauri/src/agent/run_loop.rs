@@ -3322,7 +3322,7 @@ mod deferred_loop_tests {
             vec![
                 Reply::Tool {
                     name: "load_tools",
-                    input: serde_json::json!({"names": ["semantic_search", "finalize_plan"]}),
+                    input: serde_json::json!({"names": ["semantic_search", "enter_plan_mode"]}),
                 },
                 Reply::Text("done"),
             ],
@@ -3337,15 +3337,18 @@ mod deferred_loop_tests {
         let second = tool_names(&bodies[1]);
         assert!(!first.contains(&"semantic_search".to_string()));
         assert_eq!(second[..first.len()], first[..], "nothing before moves");
-        assert_eq!(second[first.len()..], ["semantic_search", "finalize_plan"]);
+        assert_eq!(
+            second[first.len()..],
+            ["semantic_search", "enter_plan_mode"]
+        );
         // The system prompt is the same bytes on both requests.
         let system = |b: &str| serde_json::from_str::<Value>(b).unwrap()["system"].clone();
         assert_eq!(system(&bodies[0]), system(&bodies[1]));
-        assert!(last_result(&bodies[1]).contains("Loaded: semantic_search, finalize_plan"));
+        assert!(last_result(&bodies[1]).contains("Loaded: semantic_search, enter_plan_mode"));
         let records = records_of(&ws);
         assert_eq!(
             crate::agent::deferred::loaded_names(&records),
-            ["semantic_search", "finalize_plan"]
+            ["semantic_search", "enter_plan_mode"]
         );
         assert!(records.iter().any(|r| matches!(
             r,

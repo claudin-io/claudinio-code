@@ -307,8 +307,7 @@ File tools take absolute paths inside this root."
                 "Do this task by task, as you go - NEVER batch several tasks into a single 'done' call at the end. Then move to the next task (back to step 3).\n",
                 "6. After all tasks, verify the whole: call `run_quality` and report its result - the harness re-checks it before ",
                 "the run may finish. If it is red, fix the cause and run it again.\n",
-                "7. As your LAST step, call `finalize_plan` with a journal of findings: decisions, gotchas, the 'why' ",
-                "(it records the changed files and commits itself).\n",
+                "7. As your LAST step, call `finalize_plan` with a journal of findings: decisions, gotchas, the 'why'.\n",
                 "\n# LANGUAGE POLICY\n",
                 "- Any language is valid, in what the user writes and in what you write. Reply in the language of the user's latest message.\n"
             );
@@ -1359,6 +1358,7 @@ mod deferred_prefix_tests {
                 "tasks_update",
                 "spawn_agents",
                 "skills",
+                "finalize_plan",
                 "load_tools"
             ]
         );
@@ -1374,7 +1374,6 @@ mod deferred_prefix_tests {
                 "browser",
                 "browser_inspect",
                 "browser_screenshot",
-                "finalize_plan",
                 "enter_plan_mode"
             ]
         );
@@ -1415,9 +1414,22 @@ mod deferred_prefix_tests {
                 );
                 let deferred = deferred_tools(mode, PromptProfile::Standard, &[], &config);
                 for line in system.lines() {
+                    // "call `x`" is an order wherever it stands.
+                    for t in &deferred {
+                        assert!(
+                            !line.contains(&format!("call `{}`", t.name)),
+                            "{mode:?} (golden {golden}) orders deferred `{}`: {line}",
+                            t.name
+                        );
+                    }
+                    // A last step is as mandatory as a first one: a load at
+                    // the end of a session rewrites the cache in front of the
+                    // whole conversation.
                     if !(line.contains("MUST")
                         || line.contains("FIRST")
-                        || line.contains("first call"))
+                        || line.contains("first call")
+                        || line.contains("LAST")
+                        || line.contains("required"))
                     {
                         continue;
                     }
@@ -1429,6 +1441,63 @@ mod deferred_prefix_tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// Whether `text` names `tool` as a word of its own (not as part of a
+    /// longer identifier such as `mcp__x__browser_tabs`).
+    fn names_tool(text: &str, tool: &str) -> bool {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        text.match_indices(tool).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + tool.len()..].chars().next();
+            !before.is_some_and(ident) && !after.is_some_and(ident)
+        })
+    }
+
+    /// Every text the harness itself puts in front of the model is an order —
+    /// a nudge, a kickoff, the handoff request — so none may name a tool that
+    /// is deferred in either mode. The model would load it to obey, and a
+    /// load mid-session (the finalize_plan nudge comes at the very end)
+    /// rewrites the cached prefix in front of the whole conversation.
+    #[test]
+    fn no_harness_text_orders_a_deferred_tool() {
+        use crate::agent::{nudges, transition};
+        let config = AgentConfig::default();
+        let mut deferred: Vec<String> = Vec::new();
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            for t in deferred_tools(mode, PromptProfile::Standard, &[], &config) {
+                if !deferred.contains(&t.name) {
+                    deferred.push(t.name);
+                }
+            }
+        }
+        assert!(
+            deferred.iter().any(|n| n == "semantic_search"),
+            "{deferred:?}"
+        );
+        let texts = [
+            nudges::CUT_OFF.to_string(),
+            nudges::EMPTY_REPLY.to_string(),
+            nudges::ANNOUNCED_NOT_TAKEN.to_string(),
+            nudges::FINALIZE_PLAN.to_string(),
+            nudges::BRAIN_EXPLORING.to_string(),
+            nudges::HANDOFF_REQUEST.to_string(),
+            nudges::HANDOFF_RETRY.to_string(),
+            nudges::golden_flip(&["g1".into()], "builder", 1, 3),
+            nudges::quality_failed("1 failing", "detail", 1, 3),
+            nudges::repeating("`read_file`"),
+            transition::compose_builder_kickoff(Some("docs/plans/p.md"), Some("plan")),
+            transition::compose_builder_kickoff(None, None),
+            transition::compose_context_handoff_message("handoff", Some("docs/plans/p.md")),
+        ];
+        for text in &texts {
+            for name in &deferred {
+                assert!(
+                    !names_tool(text, name),
+                    "a harness text orders deferred `{name}`: {text}"
+                );
             }
         }
     }
@@ -1504,10 +1573,10 @@ mod deferred_prefix_tests {
     #[test]
     fn a_loaded_tool_the_mode_does_not_offer_is_left_out() {
         let cfg = AgentConfig::default();
-        let (_, _, brain) = prefix(&cfg, SessionMode::Brain, &[], &["finalize_plan"]);
-        assert!(!names(&brain).contains(&"finalize_plan"));
-        let (_, _, builder) = prefix(&cfg, SessionMode::Builder, &[], &["finalize_plan"]);
-        assert_eq!(names(&builder).last(), Some(&"finalize_plan"));
+        let (_, _, brain) = prefix(&cfg, SessionMode::Brain, &[], &["enter_plan_mode"]);
+        assert!(!names(&brain).contains(&"enter_plan_mode"));
+        let (_, _, builder) = prefix(&cfg, SessionMode::Builder, &[], &["enter_plan_mode"]);
+        assert_eq!(names(&builder).last(), Some(&"enter_plan_mode"));
     }
 }
 

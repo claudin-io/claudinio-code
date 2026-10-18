@@ -45,8 +45,8 @@ use tauri::ipc::Channel;
 /// loaded, each with the line the catalog shows for it. Everything else
 /// built in is core: `read_file`, `list_dir`, `grep`, `bash`, `ask_user`,
 /// `tasks_get`, `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`,
-/// `skills`, `load_tools`, and the mode's own (`write_plan`, `exit_plan_mode`
-/// in Brain). Every MCP tool is deferred too. The order here is the catalog's
+/// `skills`, `load_tools`, and the mode's own (`finalize_plan` in Builder,
+/// `write_plan`, `exit_plan_mode` in Brain). Every MCP tool is deferred too. The order here is the catalog's
 /// order.
 ///
 /// `tasks_get` is core although the brief listed it here: the Builder prompt
@@ -54,6 +54,17 @@ use tauri::ipc::Channel;
 /// first call — the Builder has no other way to read the task descriptions
 /// Brain wrote — so deferring it bought ~70 tokens of prefix for a
 /// `tools_loaded` cache break in nearly every Builder session.
+///
+/// `finalize_plan` is core in Builder (the only mode that has it) for the
+/// same reason at the other end: the Builder prompt makes it the last step,
+/// the plan kickoff ends on it and the loop's last nudge
+/// (`nudges::FINALIZE_PLAN`) orders it. A load at the end of a session
+/// rewrites the cached prefix in front of the whole conversation — the most
+/// expensive cache write a session can make. The rule is pinned by
+/// `prompt::tests::no_harness_text_orders_a_deferred_tool` and
+/// `no_standard_prompt_line_makes_a_deferred_tool_mandatory_or_first`: no
+/// text the harness or the prompt puts in front of the model orders a
+/// deferred tool.
 pub const DEFERRED_BUILTIN: &[(&str, &str)] = &[
     (
         "semantic_search",
@@ -91,10 +102,6 @@ pub const DEFERRED_BUILTIN: &[(&str, &str)] = &[
     (
         "browser_screenshot",
         "see the open page, or part of it, as an image",
-    ),
-    (
-        "finalize_plan",
-        "append the implementation log to the plan once the work is done and verified",
     ),
     (
         "enter_plan_mode",
@@ -444,6 +451,7 @@ mod tests {
             "edit_file",
             "write_plan",
             "exit_plan_mode",
+            "finalize_plan",
         ] {
             assert!(!is_deferred(core), "{core} is core");
         }
@@ -456,19 +464,20 @@ mod tests {
             tool("code_search", ""),
             tool("bash", ""),
             tool("mcp__a__x", ""),
+            tool("enter_plan_mode", ""),
             tool("finalize_plan", ""),
         ]);
-        assert_eq!(names(&core), ["read_file", "bash"]);
+        assert_eq!(names(&core), ["read_file", "bash", "finalize_plan"]);
         assert_eq!(
             names(&deferred),
-            ["code_search", "mcp__a__x", "finalize_plan"]
+            ["code_search", "mcp__a__x", "enter_plan_mode"]
         );
     }
 
     #[test]
     fn the_catalog_is_one_line_per_deferred_tool_in_a_fixed_order() {
         let deferred = vec![
-            tool("finalize_plan", "x"),
+            tool("enter_plan_mode", "x"),
             tool("mcp__b__two", "Second server tool"),
             tool("code_search", "x"),
             tool("mcp__a__one", &format!("First line\n{}", "y".repeat(300))),
@@ -479,7 +488,7 @@ mod tests {
         // Built-ins in the table's order, then MCP tools in the order they came
         // (server then tool name, as `mcp::snapshots` stores them).
         assert!(lines[0].starts_with("- code_search \u{2014} find definitions"));
-        assert!(lines[1].starts_with("- finalize_plan \u{2014} "));
+        assert!(lines[1].starts_with("- enter_plan_mode \u{2014} "));
         assert!(lines[2].starts_with("- mcp__b__two \u{2014} Second server tool"));
         let mcp_desc = lines[3].strip_prefix("- mcp__a__one \u{2014} ").unwrap();
         assert!(mcp_desc.starts_with("First line yyy"), "{mcp_desc}");
@@ -545,21 +554,25 @@ mod tests {
 
     #[test]
     fn a_load_reports_what_joined_what_was_there_and_what_does_not_exist() {
-        let deferred = vec![tool("code_search", ""), tool("finalize_plan", "")];
+        let deferred = vec![tool("code_search", ""), tool("enter_plan_mode", "")];
         let load = resolve(
-            &["code_search".into(), "finalize_plan".into(), "nope".into()],
+            &[
+                "code_search".into(),
+                "enter_plan_mode".into(),
+                "nope".into(),
+            ],
             &deferred,
-            &["finalize_plan".into()],
+            &["enter_plan_mode".into()],
         );
         assert_eq!(load.added, ["code_search"]);
-        assert_eq!(load.already, ["finalize_plan"]);
+        assert_eq!(load.already, ["enter_plan_mode"]);
         assert_eq!(load.unknown, ["nope"]);
         let text = load.answer(&deferred).unwrap();
         assert!(text.contains("Loaded: code_search") && text.contains("nope"));
         let err = resolve(&["nope".into()], &deferred, &[])
             .answer(&deferred)
             .unwrap_err();
-        assert!(err.contains("code_search, finalize_plan"), "{err}");
+        assert!(err.contains("code_search, enter_plan_mode"), "{err}");
     }
 
     /// Hooks select by the name of the tool that was called, through the
