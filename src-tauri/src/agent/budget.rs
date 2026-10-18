@@ -276,9 +276,9 @@ impl RunLimits {
         self.tool_result_chars.load(Ordering::Relaxed)
     }
 
-    /// Set for the Compact profile, whose session edits files itself instead
-    /// of delegating: there a shell command that writes a file is an edit, and
-    /// is asked about like one (`writes_files`).
+    /// Set for a session that edits files itself (`PromptProfile::edits_files`:
+    /// Builder under Compact or Standard): there a shell command that writes a
+    /// file is an edit, and is asked about like one (`writes_files`).
     pub fn set_writes_files(&self, yes: bool) {
         self.writes_files.store(yes, Ordering::Relaxed);
     }

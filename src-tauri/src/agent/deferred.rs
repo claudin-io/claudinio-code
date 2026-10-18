@@ -45,8 +45,8 @@ use tauri::ipc::Channel;
 /// loaded, each with the line the catalog shows for it. Everything else
 /// built in is core: `read_file`, `list_dir`, `grep`, `bash`, `ask_user`,
 /// `tasks_get`, `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`,
-/// `skills`, `load_tools`, and the mode's own (`finalize_plan` in Builder,
-/// `write_plan`, `exit_plan_mode` in Brain). Every MCP tool is deferred too. The order here is the catalog's
+/// `skills`, `load_tools`, and the mode's own (`edit_file` and
+/// `finalize_plan` in Builder, `write_plan`, `exit_plan_mode` in Brain). Every MCP tool is deferred too. The order here is the catalog's
 /// order.
 ///
 /// `tasks_get` is core although the brief listed it here: the Builder prompt

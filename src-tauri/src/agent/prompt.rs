@@ -293,16 +293,12 @@ File tools take absolute paths inside this root."
                 "3. Execute ONE task at a time, in dependency order. BEFORE you touch any file or spawn a subagent for a task, ",
                 "call `tasks_update` to mark THAT task status='doing'. NEVER implement or edit a task that is still ",
                 "'todo' - mark it 'doing' first, always.\n",
-                "4. Delegate: implement each task through `spawn_agents` in 'code' mode - one subagent per task, ",
-                "in ONE call when tasks are independent (parallel), in sequential waves when they depend on each other. ",
-                "This keeps your main context clean. You CANNOT edit files yourself: there is no edit_file in this session ",
-                "and bash commands that write files (redirections, tee, sed -i, inline scripts) are blocked. ",
-                "ALL file modifications go through code-mode subagents; your bash is for builds, tests and read-only inspection.\n",
-                "   Each subagent goal must be a COMPLETE technical spec: it must repeat every concrete value from the plan/task VERBATIM ",
-                "(exact file paths and symbols, agreed sizes/dimensions, and any user-supplied asset - the real URL, exact icon id, real SVG). ",
-                "The subagent has empty context and cannot ask the user, so if a value is missing it WILL guess and be wrong. ",
-                "If the plan references an external asset by name/URL that isn't yet concrete data, RESOLVE it first (fetch the data) and paste the real data into the goal - ",
-                "never tell a subagent to make something 'similar to' an asset the user already specified.\n",
+                "4. Implement the task yourself with `edit_file`. Delegate only when it clearly pays: 'explore' subagents for a broad ",
+                "read-only investigation across many files, or parallel research; 'code' subagents only for two or more changes to ",
+                "disjoint files when parallelism pays. Otherwise edit directly.\n",
+                "   A delegated goal is a COMPLETE technical spec: every concrete value from the plan/task VERBATIM (paths, symbols, ",
+                "sizes, a user asset's real URL, icon id or SVG) - a subagent starts empty and cannot ask, so it guesses what is missing. ",
+                "An asset that isn't yet concrete data is fetched and pasted in - never 'similar to' it.\n",
                 "5. When a task's work is verified, call `tasks_update` to mark THAT task status='done', with journal entries for the findings and the 'why'. ",
                 "Do this task by task, as you go - NEVER batch several tasks into a single 'done' call at the end. Then move to the next task (back to step 3).\n",
                 "6. After all tasks, verify the whole: call `run_quality` and report its result - the harness re-checks it before ",
@@ -393,9 +389,10 @@ pub(super) fn deferred_tools(
 /// Tools offered to the model for a given mode/profile. `GitSync` gets only
 /// `bash` + `ask_user` — no task system, no subagents, no MCP tools. `Compact`
 /// gets `surface::COMPACT_TOOLS`, `edit_file` included. Builder gets the full
-/// registry plus enter_plan_mode; Brain drops edit_file and gains write_plan +
-/// exit_plan_mode (bash stays but is gated to read-only commands in
-/// run_workflow). Under `Standard` the user's per-model surface then applies.
+/// registry (`edit_file` included) plus enter_plan_mode and finalize_plan;
+/// Brain drops edit_file and gains write_plan + exit_plan_mode (bash stays but
+/// is gated to read-only commands in run_workflow). Under `Standard` the
+/// user's per-model surface then applies.
 pub(super) fn api_tools(
     mode: SessionMode,
     profile: PromptProfile,
@@ -433,10 +430,11 @@ pub(super) fn api_tools(
     // Same treatment as web_search: when the feature is off the tools leave the
     // prompt entirely rather than sitting there costing tokens.
     defs.retain(|t| !t.name.starts_with("browser") || config.browser.enabled);
-    // The main session never edits files directly: Brain is read-only and
-    // Builder delegates ALL file modifications to code-mode subagents (which
-    // keep edit_file through their own toolset in subagent.rs).
-    defs.retain(|t| t.name != "edit_file");
+    // Brain is read-only. Builder edits files itself (decision D1,
+    // lean-harness Phase 3); its write gates are `PromptProfile::edits_files`.
+    if !profile.edits_files(mode) {
+        defs.retain(|t| t.name != "edit_file");
+    }
     match mode {
         SessionMode::Builder => {
             defs.push(tools::enter_plan_mode_def());
@@ -720,6 +718,54 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             &AgentConfig::default(),
         );
         assert!(git.iter().all(|t| !t.name.starts_with("tasks_")));
+    }
+
+    // Decision D1 (lean-harness Phase 3): the Builder prompt must not tell a
+    // session that has `edit_file` it cannot edit, and must say when a
+    // subagent pays: explore for broad read-only work, code only for
+    // parallel changes to disjoint files; otherwise the session edits.
+    #[test]
+    fn the_builder_prompt_edits_directly_and_says_when_to_delegate() {
+        for golden in [false, true] {
+            let sys = system_prompt(
+                Some(ROOT),
+                None,
+                None,
+                None,
+                SessionMode::Builder,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                golden,
+            );
+            for gone in [
+                "CANNOT edit",
+                "there is no edit_file",
+                "ALL file modifications go through code-mode subagents",
+                "one subagent per task",
+            ] {
+                assert!(!sys.contains(gone), "still says {gone:?}");
+            }
+            assert!(sys.contains("`edit_file`"), "names the edit tool");
+            assert!(sys.contains("'explore'"), "says when to explore");
+            assert!(sys.contains("disjoint files"), "says when code pays");
+            assert!(sys.contains("Otherwise edit directly"));
+        }
+    }
+
+    // Decision D1 (lean-harness Phase 3): the Builder main session edits
+    // files itself; Brain stays read-only and the git operator never edits.
+    #[test]
+    fn the_standard_builder_is_offered_edit_file_and_brain_is_not() {
+        let names = |mode, profile| -> Vec<String> {
+            api_tools(mode, profile, &[], &AgentConfig::default())
+                .into_iter()
+                .map(|t| t.name)
+                .collect()
+        };
+        let edit = "edit_file".to_string();
+        assert!(names(SessionMode::Builder, PromptProfile::Standard).contains(&edit));
+        assert!(!names(SessionMode::Brain, PromptProfile::Standard).contains(&edit));
+        assert!(!names(SessionMode::Builder, PromptProfile::GitSync).contains(&edit));
     }
 
     #[test]
@@ -1344,12 +1390,14 @@ mod deferred_prefix_tests {
         let (profile, system, tools) =
             prefix(&AgentConfig::default(), SessionMode::Builder, &[], &[]);
         assert_eq!(profile, PromptProfile::Standard);
+        // `edit_file` is core in Builder since decision D1 (Phase 3).
         assert_eq!(
             names(&tools),
             [
                 "read_file",
                 "list_dir",
                 "grep",
+                "edit_file",
                 "bash",
                 "run_quality",
                 "ask_user",

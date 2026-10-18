@@ -267,8 +267,7 @@ pub async fn run_workflow_with_profile(
         has_golden_goals,
         &loaded,
     );
-    ctx.limits
-        .set_writes_files(profile == PromptProfile::Compact);
+    ctx.limits.set_writes_files(profile.edits_files(cur_mode));
     // Every line the run is held to comes from the model it is about to talk
     // to, and is re-derived whenever a mode switch changes that model.
     let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -529,8 +528,7 @@ pub async fn run_workflow_with_profile(
                 has_golden_goals,
                 &loaded,
             );
-            ctx.limits
-                .set_writes_files(profile == PromptProfile::Compact);
+            ctx.limits.set_writes_files(profile.edits_files(cur_mode));
             // A mode switch is also a model switch (brain_model vs
             // builder_model), and the two need not share a window.
             prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -622,8 +620,7 @@ pub async fn run_workflow_with_profile(
                             has_golden_goals,
                             &loaded,
                         );
-                        ctx.limits
-                            .set_writes_files(profile == PromptProfile::Compact);
+                        ctx.limits.set_writes_files(profile.edits_files(cur_mode));
                         prefix_tokens = estimate_tokens(&[], &system, &tools);
                         budget = ContextBudget::for_model(
                             config,
@@ -1428,14 +1425,15 @@ pub async fn run_workflow_with_profile(
             }
 
             let in_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
-            // The Compact profile has no subagents to delegate an edit to: its
-            // session changes files itself. Each change is asked about — an
+            // A Builder session changes files itself (`edits_files`: Compact,
+            // and Standard since decision D1). Each change is asked about — an
             // `edit_file` as always, and a shell command that writes a file
             // even when its prefix is allowlisted (`run_tool`, through
             // `RunLimits::writes_files`). Brain's read-only gates are
-            // untouched — Compact never runs in Brain, and a toggle mid-round
-            // is caught by `in_brain` below before this is.
-            let direct_edit = profile == PromptProfile::Compact && !in_brain;
+            // untouched — a toggle mid-round is read here, per call.
+            let direct_edit = profile.edits_files(mode_ctl.get().0);
+            // Compact also refuses whatever lies outside its ten tools.
+            let compact = profile == PromptProfile::Compact && !in_brain;
             // A denial short-circuits everything downstream, including the mode
             // gates — there is nothing left to decide once the tool will not
             // run. An `allow` or `ask` does NOT short-circuit: the mode gates
@@ -1474,8 +1472,7 @@ pub async fn run_workflow_with_profile(
                     event_tx,
                     session_id,
                 )
-            } else if direct_edit
-                && !crate::agent::surface::COMPACT_TOOLS.contains(&tool_name.as_str())
+            } else if compact && !crate::agent::surface::COMPACT_TOOLS.contains(&tool_name.as_str())
             {
                 // The profile exists because this model's window cannot hold
                 // more than these: a call to anything else — a subagent, a
@@ -1528,8 +1525,8 @@ pub async fn run_workflow_with_profile(
                 ledger.subagent_cost += sub_cost;
                 block
             } else if tool_name == "edit_file" && !direct_edit {
-                // Not offered to a Standard main session in any mode; deny
-                // defensively in case the model hallucinates the tool.
+                // Not offered where the session does not edit (Brain, the git
+                // operator); deny defensively in case the model hallucinates it.
                 deny_tool(
                     &tool_name,
                     &tool_use_id,
@@ -1538,8 +1535,7 @@ pub async fn run_workflow_with_profile(
                         "edit_file is not available in Brain mode — it is read-only. \
                          Record the intended change in the plan (write_plan) instead."
                     } else {
-                        "edit_file is not available to the Builder session — delegate \
-                         the file modification to a code-mode subagent via spawn_agents."
+                        "edit_file is not available in this session."
                     },
                     event_tx,
                     session_id,
@@ -1558,10 +1554,8 @@ pub async fn run_workflow_with_profile(
                     &tool_name,
                     &tool_use_id,
                     &tool_input,
-                    "This bash command writes files. The Builder session never edits \
-                     files itself — delegate the modification to a code-mode subagent \
-                     via spawn_agents. Bash here is for builds, tests and read-only \
-                     inspection only.",
+                    "This bash command writes files, and this session does not edit \
+                     files. Bash here is for git, builds, tests and read-only inspection.",
                     event_tx,
                     session_id,
                 )
@@ -2067,7 +2061,9 @@ pub(crate) mod surface_tests {
             assert!(!names(&builder).contains(&tool), "builder is lean: {tool}");
             assert!(names(&brain).contains(&tool), "brain was not set: {tool}");
         }
-        assert_eq!(builder.len() + LEAN_DROPPED.len(), brain.len());
+        // Each mode adds two tools of its own; Builder also has `edit_file`,
+        // which Brain never gets.
+        assert_eq!(builder.len() + LEAN_DROPPED.len(), brain.len() + 1);
 
         let ctx = crate::agent::tools::tests_support::ctx();
         let prefix = |mode| {
@@ -2265,9 +2261,42 @@ pub(crate) mod surface_tests {
         run_script_steered(tag, context_window, answer, script, steering, |_, _| {}).await
     }
 
+    /// `run_script`, with the session in `mode` from its first round (the
+    /// brain model is the same stub as the builder).
+    async fn run_script_in(
+        mode: SessionMode,
+        tag: &str,
+        answer: Option<bool>,
+        script: impl FnOnce(&str) -> Vec<Reply>,
+    ) -> Run {
+        let steering = Arc::new(SteeringCtl::new());
+        run_script_with(mode, tag, None, answer, script, steering, |_, _| {}).await
+    }
+
     /// `run_script`, with the run's steering in the test's hands and
     /// `on_event` called with each event (and that steering) as it is sent.
     async fn run_script_steered(
+        tag: &str,
+        context_window: Option<u32>,
+        answer: Option<bool>,
+        script: impl FnOnce(&str) -> Vec<Reply>,
+        steering: Arc<SteeringCtl>,
+        on_event: impl Fn(&AgentEvent, &SteeringCtl) + Send + Sync + 'static,
+    ) -> Run {
+        run_script_with(
+            SessionMode::Builder,
+            tag,
+            context_window,
+            answer,
+            script,
+            steering,
+            on_event,
+        )
+        .await
+    }
+
+    async fn run_script_with(
+        mode: SessionMode,
         tag: &str,
         context_window: Option<u32>,
         answer: Option<bool>,
@@ -2291,6 +2320,9 @@ pub(crate) mod surface_tests {
 
         let (base, _, bodies) = spawn_recording(script(&path)).await;
         let mut config = config_for(&base, context_window);
+        if mode == SessionMode::Brain {
+            config.brain_model = config.builder_model.clone();
+        }
         config.yolo_mode = answer.is_none();
         let ctx = ToolContext {
             workspace_root: Some(root.to_string_lossy().to_string()),
@@ -2339,7 +2371,7 @@ pub(crate) mod surface_tests {
             &ctx,
             &store,
             &steering,
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+            &Arc::new(ModeCtl::new(mode, ModeOrigin::Human)),
         )
         .await;
         if let Some(user) = user {
@@ -2794,17 +2826,22 @@ pub(crate) mod surface_tests {
         std::fs::remove_dir_all(&run.root).ok();
     }
 
-    /// The counterpart: on a window that fits the Standard profile nothing was
-    /// relaxed. The Builder session still may not edit, even when a model asks.
+    /// The counterpart on a window that fits the Standard profile (decision
+    /// D1, lean-harness Phase 3): the Builder session is offered `edit_file`
+    /// beside `spawn_agents` and makes the change itself, without a second
+    /// prefix and a second context for a subagent.
     #[tokio::test]
-    async fn on_a_large_window_the_builder_session_still_cannot_edit() {
+    async fn on_a_large_window_the_builder_session_edits_the_file_itself() {
         let run = read_edit_answer("standard", None).await;
         assert!(
             matches!(run.outcome, Ok(RunOutcome::Completed)),
             "{:?}",
             run.outcome.err()
         );
-        assert_eq!(std::fs::read_to_string(&run.file).unwrap(), "hello world\n");
+        assert_eq!(
+            std::fs::read_to_string(&run.file).unwrap(),
+            "goodbye world\n"
+        );
         assert_eq!(run_config(&run.store).0, "standard");
 
         let first: serde_json::Value = serde_json::from_str(&run.bodies[0]).unwrap();
@@ -2814,12 +2851,147 @@ pub(crate) mod surface_tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
-        assert!(sent.contains(&"spawn_agents") && !sent.contains(&"edit_file"));
-        // The model was told why, in the request that followed its attempt.
-        assert!(
-            run.bodies[2].contains("delegate"),
-            "the denial reaches the model"
+        assert!(sent.contains(&"spawn_agents") && sent.contains(&"edit_file"));
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    /// An edit the Standard Builder makes is asked about like Compact's: the
+    /// person sees the proposal (the diff) and a "no" leaves the file alone.
+    #[tokio::test]
+    async fn a_standard_builder_edit_is_proposed_as_a_diff_and_waits_for_approval() {
+        let script = |path: &str| {
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": path }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "hello", "new_string": "goodbye",
+                    }),
+                },
+                Reply::Text("done"),
+            ]
+        };
+        let refused = run_script("std-edit-no", None, Some(false), script).await;
+        assert!(matches!(refused.outcome, Ok(RunOutcome::Completed)));
+        assert_eq!(
+            std::fs::read_to_string(&refused.file).unwrap(),
+            "hello world\n"
         );
+        assert!(
+            refused.events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCall { tool_name, permission, edit_proposal: Some(_), .. }
+                    if tool_name == "edit_file" && permission == "requires_approval"
+            )),
+            "the edit is shown as a proposal awaiting approval"
+        );
+        assert!(refused.bodies[2].contains("rejected"), "the model is told");
+
+        let approved = run_script("std-edit-yes", None, Some(true), script).await;
+        assert!(matches!(approved.outcome, Ok(RunOutcome::Completed)));
+        assert_eq!(
+            std::fs::read_to_string(&approved.file).unwrap(),
+            "goodbye world\n"
+        );
+        for run in [refused, approved] {
+            std::fs::remove_dir_all(&run.root).ok();
+        }
+    }
+
+    /// A shell command that writes a file is an edit in the Standard Builder
+    /// too: asked about even when its prefix (`echo `) is allowlisted, never
+    /// refused outright as it was while the session had to delegate edits.
+    #[tokio::test]
+    async fn a_standard_builder_asks_before_a_shell_command_writes_a_file() {
+        let write = |path: &str| {
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("echo goodbye > {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        };
+
+        let refused = run_script("std-bash-no", None, Some(false), write).await;
+        assert!(matches!(refused.outcome, Ok(RunOutcome::Completed)));
+        assert_eq!(
+            std::fs::read_to_string(&refused.file).unwrap(),
+            "hello world\n"
+        );
+        assert!(
+            refused.bodies[1].contains("rejected by user"),
+            "the person was asked and said no"
+        );
+
+        let approved = run_script("std-bash-yes", None, Some(true), write).await;
+        assert_eq!(
+            std::fs::read_to_string(&approved.file).unwrap(),
+            "goodbye\n"
+        );
+
+        // A command that only reads is still not worth a prompt.
+        let reads = run_script("std-bash-read", None, Some(false), |path| {
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("cat {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(reads.bodies[1].contains("hello world"));
+        for run in [refused, approved, reads] {
+            std::fs::remove_dir_all(&run.root).ok();
+        }
+    }
+
+    /// Brain stays strictly read-only whatever Builder may now do: it is not
+    /// offered `edit_file`, a call to it is refused, and a shell command that
+    /// writes a file is refused even when the person would have said yes.
+    #[tokio::test]
+    async fn a_brain_session_refuses_every_write_even_with_approval() {
+        let run = run_script_in(SessionMode::Brain, "brain-writes", Some(true), |path| {
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": path }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "hello", "new_string": "goodbye",
+                    }),
+                },
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("echo goodbye > {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(std::fs::read_to_string(&run.file).unwrap(), "hello world\n");
+        let first: serde_json::Value = serde_json::from_str(&run.bodies[0]).unwrap();
+        assert!(first["system"].to_string().contains("CURRENT MODE: BRAIN"));
+        let sent: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(!sent.contains(&"edit_file"), "{sent:?}");
+        assert!(run.bodies[2].contains("not available in Brain mode"));
+        assert!(run.bodies[3].contains("In Brain mode you cannot mutate"));
         std::fs::remove_dir_all(&run.root).ok();
     }
 }

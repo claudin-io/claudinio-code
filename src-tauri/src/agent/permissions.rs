@@ -111,7 +111,7 @@ const BASH_ALLOWLIST: &[&str] = &[
     // with no safety payoff: they read and report, they do not deploy.
     // `cargo fmt` and `cargo clippy` are deliberately absent: matching is by
     // prefix, so allowlisting them would also allowlist `cargo clippy --fix`
-    // and let the main session rewrite files outside the subagent path.
+    // and let a session rewrite files without the approval an edit gets.
     "cargo nextest",
     "cargo llvm-cov",
     "npx vitest",
@@ -196,8 +196,9 @@ pub fn bash_is_read_only(command: &str) -> bool {
     })
 }
 
-/// `bash_permission` for a session that edits files itself (the Compact
-/// profile). Everywhere else a command that writes a file is refused before
+/// `bash_permission` for a session that edits files itself (Builder under the
+/// Compact or Standard profile, `PromptProfile::edits_files`). Everywhere else
+/// (Brain, the git operator) a command that writes a file is refused before
 /// its permission is ever looked up, so the allowlist could be a list of
 /// prefixes: `cat `, `echo `, `python ` read and report. Here `cat > src/main.rs`
 /// reaches the tool, and a prefix that reads is no reason to let it write
@@ -210,9 +211,10 @@ pub fn bash_permission_writing(command: &str, auto_approve_git: bool) -> Permiss
     }
 }
 
-/// Heuristic: does this bash command WRITE file contents? Used to keep the
-/// main Builder session from editing files through bash (all modifications
-/// must go through code-mode subagents). Deliberately targets content
+/// Heuristic: does this bash command WRITE file contents? Used to keep Brain
+/// and the git operator from editing files through bash, and to ask about
+/// such a command in a session that edits (`bash_permission_writing`), the
+/// way an `edit_file` is asked about. Deliberately targets content
 /// editing — redirections, tee, in-place sed/perl, patch, and inline
 /// interpreter scripts that write — not general filesystem ops (rm/mv/cp
 /// stay governed by the normal approval flow).

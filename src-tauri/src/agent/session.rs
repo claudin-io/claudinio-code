@@ -194,6 +194,18 @@ impl PromptProfile {
         matches!(self, PromptProfile::Standard | PromptProfile::Compact)
     }
 
+    /// True when the main session in `mode` changes files itself: offered
+    /// `edit_file`, and a shell command that writes a file is asked about like
+    /// an edit (`RunLimits::writes_files`) instead of refused. Builder under a
+    /// chat profile — Compact always did; Standard since decision D1
+    /// (lean-harness Phase 3), because delegating every edit cost a second
+    /// prefix, a second exploration and the spec re-emitted as output on each
+    /// one. Brain is read-only under every profile, and the git operator
+    /// never edits (a conflict is the person's to resolve).
+    pub fn edits_files(self, mode: SessionMode) -> bool {
+        self.is_chat() && mode == SessionMode::Builder
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             PromptProfile::Standard => "standard",

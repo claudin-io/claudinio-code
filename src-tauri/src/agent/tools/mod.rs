@@ -322,7 +322,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit_file".into(),
-            description: "Replace the FIRST occurrence of old_string with new_string in a workspace file, so old_string must match exactly one place: include enough surrounding lines. The file (at least the lines being changed) must have been read with read_file first. The change is shown as a diff and applied once approved.".into(),
+            description: "Replace the FIRST occurrence of old_string with new_string in a workspace file; include enough surrounding lines that it matches one place. Read the lines being changed with read_file first. Shown as a diff, applied once approved.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

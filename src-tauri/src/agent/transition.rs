@@ -190,7 +190,7 @@ pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&st
          2. Follow the plan (Solution Design + Low-Level Design).\n\
          3. Execute ONE task at a time in dependency order:\n\
            - Mark it 'doing' BEFORE touching code.\n\
-           - Delegate implementation to code-mode subagents.\n\
+           - Implement it: edit directly; delegate only as the Builder rules say.\n\
            - Mark it 'done' AFTER verifying with evidence.\n\
          4. After all tasks, verify the whole build and call `finalize_plan`.\n",
     );
@@ -290,6 +290,15 @@ mod tests {
         assert!(msg.contains("/tmp/plan.md"));
         assert!(msg.contains("--- PLAN START ---"));
         assert!(msg.contains("finalize_plan"));
+    }
+
+    // Decision D1 (lean-harness Phase 3): the Builder edits files itself, so
+    // its kickoff must not order every task through code-mode subagents.
+    #[test]
+    fn builder_kickoff_does_not_order_delegation() {
+        let msg = compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X"));
+        assert!(!msg.contains("code-mode subagents"), "{msg}");
+        assert!(msg.contains("edit directly"), "{msg}");
     }
 
     #[test]
