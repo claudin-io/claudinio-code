@@ -99,6 +99,41 @@ model-authored code runs on the host in every task, by design: that is what
 running a project's tests means. The policy closes the routes *through
 approvals*; it does not contain a model that sets out to escape.
 
+**The sandbox the first live baseline used** (2026-10-18, run by the
+orchestrator on a shared host). A transient systemd unit, so nothing outside
+the work directory is writable and nothing private is readable:
+
+```bash
+REPO=/path/to/claudinio-code WORK=/path/to/eval-work
+systemd-run --wait --collect --pty --unit claudinio-eval-<name> \
+  -p ProtectSystem=strict \
+  -p TemporaryFileSystem=/root \
+  -p BindReadOnlyPaths=$REPO \
+  -p ReadWritePaths="$WORK $REPO/node_modules/.vite $REPO/node_modules/.vite-temp" \
+  -p PrivateTmp=yes \
+  -p InaccessiblePaths="/run/docker.sock /var/run/docker.sock" \
+  -p MemoryMax=<limit> -p CPUQuota=<limit> \
+  -E HOME=/root -E MY_KEY="$MY_KEY" \
+  $REPO/src-tauri/target/debug/examples/claudinio-eval run $REPO/eval/tasks \
+    --work-dir $WORK --out $WORK/results.jsonl …
+```
+
+- `ProtectSystem=strict` makes the whole file system read-only;
+  `ReadWritePaths` opens only the work directory and the two directories
+  Vite writes its bundled config into (`node_modules/.vite`,
+  `node_modules/.vite-temp`), without which every vitest task fails before
+  a test runs.
+- `TemporaryFileSystem=/root` hides the home directory (keys, other
+  repositories, `~/.claude`), and the repository comes back read-only on top
+  of it. `HOME=/root` is then an empty home, so no user skill joins the
+  prompt and the numbers compare across machines.
+- `PrivateTmp`, the docker socket made inaccessible (it is root on the host),
+  and memory and CPU caps, so a runaway test cannot starve the services
+  sharing the machine.
+
+It is still not a VM: the network is open (the provider has to be reached)
+and the kernel is shared. Prefer a disposable VM when one is available.
+
 - **File edits are approved**, confined to the workspace (the temporary
   directory) by the path guard — except anything inside a `.git/` directory
   and the runner's own `.claudinio.json` / `.claudinio/`. `.git/config` can
@@ -108,7 +143,13 @@ approvals*; it does not contain a model that sets out to escape.
   read-only command into any command at all.
 - **A shell command is approved only when it only looks**, as the permissions
   module classifies it (`ls`, `cat a.txt`, `git status`, `git diff`, `wc -l` …
-  with no chaining, pipes, substitution or redirection).
+  with no chaining, pipes, substitution or redirection), **and only inside the
+  task's workspace**: the directory it runs in and every word naming a path
+  (absolute, with a `..` component, `~` or `$`) must resolve inside it. The
+  first live baseline showed agents listing the eval's own directory, reading
+  other tasks' sessions and the task files that carry the reference solution;
+  the harness's saved-outputs directory stays readable, since trimmed results
+  point the model at it.
 - **Every other shell command is denied** (`rm -rf /tmp/x`, `curl … | sh`,
   `python3 -c …`, `echo x > f`, `node script.js`, `cargo test`), with a result
   telling the model to change files with `edit_file` and to run checks with
