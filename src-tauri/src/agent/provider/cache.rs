@@ -720,7 +720,7 @@ mod stub_tests {
     }
 
     #[tokio::test]
-    async fn a_marked_request_carries_exactly_the_three_breakpoints_and_its_cache_usage_is_recorded()
+    async fn a_marked_request_carries_exactly_the_three_breakpoints_and_its_cache_usage_reads_back_from_the_session_file()
      {
         let usage = json!({
             "input_tokens": 40,
@@ -754,22 +754,33 @@ mod stub_tests {
         assert!(sent["tools"][0].get("cache_control").is_none());
         assert_eq!(sent.to_string().matches("cache_control").count(), 3);
 
-        // The per-request record shows what the marked request bought.
-        let u = out.usage.expect("usage parsed from the stream");
+        // The per-request record shows what the marked request bought. It is
+        // appended the way `run_loop` appends it and read back from disk; the
+        // run loop itself cannot drive this stub marked, because a loopback
+        // provider is never marked (`wants_cache_markers`).
+        let u = out.usage.as_ref().expect("usage parsed from the stream");
         assert_eq!(u.cache_read_input_tokens, 3_000);
         assert_eq!(u.cache_creation_input_tokens, 500);
-        match SessionRecord::usage(1, "stub/m", Some(&u), None) {
-            SessionRecord::Usage {
-                input_tokens,
-                cache_read_tokens,
-                cache_creation_tokens,
-                ..
-            } => {
-                assert_eq!(input_tokens, 40);
-                assert_eq!(cache_read_tokens, 3_000);
-                assert_eq!(cache_creation_tokens, 500);
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agent::persist::SessionStore {
+            path: dir.path().join("s.jsonl"),
+        };
+        store.try_append(&SessionRecord::usage(1, "stub/m", out.usage.as_ref(), None));
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        match records.as_slice() {
+            [
+                SessionRecord::Usage {
+                    input_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    ..
+                },
+            ] => {
+                assert_eq!(*input_tokens, 40);
+                assert_eq!(*cache_read_tokens, 3_000);
+                assert_eq!(*cache_creation_tokens, 500);
             }
-            other => panic!("expected a usage record, got {other:?}"),
+            other => panic!("expected one usage record, got {other:?}"),
         }
     }
 
