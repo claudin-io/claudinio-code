@@ -17,8 +17,10 @@
 //!   walks the round in the model's order as before, appending each result
 //!   and doing the order-dependent bookkeeping (loop watch, the repeated-read
 //!   pointer, PostToolUse) in that order.
-//! - A pause during a run keeps every result that finished; the calls that did
-//!   not finish are answered the way a call skipped by a pause always was.
+//! - A pause during a run starts nothing new and waits for the calls already
+//!   under way (as it always waited for the one running call); the calls it
+//!   kept from starting are answered the way a call skipped by a pause always
+//!   was.
 
 use crate::agent::events::AgentEvent;
 use crate::agent::provider::{AgentConfig, ContentBlock};
@@ -27,11 +29,8 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use tauri::ipc::Channel;
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 /// At most this many calls of one round run at the same time. Four is what the
@@ -85,8 +84,9 @@ pub(crate) fn runs_in_parallel(
 /// at most [`MAX_CONCURRENT_TOOLS`] at a time, and each finished result is put
 /// in `ready` at its call's index. Returns the length of the run.
 ///
-/// When `interrupt` is raised mid-run, the calls still running are dropped and
-/// their slots stay empty; [`answer_unrun`] answers them.
+/// When `interrupt` is raised mid-run, the calls already started finish and
+/// keep their results; the ones still waiting for a turn are never started and
+/// their slots stay empty, for [`answer_unrun`] to answer.
 pub(crate) async fn run_ahead<E, X>(
     tool_uses: &[Value],
     start: usize,
@@ -176,62 +176,49 @@ pub(crate) fn executor<'a>(
 /// How one job of a run ended.
 enum Slot<T> {
     Done(T),
-    /// Still running (or still waiting for a turn) when the pause came.
+    /// Never started: the pause came while it waited for a turn.
     Unfinished,
     Panicked,
 }
 
 /// Run `jobs` on tasks of their own, at most `limit` at a time, and return how
-/// each ended, in the order given. Raising `interrupt` stops the wait: the jobs
-/// still running are aborted and come back [`Slot::Unfinished`].
+/// each ended, in the order given.
+///
+/// Once `interrupt` is raised no further job is started, and every job that
+/// had already started is waited for. That is the pause as it always was — the
+/// call that was running finished, the ones after it were not run — and it is
+/// the only honest choice: a tool body does its work synchronously and reports
+/// its own `ToolResult` (`execute_reported`), so an abort cannot stop it, only
+/// stop us from hearing it finish. Answering such a call as "not run" gave it a
+/// second, contradicting result while its side effects (the read tracker)
+/// stood.
 async fn run_bounded<T: Send + 'static>(
     jobs: Vec<BoxFuture<'static, T>>,
     limit: usize,
     interrupt: &AtomicBool,
 ) -> Vec<Slot<T>> {
-    let permits = Arc::new(Semaphore::new(limit));
+    let mut slots: Vec<Slot<T>> = (0..jobs.len()).map(|_| Slot::Unfinished).collect();
+    let mut waiting = jobs.into_iter().enumerate();
     let mut set = JoinSet::new();
     let mut ids = HashMap::new();
-    for (index, job) in jobs.into_iter().enumerate() {
-        let permits = permits.clone();
-        let handle = set.spawn(async move {
-            // The semaphore is never closed, so the acquire cannot fail.
-            let _permit = permits.acquire_owned().await;
-            job.await
-        });
-        ids.insert(handle.id(), index);
-    }
-    let mut slots: Vec<Slot<T>> = (0..ids.len()).map(|_| Slot::Unfinished).collect();
     loop {
-        tokio::select! {
-            // A job that finished in the same instant as the pause keeps its
-            // result: it ran, and throwing that away would be a lie.
-            biased;
-            joined = set.join_next_with_id() => match joined {
-                Some(Ok((id, value))) => slots[ids[&id]] = Slot::Done(value),
-                Some(Err(e)) => {
-                    if e.is_panic() {
-                        slots[ids[&e.id()]] = Slot::Panicked;
-                    }
-                }
-                None => break,
-            },
-            _ = raised(interrupt) => {
-                set.abort_all();
+        while set.len() < limit && !interrupt.load(Ordering::SeqCst) {
+            let Some((index, job)) = waiting.next() else {
                 break;
+            };
+            ids.insert(set.spawn(job).id(), index);
+        }
+        match set.join_next_with_id().await {
+            Some(Ok((id, value))) => slots[ids[&id]] = Slot::Done(value),
+            Some(Err(e)) => {
+                if e.is_panic() {
+                    slots[ids[&e.id()]] = Slot::Panicked;
+                }
             }
+            None => break,
         }
     }
     slots
-}
-
-/// Resolves once `flag` is set. Polled, because the steering flag is a plain
-/// `AtomicBool` the UI sets from another task; 20 ms is well under what a
-/// person notices after pressing stop.
-async fn raised(flag: &AtomicBool) {
-    while !flag.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 /// Answer every call in `tool_uses` after a pause: the ones a parallel run
@@ -273,8 +260,9 @@ fn input_of(tool_use: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tauri::ipc::InvokeResponseBody;
 
     fn call(i: usize, name: &str, input: Value) -> Value {
@@ -545,16 +533,19 @@ mod tests {
         assert!(ready[2].is_none());
     }
 
+    // A pause starts nothing new and waits for what is already under way, as
+    // it always waited for the one running call; every call is then answered
+    // once, in the model's order.
     #[tokio::test(start_paused = true)]
     async fn a_pause_during_a_parallel_run_answers_every_call() {
-        let calls = reads(3);
-        let mut ready = vec![None; 3];
+        let calls = reads(6);
+        let mut ready = vec![None; 6];
         let fake = Fake::new();
         let (events, seen) = recording_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
         let stop = interrupt.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
             stop.store(true, Ordering::SeqCst);
         });
         let started = tokio::time::Instant::now();
@@ -563,18 +554,21 @@ mod tests {
             0,
             &mut ready,
             any_call,
-            fake.exec(|i| if i == 0 { 10 } else { 5_000 }),
+            fake.exec(|_| 100),
             &interrupt,
             &events,
         )
         .await;
         assert!(
-            started.elapsed() < Duration::from_millis(1_000),
-            "a pause does not wait for the slow calls: {:?}",
+            started.elapsed() < Duration::from_millis(200),
+            "the calls kept from starting did not run after the pause: {:?}",
             started.elapsed()
         );
-        assert!(ready[0].is_some());
-        assert!(ready[1].is_none() && ready[2].is_none());
+        let mut ran = fake.finished.lock().unwrap().clone();
+        ran.sort();
+        assert_eq!(ran, ["tu_0", "tu_1", "tu_2", "tu_3"], "the first four ran");
+        assert!(ready[..4].iter().all(Option::is_some));
+        assert!(ready[4..].iter().all(Option::is_none));
 
         let (mut uses, mut results) = (Vec::new(), Vec::new());
         answer_unrun(
@@ -592,19 +586,81 @@ mod tests {
                 other => panic!("not a tool_use: {other:?}"),
             })
             .collect();
-        assert_eq!(use_ids, ["tu_0", "tu_1", "tu_2"]);
+        assert_eq!(use_ids, ["tu_0", "tu_1", "tu_2", "tu_3", "tu_4", "tu_5"]);
+        let answered: Vec<_> = results.iter().map(text).collect();
+        let expected: Vec<_> = (0..6)
+            .map(|i| {
+                let body = if i < 4 {
+                    format!("ran tu_{i}")
+                } else {
+                    INTERRUPTED.to_string()
+                };
+                (format!("tu_{i}"), body)
+            })
+            .collect();
+        assert_eq!(answered, expected);
+        // The calls that ran reported themselves when they finished (the fake
+        // sends nothing); the two kept from starting are reported once each,
+        // here.
+        assert_eq!(tool_result_ids(&seen), ["tu_4", "tu_5"]);
+    }
+
+    // The real tools do their work synchronously and report their own result
+    // (`execute_reported` sends the `ToolResult` before returning), and an
+    // abort cannot stop a body that never yields. A call that had started when
+    // the pause came therefore finishes and reports anyway: the run has to wait
+    // for it and keep that result, never answer it a second time as not run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pause_never_answers_a_call_twice_when_its_body_cannot_be_stopped() {
+        let calls = reads(2);
+        let mut ready = vec![None; 2];
+        let (events, seen) = recording_channel();
+        let reporter = events.clone();
+        let exec = move |_: &str, id: &str, _: Value| -> BoxFuture<'static, ContentBlock> {
+            let (id, events) = (id.to_string(), reporter.clone());
+            async move {
+                std::thread::sleep(Duration::from_millis(200));
+                let _ = events.send(AgentEvent::ToolResult {
+                    tool_id: id.clone(),
+                    tool_name: "read_file".into(),
+                    output: format!("ran {id}"),
+                    error: None,
+                });
+                ContentBlock::tool_result(&id, format!("ran {id}"))
+            }
+            .boxed()
+        };
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let stop = interrupt.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            stop.store(true, Ordering::SeqCst);
+        });
+        run_ahead(&calls, 0, &mut ready, any_call, exec, &interrupt, &events).await;
+        let (mut uses, mut results) = (Vec::new(), Vec::new());
+        answer_unrun(
+            &calls,
+            &mut ready,
+            INTERRUPTED,
+            &events,
+            &mut uses,
+            &mut results,
+        );
+        // Long enough for any body still running to have reported.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let mut reported = tool_result_ids(&seen);
+        reported.sort();
+        assert_eq!(reported, ["tu_0", "tu_1"], "one result each");
         let answered: Vec<_> = results.iter().map(text).collect();
         assert_eq!(
             answered,
             [
                 ("tu_0".to_string(), "ran tu_0".to_string()),
-                ("tu_1".to_string(), INTERRUPTED.to_string()),
-                ("tu_2".to_string(), INTERRUPTED.to_string()),
-            ]
+                ("tu_1".to_string(), "ran tu_1".to_string()),
+            ],
+            "the model hears what the timeline shows"
         );
-        // The finished call reported itself when it finished (the fake sends
-        // nothing); the two cut short are reported once each, here.
-        assert_eq!(tool_result_ids(&seen), ["tu_1", "tu_2"]);
     }
 
     #[tokio::test(start_paused = true)]

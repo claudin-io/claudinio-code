@@ -2409,9 +2409,9 @@ pub(crate) mod surface_tests {
         std::fs::remove_dir_all(&run.root).ok();
     }
 
-    // Stop pressed while a run of reads is under way: whatever had finished
-    // keeps its result, the rest are reported as not run, and the model's turn
-    // is answered call for call, in order, once each.
+    // Stop pressed while a run of reads is under way: whatever had started
+    // finishes and keeps its result, the rest are reported as not run, and the
+    // model's turn is answered call for call, in order, once each.
     #[tokio::test]
     async fn a_pause_during_parallel_reads_answers_every_call_once() {
         let steering = Arc::new(SteeringCtl::new());
