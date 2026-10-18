@@ -36,8 +36,11 @@ pub(crate) fn materialize(task: &Task, dest: &Path, which: Tree) -> Result<(), S
     match (&task.setup.git, which, &task.reference.git_commit) {
         (Some(git), Tree::Reference, Some(sha)) => export_git_tree(&git.repo, sha, dest)?,
         (Some(git), _, _) => export_git_tree(&git.repo, &git.commit, dest)?,
-        (None, _, _) => write_files(dest, &task.setup.files)?,
+        (None, _, _) => {}
     }
+    // Without git these are the whole tree; with git, an overlay on it (what a
+    // history commit needs to run outside its own checkout).
+    write_files(dest, &task.setup.files)?;
     if which == Tree::Reference {
         write_files(dest, &task.reference.files)?;
         if let Some(patch) = &task.reference.patch {
@@ -425,6 +428,41 @@ reference:
         let out = run_shell("echo visible; exit 3", tmp.path(), Duration::from_secs(10));
         assert_eq!(out.exit_code, Some(3));
         assert!(out.tail.contains("visible"));
+    }
+
+    /// `setup.files` laid over a git tree: how a history task adds what the
+    /// commit's tree needs to run outside its own checkout (a vitest config
+    /// that may read the linked `node_modules`). The overlay is part of the
+    /// start commit and of the reference tree alike.
+    #[test]
+    fn files_are_laid_over_a_git_tree_in_both_trees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(git(&repo).args(["init", "-q"]), "init").unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run_git(git(&repo).args(["add", "-A"]), "add").unwrap();
+        run_git(git(&repo).args(["commit", "-q", "-m", "one"]), "c1").unwrap();
+        let first =
+            String::from_utf8(run_git(git(&repo).args(["rev-parse", "HEAD"]), "rev").unwrap())
+                .unwrap();
+        let yaml = format!(
+            "id: t\ntitle: t\nprompt: p\nsetup:\n  git: {{repo: '{}', commit: '{}'}}\n\
+             \x20 files:\n    eval.cfg: \"x\"\n    a.txt: \"over\"\n\
+             oracle:\n  command: test -f eval.cfg\nreference:\n  git_commit: '{}'\n",
+            repo.display(),
+            first.trim(),
+            first.trim()
+        );
+        let t = task(&yaml);
+        for which in [Tree::Start, Tree::Reference] {
+            let dir = tmp.path().join(format!("{which:?}"));
+            materialize(&t, &dir, which).unwrap();
+            assert_eq!(std::fs::read_to_string(dir.join("eval.cfg")).unwrap(), "x");
+            assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "over");
+            let status = run_git(git(&dir).args(["status", "--porcelain"]), "status").unwrap();
+            assert!(status.is_empty(), "the overlay is committed: {status:?}");
+        }
     }
 
     #[test]

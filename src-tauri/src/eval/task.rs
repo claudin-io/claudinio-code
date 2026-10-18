@@ -9,7 +9,10 @@
 //! setup:                        # the start state: files, or a git tree
 //!   files: { "pager.py": "...", "test_pager.py": "..." }
 //!   # git: { repo: /path/or/url, commit: <sha> }   relative paths: from this file
-//!   # symlinks: { node_modules: ../../node_modules }  likewise
+//!   #   with git, `files` are laid over the exported tree (part of the start commit)
+//!   # symlinks: { node_modules: ../../node_modules }  likewise; a task that links
+//!   #   anything may not run a package manager in check/oracle (it would
+//!   #   reinstall into the shared tree): call tools by path
 //! check: python3 -m pytest -q   # what run_quality runs (default: oracle.command)
 //! oracle:                       # decides pass/fail after the run
 //!   command: python3 -m pytest -q
@@ -140,8 +143,19 @@ impl Task {
         if self.oracle.command.trim().is_empty() {
             return fail("oracle.command is empty");
         }
-        if self.setup.git.is_some() && !self.setup.files.is_empty() {
-            return fail("setup takes files or git, not both");
+        if !self.setup.symlinks.is_empty() {
+            for command in [Some(self.oracle.command.as_str()), self.check.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(tool) = package_manager_in(command) {
+                    return fail(&format!(
+                        "'{command}' runs {tool}, a package manager, in a task that links a \
+                         shared directory; it would reinstall into the linked tree. Call the \
+                         tool by path (./node_modules/.bin/...)"
+                    ));
+                }
+            }
         }
         if self.setup.git.is_none() && self.setup.files.is_empty() {
             return fail("setup needs files or git");
@@ -207,6 +221,17 @@ impl Task {
             }
         }
     }
+}
+
+/// The first word of `command` that names a package manager, if any. Words
+/// are split on whitespace and shell punctuation, and a path is reduced to its
+/// file name, so `true && /usr/bin/npm test` is caught. It is a guard against
+/// a mistake in a task file, not a shell parser.
+fn package_manager_in(command: &str) -> Option<&str> {
+    command
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
+        .map(|word| word.rsplit('/').next().unwrap_or(word))
+        .find(|name| matches!(*name, "pnpm" | "npm" | "npx" | "yarn" | "bun" | "bunx"))
 }
 
 /// A relative path with no `..` component: everything a task writes stays in
@@ -339,6 +364,43 @@ max_rounds: 12
             let err = Task::parse(&text, stem).unwrap_err();
             assert!(err.contains(want), "{want}: {err}");
         }
+    }
+
+    /// A linked directory is shared with the repository it points at. A
+    /// package manager run inside the task reinstalls into it: on 2026-10-18
+    /// a history task's `pnpm exec vitest` verified the old commit's
+    /// dependencies, found them stale and rewired the repository's own
+    /// `node_modules` into the temporary tree. So a task that links anything
+    /// must call its tools by path, never through a package manager.
+    #[test]
+    fn a_task_with_a_linked_directory_must_not_run_a_package_manager() {
+        let linked = TASK.replace(
+            "setup:\n  files:\n",
+            "setup:\n  symlinks:\n    node_modules: /elsewhere/node_modules\n  files:\n",
+        );
+        for command in [
+            "pnpm exec vitest run",
+            "npx vitest run",
+            "npm test",
+            "yarn test",
+            "true && pnpm test",
+            "cd web; /usr/bin/npm test",
+        ] {
+            let oracle = linked.replace("grep -q goodbye greet.txt", command);
+            let err = Task::parse(&oracle, "greet").unwrap_err();
+            assert!(err.contains("package manager"), "oracle {command}: {err}");
+            let check = format!("{linked}check: {command}\n");
+            let err = Task::parse(&check, "greet").unwrap_err();
+            assert!(err.contains("package manager"), "check {command}: {err}");
+        }
+        let by_path = linked.replace(
+            "grep -q goodbye greet.txt",
+            "./node_modules/.bin/vitest run src/a.test.ts",
+        );
+        assert!(Task::parse(&by_path, "greet").is_ok());
+        // Without a link nothing is shared, so a package manager is the task's own business.
+        let unlinked = TASK.replace("grep -q goodbye greet.txt", "npm test");
+        assert!(Task::parse(&unlinked, "greet").is_ok());
     }
 
     #[test]
