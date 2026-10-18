@@ -296,9 +296,17 @@ An invalid manifest rejects the entire plugin. An invalid skill or MCP server\n\
 entry only skips that entry. Prefer shipping a plugin whose components fail\n\
 independently over one that takes everything down with it.";
 
+/// How to plan a feature in Brain mode: the consensus checklist, UI sizing
+/// and assets, the Low-Level Design, diagrams. Prompt v1 carried all of it in
+/// every Brain request; prompt v2 (lean-harness Phase 5) names this skill in
+/// one line and the model reads it when a request is large enough to need it.
+/// Kept as Markdown beside this file so it reads as what the model reads.
+const BUILTIN_PLAN: &str = include_str!("skills/plan.md");
+
 /// All built-in skills shipped with the binary.
 const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("find-skills", BUILTIN_FIND_SKILLS),
+    ("plan", BUILTIN_PLAN),
     ("plugin-crafter", BUILTIN_PLUGIN_CRAFTER),
 ];
 
@@ -905,10 +913,17 @@ mod tests {
     fn the_catalog_is_one_line_per_skill_and_never_inlines_a_body() {
         let text = build_skills_system_prompt_section(&SkillManager::builtin_only()).unwrap();
         let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- ")).collect();
-        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(lines.len(), 3, "{text}");
         assert!(lines[0].starts_with("- find-skills \u{2014} Helps users discover"));
-        assert!(lines[1].starts_with("- plugin-crafter \u{2014} Authors a portable"));
-        for body_text in ["<body>", "llms.txt", "## 1. Interview first", "<location>"] {
+        assert!(lines[1].starts_with("- plan \u{2014} Planning a feature"));
+        assert!(lines[2].starts_with("- plugin-crafter \u{2014} Authors a portable"));
+        for body_text in [
+            "<body>",
+            "llms.txt",
+            "## 1. Interview first",
+            "The consensus checklist",
+            "<location>",
+        ] {
             assert!(!text.contains(body_text), "{body_text} is inlined");
         }
         // The location is the `skills` tool's business, not the prompt's.
@@ -959,6 +974,7 @@ mod tests {
                 "b-user",
                 "m-plugin",
                 "find-skills",
+                "plan",
                 "plugin-crafter"
             ]
         );
@@ -976,7 +992,7 @@ mod tests {
         assert!(text.contains("- s24 \u{2014} d") && !text.contains("- s25 "));
         let last = text.trim_end().lines().last().unwrap();
         assert!(
-            last.contains("7 more skills") && last.contains("`skills`"),
+            last.contains("8 more skills") && last.contains("`skills`"),
             "{last}"
         );
     }
@@ -1025,5 +1041,82 @@ mod tests {
             &SkillScope::User,
             &SkillScope::Project
         ));
+    }
+}
+
+/// The built-in `plan` skill (lean-harness Phase 5): what prompt v1 carried
+/// in every Brain request — the consensus checklist, the UI sizing and asset
+/// rules, the Low-Level Design guidance, the Mermaid guidance — read just in
+/// time when a planning request is large enough to need it. The v2 Brain
+/// block names it in one line.
+#[cfg(test)]
+mod plan_skill_tests {
+    use super::*;
+
+    fn plan() -> SkillEntry {
+        SkillManager::builtin_only()
+            .get("plan")
+            .cloned()
+            .expect("a built-in skill named plan")
+    }
+
+    #[test]
+    fn the_plan_skill_is_built_in_and_listed_in_the_catalog() {
+        let skill = plan();
+        assert_eq!(skill.scope, SkillScope::Builtin);
+        let text = build_skills_system_prompt_section(&SkillManager::builtin_only()).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("- plan \u{2014} "))
+            .unwrap_or_else(|| panic!("plan is not in the catalog: {text}"));
+        // On every request of every session: one short line.
+        assert!(line.chars().count() <= 140, "{line}");
+    }
+
+    /// The body is what v1's Brain block said about these four subjects, so
+    /// a session that reads it loses none of the guidance v2 left out.
+    #[test]
+    fn the_plan_skill_carries_the_checklists_the_brain_block_gave_up() {
+        let body = plan().body.unwrap();
+        for said in [
+            // The consensus checklist and its five dimensions.
+            "false consensus",
+            "scope and success criteria",
+            "UX, layout and sizing",
+            "data and persistence",
+            "edge cases and failure states",
+            "non-goals",
+            // UI sizing and user assets.
+            "Sizing and layout",
+            "GROUND TRUTH",
+            "lucide:notebook-pen",
+            // The Low-Level Design.
+            "## Low-Level Design",
+            "exact files and symbols",
+            "data flow",
+            "integration points",
+            // Mermaid.
+            "```mermaid",
+            "FULL Mermaid catalog",
+            "stateDiagram-v2",
+        ] {
+            assert!(body.contains(said), "the plan skill does not say {said:?}");
+        }
+    }
+
+    /// Decision D5: the skill is guidance for an adaptive interview, not the
+    /// v1 protocol by another route.
+    #[test]
+    fn the_plan_skill_keeps_the_interview_adaptive() {
+        let body = plan().body.unwrap();
+        for gone in [
+            "one question at a time",
+            "Batching questions is confusing",
+            "never skip",
+            "you did it wrong",
+        ] {
+            assert!(!body.contains(gone), "the plan skill says {gone:?}");
+        }
+        assert!(body.contains("one `ask_user` call"), "{body}");
     }
 }
