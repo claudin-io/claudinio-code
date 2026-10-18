@@ -11,8 +11,7 @@ pub fn def() -> ToolDef {
         name: "skills".into(),
         description: "Skills are instructions for specific kinds of task. action='list' returns \
                       every installed skill (name, scope, location, description); action='read' \
-                      returns one skill's instructions. Read a skill before working on a task it \
-                      matches, or when the user names one in a <skill> tag."
+                      returns one skill's instructions."
             .into(),
         input_schema: serde_json::json!({
             "type": "object",

@@ -398,6 +398,11 @@ pub enum SessionRecord {
     /// resumed session append them in the same order, so the tool array — the
     /// head of the cached prefix — comes out identical. Bookkeeping only.
     ToolsLoaded { names: Vec<String>, ts: u64 },
+    /// The session's living document (lean-harness Phase 4b), relative to
+    /// the workspace: `doc_create` writes it, and a successor session gets
+    /// its predecessor's (or, for a new top-level topic, the new one). The
+    /// latest record wins. Bookkeeping only; never part of the conversation.
+    DocumentLinked { path: String, ts: u64 },
 }
 
 /// Why the history a provider had cached was rewritten. Counted per session by
@@ -586,6 +591,15 @@ pub fn earliest_base_commit(records: &[SessionRecord]) -> Option<String> {
 pub fn earliest_base_commit_at(records: &[SessionRecord]) -> Option<(String, u64)> {
     records.iter().find_map(|r| match r {
         SessionRecord::BaseCommit { sha, ts } => Some((sha.clone(), *ts)),
+        _ => None,
+    })
+}
+
+/// The session's living document, relative to the workspace: the path of
+/// the latest `DocumentLinked` record, or `None` when it has none.
+pub fn linked_document(records: &[SessionRecord]) -> Option<String> {
+    records.iter().rev().find_map(|r| match r {
+        SessionRecord::DocumentLinked { path, .. } => Some(path.clone()),
         _ => None,
     })
 }
@@ -1295,6 +1309,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::Usage { ts, .. }
                 | SessionRecord::CacheBreak { ts, .. }
                 | SessionRecord::ToolsLoaded { ts, .. }
+                | SessionRecord::DocumentLinked { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
@@ -3104,6 +3119,35 @@ mod usage_tests {
         let v = serde_json::to_value(SessionRecord::cache_break(CacheBreakReason::ToolsLoaded))
             .unwrap();
         assert_eq!(v["reason"], "tools_loaded");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The session's living document (lean-harness Phase 4b) is linked by a
+    /// record of its own, the latest one winning; it never enters the
+    /// conversation, and a file written before it loads unchanged
+    /// (`OLD_SESSION` has none, and links no document). An older build skips
+    /// the line like any kind it does not know (the next test).
+    #[test]
+    fn a_document_linked_line_loads_links_the_latest_path_and_stays_out_of_the_history() {
+        assert_eq!(
+            linked_document(&load_records(&tmp_file("no_doc", &OLD_SESSION)).unwrap()),
+            None
+        );
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/a.md","ts":7}"#);
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/b.md","ts":8}"#);
+        let path = tmp_file("document_linked", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(
+            records.len(),
+            6,
+            "the document_linked lines must not be skipped"
+        );
+        assert_eq!(
+            linked_document(&records).as_deref(),
+            Some(".claudinio/docs/b.md")
+        );
+        assert_eq!(history_from_records(&records).len(), 1);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

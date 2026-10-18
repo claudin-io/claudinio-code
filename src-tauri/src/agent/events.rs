@@ -164,6 +164,15 @@ pub enum AgentEvent {
     },
     /// The session was linked to a new successor via handoff. The old session
     /// ends here; the UI stitches the successor's events into the same thread.
+    /// The session's living document changed (lean-harness Phase 4b): a
+    /// `doc_*` tool wrote it, or the loop found a person's edit. Carries the
+    /// whole outline, so the panel replaces what it shows.
+    #[serde(rename = "DocumentUpdated")]
+    DocumentUpdated {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        document: crate::agent::doc_session::DocView,
+    },
     #[serde(rename = "SessionLinked")]
     SessionLinked {
         #[serde(rename = "prevSessionId")]

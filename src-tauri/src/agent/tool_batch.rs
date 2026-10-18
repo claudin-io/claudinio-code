@@ -908,6 +908,7 @@ mod tests {
             ws.join("trust.json"),
         ));
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: Some(Arc::new(crate::agent::hooks::HookCtx::new(
                 set,
                 trust,

@@ -153,6 +153,10 @@ pub enum HandoffReason {
     ContextHandoff,
     #[serde(rename = "manual_builder")]
     ManualBuilder,
+    /// `doc_create` in a session that already has a document: a new
+    /// top-level topic is a new session (lean-harness Phase 4b).
+    #[serde(rename = "new_document")]
+    NewDocument,
 }
 
 impl HandoffReason {
@@ -162,6 +166,7 @@ impl HandoffReason {
             HandoffReason::GoldenFlip => "golden_flip",
             HandoffReason::ContextHandoff => "context_handoff",
             HandoffReason::ManualBuilder => "manual_builder",
+            HandoffReason::NewDocument => "new_document",
         }
     }
 }
@@ -175,6 +180,9 @@ pub struct HandoffSpec {
     pub golden_cycle: u32,
     pub golden_stalls: u32,
     pub golden_last_pending: Vec<String>,
+    /// The living document the successor is linked to instead of its
+    /// predecessor's (`NewDocument`), relative to the workspace.
+    pub document: Option<String>,
 }
 
 /// What a workflow run produced: either it finished normally, or it requests a
@@ -546,6 +554,7 @@ pub(super) async fn maybe_context_handoff(
         golden_cycle,
         golden_stalls: linked_stalls,
         golden_last_pending: linked_pending,
+        document: None,
     })))
 }
 

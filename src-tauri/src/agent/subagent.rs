@@ -2389,6 +2389,7 @@ mod transcript_tests {
         let ctx = ToolContext {
             workspace_root: Some(ws_str),
             session_store_path: Some(store.path.to_string_lossy().to_string()),
+            doc_access: Default::default(),
             hooks: Some(hooks),
             ..crate::agent::tools::tests_support::ctx()
         };

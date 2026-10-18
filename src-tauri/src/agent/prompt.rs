@@ -27,12 +27,16 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 - `tasks_set` is a full replacement (pass ALL tasks): use it only to create the list or to add, remove or reword tasks. Never resend the list just to change a status.
 - If the user asks about progress, guide them to the Task Panel.
 
+# 1b. LIVING DOCUMENT
+- Work with several distinct parts (research, a write-up, a multi-part feature): call `doc_create` first, one placeholder per part; fill sections with `doc_write`, delegating independent ones to explore subagents with `section`. Its outline arrives as a `<document>` block.
+- The user may edit it at any time; their edits win (`<doc-changed>`). A new top-level topic is a new `doc_create`, in a new session.
+
 # 2. CODE TOOLS
 - Accuracy hierarchy: LSP > `semantic_search` (conceptual) > `code_search` (keyword) > `grep` (fallback).
 - All of these but `grep` are deferred tools (DEFERRED TOOLS below): load the ones the task needs.
 - Use `file_outline` before `read_file` on unfamiliar files.
 - Never use bash search tools (grep/find/rg) when a dedicated tool exists.
-- For current/external information not in the codebase or your training data (docs, library versions, news, APIs), use `web_search` if available instead of guessing.
+- For current external facts (docs, library versions, news, APIs), use `web_search` if available instead of guessing.
 
 # 3. SUBAGENTS (`spawn_agents`)
 - Use subagents for broad or parallel search and verification: what they read stays out of your context, and the fuller your context, the harder it is to reason. Max {max_parallel} per call, all in ONE call; scopes must not overlap; trivial or dependent work stays with you.
@@ -437,6 +441,9 @@ pub(super) fn api_tools(
             defs.push(tools::exit_plan_mode_def());
         }
     }
+    // The living document (Phase 4b), in both modes: `doc_create` core, the
+    // rest deferred and unlisted until it loads them.
+    defs.extend(tools::doc::session_defs());
     defs.extend(mcp_defs.iter().cloned());
     defs.iter()
         .map(|t| ToolDescription {
@@ -1389,7 +1396,8 @@ mod deferred_prefix_tests {
             prefix(&AgentConfig::default(), SessionMode::Builder, &[], &[]);
         assert_eq!(profile, PromptProfile::Standard);
         // `edit_file` is core in Builder since decision D1 (Phase 3);
-        // `tasks_get` is deferred since Phase 4 (the run recites the list).
+        // `tasks_get` is deferred since Phase 4 (the run recites the list);
+        // `doc_create` is core since Phase 4b (the living document).
         assert_eq!(
             names(&tools),
             [
@@ -1405,6 +1413,7 @@ mod deferred_prefix_tests {
                 "spawn_agents",
                 "skills",
                 "finalize_plan",
+                "doc_create",
                 "load_tools"
             ]
         );
@@ -1424,6 +1433,37 @@ mod deferred_prefix_tests {
                 "tasks_get"
             ]
         );
+    }
+
+    /// The living document (Phase 4b): `doc_create` is core in both modes;
+    /// the three tools that work on a document are deferred but never listed
+    /// — a session without a document has no use for them, and `doc_create`
+    /// loads them (`deferred::before_call`). Once loaded they ride at the
+    /// end of the list like any loaded tool. Compact and the git operator
+    /// get none of them.
+    #[test]
+    fn doc_create_is_core_and_the_document_tools_wait_unlisted_until_loaded() {
+        let config = AgentConfig::default();
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            let (_, system, tools) = prefix(&config, mode, &[], &[]);
+            let sent = names(&tools);
+            assert!(sent.contains(&"doc_create"), "{mode:?}: {sent:?}");
+            for t in crate::agent::deferred::DOCUMENT_TOOLS {
+                assert!(!sent.contains(t), "{mode:?} sends {t} with no document");
+                assert!(!catalog_names(&system).contains(&t.to_string()));
+                assert!(crate::agent::deferred::is_deferred(t));
+            }
+            let loaded = crate::agent::deferred::DOCUMENT_TOOLS;
+            let (_, _, tools) = prefix(&config, mode, &[], loaded);
+            assert_eq!(names(&tools)[tools.len() - 3..], *loaded);
+        }
+        for profile in [PromptProfile::Compact, PromptProfile::GitSync] {
+            let tools = api_tools(SessionMode::Builder, profile, &[], &config);
+            assert!(
+                !tools.iter().any(|t| t.name.starts_with("doc_")),
+                "{profile:?}"
+            );
+        }
     }
 
     #[test]
@@ -1684,6 +1724,44 @@ mod deferred_prefix_tests {
         }
         let compact = crate::agent::surface::COMPACT_PROMPT;
         assert!(compact.contains("`<tasks>`") && compact.contains("same round"));
+    }
+
+    /// The living document (Phase 4b) in a few lines of the Standard prompt:
+    /// when to start one, how it is filled and delegated, that the user's
+    /// edits win, and that a new top-level topic is a new document in a new
+    /// session. Short: it is in every request of every session.
+    #[test]
+    fn the_standard_prompt_says_when_to_start_a_document_and_that_the_users_edits_win() {
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            let sys = system_prompt(
+                Some("/ws"),
+                None,
+                None,
+                None,
+                mode,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                false,
+            );
+            let start = sys.find("LIVING DOCUMENT").expect("a document section");
+            let section = &sys[start..sys[start..].find("\n# ").map_or(sys.len(), |e| start + e)];
+            for said in [
+                "several distinct parts",
+                "`doc_create`",
+                "`doc_write`",
+                "`section`",
+                "edits win",
+                "new session",
+                "`<document>`",
+            ] {
+                assert!(
+                    section.contains(said),
+                    "{mode:?} does not say {said:?}: {section}"
+                );
+            }
+            let words = section.split_whitespace().count();
+            assert!(words <= 120, "{words} words");
+        }
     }
 
     /// A feature that is off takes its tools out of the catalog as well as

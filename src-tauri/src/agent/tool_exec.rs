@@ -184,6 +184,7 @@ pub(super) async fn execute_reported(
                 output: truncated,
                 error: None,
             });
+            crate::agent::doc_session::after_tool(tool_name, ctx, event_tx, session_id);
             tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
         }
         Ok(ToolOutput::Rich { content, images }) => rich_result_block(
@@ -927,6 +928,7 @@ pub(super) fn handle_mode_switch(
                     golden_cycle: 0,
                     golden_stalls: 0,
                     golden_last_pending: vec![],
+                    document: None,
                 });
                 // Auto-commit the latest plan when exiting Brain mode
                 let auto_commit = ctx
@@ -1629,6 +1631,7 @@ mod tests {
 
     fn dummy_ctx() -> ToolContext {
         ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(
                 NonZeroUsize::new(8).unwrap(),

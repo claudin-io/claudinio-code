@@ -113,6 +113,10 @@ pub const DEFERRED_BUILTIN: &[(&str, &str)] = &[
     ),
 ];
 
+/// The tools that work on a session's living document (lean-harness Phase
+/// 4b). Deferred, and never named in the catalog.
+pub const DOCUMENT_TOOLS: &[&str] = &["doc_write", "doc_read", "doc_add"];
+
 /// How many MCP tools the catalog names. A server can expose hundreds; past
 /// this the catalog says how many more there are and from which servers, and
 /// `load_tools` still loads any of them.
@@ -123,15 +127,16 @@ pub const MCP_DESCRIPTION_CHARS: usize = 100;
 
 /// Whether `name` is sent only once loaded.
 pub fn is_deferred(name: &str) -> bool {
-    name.starts_with("mcp__") || DEFERRED_BUILTIN.iter().any(|(n, _)| *n == name)
+    name.starts_with("mcp__")
+        || DEFERRED_BUILTIN.iter().any(|(n, _)| *n == name)
+        || DOCUMENT_TOOLS.contains(&name)
 }
 
 pub fn load_tools_def() -> ToolDef {
     ToolDef {
         name: "load_tools".into(),
         description: "Add deferred tools (the DEFERRED TOOLS list in the system prompt) to your \
-                      tool list; they stay for the rest of the session. Load only what the task \
-                      needs. A name ending in * loads every deferred tool that starts with it, \
+                      tool list; they stay for the session. A name ending in * loads every deferred tool that starts with it, \
                       e.g. \"mcp__github__*\"."
             .into(),
         input_schema: serde_json::json!({
@@ -356,6 +361,17 @@ pub(crate) fn before_call(
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
 ) -> Option<crate::agent::provider::ContentBlock> {
+    if tool_name == "doc_create" {
+        // The document tools join with the document that gives them a use,
+        // in the same round: one cache break, never a load later on.
+        let deferred = deferred();
+        for name in DOCUMENT_TOOLS {
+            if deferred.iter().any(|t| t.name == *name) && !loaded.iter().any(|n| n == name) {
+                loaded.push(name.to_string());
+            }
+        }
+        return None;
+    }
     if tool_name != "load_tools" {
         if is_deferred(tool_name) && !loaded.iter().any(|n| n == tool_name) {
             let deferred = deferred();

@@ -229,6 +229,11 @@ pub async fn run_workflow_with_profile(
         crate::agent::task_recital::take_trailing_recital(history, &block);
         blocks.push(ContentBlock::text(block));
     }
+    // The living document's outline rides the same way (`agent::doc_session`).
+    if profile == PromptProfile::Standard {
+        let doc_blocks = crate::agent::doc_session::run_start_blocks(ctx);
+        blocks.extend(doc_blocks.into_iter().map(ContentBlock::text));
+    }
     push_user_blocks(history, store, ctx, blocks);
 
     let skill_mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
@@ -263,6 +268,9 @@ pub async fn run_workflow_with_profile(
         &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
             .unwrap_or_default(),
     );
+    if requested_profile == PromptProfile::Standard {
+        crate::agent::doc_session::seed_tools(ctx, store, &mut loaded);
+    }
     let mut prefix_loaded = loaded.len();
     let (mut profile, mut system, mut tools) = run_prefix(
         config,
@@ -1092,6 +1100,7 @@ pub async fn run_workflow_with_profile(
                         golden_cycle: golden.cycle,
                         golden_stalls: golden.stalls as u32,
                         golden_last_pending: golden_pending.clone(),
+                        document: None,
                     };
                     return Ok(RunOutcome::Handoff(Box::new(handoff_spec)));
                 }
@@ -1527,6 +1536,18 @@ pub async fn run_workflow_with_profile(
                     session_id,
                     &mut pending_handoff,
                 )
+            } else if tool_name == "doc_create" && profile == PromptProfile::Standard {
+                crate::agent::doc_session::create_call(
+                    &tool_use_id,
+                    &tool_input,
+                    &user_message,
+                    mode_ctl,
+                    store,
+                    ctx,
+                    event_tx,
+                    session_id,
+                    &mut pending_handoff,
+                )
             } else if tool_name == "spawn_agents" {
                 // Brain may only spawn read-only subagents.
                 let tool_input = if in_brain {
@@ -1712,6 +1733,7 @@ pub async fn run_workflow_with_profile(
         // `history` now ends with the assistant turn these results answer.
         let calls = history.last().map_or(&[][..], |m| m.content.as_slice());
         fit_round(&mut tool_result_blocks, calls, budget.round_chars);
+        crate::agent::doc_session::note_round(&mut tool_result_blocks, ctx, event_tx, session_id);
         push_turn(
             history,
             store,
@@ -3536,12 +3558,12 @@ mod deferred_loop_tests {
     use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SteeringCtl};
     use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
 
-    struct Workspace {
-        root: std::path::PathBuf,
-        store: SessionStore,
+    pub(super) struct Workspace {
+        pub(super) root: std::path::PathBuf,
+        pub(super) store: SessionStore,
     }
 
-    fn workspace(tag: &str) -> Workspace {
+    pub(super) fn workspace(tag: &str) -> Workspace {
         let root = std::env::temp_dir().join(format!(
             "claudinio-deferred-{tag}-{}-{}",
             std::process::id(),
@@ -3558,7 +3580,10 @@ mod deferred_loop_tests {
 
     /// One user message against a model following `script`, on `ws`'s
     /// session file. Returns the run's outcome and every request body sent.
-    async fn run(ws: &Workspace, script: Vec<Reply>) -> (Result<RunOutcome, String>, Vec<String>) {
+    pub(super) async fn run(
+        ws: &Workspace,
+        script: Vec<Reply>,
+    ) -> (Result<RunOutcome, String>, Vec<String>) {
         run_on(ws, None, script).await
     }
 
@@ -3598,7 +3623,7 @@ mod deferred_loop_tests {
         (outcome, bodies)
     }
 
-    fn tool_names(body: &str) -> Vec<String> {
+    pub(super) fn tool_names(body: &str) -> Vec<String> {
         let body: Value = serde_json::from_str(body).unwrap();
         body["tools"]
             .as_array()
@@ -3608,13 +3633,13 @@ mod deferred_loop_tests {
             .collect()
     }
 
-    fn last_result(body: &str) -> String {
+    pub(super) fn last_result(body: &str) -> String {
         let body: Value = serde_json::from_str(body).unwrap();
         let last = body["messages"].as_array().unwrap().last().unwrap().clone();
         last["content"][0]["content"].to_string()
     }
 
-    fn records_of(ws: &Workspace) -> Vec<SessionRecord> {
+    pub(super) fn records_of(ws: &Workspace) -> Vec<SessionRecord> {
         crate::agent::persist::load_records(&ws.store.path).unwrap()
     }
 
@@ -3837,6 +3862,238 @@ mod deferred_loop_tests {
         );
         assert_eq!(tool_names(&bodies[1]), tool_names(&bodies[0]));
         assert!(crate::agent::deferred::loaded_names(&records_of(&ws)).is_empty());
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+}
+
+/// The living document through the real loop (lean-harness Phase 4b): what
+/// `doc_create` does to the session and the next request, the outline a run
+/// starts with, a person's edit reaching the model as a persisted note, and
+/// a second document opening a new session.
+#[cfg(test)]
+mod document_loop_tests {
+    use super::deferred_loop_tests::{
+        Workspace, last_result, records_of, run, tool_names, workspace,
+    };
+    use super::*;
+    use crate::agent::deferred::DOCUMENT_TOOLS;
+    use crate::agent::subagent::scripted_model::Reply;
+
+    /// The text blocks of the last message of a request body.
+    fn last_texts(body: &str) -> Vec<String> {
+        let body: Value = serde_json::from_str(body).unwrap();
+        let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+        last["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn link_doc(ws: &Workspace, topics: &[&str]) -> std::path::PathBuf {
+        let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
+        let (rel, _) =
+            crate::agent::doc_session::create(&ws.root, &ws.store.path, "Pudim de leite", &topics)
+                .unwrap();
+        ws.store
+            .append(&SessionRecord::DocumentLinked {
+                path: rel.clone(),
+                ts: now_ms(),
+            })
+            .unwrap();
+        ws.root.join(rel)
+    }
+
+    #[tokio::test]
+    async fn doc_create_writes_the_scaffold_links_it_and_the_next_request_can_write_it() {
+        let ws = workspace("doc-create");
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Pudim de leite", "sections": ["origem", "servir"]}),
+                },
+                Reply::Tool {
+                    name: "doc_write",
+                    input: serde_json::json!({"id": "s1", "body": "Veio de Portugal."}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        let created = last_result(&bodies[1]);
+        assert!(
+            created.contains("s1 \u{b7} todo \u{b7} - \u{b7} origem"),
+            "{created}"
+        );
+        let first = tool_names(&bodies[0]);
+        assert!(first.contains(&"doc_create".to_string()));
+        assert!(!first.contains(&"doc_write".to_string()));
+        let second = tool_names(&bodies[1]);
+        assert_eq!(second[second.len() - 3..], *DOCUMENT_TOOLS);
+        let records = records_of(&ws);
+        assert_eq!(
+            crate::agent::persist::linked_document(&records).as_deref(),
+            Some(".claudinio/docs/pudim-de-leite.md")
+        );
+        assert_eq!(
+            crate::agent::deferred::loaded_names(&records),
+            DOCUMENT_TOOLS
+        );
+        let text =
+            std::fs::read_to_string(ws.root.join(".claudinio/docs/pudim-de-leite.md")).unwrap();
+        assert!(
+            text.contains(
+                "## origem\n<!-- claudinio: id=s1 status=done by=main -->\nVeio de Portugal."
+            ),
+            "{text}"
+        );
+        assert!(last_result(&bodies[2]).contains("s1 \u{b7} done \u{b7} main"));
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_session_with_a_document_starts_each_run_with_its_outline_and_its_tools() {
+        let ws = workspace("doc-start");
+        link_doc(&ws, &["origem"]);
+        let (outcome, bodies) = run(&ws, vec![Reply::Text("done")]).await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        let texts = last_texts(&bodies[0]);
+        assert_eq!(
+            texts.last().unwrap(),
+            "<document path=\".claudinio/docs/pudim-de-leite.md\">\n# Pudim de leite\n\
+             s1 \u{b7} todo \u{b7} - \u{b7} origem\n</document>"
+        );
+        assert_eq!(texts[0], "go", "the user's words come first");
+        let names = tool_names(&bodies[0]);
+        assert_eq!(names[names.len() - 3..], *DOCUMENT_TOOLS);
+        let loads = |ws: &Workspace| {
+            records_of(ws)
+                .iter()
+                .filter(|r| matches!(r, SessionRecord::ToolsLoaded { .. }))
+                .count()
+        };
+        assert_eq!(loads(&ws), 1);
+        let (_, bodies) = run(&ws, vec![Reply::Text("again")]).await;
+        assert_eq!(loads(&ws), 1, "a later run finds them loaded");
+        let names = tool_names(&bodies[0]);
+        assert_eq!(names[names.len() - 3..], *DOCUMENT_TOOLS);
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_persons_edit_during_a_run_is_told_in_the_next_tool_results_turn_and_persisted() {
+        let ws = workspace("doc-edit");
+        let path = link_doc(&ws, &["origem"]);
+        // The person edits the section once the agent has written it, while
+        // the second request is in flight.
+        let watcher = {
+            let path = path.clone();
+            tokio::spawn(async move {
+                loop {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    if text.contains("first draft") {
+                        std::fs::write(&path, text.replace("first draft", "the person's draft"))
+                            .unwrap();
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+        };
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_write",
+                    input: serde_json::json!({"id": "s1", "body": "first draft"}),
+                },
+                Reply::Delayed(
+                    1500,
+                    Box::new(Reply::Tool {
+                        name: "list_dir",
+                        input: serde_json::json!({"path": "."}),
+                    }),
+                ),
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        watcher.abort();
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.err()
+        );
+        assert!(
+            !last_texts(&bodies[1])
+                .iter()
+                .any(|t| t.contains("<doc-changed>")),
+            "the agent's own write is not a change"
+        );
+        let note = last_texts(&bodies[2])
+            .into_iter()
+            .find(|t| t.starts_with("<doc-changed>"))
+            .expect("the note rides with the tool results");
+        assert!(note.contains("s1 (origem) edited"), "{note}");
+        assert!(!note.contains("the person's draft"), "never a body: {note}");
+        // Persisted inside the tool-results turn: a reload sends the same bytes.
+        let replayed = crate::agent::persist::history_from_records(&records_of(&ws));
+        assert!(replayed.iter().any(|m| {
+            m.role == "user"
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                && m.content
+                    .iter()
+                    .any(|b| b.get_text() == Some(note.as_str()))
+        }));
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[tokio::test]
+    async fn doc_create_in_a_session_that_has_a_document_hands_off_to_a_new_session() {
+        let ws = workspace("doc-handoff");
+        link_doc(&ws, &["origem"]);
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa", "cobertura"]}),
+                },
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        let Ok(RunOutcome::Handoff(spec)) = outcome else {
+            panic!("expected a handoff");
+        };
+        assert_eq!(spec.reason, HandoffReason::NewDocument);
+        assert_eq!(
+            spec.document.as_deref(),
+            Some(".claudinio/docs/bolo-de-cenoura.md")
+        );
+        assert!(spec.first_message.contains("go"), "{}", spec.first_message);
+        assert!(ws.root.join(".claudinio/docs/bolo-de-cenoura.md").exists());
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(
+            crate::agent::persist::linked_document(&records_of(&ws)).as_deref(),
+            Some(".claudinio/docs/pudim-de-leite.md"),
+            "this session keeps its own document"
+        );
         std::fs::remove_dir_all(&ws.root).ok();
     }
 }

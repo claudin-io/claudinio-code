@@ -328,6 +328,7 @@ async fn run_session(
             .flatten()
     };
     let mut ctx = ToolContext {
+        doc_access: Default::default(),
         hooks: None,
         db_path,
         lsp_manager: None,
@@ -488,11 +489,14 @@ fn link_session(
     if let Some((sha, ts)) = crate::agent::persist::earliest_base_commit_at(&old_records) {
         new.try_append(&SessionRecord::BaseCommit { sha, ts });
     }
-    if let Ok(tasks) = crate::agent::persist::load_last_tasks(&old.path)
+    // A new top-level topic starts its own list (lean-harness Phase 4b).
+    if spec.reason != crate::agent::session::HandoffReason::NewDocument
+        && let Ok(tasks) = crate::agent::persist::load_last_tasks(&old.path)
         && !tasks.is_empty()
     {
         let _ = crate::agent::persist::append_tasks(&new.path, &tasks);
     }
+    crate::agent::doc_session::carry_into(&old.path, &old_records, &new, spec.document.as_deref());
     new.try_append(&SessionRecord::Mode {
         mode: spec.next_mode.as_str().into(),
         origin: spec.next_origin.as_str().into(),
@@ -710,6 +714,78 @@ reference:
         assert!(
             bodies[2].contains("hello world"),
             "the read-only command ran"
+        );
+    }
+
+    /// A successor in the eval is linked like the app's: the living document
+    /// travels with a context handoff, and a new top-level topic starts its
+    /// own list instead of inheriting the old session's tasks.
+    #[test]
+    fn a_successor_carries_the_document_and_a_new_topic_starts_without_the_old_tasks() {
+        let work = tempfile::tempdir().unwrap();
+        let ws = work.path().to_str().unwrap();
+        let old = SessionStore::create("old", Some(ws)).unwrap();
+        old.try_append(&SessionRecord::DocumentLinked {
+            path: ".claudinio/docs/a.md".into(),
+            ts: 1,
+        });
+        crate::agent::persist::append_tasks(
+            &old.path,
+            &[crate::agent::persist::TaskItem {
+                id: "t1".into(),
+                title: "old work".into(),
+                description: String::new(),
+                journal: vec![],
+                status: "todo".into(),
+            }],
+        )
+        .unwrap();
+        let spec = |reason, document: Option<&str>| crate::agent::session::HandoffSpec {
+            reason,
+            next_mode: crate::agent::session::SessionMode::Builder,
+            next_origin: crate::agent::session::ModeOrigin::Agent,
+            first_message: String::new(),
+            golden_cycle: 0,
+            golden_stalls: 0,
+            golden_last_pending: vec![],
+            document: document.map(str::to_string),
+        };
+        let carried = link_session(
+            &old,
+            ws,
+            &spec(crate::agent::session::HandoffReason::ContextHandoff, None),
+        )
+        .unwrap();
+        let records = crate::agent::persist::load_records(&carried.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::linked_document(&records).as_deref(),
+            Some(".claudinio/docs/a.md")
+        );
+        assert_eq!(
+            crate::agent::persist::load_last_tasks(&carried.path)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let fresh = link_session(
+            &old,
+            ws,
+            &spec(
+                crate::agent::session::HandoffReason::NewDocument,
+                Some(".claudinio/docs/b.md"),
+            ),
+        )
+        .unwrap();
+        let records = crate::agent::persist::load_records(&fresh.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::linked_document(&records).as_deref(),
+            Some(".claudinio/docs/b.md")
+        );
+        assert!(
+            crate::agent::persist::load_last_tasks(&fresh.path)
+                .unwrap()
+                .is_empty()
         );
     }
 

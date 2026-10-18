@@ -322,6 +322,7 @@ mod tests {
     fn ctx_with_root(root: &std::path::Path) -> crate::agent::tools::ToolContext {
         use std::sync::Arc;
         crate::agent::tools::ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             browser: None,

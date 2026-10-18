@@ -522,6 +522,7 @@ mod tests {
 
     fn dummy_ctx() -> ToolContext {
         ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             records_cache: std::sync::Arc::new(std::sync::Mutex::new(LruCache::new(
                 NonZeroUsize::new(8).unwrap(),

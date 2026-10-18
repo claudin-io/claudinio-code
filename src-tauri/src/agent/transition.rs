@@ -76,12 +76,23 @@ pub async fn link_session(
         new_store.try_append(&SessionRecord::BaseCommit { sha, ts });
     }
 
-    // 5. Copy tasks snapshot (golden tasks included).
-    if let Ok(tasks) = tasks_store::load_last_tasks(&old_handle.store_path)
+    // 5. Copy tasks snapshot (golden tasks included) — except for a new
+    // top-level topic, which is a new document and starts its own list.
+    if spec.reason != HandoffReason::NewDocument
+        && let Ok(tasks) = tasks_store::load_last_tasks(&old_handle.store_path)
         && !tasks.is_empty()
     {
         let _ = tasks_store::append_tasks(&new_path, &tasks);
     }
+
+    // 5½. The living document: the predecessor's travels with it, or the new
+    // one for a new topic (lean-harness Phase 4b).
+    crate::agent::doc_session::carry_into(
+        &old_handle.store_path,
+        &old_records,
+        &new_store,
+        spec.document.as_deref(),
+    );
 
     // 6. Append the Mode record for the new session.
     new_store.try_append(&SessionRecord::Mode {
@@ -179,7 +190,9 @@ pub fn resolve_first_message(
             }
             msg
         }
-        HandoffReason::GoldenFlip | HandoffReason::ContextHandoff => spec.first_message.clone(),
+        HandoffReason::GoldenFlip | HandoffReason::ContextHandoff | HandoffReason::NewDocument => {
+            spec.first_message.clone()
+        }
     }
 }
 
@@ -290,6 +303,7 @@ pub fn rebuild_tool_context(
         // empty history and a handoff document, which is a compacted context,
         // not a user opening the app (`startup`) and not a human action
         // (`resume`).
+        doc_access: Default::default(),
         hooks: old_ctx.hooks.as_ref().map(|h| {
             let next = h
                 .for_session(new_session_id, new_store_path.to_path_buf())
@@ -362,6 +376,7 @@ mod tests {
             golden_cycle: 0,
             golden_stalls: 0,
             golden_last_pending: Vec::new(),
+            document: None,
         }
     }
 

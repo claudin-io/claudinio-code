@@ -1,5 +1,6 @@
 pub(crate) mod bash;
 mod browser;
+pub mod doc;
 mod edit_file;
 pub mod finalize_plan;
 mod grep;
@@ -92,6 +93,12 @@ pub struct ToolContext {
     /// one-off workflows — so no firing site has to branch on a missing
     /// workspace itself. See `crate::agent::hooks`.
     pub hooks: Option<Arc<crate::agent::hooks::HookCtx>>,
+    /// What this context may do to the session's living document
+    /// (`agent::doc_session`): the main session writes any section; a
+    /// subagent spawned with a `section` writes only that one; any other
+    /// subagent none. `Main` by default — every context the app builds is a
+    /// session's own.
+    pub doc_access: crate::agent::doc_session::DocAccess,
 }
 
 /// See `ToolContext::shell_gate`.
@@ -110,6 +117,7 @@ pub(crate) mod tests_support {
 
     pub fn ctx() -> ToolContext {
         ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -286,7 +294,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read_file".into(),
-            description: "Read a text file in the workspace (max 2MB), or only lines start_line..end_line (1-based, inclusive). A file must be read before edit_file may change it.".into(),
+            description: "Read a text file in the workspace (max 2MB), or only lines start_line..end_line (1-based, inclusive).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -423,8 +431,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
             name: "run_quality".into(),
             description: "Run the project's own checks and record the result as session evidence: \
                           'tests' runs its test suite, 'coverage' how much of what you changed a \
-                          test executes. The commands come from the project; you cannot pass one. \
-                          A golden task can be closed only after a green run with no file changed \
+                          test executes. A golden task can be closed only after a green run with no file changed \
                           since, so call this when the work is done and again after any later edit.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -592,7 +599,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_update".into(),
-            description: "Change tasks without resending the list: status (todo -> doing -> done) and/or journal entries to append. One task: id, status, journal. Several at once: updates: [{id, status?, journal?}]; all are checked first, and if one fails none is applied. Returns where the whole list stands.".into(),
+            description: "Change tasks without resending the list: status (todo -> doing -> done) and/or journal entries to append. One task: id, status, journal. Several at once: updates: [{id, status?, journal?}]; all are checked first, and if one fails none is applied.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -617,7 +624,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "spawn_agents".into(),
-            description: format!("Run 1-{n} subagents in parallel, all in ONE call's 'agents' array. Each starts with an empty context and cannot ask the user, so its goal must be self-contained: paths, symbols, constraints, exact values. 'explore' reads; 'code' can also edit files and run bash. Returns each agent's report.", n = max_parallel),
+            description: format!("Run 1-{n} subagents in parallel, all in ONE call's 'agents' array. Each starts with an empty context and cannot ask the user, so its goal must be self-contained: paths, symbols, constraints, exact values. 'explore' reads; 'code' can also edit files and run bash.", n = max_parallel),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["agents"],
@@ -631,7 +638,8 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                                 "name": { "type": "string", "description": "Short label shown to the user" },
                                 "goal": { "type": "string", "description": "Self-contained instructions, in English" },
                                 "mode": { "type": "string", "enum": ["explore", "code"] },
-                                "expected_output": { "type": "string", "description": "What the report must contain" }
+                                "expected_output": { "type": "string", "description": "What the report must contain" },
+                                "section": { "type": "string", "description": "Document section id it writes" }
                             }
                         }
                     }
@@ -666,7 +674,7 @@ pub fn write_plan_def() -> ToolDef {
 pub fn finalize_plan_def() -> ToolDef {
     ToolDef {
         name: "finalize_plan".into(),
-        description: "Append the Implementation Log to the plan once all tasks are done and verified: the last step of a Builder run. Changed files and commits are read from git, so `journal` holds findings, decisions and gotchas, not a file list.".into(),
+        description: "Append the Implementation Log to the plan once all tasks are done and verified. Changed files and commits are read from git, so `journal` holds findings, decisions and gotchas, not a file list.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1018,6 +1026,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = skills_tool::execute(args, &mgr)?;
             Ok(ToolOutput::Text { content })
         }
+        "doc_create" | "doc_write" | "doc_read" | "doc_add" => doc::execute(name, &args, ctx),
         "spawn_agents" => Err("spawn_agents is handled by the session orchestrator".into()),
         "enter_plan_mode" | "exit_plan_mode" => {
             Err("mode switch tools are handled by the session orchestrator".into())
@@ -1308,6 +1317,7 @@ mod tests {
     /// (so any path is valid).
     fn test_ctx() -> ToolContext {
         ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1962,6 +1972,7 @@ mod tests {
     #[test]
     fn test_validate_path_allows_within_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1993,6 +2004,7 @@ mod tests {
     #[test]
     fn test_validate_path_rejects_outside_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2024,6 +2036,7 @@ mod tests {
     #[test]
     fn test_validate_path_allows_when_no_workspace_set() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2053,6 +2066,7 @@ mod tests {
     #[test]
     fn test_validate_read_path_allows_user_skill_dirs() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2105,6 +2119,7 @@ mod tests {
         std::fs::write(&file_path, "fn main() {}").unwrap();
 
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2144,6 +2159,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2187,6 +2203,7 @@ mod tests {
     #[test]
     fn test_execute_list_dir_rejects_outside_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2219,6 +2236,7 @@ mod tests {
     #[test]
     fn test_execute_read_file_rejects_outside_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2251,6 +2269,7 @@ mod tests {
     #[test]
     fn test_grep_defaults_to_workspace_root() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2282,6 +2301,7 @@ mod tests {
     fn test_bash_dispatch_echo() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2316,6 +2336,7 @@ mod tests {
     #[test]
     fn test_bash_dispatch_unknown_tool() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,

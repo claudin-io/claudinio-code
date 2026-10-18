@@ -349,15 +349,18 @@ pub fn parse(md: &str) -> Document {
     }
 }
 
+/// One section as it is written in the file: its header line(s), then its
+/// body.
+pub fn render_section(s: &Section) -> String {
+    format!("{}{}", s.header(), s.body)
+}
+
 pub fn render(doc: &Document) -> String {
     let mut out = String::new();
     for b in &doc.blocks {
         match b {
             Block::Prose(p) => out.push_str(p),
-            Block::Section(s) => {
-                out.push_str(&s.header());
-                out.push_str(&s.body);
-            }
+            Block::Section(s) => out.push_str(&render_section(s)),
         }
     }
     out
@@ -552,7 +555,7 @@ impl Document {
 
     /// One more than the highest `s<N>` in the document, and never below
     /// the floor an earlier reading set.
-    fn next_number(&self) -> u32 {
+    pub fn next_number(&self) -> u32 {
         let highest = self
             .sections()
             .filter_map(|s| s.id.strip_prefix('s')?.parse::<u32>().ok())
@@ -565,7 +568,12 @@ impl Document {
     /// deleted keeps its number: the model may still know `s3` as the topic
     /// it was, and a new placeholder answering to it would read as an edit.
     pub fn reserve_ids_of(&mut self, earlier: &Document) {
-        self.floor = self.floor.max(earlier.next_number());
+        self.reserve_from(earlier.next_number());
+    }
+
+    /// New ids start at `s<n>` or later.
+    pub fn reserve_from(&mut self, n: u32) {
+        self.floor = self.floor.max(n);
     }
 
     /// Claim and write section `id` for `owner`. `body` empty or absent with

@@ -276,6 +276,7 @@ pub async fn send_message(
     };
 
     let ctx = ToolContext {
+        doc_access: Default::default(),
         hooks: Some(hook_ctx),
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
@@ -1110,6 +1111,7 @@ pub async fn compact_session(
     let ctx = ToolContext {
         // No SessionStart: this is not a run, it is a compaction. PreCompact is
         // the event that belongs here, and it fires with `trigger: "manual"`.
+        doc_access: Default::default(),
         hooks: Some(build_hook_ctx(
             ws.resolve_hooks(&config).await,
             state.hook_trust.clone(),
@@ -1268,6 +1270,7 @@ pub async fn continue_with_builder(
         golden_cycle: 0,
         golden_stalls: 0,
         golden_last_pending: Vec::new(),
+        document: None,
     };
     spec.first_message = transition::resolve_first_message(
         &spec,
@@ -1295,6 +1298,7 @@ pub async fn continue_with_builder(
     let ctx = ToolContext {
         // A linked session starting from a kickoff document — the same shape as
         // a context handoff, and reported the same way.
+        doc_access: Default::default(),
         hooks: Some(build_hook_ctx(
             ws.resolve_hooks(&config).await,
             state.hook_trust.clone(),
@@ -1555,6 +1559,7 @@ pub async fn commit_and_push(
         // so PreToolUse and PostToolUse fire. There is no user prompt and no
         // conversation here, so SessionStart, UserPromptSubmit and Stop do not
         // (see the profile check in `run_workflow_with_profile`).
+        doc_access: Default::default(),
         hooks: Some(build_hook_ctx(
             ws.resolve_hooks(&config).await,
             state.hook_trust.clone(),
