@@ -135,7 +135,9 @@ reports one, and which subagent asked; OpenAI's `prompt_tokens` includes its
 to all input on either protocol). A subagent's own turns and usage go to
 `<session>.sub/<parent_tool_use_id>-<n>.jsonl` beside the session file, not
 into it: the session file is the model's history and is replayed into the next
-request. `scripts/session-stats.py` aggregates them (`--cost` for cost, rounds
+request. A compaction's summarizer is a subagent too and writes
+`<session>.sub/compact-<n>.jsonl` (a fresh file per attempt). Jev's calls are
+billed into the session total but leave no `usage` record. `scripts/session-stats.py` aggregates them (`--cost` for cost, rounds
 and cache share per run).
 
 ## Trust boundaries

@@ -9,7 +9,7 @@ faster or better is gated on the numbers this produces (lean-harness plan,
 
 | | Metric | How the runner computes it |
 |---|---|---|
-| **M1** | Billed cost per solved task, cache-aware | Total cost of every provider request in the run (main sessions, subagents, the completion judge) divided by the number of tasks whose oracle passed. The cost is what the provider reported; for a request with none, `--price-in/--price-out` (USD per million tokens) fill it in, cache reads at 0.1x and cache writes at 1.25x the input price unless given. When neither exists M1 prints `n/a` rather than a number that is too low. |
+| **M1** | Billed cost per solved task, cache-aware | Total cost of every provider request in the run (main sessions, subagents, compaction summaries, the completion judge) divided by the number of tasks whose oracle passed. The cost is what the provider reported; for a request with none, `--price-in/--price-out` (USD per million tokens) fill it in, cache reads at 0.1x and cache writes at 1.25x the input price unless given. When neither exists M1 prints `n/a` rather than a number that is too low. Jev's calls are not included: they leave no `usage` record (the app only adds their cost to the session total), so a run with `--jev-api-key-env` reports M1 without them. |
 | **M2** | Rounds per task | Median over tasks of provider requests, main session and subagents together. Each round re-sends the whole context, so this is latency and money even when cached. |
 | **M3** | Pass rate | Tasks whose oracle passed after the session, over tasks run. Nothing ships that lowers it. |
 
@@ -58,10 +58,11 @@ results to `results.jsonl` in the work directory, not into the current one.
 (`completed`, `timeout`, `error: …`), `wall_s`, the oracle's exit code and
 output tail, and the metrics: `rounds` (`main_rounds` + `subagent_rounds`),
 `input_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `output_tokens`,
-`subagent_tokens`, `cost`, `cost_known`, `tool_calls` per tool, `subagents`,
-`sessions` — then prints M1, M2, M3 and the shares. The sessions themselves are
+`subagent_tokens`, `cost`, `cost_known`, `tool_calls` per tool, `subagents`
+(spawned with `spawn_agents`), `compactions` (summarizer runs, whose requests
+count in `subagent_rounds` and `subagent_tokens`), `sessions` — then prints M1, M2, M3 and the shares. The sessions themselves are
 ordinary session files under the task's workspace (`.claudinio/sessions/`,
-subagent transcripts in `<id>.sub/`), so `scripts/session-stats.py --cost` reads
+subagent and compaction transcripts in `<id>.sub/`), so `scripts/session-stats.py --cost` reads
 them too.
 
 ## What a run is

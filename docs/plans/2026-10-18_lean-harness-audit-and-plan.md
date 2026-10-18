@@ -483,3 +483,46 @@ An independent review of `a24bbdc..f5949ef` reported four major and three minor 
 
 **Deviations.** Beyond what the review asked: the policy also protects `.claudinio.json` and `.claudinio/` (the same bypass by another route); the history eval config gained `passWithNoTests: false`; and the visible test files of tasks that already had hidden tests (for example `test_retry_basic.py`) are also rewritten, which discards any tests the agent added to them. Those tasks grade their hidden tests.
 
+
+### Phase 0 — second review fixes
+
+A second independent review of `a24bbdc..d08c47f` reported one major and five minor findings. All six were checked against the code and all six were real. Five were fixed test-first (the reproducing test seen red on an assertion first); the Jev one was documented instead, for the reason below.
+
+**Commits.** `6d17526` a compaction's summarizer requests are recorded as usage · `ec4b449` the subagent transcript keeps the final turn on the interrupted and stop-hook paths · `aef0ed0` session-stats books every subagent transcript to its run · `8ae7a50` validate removes its temporary work dir when every task is valid · `1909cb1` the architecture-notes oracle grades content, not one word · and the docs commit that adds this entry.
+
+- **Compaction requests were never recorded (major).** `compact_history` ran its summarizer through the unrecorded `run_subagent`, so a run that compacted reported fewer rounds and a lower M1 than the provider billed. The summarizer now writes its turns and `usage` to `<id>.sub/compact-<n>.jsonl`, a fresh file per attempt, because a failed attempt writes no `Compacted` record but was still billed. `eval::metrics` counts those requests as subagent rounds and tokens and reports `compactions` separately from spawned `subagents`. `run_subagent` is now `#[cfg(test)]`, so no production subagent can run unrecorded. The test drives `compact_history` directly against the scripted model rather than a whole run over the hard line: that function is the one funnel both mid-run call sites and the manual command go through, and reaching it through a run would first take the verbatim-prune and handoff paths.
+- **Transcript gaps (minor).** The interrupted branch now writes the partial text. On the stop-hook path the review's finding understated the problem: the terminal turn was missing from the subagent's *live history* too, so the model got `<hook-feedback>` about an answer it could no longer see. The turn now joins the history before SubagentStop fires, as it already did in the main loop. This is a deliberate behaviour change. The scripted model gained `Reply::Hang`, a response that never finishes, to drive the interrupt test.
+- **session-stats id mismatch (minor).** The spawn map is keyed by the same `[A-Za-z0-9_-]` sanitization the transcript file name uses. Compaction transcripts are booked to the run that was under way when they started (matched by their meta `created_at`) rather than becoming runs of their own.
+- **Work dirs and the default `--out` (minor).** `validate` removes its temporary work dir when every task is valid (~235 MB per full run). It keeps the dir, and prints its path, when a task is invalid, and it never removes a `--work-dir` the user named. `run`'s default results file moved from `eval-results.jsonl` in the cwd to `results.jsonl` in the work dir. The five leftover `/tmp/claudinio-eval-*` dirs from earlier validate runs on this host (~482 MB) were deleted.
+- **Document oracle graded a word (minor).** Reproduced by hand: the reference write-up with "collision" reworded to "collide" failed the check. A required word may now list alternatives (`collision|collide|clash|same code`), matched case-insensitively. A Failure-modes section that never mentions collisions still fails.
+- **Jev not in M1 (minor): documented, not recorded.** Jev's calls return a cost and no token usage, at four call sites (routing, prune decisions, the verdict, the loop check). Writing them as `usage` records would count them as rounds, and M2 is defined as requests to the model under test. `eval/README.md` and `docs/ARCHITECTURE.md` now say that M1 leaves out Jev, which the runner enables only with `--jev-api-key-env`. If Jev's cost ever needs to be inside M1, it should get a record kind of its own rather than a `usage` record.
+
+**`validate` after the fixes**: 25/25 valid, oracle time 46.1 s (60 s wall including the build). The temporary work dir was removed afterwards.
+
+| task | start (must fail) | reference (must pass) | seconds | verdict |
+|---|---|---|---:|---|
+| brain-todo-priorities | fail (1) | pass | 2.1 | ok |
+| doc-architecture-notes | fail (1) | pass | 0.5 | ok |
+| doc-incident-writeup | fail (1) | pass | 0.5 | ok |
+| hist-auto-mode-choice | fail (1) | pass | 5.4 | ok |
+| hist-custom-provider-not-catalog | fail (1) | pass | 5.2 | ok |
+| hist-hook-tooltip-wraps | fail (1) | pass | 6.6 | ok |
+| hist-jev-settings | fail (1) | pass | 4.7 | ok |
+| hist-mtplx-engine-label | fail (1) | pass | 5.1 | ok |
+| hist-pretooluse-hook-round | fail (1) | pass | 4.3 | ok |
+| hist-windows-folder-name | fail (1) | pass | 3.8 | ok |
+| js-callbacks-to-async | fail (1) | pass | 0.3 | ok |
+| js-daily-summary-counts | fail (1) | pass | 0.3 | ok |
+| js-digest-local-day | fail (1) | pass | 0.3 | ok |
+| js-lru-cache | fail (1) | pass | 0.3 | ok |
+| js-money-in-cents | fail (1) | pass | 0.3 | ok |
+| js-slugify-accents | fail (1) | pass | 0.3 | ok |
+| js-two-small-features | fail (1) | pass | 0.3 | ok |
+| py-csv-quoted-fields | fail (1) | pass | 0.7 | ok |
+| py-extract-validation | fail (2) | pass | 0.8 | ok |
+| py-inventory-weight-report | fail (1) | pass | 0.7 | ok |
+| py-pager-last-page | fail (1) | pass | 0.6 | ok |
+| py-plan-quota-off-by-one | fail (1) | pass | 0.7 | ok |
+| py-rename-timeout-setting | fail (1) | pass | 0.8 | ok |
+| py-retry-backoff | fail (2) | pass | 0.7 | ok |
+| py-two-unrelated-bugs | fail (1) | pass | 0.8 | ok |
