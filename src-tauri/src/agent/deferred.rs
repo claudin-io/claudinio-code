@@ -44,9 +44,16 @@ use tauri::ipc::Channel;
 /// The built-in tools a Standard main session does not send until they are
 /// loaded, each with the line the catalog shows for it. Everything else
 /// built in is core: `read_file`, `list_dir`, `grep`, `bash`, `ask_user`,
-/// `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`, `skills`,
-/// `load_tools`, and the mode's own (`write_plan`, `exit_plan_mode` in Brain).
-/// Every MCP tool is deferred too. The order here is the catalog's order.
+/// `tasks_get`, `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`,
+/// `skills`, `load_tools`, and the mode's own (`write_plan`, `exit_plan_mode`
+/// in Brain). Every MCP tool is deferred too. The order here is the catalog's
+/// order.
+///
+/// `tasks_get` is core although the brief listed it here: the Builder prompt
+/// and every handoff kickoff (`agent::transition`) make it the session's
+/// first call — the Builder has no other way to read the task descriptions
+/// Brain wrote — so deferring it bought ~70 tokens of prefix for a
+/// `tools_loaded` cache break in nearly every Builder session.
 pub const DEFERRED_BUILTIN: &[(&str, &str)] = &[
     (
         "semantic_search",
@@ -85,7 +92,6 @@ pub const DEFERRED_BUILTIN: &[(&str, &str)] = &[
         "browser_screenshot",
         "see the open page, or part of it, as an image",
     ),
-    ("tasks_get", "the current task list"),
     (
         "finalize_plan",
         "append the implementation log to the plan once the work is done and verified",
@@ -434,6 +440,7 @@ mod tests {
             "spawn_agents",
             "skills",
             "load_tools",
+            "tasks_get",
             "edit_file",
             "write_plan",
             "exit_plan_mode",
@@ -449,16 +456,19 @@ mod tests {
             tool("code_search", ""),
             tool("bash", ""),
             tool("mcp__a__x", ""),
-            tool("tasks_get", ""),
+            tool("finalize_plan", ""),
         ]);
         assert_eq!(names(&core), ["read_file", "bash"]);
-        assert_eq!(names(&deferred), ["code_search", "mcp__a__x", "tasks_get"]);
+        assert_eq!(
+            names(&deferred),
+            ["code_search", "mcp__a__x", "finalize_plan"]
+        );
     }
 
     #[test]
     fn the_catalog_is_one_line_per_deferred_tool_in_a_fixed_order() {
         let deferred = vec![
-            tool("tasks_get", "x"),
+            tool("finalize_plan", "x"),
             tool("mcp__b__two", "Second server tool"),
             tool("code_search", "x"),
             tool("mcp__a__one", &format!("First line\n{}", "y".repeat(300))),
@@ -469,7 +479,7 @@ mod tests {
         // Built-ins in the table's order, then MCP tools in the order they came
         // (server then tool name, as `mcp::snapshots` stores them).
         assert!(lines[0].starts_with("- code_search \u{2014} find definitions"));
-        assert!(lines[1].starts_with("- tasks_get \u{2014} "));
+        assert!(lines[1].starts_with("- finalize_plan \u{2014} "));
         assert!(lines[2].starts_with("- mcp__b__two \u{2014} Second server tool"));
         let mcp_desc = lines[3].strip_prefix("- mcp__a__one \u{2014} ").unwrap();
         assert!(mcp_desc.starts_with("First line yyy"), "{mcp_desc}");
@@ -535,21 +545,21 @@ mod tests {
 
     #[test]
     fn a_load_reports_what_joined_what_was_there_and_what_does_not_exist() {
-        let deferred = vec![tool("code_search", ""), tool("tasks_get", "")];
+        let deferred = vec![tool("code_search", ""), tool("finalize_plan", "")];
         let load = resolve(
-            &["code_search".into(), "tasks_get".into(), "nope".into()],
+            &["code_search".into(), "finalize_plan".into(), "nope".into()],
             &deferred,
-            &["tasks_get".into()],
+            &["finalize_plan".into()],
         );
         assert_eq!(load.added, ["code_search"]);
-        assert_eq!(load.already, ["tasks_get"]);
+        assert_eq!(load.already, ["finalize_plan"]);
         assert_eq!(load.unknown, ["nope"]);
         let text = load.answer(&deferred).unwrap();
         assert!(text.contains("Loaded: code_search") && text.contains("nope"));
         let err = resolve(&["nope".into()], &deferred, &[])
             .answer(&deferred)
             .unwrap_err();
-        assert!(err.contains("code_search, tasks_get"), "{err}");
+        assert!(err.contains("code_search, finalize_plan"), "{err}");
     }
 
     /// Hooks select by the name of the tool that was called, through the
@@ -560,8 +570,8 @@ mod tests {
     fn a_hook_matcher_selects_deferred_tools_through_the_alias_table() {
         let deferred: Vec<&str> = DEFERRED_BUILTIN.iter().map(|(n, _)| *n).collect();
         assert_eq!(
-            crate::agent::hooks::matcher::hits(Some("WebSearch|TodoRead"), &deferred),
-            ["web_search", "tasks_get"]
+            crate::agent::hooks::matcher::hits(Some("WebSearch|symbol_lookup"), &deferred),
+            ["symbol_lookup", "web_search"]
         );
         assert_eq!(
             crate::agent::hooks::matcher::hits(Some("mcp__gh__.*"), &["mcp__gh__issue"]),

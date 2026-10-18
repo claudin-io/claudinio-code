@@ -30,7 +30,7 @@ UI Mandate: The Task Panel is your only plan/progress UI. Never write plans in t
 
 # 2. CODE TOOLS
 - Accuracy hierarchy: LSP > `semantic_search` (conceptual) > `code_search` (keyword) > `grep` (fallback).
-- Conceptual questions MUST start with `semantic_search`.
+- All of these but `grep` are deferred tools (DEFERRED TOOLS below): load the ones the task needs.
 - Use `file_outline` before `read_file` on unfamiliar files.
 - Never use bash search tools (grep/find/rg) when a dedicated tool exists.
 - For current/external information not in the codebase or your training data (docs, library versions, news, APIs), use `web_search` if available instead of guessing.
@@ -216,7 +216,7 @@ File tools take absolute paths inside this root."
                 "Never end your turn before all three deliverables are in place.\n",
                 "\n### Investigation: smart tools first\n",
                 "Indexed tools are your primary tools - brute-force search is the last resort:\n",
-                "* `semantic_search` is your first call for any conceptual question ('how does X work', 'where is behavior Y') - describe the behavior in English.\n",
+                "* `semantic_search` for any conceptual question ('how does X work', 'where is behavior Y') - describe the behavior in English.\n",
                 "* `code_search`/`symbol_lookup` only when you already know the exact symbol or keyword.\n",
                 "* For unfamiliar files, `file_outline` before `read_file`; use `go_to_definition`/`find_references` to trace relationships.\n",
                 "* `grep` and bash search are last resorts, used only after indexed tools return empty results.\n",
@@ -1354,6 +1354,7 @@ mod deferred_prefix_tests {
                 "bash",
                 "run_quality",
                 "ask_user",
+                "tasks_get",
                 "tasks_set",
                 "tasks_update",
                 "spawn_agents",
@@ -1373,7 +1374,6 @@ mod deferred_prefix_tests {
                 "browser",
                 "browser_inspect",
                 "browser_screenshot",
-                "tasks_get",
                 "finalize_plan",
                 "enter_plan_mode"
             ]
@@ -1390,6 +1390,47 @@ mod deferred_prefix_tests {
         assert!(!listed.contains(&"finalize_plan".to_string()));
         assert!(!listed.contains(&"enter_plan_mode".to_string()));
         assert!(listed.contains(&"semantic_search".to_string()));
+    }
+
+    /// A rule that makes a tool the session's first or mandatory call must
+    /// name a tool the request carries. Ordering a deferred one makes nearly
+    /// every session spend a `tools_loaded` cache break on it before any work
+    /// — against the plan's ≤ 2 breaks per session — and tells the model to
+    /// call something its tool list does not define.
+    #[test]
+    fn no_standard_prompt_line_makes_a_deferred_tool_mandatory_or_first() {
+        let config = AgentConfig::default();
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            for golden in [false, true] {
+                let (_, system, _) = run_prefix(
+                    &config,
+                    &crate::agent::tools::tests_support::ctx(),
+                    PromptProfile::Standard,
+                    mode,
+                    None,
+                    None,
+                    &[],
+                    golden,
+                    &[],
+                );
+                let deferred = deferred_tools(mode, PromptProfile::Standard, &[], &config);
+                for line in system.lines() {
+                    if !(line.contains("MUST")
+                        || line.contains("FIRST")
+                        || line.contains("first call"))
+                    {
+                        continue;
+                    }
+                    for t in &deferred {
+                        assert!(
+                            !line.contains(&format!("`{}`", t.name)),
+                            "{mode:?} (golden {golden}) requires deferred `{}`: {line}",
+                            t.name
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// A feature that is off takes its tools out of the catalog as well as

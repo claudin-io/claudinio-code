@@ -317,8 +317,7 @@ resident, context used against context served, and the current token rate.
 | `browser_inspect` | auto | deferred | Read the open page's console, network, text or HTML |
 | `browser_screenshot` | auto | deferred | Capture the viewport, full page, an element or a region |
 | `ask_user` | auto | always | Ask you a question, with options |
-| `tasks_get` | auto | deferred | Read the task list |
-| `tasks_set` / `tasks_update` | auto | always | Rewrite the task list, or change one task |
+| `tasks_get` / `tasks_set` / `tasks_update` | auto | always | Read the task list, rewrite it, or change one task |
 | `run_quality` | auto | always | Run the project's tests (and coverage) and record the result |
 | `write_plan` / `exit_plan_mode` | auto | always (Brain) | Author the plan; return to Builder |
 | `finalize_plan` / `enter_plan_mode` | auto | deferred (Builder) | Close out the plan; switch to Brain |

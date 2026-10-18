@@ -3357,7 +3357,7 @@ mod deferred_loop_tests {
             vec![
                 Reply::Tool {
                     name: "load_tools",
-                    input: serde_json::json!({"names": ["semantic_search", "tasks_get"]}),
+                    input: serde_json::json!({"names": ["semantic_search", "finalize_plan"]}),
                 },
                 Reply::Text("done"),
             ],
@@ -3372,15 +3372,15 @@ mod deferred_loop_tests {
         let second = tool_names(&bodies[1]);
         assert!(!first.contains(&"semantic_search".to_string()));
         assert_eq!(second[..first.len()], first[..], "nothing before moves");
-        assert_eq!(second[first.len()..], ["semantic_search", "tasks_get"]);
+        assert_eq!(second[first.len()..], ["semantic_search", "finalize_plan"]);
         // The system prompt is the same bytes on both requests.
         let system = |b: &str| serde_json::from_str::<Value>(b).unwrap()["system"].clone();
         assert_eq!(system(&bodies[0]), system(&bodies[1]));
-        assert!(last_result(&bodies[1]).contains("Loaded: semantic_search, tasks_get"));
+        assert!(last_result(&bodies[1]).contains("Loaded: semantic_search, finalize_plan"));
         let records = records_of(&ws);
         assert_eq!(
             crate::agent::deferred::loaded_names(&records),
-            ["semantic_search", "tasks_get"]
+            ["semantic_search", "finalize_plan"]
         );
         assert!(records.iter().any(|r| matches!(
             r,
@@ -3399,8 +3399,8 @@ mod deferred_loop_tests {
             &ws,
             vec![
                 Reply::Tool {
-                    name: "tasks_get",
-                    input: serde_json::json!({}),
+                    name: "code_search",
+                    input: serde_json::json!({"query": "greet"}),
                 },
                 Reply::Text("done"),
             ],
@@ -3411,13 +3411,19 @@ mod deferred_loop_tests {
             "{:?}",
             outcome.err()
         );
+        // The call reaches code_search itself: its own answer (a temp dir has
+        // no index), not a refusal for a tool the request did not carry.
         let result = last_result(&bodies[1]);
-        assert!(!result.contains("Error"), "the call ran: {result}");
-        assert_eq!(tool_names(&bodies[1]).last().unwrap(), "tasks_get");
-        assert!(!tool_names(&bodies[0]).contains(&"tasks_get".to_string()));
+        assert!(
+            result.contains("index not available"),
+            "the call ran: {result}"
+        );
+        assert!(!result.contains("unknown tool") && !result.contains("not available in this"));
+        assert_eq!(tool_names(&bodies[1]).last().unwrap(), "code_search");
+        assert!(!tool_names(&bodies[0]).contains(&"code_search".to_string()));
         assert_eq!(
             crate::agent::deferred::loaded_names(&records_of(&ws)),
-            ["tasks_get"]
+            ["code_search"]
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }
@@ -3434,7 +3440,7 @@ mod deferred_loop_tests {
             vec![
                 Reply::Tools(vec![
                     ("code_search", serde_json::json!({"query": "greet"})),
-                    ("tasks_get", serde_json::json!({})),
+                    ("symbol_lookup", serde_json::json!({"name": "greet"})),
                     ("load_tools", serde_json::json!({"names": ["file_outline"]})),
                 ]),
                 Reply::Text("done"),
@@ -3449,7 +3455,7 @@ mod deferred_loop_tests {
         let second = tool_names(&bodies[1]);
         assert_eq!(
             second[second.len() - 3..],
-            ["code_search", "tasks_get", "file_outline"],
+            ["code_search", "symbol_lookup", "file_outline"],
             "loaded in the order the calls came"
         );
         let records = records_of(&ws);
@@ -3470,7 +3476,7 @@ mod deferred_loop_tests {
         assert_eq!(loads, 1, "one record names everything the round loaded");
         assert_eq!(
             crate::agent::deferred::loaded_names(&records),
-            ["code_search", "tasks_get", "file_outline"]
+            ["code_search", "symbol_lookup", "file_outline"]
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }

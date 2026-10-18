@@ -563,7 +563,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_get".into(),
-            description: "Return the current list of tasks. Each task has an id, title, description, journal (array of notes/findings), and status (todo | doing | done). Use this at the start of a session to understand what needs to be done.".into(),
+            description: "Return the current task list: each task's id, title, description, journal (notes and findings) and status (todo | doing | done).".into(),
             input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
         },
         ToolDef {
