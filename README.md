@@ -333,7 +333,9 @@ cargo run --example claudinio-eval -- run ../eval/tasks \
 ```
 
 The runner approves file edits and read-only shell commands only, never
-arbitrary shell, since it runs model-chosen commands on your machine. Every
+arbitrary shell. That keeps a wrong model from doing damage by accident; it is
+not a sandbox — the task's tests run code the model wrote — so run `run` in a
+disposable container or VM. Every
 provider request is recorded as a `usage` record in the session (cache reads
 and cache writes included), subagent transcripts are kept beside their session,
 and `scripts/session-stats.py --cost` reports cost, rounds and cache share from

@@ -80,13 +80,25 @@ files copied in first, so the agent never saw them.
 ## The approval policy, and why
 
 The runner executes the model's tool calls on the host, with nobody watching.
-So it **never auto-approves arbitrary shell**: a model that is wrong, or that
-read a hostile file, would otherwise run whatever it liked on the machine
-running the eval. The person at the other end of every prompt is replaced by a
-deliberately narrow policy (`src-tauri/src/eval/policy.rs`):
+The person at the other end of every prompt is replaced by a deliberately
+narrow policy (`src-tauri/src/eval/policy.rs`) whose job is to keep a *wrong*
+model from doing damage by accident — an `rm -rf`, a `git push`, a stray
+`curl | sh` — so it never auto-approves arbitrary shell.
 
-- **File edits are approved.** `edit_file` and its siblings go through the path
-  guard, which confines them to the workspace (the temporary directory).
+**It is not a sandbox, and `run` must be executed in a disposable container or
+VM.** `run_quality` and the oracle run pytest, `node --test` and vitest over
+files the model wrote (a `conftest.py`, a test file, a vite config), so
+model-authored code runs on the host in every task, by design: that is what
+running a project's tests means. The policy closes the routes *through
+approvals*; it does not contain a model that sets out to escape.
+
+- **File edits are approved**, confined to the workspace (the temporary
+  directory) by the path guard — except anything inside a `.git/` directory
+  and the runner's own `.claudinio.json` / `.claudinio/`. `.git/config` can
+  name a program git runs by itself (`core.fsmonitor` runs on every
+  `git status`, which the policy approves), and `.claudinio.json` names the
+  command `run_quality` runs; an approved edit to either would turn an approved
+  read-only command into any command at all.
 - **A shell command is approved only when it only looks**, as the permissions
   module classifies it (`ls`, `cat a.txt`, `git status`, `git diff`, `wc -l` …
   with no chaining, pipes, substitution or redirection).
@@ -94,7 +106,7 @@ deliberately narrow policy (`src-tauri/src/eval/policy.rs`):
   `python3 -c …`, `echo x > f`, `node script.js`, `cargo test`), with a result
   telling the model to change files with `edit_file` and to run checks with
   `run_quality`, which runs the task's own `check` command from the workspace
-  config, never a command the model chose. The runner sets a shell gate so that
+  config (a file the model cannot edit). The runner sets a shell gate so that
   even commands the app's allowlist would run unasked reach this policy.
 - **Anything else is refused** (MCP tools, browser navigation): neither is
   configured, and an unknown tool fails closed.

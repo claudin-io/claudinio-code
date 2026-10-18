@@ -316,9 +316,12 @@ given one `start` commit and a `.claudinio.json` whose quality `test_cmd` is the
 task's check; then `run_workflow` runs a fresh Builder session with a
 `Channel::new` closure as the event sink, so no Tauri window is involved, and
 the task's oracle decides pass or fail. Approvals and `ask_user` are answered
-by `eval::policy`: edits yes, read-only shell yes, every other shell command no
-(the runner turns on `ToolContext::shell_gate`, which only ever adds a prompt,
-so allowlisted commands reach the policy too). Metrics are read back from the
+by `eval::policy`: edits yes (never inside `.git/` or to the runner's
+`.claudinio.json`), read-only shell yes, every other shell command no (the
+runner turns on `ToolContext::shell_gate`, which only ever adds a prompt, so
+allowlisted commands reach the policy too). The policy prevents accidents; it
+is not a sandbox, since the task's tests run model-written code, so `run`
+belongs in a disposable container. Metrics are read back from the
 session files the run wrote — the same `usage` records and `.sub/` transcripts
 a user's sessions have. `validate` needs no model: each oracle must fail on the
 start tree and pass on the reference. See `eval/README.md`.
