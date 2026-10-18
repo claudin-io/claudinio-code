@@ -215,8 +215,11 @@ fn is_top_heading(line: &str) -> bool {
     t.starts_with("# ") || t.starts_with("## ")
 }
 
+/// What the harness's comment carries: id, status, owner.
+type Tag = (String, Status, Option<String>);
+
 /// `<!-- claudinio: id=s1 status=done by=main -->`, read into its fields.
-fn parse_comment(text: &str) -> Option<(String, Status, Option<String>)> {
+fn parse_comment(text: &str) -> Option<Tag> {
     let inner = text
         .trim()
         .strip_prefix("<!--")?
@@ -237,7 +240,7 @@ fn parse_comment(text: &str) -> Option<(String, Status, Option<String>)> {
 
 /// A placeholder line: `[topic]`, optionally followed by the harness's
 /// comment. The topic holds no bracket, so `[a] [b]` and `[x](y)` are prose.
-fn parse_placeholder(line: &str) -> Option<(String, Option<(String, Status, Option<String>)>)> {
+fn parse_placeholder(line: &str) -> Option<(String, Option<Tag>)> {
     let t = bare(line).trim();
     let rest = t.strip_prefix('[')?;
     let close = rest.find(']')?;
@@ -254,12 +257,7 @@ fn parse_placeholder(line: &str) -> Option<(String, Option<(String, Status, Opti
     Some((topic.trim().to_string(), comment))
 }
 
-fn section(
-    header_raw: String,
-    topic: String,
-    comment: Option<(String, Status, Option<String>)>,
-    written: bool,
-) -> Section {
+fn section(header_raw: String, topic: String, comment: Option<Tag>, written: bool) -> Section {
     let (id, status, owner) = comment.unwrap_or((String::new(), Status::Todo, None));
     let mut s = Section {
         id,
