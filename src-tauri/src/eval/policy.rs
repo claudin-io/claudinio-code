@@ -189,7 +189,12 @@ mod tests {
                 "{path} must be refused"
             );
         }
-        for path in ["/tmp/ws/src/git.rs", ".gitignore", "docs/.github/x.md", "a.json"] {
+        for path in [
+            "/tmp/ws/src/git.rs",
+            ".gitignore",
+            "docs/.github/x.md",
+            "a.json",
+        ] {
             assert!(
                 approves(
                     "edit_file",

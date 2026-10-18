@@ -1039,7 +1039,10 @@ mod tests {
                 cache_read_tokens,
                 output_tokens,
                 ..
-            } => assert_eq!((input_tokens, cache_read_tokens, output_tokens), (100, 900, 10)),
+            } => assert_eq!(
+                (input_tokens, cache_read_tokens, output_tokens),
+                (100, 900, 10)
+            ),
             other => panic!("{other:?}"),
         }
     }

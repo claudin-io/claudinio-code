@@ -379,7 +379,7 @@ async fn run_session(
     let mut history = Vec::new();
     let mut message = task.prompt.clone();
     let mut handoffs = 0;
-    let result = loop {
+    loop {
         let outcome = crate::agent::session::run_workflow(
             &config,
             &mut history,
@@ -426,8 +426,7 @@ async fn run_session(
                 break Err(e);
             }
         }
-    };
-    result
+    }
 }
 
 /// Aborts a spawned task when dropped.
