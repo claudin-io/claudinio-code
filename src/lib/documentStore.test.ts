@@ -46,6 +46,19 @@ describe("documentStore", () => {
     expect(subagentForOwner("sub:nobody", subs)).toBeNull();
   });
 
+  it("matches a name the harness had to clean for its comment", () => {
+    // The backend keeps letters, digits, _ and - (subagent_owner), so a
+    // name with '>' or '=' still opens its own timeline.
+    const subs = [
+      { id: "a", name: "a-->" },
+      { id: "b", name: "x=1 <b>" },
+      { id: "c", name: "<>" },
+    ];
+    expect(subagentForOwner("sub:a--", subs)).toBe("a");
+    expect(subagentForOwner("sub:x1-b", subs)).toBe("b");
+    expect(subagentForOwner("sub:agent", subs)).toBe("c");
+  });
+
   it("knows the session's document however the editor was opened on it", () => {
     // From the panel, the file tree or a chat link: every save of the
     // linked document must go through save_document.

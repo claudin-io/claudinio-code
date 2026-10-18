@@ -376,12 +376,26 @@ pub fn write(
 }
 
 /// The owner a subagent writes as: `sub:<name>`, spaces as dashes so the
-/// harness's comment stays one token per field.
+/// harness's comment stays one token per field, and only letters, digits,
+/// `_` and `-` kept: the name is the model's, and a `>` in it (`a-->`) would
+/// end the comment early in any Markdown renderer, showing the rest of it in
+/// the document the person reads. `sub:agent` when nothing is left. The
+/// panel matches owners to subagents with the same rule
+/// (`subagentForOwner` in `lib/documentStore.ts`).
 pub fn subagent_owner(name: &str) -> String {
-    format!(
-        "sub:{}",
-        name.split_whitespace().collect::<Vec<_>>().join("-")
-    )
+    let words: Vec<String> = name
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.is_empty() {
+        return "sub:agent".into();
+    }
+    format!("sub:{}", words.join("-"))
 }
 
 /// Claim section `id` for a subagent before it starts (`doing`, under
@@ -911,6 +925,22 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains(from), "{from:?} not in {text}");
         std::fs::write(path, text.replace(from, to)).unwrap();
+    }
+
+    /// The owner sits inside the harness's HTML comment: a model-chosen name
+    /// must not be able to end that comment early in a Markdown renderer.
+    #[test]
+    fn a_subagent_owner_is_one_token_that_cannot_close_the_comment() {
+        assert_eq!(subagent_owner("pesquisa origem"), "sub:pesquisa-origem");
+        assert_eq!(subagent_owner("a-->"), "sub:a--");
+        assert_eq!(subagent_owner("x=1 <b>"), "sub:x1-b");
+        assert_eq!(subagent_owner("análise_2"), "sub:análise_2");
+        assert_eq!(subagent_owner("-->"), "sub:--");
+        assert_eq!(subagent_owner("<>"), "sub:agent");
+        for name in ["a-->", "a--!>", "x=1 <b>"] {
+            let owner = subagent_owner(name);
+            assert!(!owner.contains('>') && !owner.contains('='), "{owner}");
+        }
     }
 
     #[test]

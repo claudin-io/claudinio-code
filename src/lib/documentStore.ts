@@ -62,14 +62,22 @@ export function clearSubagentRequest(): void {
 }
 
 /**
- * The id of the subagent an owner (`sub:<name>`, spaces written as dashes)
- * names, among `candidates` in timeline order — the latest one when a name
- * was used twice. Null for `main` or a name no subagent had.
+ * The id of the subagent an owner (`sub:<name>`) names, among `candidates`
+ * in timeline order — the latest one when a name was used twice. Null for
+ * `main` or a name no subagent had. The name is cleaned as the backend's
+ * `subagent_owner` cleans it: spaces as dashes, only letters, digits, `_`
+ * and `-` kept, `agent` when nothing is left.
  */
 export function subagentForOwner(owner: string, candidates: { id: string; name: string }[]): string | null {
   if (!owner.startsWith("sub:")) return null;
   const want = owner.slice(4);
-  const normal = (name: string) => name.trim().split(/\s+/).join("-");
+  const normal = (name: string) =>
+    name
+      .trim()
+      .split(/\s+/)
+      .map((w) => w.replace(/[^\p{L}\p{N}_-]/gu, ""))
+      .filter((w) => w !== "")
+      .join("-") || "agent";
   for (let i = candidates.length - 1; i >= 0; i--) {
     if (normal(candidates[i].name) === want) return candidates[i].id;
   }
