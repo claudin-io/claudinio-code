@@ -7,6 +7,7 @@ mod lines;
 mod list_dir;
 pub mod quality;
 mod read_file;
+pub(crate) mod skills_tool;
 pub mod tasks;
 mod web_search;
 pub(crate) mod write_plan;
@@ -631,6 +632,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                 }
             }),
         },
+        skills_tool::def(),
     ]
 }
 
@@ -996,6 +998,21 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             browser::screenshot(a, ctx).await
         }
+        "skills" => {
+            // Scanned per call, like the run's catalog: a skill installed or
+            // edited mid-session is the one the model reads.
+            let prefs = ctx
+                .agent_config
+                .as_ref()
+                .map(|c| c.plugins.clone())
+                .unwrap_or_default();
+            let mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
+                ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
+                &prefs,
+            );
+            let content = skills_tool::execute(args, &mgr)?;
+            Ok(ToolOutput::Text { content })
+        }
         "spawn_agents" => Err("spawn_agents is handled by the session orchestrator".into()),
         "enter_plan_mode" | "exit_plan_mode" => {
             Err("mode switch tools are handled by the session orchestrator".into())
@@ -1308,6 +1325,48 @@ mod tests {
                 std::num::NonZeroUsize::new(1).unwrap(),
             ))),
         }
+    }
+
+    /// A skill in the workspace is what `skills` answers with — the same scan
+    /// the run's catalog came from, so a name the prompt lists can be read.
+    #[tokio::test]
+    async fn the_skills_tool_reads_the_workspace_s_skills() {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-skills-exec-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        let dir = root.join(".agents/skills/release");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: release\ndescription: Cut a release\n---\n\nBump the version.",
+        )
+        .unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            ..test_ctx()
+        };
+        assert!(get_defs(4).iter().any(|t| t.name == "skills"));
+        let listed = execute("skills", serde_json::json!({"action": "list"}), &ctx)
+            .await
+            .unwrap();
+        let ToolOutput::Text { content } = listed else {
+            panic!("text")
+        };
+        assert!(content.contains("release [project]"), "{content}");
+        let read = execute(
+            "skills",
+            serde_json::json!({"action": "read", "name": "release"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = read else {
+            panic!("text")
+        };
+        assert!(content.contains("Bump the version."), "{content}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Write a temp file with 20 numbered lines, return its path.

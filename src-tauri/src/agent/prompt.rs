@@ -1110,7 +1110,7 @@ mod prefix_stability_tests {
         for _ in 0..3 {
             assert_eq!(first, prefix_json(&root, SessionMode::Builder));
         }
-        assert!(first.contains("q4-own") && first.contains("<name>plugin-shared</name>"));
+        assert!(first.contains("q4-own") && first.contains("- plugin-shared \u{2014} "));
         assert!(
             first.contains("Plugin skill from q0") && !first.contains("Plugin skill from q5"),
             "the first plugin in path order keeps a shared skill name"
@@ -1150,10 +1150,10 @@ mod prefix_stability_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The skills catalog lists skills in name order whatever order the
-    /// directories were read in, and when one name exists in two packages of
-    /// the same scope the winner does not depend on `read_dir` order either:
-    /// the package that sorts first keeps it.
+    /// The skills catalog lists skills in scope-then-name order whatever
+    /// order the directories were read in, and when one name exists in two
+    /// packages of the same scope the winner does not depend on `read_dir`
+    /// order either: the package that sorts first keeps it.
     #[test]
     fn the_skills_catalog_is_deterministic_across_scans() {
         let root = workspace("catalog");
@@ -1164,23 +1164,24 @@ mod prefix_stability_tests {
             .collect();
         assert!(sections.windows(2).all(|w| w[0] == w[1]));
         let s = &sections[0];
+        // Project skills first, then the monorepo packages' (Subfolder).
         let order: Vec<usize> = [
             "alpha-review",
+            "mid-docs",
+            "zeta-deploy",
             "api-build",
             "lint",
-            "mid-docs",
             "web-build",
-            "zeta-deploy",
         ]
         .iter()
         .map(|n| {
-            s.find(&format!("<name>{n}</name>"))
+            s.find(&format!("- {n} \u{2014} "))
                 .unwrap_or_else(|| panic!("{n}"))
         })
         .collect();
         assert!(
             order.windows(2).all(|w| w[0] < w[1]),
-            "name order: {order:?}"
+            "scope-then-name order: {order:?}"
         );
         assert!(
             s.contains("Lint the api package") && !s.contains("Lint the web package"),

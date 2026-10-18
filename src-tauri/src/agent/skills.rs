@@ -43,16 +43,6 @@ pub enum SkillScope {
     Plugin,
 }
 
-/// A catalog entry that goes into the system prompt — only name + description.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillCatalogEntry {
-    pub name: String,
-    pub description: String,
-    pub location: String,
-    pub scope: SkillScope,
-}
-
 /// Remote skill listing from the registry API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteSkill {
@@ -163,16 +153,7 @@ fn sorted_dir_entries(dir: &Path) -> Vec<PathBuf> {
 /// Priority order: Project > Subfolder > User > Plugin > Builtin (fallback).
 /// A skill the user wrote always beats one a plugin shipped with the same name.
 fn has_higher_priority(current: &SkillScope, incoming: &SkillScope) -> bool {
-    fn rank(s: &SkillScope) -> u8 {
-        match s {
-            SkillScope::Project => 4,
-            SkillScope::Subfolder => 3,
-            SkillScope::User => 2,
-            SkillScope::Plugin => 1,
-            SkillScope::Builtin => 0,
-        }
-    }
-    rank(current) >= rank(incoming)
+    current.rank() >= incoming.rank()
 }
 
 // ─── Built-in Skills ──────────────────────────────────────────────────────────
@@ -353,28 +334,56 @@ impl SkillManager {
         mgr
     }
 
+    /// The skills shipped with the binary, parsed. They are the lowest
+    /// priority: any skill on disk with the same name replaces one.
+    fn builtin_entries() -> Vec<SkillEntry> {
+        let mut entries = Vec::new();
+        for (name, content) in BUILTIN_SKILLS {
+            let source = std::path::Path::new("builtin");
+            match Self::parse_skill_md_from_str(content, source) {
+                Ok((meta, body)) => entries.push(SkillEntry {
+                    name: name.to_string(),
+                    description: meta.description.clone(),
+                    location: "<built-in>".into(),
+                    scope: SkillScope::Builtin,
+                    body: Some(body),
+                }),
+                Err(e) => {
+                    eprintln!("[skills] failed to parse built-in skill '{}': {e}", name);
+                }
+            }
+        }
+        entries
+    }
+
+    /// A manager holding only the built-in skills — what a fresh install with
+    /// no skill on disk sees. No directory is scanned, so a test using it does
+    /// not depend on what the machine running it has under `~/.claude/skills`.
+    #[cfg(test)]
+    pub fn builtin_only() -> Self {
+        Self {
+            workspace_root: None,
+            skills: Self::builtin_entries()
+                .into_iter()
+                .map(|e| (e.name.clone(), e))
+                .collect(),
+            plugin_prefs: HashMap::new(),
+        }
+    }
+
+    /// Add (or replace) one skill, as a scan that found it would.
+    #[cfg(test)]
+    pub fn insert_for_test(&mut self, entry: SkillEntry) {
+        self.skills.insert(entry.name.clone(), entry);
+    }
+
     /// Re-scan all skill directories. Returns how many skills were found.
     pub fn scan(&mut self) -> usize {
         let mut all: HashMap<String, (SkillEntry, SkillScope)> = HashMap::new();
 
         // 0. Built-in skills (lowest priority — fallback if no filesystem version exists)
-        for (name, content) in BUILTIN_SKILLS {
-            let source = std::path::Path::new("builtin");
-            match Self::parse_skill_md_from_str(content, source) {
-                Ok((meta, body)) => {
-                    let entry = SkillEntry {
-                        name: name.to_string(),
-                        description: meta.description.clone(),
-                        location: "<built-in>".into(),
-                        scope: SkillScope::Builtin,
-                        body: Some(body),
-                    };
-                    all.insert(entry.name.clone(), (entry, SkillScope::Builtin));
-                }
-                Err(e) => {
-                    eprintln!("[skills] failed to parse built-in skill '{}': {e}", name);
-                }
-            }
+        for entry in Self::builtin_entries() {
+            all.insert(entry.name.clone(), (entry, SkillScope::Builtin));
         }
 
         // 0.5. Skills contributed by installed Agent Plugins. They rank above
@@ -465,22 +474,6 @@ impl SkillManager {
         }
 
         Ok((meta, body))
-    }
-
-    /// Get the catalog (name + description only) for system prompt disclosure.
-    pub fn catalog(&self) -> Vec<SkillCatalogEntry> {
-        let mut entries: Vec<SkillCatalogEntry> = self
-            .skills
-            .values()
-            .map(|s| SkillCatalogEntry {
-                name: s.name.clone(),
-                description: s.description.clone(),
-                location: s.location.clone(),
-                scope: s.scope.clone(),
-            })
-            .collect();
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        entries
     }
 
     /// Get a sorted list of all skills with full metadata.
@@ -713,68 +706,101 @@ pub async fn preview_remote_skill(url: &str) -> Result<SkillEntry, String> {
 
 // ─── System Prompt Injection ──────────────────────────────────────────────────
 
-/// Build the skills section to inject into the system prompt.
-/// Returns None if no skills are available.
-/// Built-in skills have their full body inlined so no read_file call is needed.
-pub fn build_skills_system_prompt_section(mgr: &SkillManager) -> Option<String> {
-    let catalog = mgr.catalog();
-    if catalog.is_empty() {
-        return None;
-    }
+/// How many skills the prompt names. Past this the catalog is a list nobody
+/// reads that is paid for on every request; the rest are one `skills` call
+/// away.
+pub const CATALOG_LINES: usize = 25;
 
-    let mut xml = String::from("\n\n<available_skills>\n");
+/// How much of a skill's description the prompt carries. Enough for the
+/// trigger conditions a description is supposed to open with; the full text
+/// is in `skills list`.
+pub const CATALOG_DESCRIPTION_CHARS: usize = 160;
 
-    let mut has_builtin = false;
-    for skill in &catalog {
-        xml.push_str("  <skill>\n");
-        xml.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
-        xml.push_str(&format!(
-            "    <description>{}</description>\n",
-            escape_xml(&skill.description)
-        ));
-        xml.push_str(&format!(
-            "    <location>{}</location>\n",
-            escape_xml(&skill.location)
-        ));
-
-        // Built-in skills have their body inlined so the AI doesn't need read_file
-        if skill.scope == SkillScope::Builtin {
-            has_builtin = true;
-            if let Some(body) = mgr.get_body(&skill.name) {
-                xml.push_str("    <body>\n");
-                xml.push_str(&escape_xml(&body));
-                xml.push_str("\n    </body>\n");
-            }
+impl SkillScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SkillScope::Builtin => "builtin",
+            SkillScope::Project => "project",
+            SkillScope::Subfolder => "subfolder",
+            SkillScope::User => "user",
+            SkillScope::Plugin => "plugin",
         }
-
-        xml.push_str("  </skill>\n");
-    }
-    xml.push_str("</available_skills>\n\n");
-
-    xml.push_str(
-        "The following skills provide specialized instructions for specific tasks.\n\
-         When a task matches a skill's description, use your read_file tool to load\n\
-         the SKILL.md at the listed location before proceeding.\n\
-         When a skill references relative paths, resolve them against the skill's\n\
-         directory (the parent of SKILL.md) and use absolute paths in tool calls.\n",
-    );
-
-    if has_builtin {
-        xml.push_str(
-            "Built-in skills (location \"<built-in>\") have their full content inlined\n\
-             above inside a <body> tag — no read_file call is needed for them.\n",
-        );
     }
 
-    Some(xml)
+    /// Higher wins, in the order a name collision is settled in
+    /// (`has_higher_priority`).
+    fn rank(&self) -> u8 {
+        match self {
+            SkillScope::Project => 4,
+            SkillScope::Subfolder => 3,
+            SkillScope::User => 2,
+            SkillScope::Plugin => 1,
+            SkillScope::Builtin => 0,
+        }
+    }
 }
 
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+impl SkillManager {
+    /// Every skill, the user's own first: scope priority (project, subfolder,
+    /// user, plugin, built-in), then name. The order the prompt lists them in
+    /// and the order `skills list` answers in.
+    pub fn by_priority(&self) -> Vec<&SkillEntry> {
+        let mut entries: Vec<&SkillEntry> = self.skills.values().collect();
+        entries.sort_by(|a, b| {
+            b.scope
+                .rank()
+                .cmp(&a.scope.rank())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        entries
+    }
+}
+
+/// `text` on one line, cut to `max` characters with an ellipsis when longer.
+pub(crate) fn one_line(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(max).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('\u{2026}');
+    cut
+}
+
+/// The skills section of the system prompt, or `None` when there are none.
+///
+/// Skills by reference (lean-harness plan, Phase 2): one line per skill,
+/// `- name — description`, ranked by scope and capped at [`CATALOG_LINES`].
+/// The instructions themselves come from the `skills` tool when a task needs
+/// them — Anthropic's progressive disclosure, and what Claude Code does with
+/// its own skills. Before this the catalog carried each skill's location and
+/// the full bodies of the two built-ins, 6.6k characters on every request.
+pub fn build_skills_system_prompt_section(mgr: &SkillManager) -> Option<String> {
+    let entries = mgr.by_priority();
+    if entries.is_empty() {
+        return None;
+    }
+    let mut text = String::from(
+        "\n## SKILLS\n\
+         Skills are instructions for specific kinds of task. When a task matches one below, \
+         or a user message names one in a `<skill>name</skill>` tag, load it with \
+         `skills` {\"action\": \"read\", \"name\": \"...\"} before you start.\n",
+    );
+    for skill in entries.iter().take(CATALOG_LINES) {
+        text.push_str(&format!(
+            "- {} \u{2014} {}\n",
+            skill.name,
+            one_line(&skill.description, CATALOG_DESCRIPTION_CHARS)
+        ));
+    }
+    if entries.len() > CATALOG_LINES {
+        text.push_str(&format!(
+            "({} more skills: `skills` {{\"action\": \"list\"}} shows them all.)\n",
+            entries.len() - CATALOG_LINES
+        ));
+    }
+    Some(text)
 }
 
 #[cfg(test)]
@@ -814,9 +840,9 @@ mod tests {
 
     #[test]
     fn test_catalog_returns_vec() {
-        // Catalog should always return a Vec (possibly empty)
+        // The listing should always return a Vec (possibly empty)
         let mgr = SkillManager::new(None);
-        let catalog = mgr.catalog();
+        let catalog = mgr.list();
         // It's a valid vector regardless of whether User has skills
         assert!(catalog.len() <= 500, "sanity: catalog shouldn't be huge");
         // If there are skills, they should be sorted
@@ -857,10 +883,115 @@ mod tests {
         let result = build_skills_system_prompt_section(&mgr);
         assert!(result.is_some());
         let text = result.unwrap();
-        assert!(text.contains("pdf"));
-        assert!(text.contains("PDF processing"));
-        assert!(text.contains("SKILL.md"));
+        assert!(text.contains("- pdf \u{2014} PDF processing"), "{text}");
         assert!(!text.contains("<body>"));
+    }
+
+    fn entry(name: &str, scope: SkillScope, description: &str) -> SkillEntry {
+        SkillEntry {
+            name: name.into(),
+            description: description.into(),
+            location: format!("/skills/{name}/SKILL.md"),
+            scope,
+            body: Some(format!("Body of {name}.")),
+        }
+    }
+
+    /// The catalog is a reference, not the skill: one line per skill, and
+    /// the skill's instructions arrive only when the model asks for them.
+    /// The two built-in bodies used to ride inline on every request (6.6k
+    /// characters) for a skill needed in perhaps one session in a hundred.
+    #[test]
+    fn the_catalog_is_one_line_per_skill_and_never_inlines_a_body() {
+        let text = build_skills_system_prompt_section(&SkillManager::builtin_only()).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- ")).collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].starts_with("- find-skills \u{2014} Helps users discover"));
+        assert!(lines[1].starts_with("- plugin-crafter \u{2014} Authors a portable"));
+        for body_text in ["<body>", "llms.txt", "## 1. Interview first", "<location>"] {
+            assert!(!text.contains(body_text), "{body_text} is inlined");
+        }
+        // The location is the `skills` tool's business, not the prompt's.
+        assert!(!text.contains("<built-in>"));
+    }
+
+    #[test]
+    fn a_description_is_cut_at_160_characters_and_kept_on_one_line() {
+        let mut mgr = SkillManager::builtin_only();
+        mgr.skills.clear();
+        let long = format!("Line one\nline two {}", "x".repeat(400));
+        mgr.insert_for_test(entry("long", SkillScope::User, &long));
+        let text = build_skills_system_prompt_section(&mgr).unwrap();
+        let line = text.lines().find(|l| l.starts_with("- long")).unwrap();
+        let description = line.strip_prefix("- long \u{2014} ").unwrap();
+        assert!(description.starts_with("Line one line two xxx"), "{line}");
+        assert!(
+            description.chars().count() <= 161,
+            "{}",
+            description.chars().count()
+        );
+        assert!(description.ends_with('\u{2026}'));
+    }
+
+    /// A skill the user wrote outranks one a plugin shipped, which outranks a
+    /// built-in — the same order a name collision is settled in — so when the
+    /// list is cut it is the user's own skills that stay in view.
+    #[test]
+    fn skills_are_listed_by_scope_priority_then_name() {
+        let mut mgr = SkillManager::builtin_only();
+        mgr.insert_for_test(entry("b-user", SkillScope::User, "u"));
+        mgr.insert_for_test(entry("a-user", SkillScope::User, "u"));
+        mgr.insert_for_test(entry("z-project", SkillScope::Project, "p"));
+        mgr.insert_for_test(entry("m-plugin", SkillScope::Plugin, "pl"));
+        mgr.insert_for_test(entry("q-sub", SkillScope::Subfolder, "s"));
+        let text = build_skills_system_prompt_section(&mgr).unwrap();
+        let names: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .map(|l| l.split(' ').next().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "z-project",
+                "q-sub",
+                "a-user",
+                "b-user",
+                "m-plugin",
+                "find-skills",
+                "plugin-crafter"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_catalog_shows_twenty_five_skills_and_counts_the_rest() {
+        let mut mgr = SkillManager::builtin_only();
+        for i in 0..30 {
+            mgr.insert_for_test(entry(&format!("s{i:02}"), SkillScope::Project, "d"));
+        }
+        let text = build_skills_system_prompt_section(&mgr).unwrap();
+        let listed = text.lines().filter(|l| l.starts_with("- ")).count();
+        assert_eq!(listed, 25, "{text}");
+        assert!(text.contains("- s24 \u{2014} d") && !text.contains("- s25 "));
+        let last = text.trim_end().lines().last().unwrap();
+        assert!(
+            last.contains("7 more skills") && last.contains("`skills`"),
+            "{last}"
+        );
+    }
+
+    /// The composer's `<skill>name</skill>` mention reaches the model as text
+    /// in the user's message; the catalog is what tells the model to load it.
+    #[test]
+    fn the_catalog_tells_the_model_to_load_a_skill_with_the_skills_tool() {
+        let text = build_skills_system_prompt_section(&SkillManager::builtin_only()).unwrap();
+        assert!(text.contains("<skill>name</skill>"), "{text}");
+        assert!(
+            text.contains(r#"`skills` {"action": "read", "name": "#),
+            "{text}"
+        );
+        assert!(!text.contains("read_file"), "{text}");
     }
 
     #[test]
