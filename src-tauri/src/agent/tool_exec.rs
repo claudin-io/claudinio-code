@@ -87,7 +87,7 @@ fn effective_permission(
 /// The protocol's own answer is `stop_hook_active`: a hook is told it already
 /// blocked once and is expected to relent. That is a convention, and this is
 /// what happens when a hook does not follow it. Same shape and same reasoning
-/// as the quality-retry and continuation-judge caps in `session`.
+/// as the quality-retry and continuation-judge caps in `run_loop`.
 pub(crate) const MAX_STOP_HOOK_BLOCKS: u32 = 3;
 
 /// A tool's result in the shape a `PostToolUse` hook expects.

@@ -17,6 +17,7 @@ pub mod provider;
 pub mod prune;
 pub mod retry;
 pub mod route;
+pub mod run_loop;
 pub mod run_state;
 pub mod session;
 pub mod skills;

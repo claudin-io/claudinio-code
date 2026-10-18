@@ -2669,7 +2669,7 @@ mod tests {
         )
         .unwrap();
 
-        // Now simulate what session.rs does: deserialize the input
+        // Now simulate what run_loop.rs does: deserialize the input
         let input = tool_uses[0].get("input").unwrap();
         let path = input.get("path").and_then(|v| v.as_str()).unwrap();
         assert_eq!(path, "src/main.ts");

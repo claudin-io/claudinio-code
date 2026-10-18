@@ -388,7 +388,6 @@ mod judge_backend_tests {
 #[cfg(test)]
 mod jev_harness_tests {
     use super::*;
-
     use crate::agent::jev::test_support::{spawn_stub, stub_backend};
     use crate::agent::loop_watch::{LoopAction, LoopWatch};
     use serde_json::json;

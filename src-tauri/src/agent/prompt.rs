@@ -513,12 +513,14 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
     fn a_message_in_any_language_is_never_refused() {
         let sources = [
             ("session.rs", include_str!("session.rs")),
+            ("run_loop.rs", include_str!("run_loop.rs")),
+            ("tool_exec.rs", include_str!("tool_exec.rs")),
+            ("handoff.rs", include_str!("handoff.rs")),
+            ("judge.rs", include_str!("judge.rs")),
             ("prompt.rs", include_str!("prompt.rs")),
             ("events.rs", include_str!("events.rs")),
-            ("judge.rs", include_str!("judge.rs")),
-            ("handoff.rs", include_str!("handoff.rs")),
             ("retry.rs", include_str!("retry.rs")),
-            ("tool_exec.rs", include_str!("tool_exec.rs")),
+            ("route.rs", include_str!("route.rs")),
         ];
         let gate = ["reject_non", "_english("].concat();
         let refusal = ["Only English", " is supported"].concat();

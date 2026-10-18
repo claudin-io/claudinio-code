@@ -2,7 +2,7 @@
 //! OpenAI-compatible provider from the models.dev catalog. The session keeps
 //! its history in the internal Anthropic-shaped format (`Message` /
 //! `ContentBlock`); this module translates at the wire boundary in both
-//! directions so `StreamOutput` stays byte-compatible with what session.rs
+//! directions so `StreamOutput` stays byte-compatible with what run_loop.rs
 //! expects from the Anthropic client.
 
 use super::{
@@ -302,7 +302,7 @@ fn accumulate_tool_calls(
 }
 
 /// Convert accumulated tool calls into Anthropic-shaped `tool_use` Values —
-/// the exact shape session.rs consumes from `StreamOutput.tool_uses`. Empty
+/// the exact shape run_loop.rs consumes from `StreamOutput.tool_uses`. Empty
 /// arguments mean a no-arg tool ({}); non-empty-but-unparseable arguments
 /// mean the stream was cut mid-call (max_tokens) and the call is dropped so
 /// a half-written tool never executes (mirrors the Anthropic client).
