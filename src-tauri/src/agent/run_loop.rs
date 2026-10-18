@@ -226,6 +226,7 @@ pub async fn run_workflow_with_profile(
     if profile == PromptProfile::Standard
         && let Some(block) = crate::agent::task_recital::tasks_block(&tasks_at_start)
     {
+        crate::agent::task_recital::take_trailing_recital(history, &block);
         blocks.push(ContentBlock::text(block));
     }
     push_user_blocks(history, store, ctx, blocks);

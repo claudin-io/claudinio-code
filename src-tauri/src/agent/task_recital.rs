@@ -87,13 +87,18 @@ pub fn still_doing_nudge(ctx: &ToolContext, at_start: &[TaskItem]) -> Option<Str
 /// the compaction point with the list as it stood then, so the loop's rebuild
 /// right after compacting and any later reload produce the same history.
 ///
-/// Only a context that ends on a user message gets it: that is a compaction
-/// inside a run (the tail ends on the round's tool results, or on the run's
-/// own user turn). One that ends on the model's answer was compacted between
+/// Only a context that ends on a user message gets it: a compaction inside
+/// a run (the tail ends on the round's tool results, or on the run's own
+/// user turn), or one between runs that kept no tail at all (the tail shrinks
+/// to zero when it alone is over budget), where the history is the summary
+/// alone. A context that ends on the model's answer was compacted between
 /// runs, and the next run's user turn carries the list anyway; adding a user
 /// message after the answer would put words in the conversation no loop
 /// wrote. A tail that already ends with this exact list — the run's user
 /// turn, when a run compacts before its first request — is left as it is.
+/// In the tailless between-runs case the next run's user turn merges into
+/// the summary's message, and [`take_trailing_recital`] keeps the list from
+/// being said twice.
 pub fn recite_after_compaction(
     history: &mut [crate::agent::provider::Message],
     tasks: &[TaskItem],
@@ -111,6 +116,28 @@ pub fn recite_after_compaction(
     if !already {
         last.content
             .push(crate::agent::provider::ContentBlock::text(block));
+    }
+}
+
+/// Before a run appends `block` to its user turn: when the history already
+/// ends with a user message whose last block is this same list — a tailless
+/// compaction between runs left `[summary, list]` — remove it, because the
+/// run's turn merges into that message (`session::push_user_blocks`) and
+/// appends the list again. The model then reads it once, last, after the
+/// new message. Only the in-memory copy changes: the recital is rebuilt
+/// from the compaction record on every replay.
+pub fn take_trailing_recital(history: &mut [crate::agent::provider::Message], block: &str) {
+    let Some(last) = history
+        .last_mut()
+        .filter(|m| m.role == "user" && m.content.len() > 1)
+    else {
+        return;
+    };
+    if matches!(
+        last.content.last(),
+        Some(crate::agent::provider::ContentBlock::Text { text, .. }) if text == block
+    ) {
+        last.content.pop();
     }
 }
 
@@ -485,6 +512,55 @@ mod loop_tests {
         let texts = last_message_texts(&bodies[0]);
         assert_eq!(texts, [kickoff.clone()]);
         assert!(kickoff.contains("no `<tasks>` block means"), "{kickoff}");
+    }
+
+    // A compaction between runs that kept no tail (the tail shrinks to zero
+    // when it alone is over budget) leaves the history as one user message:
+    // the summary, then the recited list. The next run's user turn merges
+    // into that message, and the model must still read the list once, not
+    // twice (Phase 4 review).
+    #[tokio::test]
+    async fn a_run_after_a_tailless_compaction_sees_the_list_once() {
+        let tasks = [todo("t1", "wire the UI")];
+        let ws = workspace("tailless", &tasks);
+        let turn = |role: &str, text: &str| SessionRecord::Turn {
+            message: crate::agent::provider::Message {
+                role: role.into(),
+                content: vec![ContentBlock::text(text)],
+            },
+            ts: now_ms(),
+        };
+        ws.store.try_append(&turn("user", "start it"));
+        ws.store.try_append(&turn("assistant", "started"));
+        ws.store.try_append(&SessionRecord::Compacted {
+            summary: "## Summary\nwork started".into(),
+            tail_turns: 0,
+            ts: now_ms(),
+        });
+        let (_, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "what next?",
+            vec![Reply::Text("t1")],
+        )
+        .await;
+        let body: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let blocks = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+            .filter(|b| {
+                b["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with(TASKS_OPEN))
+            })
+            .count();
+        assert_eq!(blocks, 1, "{body}");
+        // Once, and last: after the new message, where attention is highest.
+        let texts = last_message_texts(&bodies[0]);
+        assert_eq!(texts.last(), tasks_block(&tasks).as_ref(), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "what next?"));
     }
 
     fn doing(id: &str, title: &str) -> TaskItem {
