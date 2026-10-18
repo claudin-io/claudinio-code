@@ -1168,30 +1168,42 @@ mod tests {
         assert!(prompt.contains("file_outline") && prompt.contains("semantic_search"));
     }
 
-    // A subagent runs on the builder model: when that model is lean, so is it —
-    // in what it is offered and in what its prompt sends it after.
+    // A subagent is lean whatever surface the user set for the builder model
+    // it runs on (Phase 2): the three LSP tools are never offered, and the
+    // index searches always are — a fresh context has nothing to load them on.
     #[test]
-    fn a_lean_builder_model_makes_its_subagents_lean() {
+    fn a_subagent_is_lean_whatever_surface_its_builder_model_has() {
         use crate::agent::surface::{LEAN_DROPPED, ToolSurface, prompt_for};
-        let mut config = AgentConfig::default();
-        let full = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &config);
-        config
-            .tool_surface
-            .insert(config.builder_model.clone(), "lean".into());
-        for mode in [SubagentMode::Explore, SubagentMode::Code] {
-            let defs = subagent_defs(mode, &[], MAX_PARALLEL_AGENTS, &config);
-            for tool in LEAN_DROPPED {
-                assert!(!defs.iter().any(|d| d.name == tool), "{tool}");
-            }
-            assert!(defs.iter().any(|d| d.name == "semantic_search"));
+        let names = |config: &AgentConfig, mode| -> Vec<String> {
+            subagent_defs(mode, &[], MAX_PARALLEL_AGENTS, config)
+                .into_iter()
+                .map(|d| d.name)
+                .collect()
+        };
+        let default = AgentConfig::default();
+        let mut configs = Vec::new();
+        for (on_brain, surface) in [(false, "full"), (false, "lean"), (true, "lean")] {
+            let mut config = AgentConfig::default();
+            let model = if on_brain {
+                config.brain_model.clone()
+            } else {
+                config.builder_model.clone()
+            };
+            config.tool_surface.insert(model, surface.into());
+            configs.push(config);
         }
-        // Setting it on the brain model alone changes nothing for a subagent.
-        let mut brain_only = AgentConfig::default();
-        brain_only
-            .tool_surface
-            .insert(brain_only.brain_model.clone(), "lean".into());
-        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &brain_only);
-        assert_eq!(defs.len(), full.len());
+        for mode in [SubagentMode::Explore, SubagentMode::Code] {
+            let expected = names(&default, mode);
+            for tool in LEAN_DROPPED {
+                assert!(!expected.iter().any(|n| n == tool), "{tool}");
+            }
+            for tool in ["semantic_search", "code_search", "file_outline"] {
+                assert!(expected.iter().any(|n| n == tool), "{tool}");
+            }
+            for config in &configs {
+                assert_eq!(names(config, mode), expected, "{:?}", config.tool_surface);
+            }
+        }
 
         // The prompt is built lean since Phase 2; the rewrite is what does it.
         assert!(TOOL_PREFERENCE.contains("symbol_lookup") && TOOL_PREFERENCE.contains("LSP tools"));
