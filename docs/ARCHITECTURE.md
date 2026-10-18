@@ -228,15 +228,22 @@ never shows it. A successor session gets it after its kickoff, because
 `link_session` copies the tasks before that run starts. After a summarizing
 compaction `persist::history_from_records` restates the list as it stood at the
 compaction point as the last block of the rebuilt context, when that context
-ends on a user message (a compaction inside a run; one between runs leaves it to
-the next run's turn, and an identical last block is not repeated). The prompts
+ends on a user message (a compaction inside a run, or one between runs that kept
+no tail; one that ends on the model's answer leaves it to the next run's turn,
+and an identical last block is never repeated — a run whose turn merges into a
+tailless summary drops the recital and appends its own, so the list is said once
+and last). Successor kickoffs say that a list follows as a `<tasks>` block and
+that no block means no list: the run appends one only when the session has
+tasks. The prompts
 say: a list only beyond a one-step change; `doing` in the same round as the
 task's first tool call; batch status changes — `tasks_update` takes
 `updates: [{id, status?, journal?}]`, checks every item (LLD gate, id, status)
 and then the quality gate on the list as the whole batch leaves it, and applies
 nothing if any check fails, naming the task and the reason. A turn that ends
-with a task still `doing` gets one `nudges::still_doing` reminder per run, then
-finishes. `prompt.rs` pins the absence of mandated round-trips
+with a task still `doing` that this run set `doing` or wrote to (the loop keeps
+the list it read at run start and compares) gets one `nudges::still_doing`
+reminder per run, then finishes; a task an earlier run left `doing` is not
+named. `prompt.rs` pins the absence of mandated round-trips
 (`no_prompt_mandates_a_task_round_trip`) across the Standard prompts, Compact,
 the kickoffs and the nudges.
 
