@@ -959,11 +959,12 @@ pub async fn run_workflow_with_profile(
                 let (verdict, judge) = match jev_verdict {
                     Some(v) => (v, "jev"),
                     None => {
-                        let (verdict, usage) =
+                        let (verdict, request) =
                             judge_terminal_turn_metered(config, judge_model, &last_text).await;
-                        // A judge request that reported usage was a billed
-                        // request of this run; one that failed is not counted.
-                        if usage.is_some() {
+                        // An answered judge request is a round of this run,
+                        // with or without reported usage; one that failed
+                        // never reached a model and is not counted.
+                        if let Some(usage) = request {
                             requests += 1;
                             store.try_append(&SessionRecord::usage(
                                 requests,

@@ -48,18 +48,20 @@ fn parse_turn_verdict(reply: &str) -> TurnVerdict {
 /// ever adds. Fails safe toward `Done` on any error — a judge outage must never
 /// wedge the loop or fabricate an infinite continuation.
 ///
-/// Returns the verdict with the usage the judge's request reported (`None`
-/// when the request failed or the response carried none): the judge is a
-/// billed request of the run, and is recorded as one.
+/// Returns the verdict with what became of the judge's request: `None` when
+/// it failed (nothing was billed, no round happened), `Some(usage)` when it
+/// was answered — `usage` itself `None` when the response carried none. The
+/// judge is a request of the run, and an answered one is recorded as a round
+/// whether or not the provider reported its usage.
 pub(super) async fn judge_terminal_turn_metered(
     config: &AgentConfig,
     model: &str,
     assistant_text: &str,
-) -> (TurnVerdict, Option<crate::agent::provider::Usage>) {
+) -> (TurnVerdict, Option<Option<crate::agent::provider::Usage>>) {
     match crate::agent::provider::classify_turn_completion_metered(config, model, assistant_text)
         .await
     {
-        Ok((reply, usage)) => (parse_turn_verdict(&reply), usage),
+        Ok((reply, usage)) => (parse_turn_verdict(&reply), Some(usage)),
         Err(_) => (TurnVerdict::Done, None),
     }
 }
@@ -325,17 +327,28 @@ mod judge_backend_tests {
         }))
         .await;
         let cfg = cfg_for(base);
-        let (verdict, usage) =
+        let (verdict, request) =
             judge_terminal_turn_metered(&cfg, "claudinio", "All done, tests pass.").await;
         assert_eq!(verdict, TurnVerdict::Done);
-        let usage = usage.expect("the response carried usage");
+        let usage = request
+            .expect("the request was answered")
+            .expect("the response carried usage");
         assert_eq!((usage.input_tokens, usage.output_tokens), (310, 2));
 
-        // An unreachable judge still fails safe, and reports no usage.
-        let (verdict, usage) =
+        // An answer without usage is still an answered request.
+        let base = spawn_stub_with(serde_json::json!({
+            "content": [ { "type": "text", "text": "DONE" } ],
+        }))
+        .await;
+        let (_, request) =
+            judge_terminal_turn_metered(&cfg_for(base), "claudinio", "All done.").await;
+        assert!(matches!(request, Some(None)), "{request:?}");
+
+        // An unreachable judge still fails safe, and made no request.
+        let (verdict, request) =
             judge_terminal_turn_metered(&cfg_for("http://127.0.0.1:1".into()), "claudinio", "x")
                 .await;
-        assert_eq!((verdict, usage.is_none()), (TurnVerdict::Done, true));
+        assert_eq!((verdict, request.is_none()), (TurnVerdict::Done, true));
     }
 
     #[tokio::test]

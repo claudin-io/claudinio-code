@@ -652,6 +652,20 @@ reference:
         );
     }
 
+    /// M2 counts provider requests, and a request is a round whether or not
+    /// its response carried usage: on a provider that reports none, every
+    /// request — the completion judge's included — is still one usage record.
+    #[tokio::test]
+    async fn a_request_without_usage_is_still_a_round() {
+        let work = tempfile::tempdir().unwrap();
+        let task = Task::parse(TASK, "greet").unwrap();
+        let (base, _, bodies) = spawn_with_usage(vec![Reply::Text("Nothing to do.")], None).await;
+        let result = run_task(&task, &options(&base, work.path())).await;
+        let requests = bodies.lock().unwrap().len() as u32;
+        assert_eq!(requests, 2, "one round and the completion judge");
+        assert_eq!(result.metrics.rounds, requests);
+    }
+
     /// A model that tries to run the tests through the shell is refused and
     /// told to use run_quality instead; a model that only looks is not.
     #[tokio::test]
