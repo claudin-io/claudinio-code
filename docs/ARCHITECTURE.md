@@ -67,14 +67,19 @@ send_message (commands/agent.rs)
 **Concurrency within a round.** A run of two or more consecutive calls that are
 all `tools::PARALLEL_SAFE_TOOLS` (the file, index, LSP and web readers and
 `tasks_get`), need no prompt and are watched by no `PreToolUse`/`PostToolUse`
-hook is run ahead at once, at most four at a time (`agent/tool_batch.rs`). Any
+hook is run ahead at once, at most four at a time, each body on tokio's
+blocking pool so a synchronous read or `rg` never holds an async worker
+(`agent/tool_batch.rs`). Any
 other call (an approval, `edit_file`, `bash`, `spawn_agents`, `ask_user`, the
 browser, the task and plan mutators, every MCP tool) ends the run and runs on
 its own, in order, so a read after an edit sees the edit. Each result lands in
 its call's slot and the loop then walks the round in the model's order as
 before: the transcript, the loop watch, the repeated-read pointer and the hooks
-see the same sequence they did when calls ran one by one. A pause keeps what
-finished and answers the rest as not run. Subagents use the same run-ahead.
+see the same sequence they did when calls ran one by one, a kept result
+included. A pause starts nothing new and waits for the calls already under way
+(as it always waited for the one running call: a tool body cannot be stopped
+mid-read), keeps their results and answers the calls it kept from starting as
+not run, one result per call. Subagents use the same run-ahead.
 
 The loop is split by responsibility, one file each under `agent/`: `prompt.rs`
 (the prompt text and the tool list beside it), `run_loop.rs` (the loop above),
