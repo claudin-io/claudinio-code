@@ -778,7 +778,7 @@ const NOT_RUN_PREFIXES: [&str; 4] = [
     "Edit rejected",
     "Interrupted by the user",
 ];
-/// How the result cap marks what it cut (`session::truncate`).
+/// How the result cap marks what it cut (`tool_exec::truncate`).
 const CAPPED_MARK: &str = "...(truncated, ";
 
 /// Which results in a history are less than what their tool returned.
