@@ -283,10 +283,14 @@ other three tools are deferred but never listed, loaded by `doc_create` in the
 same round (one cache break) or seeded as loaded when a session starts with a
 document (a successor's `tools_loaded` record). `doc_create` in a session that
 already has a document hands off (`HandoffReason::NewDocument`,
-`HandoffSpec.document`): the successor owns the new file and starts without the
-old task list; any other successor carries the predecessor's document and its
-memory. A subagent spawned with `section` gets that section claimed for it
-(`doing`, owner `sub:<name>`; one held by another agent is not given) and
+`HandoffSpec.document`): the successor owns the new file and starts its memory
+at its first read (the old session's `<session>.doc.json` is left alone), and
+of the old task list it keeps only the golden tasks, with the golden loop's
+counters (`transition::tasks_for_successor`); any other successor carries the
+predecessor's document and its memory. A subagent spawned with `section` gets that section claimed for it
+(`doing`, owner `sub:<name>` with only letters, digits, `_` and `-` kept, so
+a name cannot close the harness's comment; one held by another agent is not
+given) and
 `doc_write`/`doc_read` for it alone; every subagent context is
 `DocAccess::Section` or `::None`, never the parent's `Main`. No subagent
 outlives the run that spawned it, so a run's start frees any section still
@@ -296,7 +300,11 @@ section. The UI hears of
 every write and every detected edit through `AgentEvent::DocumentUpdated`
 and loads the panel with `get_document`; `save_document` merges a person's
 save from the app with what agents wrote while the editor was open
-(`document::merge_human_save`). Both commands take a session id only as a
+(`document::merge_human_save`) — every app save of that file, however the
+editor was opened on it (App decides with `isLinkedDocument` from the
+document the panel reports). A model-written body that leaves a code fence
+open is closed by the harness, or the fence would swallow the sections after
+it. Both commands take a session id only as a
 plain file name of an existing session (`doc_session::session_file`), and
 write only the document that session links. The Task Panel stays for sessions
 without a document; Brain's `write_plan` plan file is still its own mechanism.

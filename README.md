@@ -247,8 +247,9 @@ in the file is yours and is kept byte for byte.
   bodies: the agent reads a section when it needs it (`doc_read`).
 - **A new top-level topic is a new document, and a new session.** Asking for
   one while the session already has a document opens a linked session that
-  owns the new file; the old one keeps its own. A context handoff carries the
-  document along.
+  owns the new file; the old one keeps its own (and its memory of who edited
+  what). Your golden goals go along: a new topic is not a way out of them. A
+  context handoff carries the document along.
 
 ### Nothing is a black box
 
