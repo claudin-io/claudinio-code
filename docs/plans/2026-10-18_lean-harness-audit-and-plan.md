@@ -385,10 +385,10 @@ Primary texts, in the order they appear above. Figures marked *(secondary)* in t
 | `run_loop.rs` | 1,855 | `run_workflow`, `run_workflow_with_profile`, golden/quality caps, `run_finish_line_checks`; `finish_line_tests`, `surface_tests`, `context_line_tests` |
 | `tool_exec.rs` | 1,417 | `effective_permission`, `run_tool`, `execute_and_report`, approval gate, `deny_tool`, `ask_user`, mode switches, `fit_round`/`tool_result_block`/`rich_result_block`, `truncate` |
 | `handoff.rs` | 557 | `HandoffReason`/`HandoffSpec`/`RunOutcome`, `compact_history`, `compute_tail_turns`, `shed_line`, `accept_prune`, `shed_options`, `try_verbatim_compaction`, `maybe_context_handoff` |
-| `prompt.rs` | ~460 | `SYSTEM_PROMPT`, `GOLDEN_PROMPT`, `GIT_SYNC_PROMPT`, mode blocks, `system_prompt`, `build_spec_prompt_section`, `run_prefix`, `api_tools` |
-| `events.rs` | ~280 | `AgentEvent`, `QualityLayerView`, `EditProposalData` |
-| `judge.rs` | ~165 | `TurnVerdict`, `parse_turn_verdict`, `judge_terminal_turn`, Jev completion questions/thresholds, `judge_with_jev`, `loop_verdict`, `should_nudge_terminal` |
-| `retry.rs` | ~110 | `is_retryable_error`, `stream_message_with_retry` |
+| `prompt.rs` | 463 | `SYSTEM_PROMPT`, `GOLDEN_PROMPT`, `GIT_SYNC_PROMPT`, mode blocks, `system_prompt`, `build_spec_prompt_section`, `run_prefix`, `api_tools` |
+| `events.rs` | 280 | `AgentEvent`, `QualityLayerView`, `EditProposalData` |
+| `judge.rs` | 173 | `TurnVerdict`, `parse_turn_verdict`, `judge_terminal_turn`, Jev completion questions/thresholds, `judge_with_jev`, `loop_verdict`, `should_nudge_terminal` |
+| `retry.rs` | 117 | `is_retryable_error`, `stream_message_with_retry` |
 | `session.rs` | 498 | `SessionMode`, `PromptProfile`, `ModeOrigin`, `ModeCtl`, `SteeringCtl`, approval/answer maps, token estimation, `push_turn`/`push_user_blocks`/`inject_steering`, `write_status`, pricing; re-exports the names other modules reach through `agent::session` |
 
 `architecture_tests::no_agent_file_carries_more_than_two_thousand_production_lines` fails the build when any `.rs` under `src/agent/` (recursive) passes 2,000 lines outside its `#[cfg(test)]` modules. It was written first and seen red ("src/agent/session.rs (5350)"). "From the first `#[cfg(test)]` to end of file" does not hold — `tools/mod.rs` opens `tests_support` at line 90 — so each gated `mod … {` is skipped up to its column-0 `}` (rustfmt's shape); `production_lines_leave_out_only_the_test_modules` pins that rule.
