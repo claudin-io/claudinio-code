@@ -59,7 +59,22 @@ send_message (commands/agent.rs)
              ├─ no tool calls? → judge::judge_terminal_turn, then done
              └─ tool calls  → tool_exec::run_tool: permissions → [approval gate]
                                 → tools::execute → results appended, next round
+                              (tool_batch::run_ahead: a contiguous run of read-only
+                               calls runs concurrently, at most 4, results kept
+                               in the model's order)
 ```
+
+**Concurrency within a round.** A run of two or more consecutive calls that are
+all `tools::PARALLEL_SAFE_TOOLS` (the file, index, LSP and web readers and
+`tasks_get`), need no prompt and are watched by no `PreToolUse`/`PostToolUse`
+hook is run ahead at once, at most four at a time (`agent/tool_batch.rs`). Any
+other call (an approval, `edit_file`, `bash`, `spawn_agents`, `ask_user`, the
+browser, the task and plan mutators, every MCP tool) ends the run and runs on
+its own, in order, so a read after an edit sees the edit. Each result lands in
+its call's slot and the loop then walks the round in the model's order as
+before: the transcript, the loop watch, the repeated-read pointer and the hooks
+see the same sequence they did when calls ran one by one. A pause keeps what
+finished and answers the rest as not run. Subagents use the same run-ahead.
 
 The loop is split by responsibility, one file each under `agent/`: `prompt.rs`
 (the prompt text and the tool list beside it), `run_loop.rs` (the loop above),

@@ -317,6 +317,11 @@ resident, context used against context served, and the current token rate.
 | **`edit_file`** | **requires approval** | Propose an edit, shown as a diff |
 | **`bash`** | **requires approval** | Run a shell command (read-only commands are allowlisted) |
 
+Calls to the read-only tools in the first block (`read_file` through
+`web_search`, plus `tasks_get`) that the model makes side by side run at the
+same time, four at most; everything else runs one call at a time, in the order
+the model asked.
+
 File tools are confined to the opened workspace by a path guard that rejects
 traversal. A denylist blocks known-destructive commands outright. Anything the
 browser reads off a page is wrapped and labelled as untrusted data, because a

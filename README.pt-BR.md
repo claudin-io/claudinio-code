@@ -315,6 +315,11 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | **`edit_file`** | **requer aprovação** | Propõe uma edição, exibida como diff |
 | **`bash`** | **requer aprovação** | Roda um comando de shell (comandos de leitura são allowlisted) |
 
+As chamadas às ferramentas só de leitura do primeiro bloco (de `read_file` a
+`web_search`, mais `tasks_get`) que o modelo faz lado a lado rodam ao mesmo
+tempo, no máximo quatro; todo o resto roda uma chamada de cada vez, na ordem em
+que o modelo pediu.
+
 As ferramentas de arquivo ficam confinadas ao workspace aberto por um guard de
 caminho que rejeita traversal. Uma denylist bloqueia comandos sabidamente
 destrutivos. Tudo que o browser lê de uma página é embrulhado e marcado como
