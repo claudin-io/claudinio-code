@@ -244,15 +244,21 @@ everything else in the file is yours and is kept byte for byte.
 - **The panel shows who is on what.** Where the Task Panel sits, a session
   with a document lists its sections with their status and owner (`main`, or
   the subagent, whose name opens its timeline). Click a row to edit the
-  document at that section.
+  document at that section. A section handed to a subagent that writes
+  nothing goes back to how it was — finished, or edited by you.
 - **Each run starts with the outline** (`id · status · owner · topic`), not the
-  bodies: the agent reads a section when it needs it (`doc_read`).
+  bodies: the agent reads a section when it needs it (`doc_read`). A
+  compaction restates the outline after its summary, as it does the task list.
 - **A new top-level topic is a new document, and a new session.** Asking for
   one while the session already has a document opens a linked session that
   owns the new file; the old one keeps its own (and its memory of who edited
   what). Your golden goals go along: a new topic is not a way out of them. The
   new session fills its document before it may open another (a further topic
-  waits for your next message). A context handoff carries the document along.
+  waits for your next message, even when that session's context fills and
+  hands off first). A context handoff carries the document along.
+- **The file stays inside `.claudinio/docs/`.** A link planted where the file
+  would go is never followed, and a `.claudinio` or `.claudinio/docs` that is a
+  link is refused, so a cloned repo cannot steer the write elsewhere.
 
 ### Nothing is a black box
 

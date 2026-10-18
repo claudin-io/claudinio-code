@@ -243,14 +243,18 @@ nothing if any check fails, naming the task and the reason. Because the block
 carries no descriptions or journals, a `tasks_set` that resends an existing task
 with an empty description or journal keeps the stored one
 (`tasks::keep_stored_details`): a list rewritten from the block alone does not
-erase what Brain wrote or the findings recorded since. A Builder kickoff with
+erase what Brain wrote or the findings recorded since. "Existing" means the
+same task, not only the same id: a stored task that is done and sent under
+another title is a new task reusing the id (models number their lists `t1`,
+`t2`, ...), and starts with what it was sent. A Builder kickoff with
 no plan file to inline carries each task's description and journal itself
 (`transition::compose_task_details`), since the block names the tasks and the
 plan is not there to describe them. A turn that ends
 with a task still `doing` that this run set `doing` or wrote to (the loop keeps
 the list it read at run start and compares) gets one `nudges::still_doing`
 reminder per run, then finishes; a task an earlier run left `doing` is not
-named. `prompt.rs` pins the absence of mandated round-trips
+named (work is a status or journal change against the run-start snapshot;
+a reworded title is not). `prompt.rs` pins the absence of mandated round-trips
 (`no_prompt_mandates_a_task_round_trip`) across the Standard prompts, Compact,
 the kickoffs and the nudges.
 
@@ -272,7 +276,10 @@ even a deleted section's. `doc_session.rs` owns the file — only a relative, pl
 under `.claudinio/docs/` that does not resolve outside it through a link: the
 session JSONL is workspace data, and any other linked path leaves the session
 with no document rather than letting the harness rewrite, say, `Cargo.toml` at
-a run start. One process-wide
+a run start. `doc_create` (no approval; the name is the model's title) makes
+the folder one component at a time and refuses a `.claudinio` or `docs` that is
+a link or a file, treats any entry at a candidate name — a dangling link
+included — as taken, and opens the file with `create_new`. One process-wide
 lock around every read-modify-write (parallel subagents and the app's save
 share the file), and a memory beside the session (`<session>.doc.json`: the
 text last seen, the sections a person changed that no agent has read since,
@@ -285,16 +292,24 @@ outline, never the bodies: a run's user turn ends with a `<document path>`
 block (`id · status · owner · topic`, beside `<tasks>`), every `doc_*` write
 answers with it, and a person's edit found after a round joins that round's
 persisted tool-results message as one `<doc-changed>` note (ids and topics)
-— never a per-request injection, which would rewrite the cached prefix.
+— never a per-request injection, which would rewrite the cached prefix. A
+summarizing compaction records the outline as the file stands then
+(`Compacted.document`, `doc_session::outline_block`) and
+`history_from_records` restates it after the `<tasks>` block, under the same
+rules as the list.
 `doc_create` is core in a Standard main session and answered by the loop; the
-other three tools are deferred but never listed, loaded by `doc_create` in the
-same round (one cache break) or seeded as loaded when a session starts with a
+other three tools are deferred but never listed, loaded by a `doc_create` that
+leaves the session with a document, in the same round (one cache break; a
+failed one loads nothing), or seeded as loaded when a session starts with a
 document (a successor's `tools_loaded` record). `doc_create` in a session that
 already has a document hands off (`HandoffReason::NewDocument`,
 `HandoffSpec.document`): the successor owns the new file and starts its memory
 at its first read (the old session's `<session>.doc.json` is left alone; its
-first run — the one the handoff starts — may not hand off again, since the app
-follows every handoff and the successor's first message repeats the request),
+first run — the one the handoff starts, and the first run of a session a
+context handoff opened from it — may not hand off again, since the app
+follows every handoff and the successor's first message repeats the request;
+`doc_session::new_document_turn` walks `context_handoff` links back while each
+session is in its first run),
 and
 of the old task list it keeps only the golden tasks, with the golden loop's
 counters (`transition::tasks_for_successor`); any other successor carries the
@@ -305,7 +320,9 @@ given) and
 `doc_write`/`doc_read` for it alone; every subagent context is
 `DocAccess::Section` or `::None`, never the parent's `Main`. No subagent
 outlives the run that spawned it, so a run's start frees any section still
-`doing` under a `sub:` owner. `edit_file` refuses the linked document: an
+`doing` under a `sub:` owner. A freed section the subagent never touched goes
+back to the status and owner it had before the claim (kept in the memory's
+`claimed`); one it wrote to without finishing goes to `todo`. `edit_file` refuses the linked document: an
 agent's edit would read as the person's and lock the agent out of its own
 section. The UI hears of
 every write and every detected edit through `AgentEvent::DocumentUpdated`

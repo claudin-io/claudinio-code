@@ -223,9 +223,12 @@ placeholder por parte:
 
 e depois preenche cada placeholder com `doc_write`, em ordem ou em paralelo:
 um subagente explore criado com `"section": "s2"` escreve essa seção ele mesmo,
-e só ela. O harness marca cada seção com um comentário HTML que é dele
-(`<!-- claudinio: id=s2 status=doing by=sub:ingredientes -->`), invisível na
-renderização; todo o resto do arquivo é seu e é preservado byte a byte.
+e só ela, então o relatório de volta pode ter duas linhas. O harness marca cada
+seção com um comentário HTML que é dele (`<!-- claudinio: id=s2 status=doing
+by=sub:ingredientes -->`), invisível na renderização, e fecha cada seção que
+escreveu com `<!-- claudinio: end -->`, então uma nota que você digita entre
+duas seções continua sua por mais que o agente reescreva a de cima; todo o
+resto do arquivo é seu e é preservado byte a byte.
 
 - **Você pode editar a qualquer momento, no app ou em qualquer editor, e a sua
   edição vence.** Uma seção cujo texto você mudou fica marcada *Edited by you*;
@@ -236,13 +239,21 @@ renderização; todo o resto do arquivo é seu e é preservado byte a byte.
 - **O painel mostra quem está em quê.** No lugar do Task Panel, uma sessão com
   documento lista as seções com status e dono (`main`, ou o subagente, cujo
   nome abre a timeline dele). Clique numa linha para editar o documento naquela
-  seção.
+  seção. Uma seção entregue a um subagente que não escreve nada volta a ser o
+  que era — terminada, ou editada por você.
 - **Cada execução começa com o esboço** (`id · status · dono · tópico`), não com
-  os corpos: o agente lê uma seção quando precisa (`doc_read`).
+  os corpos: o agente lê uma seção quando precisa (`doc_read`). Uma compactação
+  repete o esboço depois do resumo, como faz com a lista de tarefas.
 - **Um novo tópico de primeiro nível é um novo documento, e uma nova sessão.**
   Pedir um quando a sessão já tem documento abre uma sessão encadeada que é dona
-  do novo arquivo; a antiga mantém o seu. Um handoff de contexto leva o
-  documento junto.
+  do novo arquivo; a antiga mantém o seu (e a memória de quem editou o quê). Os
+  seus golden goals vão junto: um novo tópico não é saída para eles. A nova
+  sessão preenche o seu documento antes de poder abrir outro (um tópico a mais
+  espera a sua próxima mensagem, mesmo quando o contexto dessa sessão enche e
+  ela faz handoff antes). Um handoff de contexto leva o documento junto.
+- **O arquivo fica dentro de `.claudinio/docs/`.** Um link plantado onde o
+  arquivo iria nunca é seguido, e um `.claudinio` ou `.claudinio/docs` que seja
+  link é recusado, então um repositório clonado não desvia a escrita para fora.
 
 ### Nada é caixa-preta
 
