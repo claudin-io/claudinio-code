@@ -519,6 +519,25 @@ pub fn view(workspace: &Path, store_path: &Path) -> Option<DocView> {
     Some(view_of(&l.rel, &doc))
 }
 
+/// The session file of `session_id` in `workspace`, for the app's
+/// document commands. `None` unless the id is a plain name (letters, digits,
+/// `-`, `_`) and the file exists: the id arrives over IPC, and the webview
+/// is not trusted to name a path.
+pub fn session_file(workspace: &Path, session_id: &str) -> Option<PathBuf> {
+    let plain = !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !plain {
+        return None;
+    }
+    let path = workspace
+        .join(".claudinio")
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    path.is_file().then_some(path)
+}
+
 /// The current view for a context, after a write (`DocumentUpdated`).
 pub fn view_for(ctx: &crate::agent::tools::ToolContext) -> Option<DocView> {
     let ws = ctx.workspace_root.as_deref()?;
@@ -530,8 +549,6 @@ pub fn view_for(ctx: &crate::agent::tools::ToolContext) -> Option<DocView> {
 /// the editor loaded. Merged with what agents wrote meanwhile
 /// (`document::merge_human_save`); the sections the person changed are
 /// marked `human` and the model is told.
-// Called by the app's save command (a later commit).
-#[allow(dead_code)]
 pub fn save_human(
     workspace: &Path,
     store_path: &Path,
@@ -1130,6 +1147,16 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_session_id_from_the_app_names_a_session_file_and_nothing_else() {
+        let ws = Ws::new("session-file");
+        assert_eq!(session_file(&ws.root, "s"), Some(ws.store()));
+        assert_eq!(session_file(&ws.root, "missing"), None);
+        for bad in ["", "../s", "s/../../etc", "a b", "s.jsonl"] {
+            assert_eq!(session_file(&ws.root, bad), None, "{bad:?}");
+        }
     }
 
     #[test]

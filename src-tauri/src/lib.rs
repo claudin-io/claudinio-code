@@ -104,6 +104,8 @@ pub fn run() {
             commands::tasks::get_tasks,
             commands::tasks::set_tasks,
             commands::tasks::dismiss_golden_tasks,
+            commands::document::get_document,
+            commands::document::save_document,
             commands::network_log::get_network_log,
             commands::plugins::plugins_list,
             commands::plugins::plugins_inspect,
