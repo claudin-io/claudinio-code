@@ -1033,6 +1033,13 @@ pub struct Usage {
     pub output_tokens: u32,
     #[serde(default)]
     pub cache_read_input_tokens: u32,
+    /// Input tokens the provider wrote to its prompt cache on this request
+    /// (Anthropic's `cache_creation_input_tokens`; OpenAI-protocol providers do
+    /// not report writes, so it stays 0 there). Billed above the plain input
+    /// price, so a cost-per-task number that leaves it out flatters a run that
+    /// keeps re-warming its cache.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
     /// Cost in USD as returned by the provider (if supported), otherwise None.
     /// We calculate an estimate when the provider does not supply it.
     #[serde(default)]
@@ -1070,6 +1077,13 @@ fn merge_usage(usage: &mut Option<Usage>, value: &Value) {
         && v > 0
     {
         u.cache_read_input_tokens = v as u32;
+    }
+    if let Some(v) = obj
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        && v > 0
+    {
+        u.cache_creation_input_tokens = v as u32;
     }
     if let Some(v) = obj.get("cost").and_then(|v| v.as_f64()) {
         u.cost = Some(v);
@@ -2397,6 +2411,24 @@ mod tests {
         assert_eq!(u.output_tokens, 64);
         assert_eq!(u.cache_read_input_tokens, 300);
         assert_eq!(u.cost, None);
+    }
+
+    #[test]
+    fn cache_creation_tokens_are_read_next_to_cache_reads() {
+        // Anthropic bills a cache write at 1.25x the input price and reports it
+        // in its own field. Without it a run that pays to warm the cache looks
+        // cheaper than one that reads it, which is the opposite of the truth.
+        let mut usage: Option<Usage> = None;
+        merge_usage(
+            &mut usage,
+            &json!({"input_tokens": 12, "output_tokens": 0,
+                    "cache_read_input_tokens": 300, "cache_creation_input_tokens": 4_000}),
+        );
+        merge_usage(&mut usage, &json!({"output_tokens": 64}));
+        let u = usage.unwrap();
+        assert_eq!(u.cache_creation_input_tokens, 4_000);
+        assert_eq!(u.cache_read_input_tokens, 300);
+        assert_eq!(u.input_tokens, 12);
     }
 
     #[test]

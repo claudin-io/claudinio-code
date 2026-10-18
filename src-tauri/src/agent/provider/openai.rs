@@ -257,6 +257,7 @@ fn parse_usage(v: &Value, pricing: Option<(f64, f64)>) -> Usage {
         input_tokens: input,
         output_tokens: output,
         cache_read_input_tokens: cached,
+        cache_creation_input_tokens: 0,
         cost,
         cost_input: None,
         cost_output: None,
