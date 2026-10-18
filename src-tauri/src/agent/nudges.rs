@@ -6,7 +6,8 @@
 //! orders a deferred tool makes the model load it, and a load late in a
 //! session rewrites the cached prefix in front of the whole conversation
 //! (Phase 2 review, 2026-10-18). The handoff kickoffs are composed in
-//! `agent::transition` and checked by the same test.
+//! `agent::transition` and checked by the same test. A fixed text added
+//! here joins [`ALL`]; a test fails until it does.
 
 /// The response stopped at the output-token limit before a tool call or a
 /// final answer was complete.
@@ -113,9 +114,54 @@ pub fn repeating(what: &str) -> String {
     )
 }
 
+/// The first message of the Builder session a plan approval opens
+/// (`exit_plan_mode`, `HandoffReason::PlanExecution`).
+pub const PLAN_APPROVED: &str = "Plan approved. Read the plan and execute the tasks.";
+
+/// `exit_plan_mode`'s result when the plan is approved: this session ends
+/// and the Builder session above takes over.
+pub const PLAN_APPROVED_RESULT: &str =
+    "Plan approved. Switching to Builder mode via new session... End your turn.";
+
+/// Every fixed text above, by name, for the test that checks them all
+/// (`prompt::tests::no_harness_text_orders_a_deferred_tool`). Kept complete
+/// by [`tests::every_text_constant_is_in_all`], which reads this file: a new
+/// `pub const` here that is left out fails the suite.
+#[cfg(test)]
+pub const ALL: &[(&str, &str)] = &[
+    ("CUT_OFF", CUT_OFF),
+    ("EMPTY_REPLY", EMPTY_REPLY),
+    ("ANNOUNCED_NOT_TAKEN", ANNOUNCED_NOT_TAKEN),
+    ("FINALIZE_PLAN", FINALIZE_PLAN),
+    ("BRAIN_EXPLORING", BRAIN_EXPLORING),
+    ("HANDOFF_REQUEST", HANDOFF_REQUEST),
+    ("HANDOFF_RETRY", HANDOFF_RETRY),
+    ("PLAN_APPROVED", PLAN_APPROVED),
+    ("PLAN_APPROVED_RESULT", PLAN_APPROVED_RESULT),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The guard over harness texts is only as wide as `ALL`. A constant
+    // added to this file and not to `ALL` would never be checked, so the
+    // list is compared with the file itself.
+    #[test]
+    fn every_text_constant_is_in_all() {
+        let declared: Vec<&str> = include_str!("nudges.rs")
+            .lines()
+            .filter_map(|l| l.strip_prefix("pub const "))
+            .filter_map(|l| l.split_once(": &str"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(declared.contains(&"CUT_OFF"), "{declared:?}");
+        let listed: Vec<&str> = ALL.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            declared, listed,
+            "nudges::ALL must list every text constant, in order"
+        );
+    }
 
     // A golden flip's successor always has a list (the pending goals are
     // tasks), and its first run ends the kickoff with it as a `<tasks>` block.

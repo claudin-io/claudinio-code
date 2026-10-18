@@ -1548,6 +1548,12 @@ mod deferred_prefix_tests {
     /// is deferred in either mode. The model would load it to obey, and a
     /// load mid-session (the finalize_plan nudge comes at the very end)
     /// rewrites the cached prefix in front of the whole conversation.
+    ///
+    /// The fixed texts come from `nudges::ALL`, which a test in `nudges`
+    /// keeps equal to the file's constants; the composed ones (the
+    /// functions in `nudges` and the kickoffs in `transition`) are listed
+    /// here and must grow with them. The `<hook-feedback>` and
+    /// `<hook-context>` wrappers add only their tags to a hook's own text.
     #[test]
     fn no_harness_text_orders_a_deferred_tool() {
         use crate::agent::{nudges, transition};
@@ -1564,14 +1570,8 @@ mod deferred_prefix_tests {
             deferred.iter().any(|n| n == "semantic_search"),
             "{deferred:?}"
         );
-        let texts = [
-            nudges::CUT_OFF.to_string(),
-            nudges::EMPTY_REPLY.to_string(),
-            nudges::ANNOUNCED_NOT_TAKEN.to_string(),
-            nudges::FINALIZE_PLAN.to_string(),
-            nudges::BRAIN_EXPLORING.to_string(),
-            nudges::HANDOFF_REQUEST.to_string(),
-            nudges::HANDOFF_RETRY.to_string(),
+        let mut texts: Vec<String> = nudges::ALL.iter().map(|(_, t)| t.to_string()).collect();
+        texts.extend([
             nudges::golden_flip(&["g1".into()], "builder", 1, 3),
             nudges::quality_failed("1 failing", "detail", 1, 3),
             nudges::repeating("`read_file`"),
@@ -1585,7 +1585,7 @@ mod deferred_prefix_tests {
             transition::compose_builder_kickoff(Some("docs/plans/p.md"), Some("plan")),
             transition::compose_builder_kickoff(None, None),
             transition::compose_context_handoff_message("handoff", Some("docs/plans/p.md")),
-        ];
+        ]);
         for text in &texts {
             for name in &deferred {
                 assert!(

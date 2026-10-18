@@ -924,7 +924,7 @@ pub(super) fn handle_mode_switch(
                     reason: HandoffReason::PlanExecution,
                     next_mode: SessionMode::Builder,
                     next_origin: ModeOrigin::Agent,
-                    first_message: "Plan approved. Read the plan and execute the tasks.".into(),
+                    first_message: crate::agent::nudges::PLAN_APPROVED.into(),
                     golden_cycle: 0,
                     golden_stalls: 0,
                     golden_last_pending: vec![],
@@ -969,11 +969,7 @@ pub(super) fn handle_mode_switch(
                         }
                     }
                 }
-                (
-                    "Plan approved. Switching to Builder mode via new session... End your turn."
-                        .into(),
-                    None,
-                )
+                (crate::agent::nudges::PLAN_APPROVED_RESULT.into(), None)
             }
         }
         _ => ("unknown mode tool".into(), Some("invalid".into())),
