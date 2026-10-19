@@ -155,13 +155,26 @@ fn plans_dir(ctx: &ToolContext) -> Result<PathBuf, String> {
     Ok(write_plan::plans_dir(root, ctx.plan_save_path.as_deref()))
 }
 
-/// The most recently modified `*.md` in the plans directory, if any.
+/// True when `path` is the project memory of the context's workspace: the
+/// memory is not a plan, and the log `run_finalize` appends (with a plain
+/// write that follows links) must never land in it — it would put the
+/// model's own journal in a file only the harness writes, and its length
+/// would spend the cap on the entries already there (Phase 9 review).
+fn is_memory(ctx: &ToolContext, path: &Path) -> bool {
+    ctx.workspace_root
+        .as_deref()
+        .is_some_and(|root| crate::agent::project_memory::is_memory_path(Path::new(root), path))
+}
+
+/// The most recently modified `*.md` in the plans directory, if any — never
+/// the project memory, which a repository whose plans directory is
+/// `.claudinio` would otherwise pick right after a memory append.
 pub fn latest_plan_file(ctx: &ToolContext) -> Option<PathBuf> {
     let dir = plans_dir(ctx).ok()?;
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(&dir).ok()?.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") || is_memory(ctx, &path) {
             continue;
         }
         let mtime = entry
@@ -190,6 +203,9 @@ fn resolve_plan_file(ctx: &ToolContext, plan_file: Option<&str>) -> Result<PathB
                 // A bare basename resolved inside the plans directory.
                 plans_dir(ctx)?.join(name)
             };
+            if is_memory(ctx, &path) {
+                return Err(crate::agent::gate_text::PROJECT_MEMORY_WRITE.into());
+            }
             if path.exists() {
                 Ok(path)
             } else {
@@ -507,6 +523,53 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&plan).unwrap(), "# Plan\n");
         assert!(!memory_file(&root).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The memory is not a plan: a `plan_file` naming it is refused before
+    // anything is written, so the model's journal never lands in the memory
+    // and the cap is never spent on it (the entries already there stay).
+    #[test]
+    fn a_plan_file_naming_the_project_memory_is_refused_and_leaves_it_unchanged() {
+        let root = tmp_workspace("planfilememory");
+        write_plan_md(&root, "2026-10-19_x.md", "# Plan\n");
+        let before = "# Project memory\n\n## Learned\n- 2026-10-01 — keep me (plan: p.md)\n";
+        std::fs::write(memory_file(&root), before).unwrap();
+        let ctx = ctx_for(root.to_str().unwrap(), None);
+        let absolute = memory_file(&root).to_string_lossy().into_owned();
+        for plan_file in [
+            ".claudinio/MEMORY.md",
+            "./.claudinio/memory.md",
+            absolute.as_str(),
+        ] {
+            let args = FinalizePlanArgs {
+                journal: "x".repeat(5_000),
+                plan_file: Some(plan_file.into()),
+                summary: None,
+                memory: Some(vec!["x".into()]),
+            };
+            let err = execute(args, &ctx).unwrap_err();
+            assert_eq!(
+                err,
+                crate::agent::gate_text::PROJECT_MEMORY_WRITE,
+                "{plan_file}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(memory_file(&root)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A repository whose plans directory is `.claudinio` itself: the newest
+    // `*.md` there is the memory right after an append, and it is not a plan.
+    #[test]
+    fn the_newest_plan_is_never_the_project_memory() {
+        let root = tmp_workspace("plansdirmemory");
+        let plan = root.join(".claudinio").join("2026-10-19_x.md");
+        std::fs::write(&plan, "# Plan\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(memory_file(&root), "## Learned\n").unwrap();
+        let ctx = ctx_for(root.to_str().unwrap(), Some(".claudinio"));
+        assert_eq!(latest_plan_file(&ctx), Some(plan));
         let _ = std::fs::remove_dir_all(&root);
     }
 
