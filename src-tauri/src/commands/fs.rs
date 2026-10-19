@@ -190,6 +190,21 @@ async fn ensure_in_open_workspace(
     state: &tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), String> {
     let roots: Vec<std::path::PathBuf> = state.workspaces.lock().await.keys().cloned().collect();
+    in_open_workspace(path, &roots)
+}
+
+/// The rule behind `ensure_in_open_workspace`, apart from the app state.
+///
+/// A relative path is refused: the check would resolve it against a workspace
+/// and `std::fs` against the process's directory, and with several workspaces
+/// open there is no telling which one it meant. The webview sends absolute
+/// paths.
+fn in_open_workspace(path: &str, roots: &[std::path::PathBuf]) -> Result<(), String> {
+    if Path::new(path).is_relative() {
+        return Err(format!(
+            "cannot access '{path}': the path is relative. File access needs an absolute path inside the open project."
+        ));
+    }
     if roots.is_empty() {
         return Err(format!(
             "cannot access '{path}': no workspace is open. File access is restricted to the open project."
@@ -308,4 +323,32 @@ pub async fn export_file_bytes(
     };
     std::fs::write(&path, &bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A relative path is checked against a workspace but `std::fs` opens it
+    /// from the process's directory, so `.bashrc` passed the guard and wrote
+    /// `$HOME/.bashrc` when the app ran from `$HOME` — the attack this guard
+    /// exists to stop. The webview always sends absolute paths.
+    #[test]
+    fn a_relative_path_is_refused_even_when_it_would_fit_a_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        let roots = vec![ws.path().to_path_buf()];
+        let err = in_open_workspace(".bashrc", &roots).unwrap_err();
+        assert!(err.contains("absolute"), "{err}");
+        assert!(in_open_workspace("src/main.rs", &roots).is_err());
+    }
+
+    #[test]
+    fn an_absolute_path_inside_a_workspace_passes_and_one_outside_does_not() {
+        let ws = tempfile::tempdir().unwrap();
+        let roots = vec![ws.path().to_path_buf()];
+        let inside = ws.path().join("a.txt");
+        assert!(in_open_workspace(&inside.to_string_lossy(), &roots).is_ok());
+        assert!(in_open_workspace("/etc/passwd", &roots).is_err());
+        assert!(in_open_workspace(&inside.to_string_lossy(), &[]).is_err());
+    }
 }

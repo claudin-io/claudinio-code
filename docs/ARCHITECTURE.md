@@ -508,11 +508,10 @@ approval prompt. `edit_file` always shows a diff first. It also creates files
 (lean-harness Phase 3b): an empty `old_string` on a path that does not exist
 proposes the whole file as a diff from nothing, and applying it makes the
 missing folders and writes with `create_new`, so it never overwrites. The
-workspace and spec guards run first, as for any edit; a new file needs an
-absolute path, because the guard resolves a relative one against the workspace
-while the write would resolve it against the process's directory; for the same
-reason a read or an edit by a relative path that is not found asks for the
-absolute path instead of offering to create the file.
+workspace and spec guards run first, as for any edit. A relative path is
+joined onto the workspace (`tools::in_workspace`) before it is checked, so the
+file a tool opens is the one the guard approved — `std::fs` alone would open it
+from the process's directory (`$HOME`, or `/` from Finder).
 Read-before-edit (`ReadTracker`) has nothing to check on a missing path, and
 records a created file as fully read. An `old_string` that occurs more than once
 is refused with the count unless the call sets `replace_all`, and the count is
@@ -546,7 +545,8 @@ the harness's file the harness's, it is not a sandbox.
 **2. What the webview may touch.** The chat renders untrusted content, so treat
 the frontend as a place where attacker-influenced script could run. The
 filesystem commands in `commands/fs.rs` therefore enforce workspace containment
-themselves — they do not rely on the frontend asking nicely. Both guards call
+themselves — they do not rely on the frontend asking nicely, and refuse a
+relative path, which `std::fs` would open from the process's directory. Both guards call
 `workspace_path.rs` so they cannot drift apart. Writes outside the workspace go
 through `export_file`, which opens the save dialog *in Rust* so the destination
 is never an IPC argument.

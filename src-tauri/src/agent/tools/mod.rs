@@ -166,6 +166,20 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     crate::workspace_path::ensure_within_root(requested, std::path::Path::new(root))
 }
 
+/// A relative `path` joined onto the workspace root, so the file a tool opens
+/// is the one `validate_path` checked: the guard resolves a relative path
+/// against the workspace, and `std::fs` would resolve it against the process's
+/// directory (`$HOME`, or `/` from Finder). Absolute paths, and every path in a
+/// context with no workspace, come back unchanged.
+pub fn in_workspace(path: &str, ctx: &ToolContext) -> String {
+    match ctx.workspace_root.as_deref() {
+        Some(root) if Path::new(path).is_relative() => {
+            Path::new(root).join(path).to_string_lossy().into_owned()
+        }
+        _ => path.to_string(),
+    }
+}
+
 /// Like `validate_path`, but also refuses to write the project's specs and
 /// the project memory (`agent::project_memory::is_memory_path`).
 ///
@@ -743,8 +757,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
     }
     match name {
         "read_file" => {
-            let a: read_file::ReadFileArgs =
+            let mut a: read_file::ReadFileArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = in_workspace(&a.path, ctx);
             validate_read_path(&a.path, ctx)?;
             let path = a.path.clone();
             let start_line = a.start_line;
@@ -758,8 +773,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::Text { content })
         }
         "list_dir" => {
-            let a: list_dir::ListDirArgs =
+            let mut a: list_dir::ListDirArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = in_workspace(&a.path, ctx);
             validate_read_path(&a.path, ctx)?;
             let dir = a.path.clone();
             let entries = list_dir::execute(a)?;
@@ -768,8 +784,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             })
         }
         "grep" => {
-            let a: grep::GrepArgs =
+            let mut a: grep::GrepArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = a.path.map(|p| in_workspace(&p, ctx));
             if let Some(ref path) = a.path {
                 validate_read_path(path, ctx)?;
             } else if let Some(ref root) = ctx.workspace_root {
@@ -788,8 +805,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             })
         }
         "edit_file" => {
-            let a: edit_file::EditFileArgs =
+            let mut a: edit_file::EditFileArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = in_workspace(&a.path, ctx);
             validate_editable_path(&a.path, ctx)?;
             if crate::agent::doc_session::is_linked_document(ctx, &a.path) {
                 return Err(
@@ -1068,8 +1086,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 }
 
 pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<String, String> {
-    let a: edit_file::EditFileArgs =
+    let mut a: edit_file::EditFileArgs =
         serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+    a.path = in_workspace(&a.path, ctx);
     edit_gates(&a, ctx).await?;
     let diff = edit_file::preview(&a)?;
     let applied = edit_file::apply(&diff)?;
@@ -1092,22 +1111,9 @@ pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<Strin
 async fn edit_gates(a: &edit_file::EditFileArgs, ctx: &ToolContext) -> Result<(), String> {
     validate_editable_path(&a.path, ctx)?;
     // `symlink_metadata`: a dangling link is something there, not a new file.
+    // The callers joined a relative path onto the workspace (`in_workspace`),
+    // so a missing file here is missing where it was checked.
     if std::fs::symlink_metadata(&a.path).is_err() {
-        let path = Path::new(&a.path);
-        // A relative path is checked against the workspace but opened from
-        // the process's directory: a create could land outside the workspace,
-        // and an edit of a file that exists would be called missing.
-        if let Some(root) = ctx.workspace_root.as_deref()
-            && path.is_relative()
-        {
-            let absolute = Path::new(root).join(path);
-            let absolute = absolute.to_string_lossy();
-            return Err(if a.old_string.is_empty() {
-                crate::agent::gate_text::create_needs_absolute_path(&a.path, &absolute)
-            } else {
-                crate::agent::gate_text::edit_needs_absolute_path(&a.path, &absolute)
-            });
-        }
         return Ok(());
     }
     let tracker = ctx.read_tracker.lock().await;
@@ -2163,44 +2169,43 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A relative path resolves against the workspace when it is checked but
-    /// against the process's own directory when it is written, so a file
-    /// created from one could land outside the workspace the check approved.
+    /// A relative path names a file in the workspace, where the guard checked
+    /// it. It used to be refused with "pass the absolute path", because the
+    /// write would have resolved it against the process's directory instead;
+    /// joining it onto the workspace closes that gap, so the create goes ahead
+    /// there (final review of the lean-harness branch).
     #[test]
-    fn a_new_file_needs_an_absolute_path() {
+    fn a_new_file_by_a_relative_path_is_created_in_the_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_at(dir.path());
         let args = serde_json::json!({
             "path": "phase3b-relative/NEW.md", "old_string": "", "new_string": "x\n",
         });
-        let err = edit(&ctx, args.clone()).unwrap_err();
-        assert!(err.contains("absolute"), "{err}");
-        let suggested = dir.path().join("phase3b-relative/NEW.md");
-        assert!(err.contains(&*suggested.to_string_lossy()), "{err}");
-        assert!(apply(&ctx, args).is_err());
+        apply(&ctx, args).unwrap();
+        let created = dir.path().join("phase3b-relative/NEW.md");
+        assert_eq!(std::fs::read_to_string(created).unwrap(), "x\n");
         assert!(!std::path::Path::new("phase3b-relative").exists());
     }
 
-    /// The same mismatch on an edit: a relative path to a file that exists in
-    /// the workspace is not found from the app's directory, and calling it
-    /// missing sends the model into a create that is then refused. It is told
-    /// the absolute path instead.
+    /// The same on an edit: a relative path to a file in the workspace edits
+    /// that file, and is never called missing.
     #[test]
-    fn editing_by_a_relative_path_asks_for_the_absolute_one_not_a_create() {
+    fn editing_by_a_relative_path_edits_the_workspace_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("phase6f-edit.rs"), "fn main() {}\n").unwrap();
         let ctx = ctx_at(dir.path());
-        let err = edit(
+        read_whole(&ctx, "phase6f-edit.rs");
+        apply(
             &ctx,
             serde_json::json!({
                 "path": "phase6f-edit.rs", "old_string": "main", "new_string": "start",
             }),
         )
-        .unwrap_err();
-        assert!(!err.contains("create"), "{err}");
-        let absolute = dir.path().join("phase6f-edit.rs");
-        assert!(err.contains(&*absolute.to_string_lossy()), "{err}");
-        assert!(err.contains("absolute"), "{err}");
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("phase6f-edit.rs")).unwrap(),
+            "fn start() {}\n"
+        );
     }
 
     #[test]
@@ -2230,25 +2235,98 @@ mod tests {
         assert!(err.contains("where edit_file is available"), "{err}");
     }
 
-    /// A relative path is read from the app's own directory while the
-    /// workspace guard resolves it against the workspace, so a relative read
-    /// can miss a file that exists in the workspace. Telling the model to
-    /// create it there sends it into a refused create and a needless round;
-    /// the answer is the absolute path.
+    /// A relative read of a file the workspace holds returns it; it used to
+    /// miss and be told to pass the absolute path (Phase 6f).
     #[test]
-    fn reading_a_missing_relative_path_asks_for_the_absolute_one_not_a_create() {
+    fn reading_a_relative_path_reads_the_workspace_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("phase6f-exists.rs"), "fn main() {}\n").unwrap();
         let ctx = ctx_at(dir.path());
-        let err = futures::executor::block_on(execute(
+        let out = futures::executor::block_on(execute(
             "read_file",
             serde_json::json!({ "path": "phase6f-exists.rs" }),
             &ctx,
         ))
-        .unwrap_err();
-        assert!(err.contains("does not exist"), "{err}");
-        assert!(!err.contains("create"), "{err}");
-        assert!(err.contains("absolute path"), "{err}");
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("read_file returns text")
+        };
+        assert!(content.contains("fn main()"), "{content}");
+    }
+
+    // ── A relative path means the workspace, where it is checked and opened ──
+    //
+    // The guard resolved a relative path against the workspace and the tools
+    // then opened it from the process's directory, so `.ssh/id_rsa` passed the
+    // guard and read `$HOME/.ssh/id_rsa` whenever the app ran from `$HOME`.
+    // `cargo test` runs from the crate root, which holds a `Cargo.toml` and a
+    // `src/` that a fresh workspace does not.
+
+    #[test]
+    fn a_relative_read_opens_the_workspace_file_not_the_apps() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "workspace copy\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        let out = futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": "Cargo.toml" }),
+            &ctx,
+        ))
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("read_file returns text")
+        };
+        assert!(content.contains("workspace copy"), "{content}");
+        assert!(!content.contains("[package]"), "{content}");
+    }
+
+    #[test]
+    fn a_relative_path_the_workspace_lacks_is_not_served_from_the_apps_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let run = |name: &str, args: serde_json::Value| {
+            futures::executor::block_on(execute(name, args, &ctx))
+        };
+        let text = |out: Result<ToolOutput, String>| match out {
+            Ok(ToolOutput::Text { content }) => content,
+            Ok(_) => String::new(),
+            Err(e) => e,
+        };
+        let read = text(run(
+            "read_file",
+            serde_json::json!({ "path": "Cargo.toml" }),
+        ));
+        assert!(!read.contains("[package]"), "{read}");
+        let listed = text(run("list_dir", serde_json::json!({ "path": "src" })));
+        assert!(!listed.contains("lib.rs"), "{listed}");
+        let grepped = text(run(
+            "grep",
+            serde_json::json!({ "pattern": "package", "path": "Cargo.toml" }),
+        ));
+        assert!(!grepped.contains("[package]"), "{grepped}");
+    }
+
+    #[test]
+    fn a_relative_edit_proposes_a_change_to_the_workspace_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"ws\"\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        read_whole(&ctx, "Cargo.toml");
+        let out = edit(
+            &ctx,
+            serde_json::json!({
+                "path": "Cargo.toml", "old_string": "name = \"ws\"", "new_string": "name = \"x\"",
+            }),
+        )
+        .unwrap();
+        let ToolOutput::EditProposal { path, .. } = out else {
+            panic!("edit_file proposes")
+        };
+        assert_eq!(
+            std::path::Path::new(&path),
+            dir.path().join("Cargo.toml"),
+            "the proposal names the workspace file"
+        );
     }
 
     // ── edit_file edits exactly one place (lean-harness Phase 3b) ──

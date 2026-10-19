@@ -120,26 +120,6 @@ pub fn create_over_existing(path: &str) -> String {
     )
 }
 
-/// A new file named by a relative path, which the containment check resolves
-/// against the workspace and the write would resolve against the process's
-/// own directory.
-pub fn create_needs_absolute_path(path: &str, absolute: &str) -> String {
-    format!(
-        "{path} is relative; a new file needs an absolute path inside the workspace. Retry \
-         edit_file with path {absolute}."
-    )
-}
-
-/// An edit of text in a file named by a relative path that is not found from
-/// the process's directory: the file may well exist in the workspace, which
-/// the containment check resolved the path against (lean-harness Phase 6f).
-pub fn edit_needs_absolute_path(path: &str, absolute: &str) -> String {
-    format!(
-        "{path} is relative and is not found from the app's directory; edit_file needs an \
-         absolute path inside the workspace. Retry edit_file with path {absolute}."
-    )
-}
-
 /// `edit_file` with an `old_string` that occurs `count` times.
 pub fn ambiguous_match(path: &str, count: usize) -> String {
     format!(
@@ -246,14 +226,6 @@ pub fn all() -> Vec<(&'static str, String)> {
         ),
         ("edit_target_missing", edit_target_missing("/w/src/new.rs")),
         ("create_over_existing", create_over_existing("/w/src/a.rs")),
-        (
-            "create_needs_absolute_path",
-            create_needs_absolute_path("src/new.rs", "/w/src/new.rs"),
-        ),
-        (
-            "edit_needs_absolute_path",
-            edit_needs_absolute_path("src/a.rs", "/w/src/a.rs"),
-        ),
         ("ambiguous_match", ambiguous_match("/w/src/a.rs", 2)),
         ("quality_missing", quality_missing("golden-g-1")),
         ("quality_stale", quality_stale("golden-g-1")),
@@ -327,14 +299,6 @@ mod tests {
         (
             "create_over_existing",
             &["already exists", "read_file", "then retry edit_file"],
-        ),
-        (
-            "create_needs_absolute_path",
-            &["absolute", "retry edit_file with path /w/src/new.rs"],
-        ),
-        (
-            "edit_needs_absolute_path",
-            &["absolute", "retry edit_file with path /w/src/a.rs"],
         ),
         (
             "ambiguous_match",
