@@ -3181,10 +3181,9 @@ mod usage_tests {
     /// the line like any kind it does not know (the next test).
     #[test]
     fn a_document_linked_line_loads_links_the_latest_path_and_stays_out_of_the_history() {
-        assert_eq!(
-            linked_document(&load_records(&tmp_file("no_doc", &OLD_SESSION)).unwrap()),
-            None
-        );
+        let none = tmp_file("no_doc", &OLD_SESSION);
+        assert_eq!(linked_document(&load_records(&none).unwrap()), None);
+        std::fs::remove_dir_all(none.parent().unwrap()).ok();
         let mut lines = OLD_SESSION.to_vec();
         lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/a.md","ts":7}"#);
         lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/b.md","ts":8}"#);

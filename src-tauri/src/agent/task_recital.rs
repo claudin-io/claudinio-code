@@ -282,6 +282,7 @@ mod tests {
             tasks_block(&session_tasks(&crate::agent::tools::tests_support::ctx())),
             None
         );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // A title is cut at TITLE_CHARS characters; in Portuguese, CJK or emoji
@@ -320,6 +321,12 @@ pub(crate) mod loop_tests {
         pub store: SessionStore,
     }
 
+    impl Drop for Workspace {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
     pub(crate) fn workspace(tag: &str, tasks: &[TaskItem]) -> Workspace {
         let root = std::env::temp_dir().join(format!(
             "claudinio-recital-loop-{tag}-{}-{}",
@@ -336,6 +343,18 @@ pub(crate) mod loop_tests {
             crate::agent::persist::append_tasks(&store.path, tasks).unwrap();
         }
         Workspace { root, store }
+    }
+
+    /// A test's folder goes when the test does, failing or not: the names
+    /// carry the pid and the time, so a leftover is never reused, only piled up.
+    #[test]
+    fn a_workspace_is_removed_when_the_test_drops_it() {
+        let root = {
+            let ws = workspace("dropped", &[]);
+            assert!(ws.root.exists());
+            ws.root.clone()
+        };
+        assert!(!root.exists(), "{} was left behind", root.display());
     }
 
     /// One run of `message` under `profile` against a model following
