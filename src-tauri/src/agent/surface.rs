@@ -214,7 +214,7 @@ its work is verified; several in one call. Never resend the whole list just to c
 # WORK
 - Find things with `grep` and `list_dir`. Read with `read_file`, and on a large file pass \
 start_line/end_line for the part you need: your context is small, so never read more than you will use.
-- You MUST read a file before you change it. Change files with `edit_file`.
+- You MUST read a file before you change it. Create and change files with `edit_file`.
 - Run builds and tests with `bash`, and fix what they report before you call a task done.
 - When the work is finished, call `run_quality`: it runs the project's own checks and records the result.
 - Finish the work, or block with `ask_user`. Never end with a plain-text question or a TODO.
@@ -257,6 +257,18 @@ pub fn effective_profile(
 
 #[cfg(test)]
 mod tests {
+    /// A small model with no word on creating files reached for a shell
+    /// heredoc (an approval, no diff) or gave up — every failed run of the
+    /// lean-harness clean baseline eval was a new file (Phase 3b).
+    #[test]
+    fn the_compact_prompt_says_edit_file_creates_files_too() {
+        assert!(
+            super::COMPACT_PROMPT.contains("Create and change files with `edit_file`"),
+            "{}",
+            super::COMPACT_PROMPT
+        );
+    }
+
     use super::*;
     use crate::agent::provider::ProviderEntry;
 

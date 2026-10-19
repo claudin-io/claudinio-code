@@ -37,7 +37,7 @@ use std::path::{Component, Path};
 /// The tool result a refused shell command gets.
 pub(crate) const SHELL_REJECTION: &str = "Not run: this evaluation runs unattended and approves \
 only read-only shell commands (ls, cat, head, tail, wc, git status/diff/log, without pipes, \
-chaining or redirection). Change files with edit_file, and run the project's tests and checks \
+chaining or redirection). Create and change files with edit_file, and run the project's tests and checks \
 with the run_quality tool.";
 
 /// What `ask_user` gets when the task has no scripted answer left.
@@ -164,6 +164,17 @@ pub(crate) fn answer_questions(questions: &Value, scripted: &mut Vec<String>) ->
 
 #[cfg(test)]
 mod tests {
+    /// A refused shell write was most often a new file (the clean baseline,
+    /// 2026-10-18), so the refusal names the way to create one.
+    #[test]
+    fn the_shell_refusal_says_files_are_created_with_edit_file() {
+        assert!(
+            super::SHELL_REJECTION.contains("Create and change files with edit_file"),
+            "{}",
+            super::SHELL_REJECTION
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

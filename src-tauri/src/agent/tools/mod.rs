@@ -333,13 +333,14 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "edit_file".into(),
-            description: "Replace the FIRST occurrence of old_string with new_string in a workspace file; include enough surrounding lines that it matches one place. Read the lines being changed with read_file first. Shown as a diff, applied once approved.".into(),
+            description: "Replace old_string with new_string in a workspace file; old_string must match one place (add surrounding lines) unless replace_all. old_string \"\" creates a new file. Read the lines being changed with read_file first. Shown as a diff, applied once approved.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path inside the workspace" },
                     "old_string": { "type": "string" },
-                    "new_string": { "type": "string" }
+                    "new_string": { "type": "string" },
+                    "replace_all": { "type": "boolean" }
                 },
                 "required": ["path", "old_string", "new_string"]
             }),
@@ -1393,6 +1394,28 @@ mod tests {
             .map(|t| (t.name.clone(), t.description.chars().count()))
             .collect();
         assert!(over.is_empty(), "over 400 characters: {over:?}");
+    }
+
+    /// Phase 3b: models that could not tell edit_file creates files wrote
+    /// them with shell heredocs (an approval, no diff) or gave up, and the
+    /// description promised "the FIRST occurrence" while every occurrence was
+    /// replaced. It now says both rules, and the schema offers replace_all as
+    /// an optional flag.
+    #[test]
+    fn edit_file_says_it_creates_files_and_matches_one_place() {
+        let defs = get_defs(4);
+        let edit = defs.iter().find(|t| t.name == "edit_file").unwrap();
+        let text = edit.description.to_lowercase();
+        assert!(text.contains("old_string \"\" creates"), "{text}");
+        assert!(text.contains("match one place"), "{text}");
+        assert!(text.contains("replace_all"), "{text}");
+        assert!(!text.contains("first occurrence"), "{text}");
+        assert_eq!(
+            edit.input_schema["properties"]["replace_all"]["type"],
+            "boolean"
+        );
+        let required = edit.input_schema["required"].as_array().unwrap();
+        assert!(!required.iter().any(|r| r == "replace_all"));
     }
 
     /// `tasks_update` takes one task or a batch (lean-harness Phase 4): the
