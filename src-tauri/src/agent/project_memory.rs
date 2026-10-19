@@ -339,11 +339,8 @@ pub fn named_in(command: &str) -> bool {
         .map(|word| parts_of(word))
         .filter(|parts| !parts.is_empty())
         .collect();
-    let names_dir_in = |paths: &[Vec<String>]| {
-        paths
-            .iter()
-            .any(|p| glob_matches(&p[p.len() - 1], dir))
-    };
+    let names_dir_in =
+        |paths: &[Vec<String>]| paths.iter().any(|p| glob_matches(&p[p.len() - 1], dir));
     let names_file_in = |paths: &[Vec<String>]| {
         paths
             .iter()
@@ -381,9 +378,9 @@ pub fn named_in(command: &str) -> bool {
         let rewrites_folder = runs(FOLDER_WRITERS)
             || (runs(&["git"]) && words.iter().any(|w| GIT_REWRITERS.contains(&w.as_str())));
         let find_acts = runs(&["find"])
-            && words.iter().any(|w| {
-                ["-delete", "-exec", "-execdir", "-ok", "-okdir"].contains(&w.as_str())
-            });
+            && words
+                .iter()
+                .any(|w| ["-delete", "-exec", "-execdir", "-ok", "-okdir"].contains(&w.as_str()));
         if (rewrites_folder && (names_dir || in_dir))
             || (find_acts && (names_dir || in_dir || names_file_in(&paths)))
         {
@@ -403,7 +400,11 @@ fn command_segments(lower: &str) -> Vec<Vec<String>> {
         .collect();
     folded
         .split(|c: char| ";|&\n\r()`".contains(c))
-        .map(|seg| seg.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+        .map(|seg| {
+            seg.split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .filter(|words| !words.is_empty())
         .collect()
 }
@@ -416,12 +417,16 @@ fn commands_of(words: &[String]) -> Vec<&str> {
     fn base(w: &str) -> &str {
         w.rsplit('/').next().unwrap_or(w)
     }
-    let mut rest = words.iter().skip_while(|w| w.contains('=') && !w.starts_with('-'));
+    let mut rest = words
+        .iter()
+        .skip_while(|w| w.contains('=') && !w.starts_with('-'));
     let Some(first) = rest.next().map(|w| base(w)) else {
         return Vec::new();
     };
     if RUNS_ANOTHER.contains(&first) {
-        std::iter::once(first).chain(rest.map(|w| base(w))).collect()
+        std::iter::once(first)
+            .chain(rest.map(|w| base(w)))
+            .collect()
     } else {
         vec![first]
     }

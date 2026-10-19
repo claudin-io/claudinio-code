@@ -1093,7 +1093,11 @@ mod read_only_tests {
                 PermissionLevel::Auto,
                 "{cmd:?} chains only allowlisted commands"
             );
-            assert_eq!(bash_permission_brain(cmd), PermissionLevel::Auto, "{cmd:?} in Brain");
+            assert_eq!(
+                bash_permission_brain(cmd),
+                PermissionLevel::Auto,
+                "{cmd:?} in Brain"
+            );
         }
     }
 
