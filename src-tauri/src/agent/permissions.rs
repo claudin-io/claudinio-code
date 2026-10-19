@@ -368,12 +368,30 @@ fn filters_its_input(segment: &str) -> bool {
     let args: Vec<&str> = words.collect();
     match command {
         "grep" | "egrep" | "fgrep" | "cut" | "cat" | "head" | "tail" | "wc" => true,
+        // getopt takes any unambiguous abbreviation of a long option, so
+        // `--o=F` is `--output=F` and `--co=P` runs P: a long option whose
+        // name could start either is refused (`--` alone included).
         "sort" => !args.iter().any(|a| match a.strip_prefix("--") {
-            Some(long) => long.starts_with("output") || long.starts_with("compress"),
+            Some(long) => {
+                let name = long.split('=').next().unwrap_or(long);
+                "output".starts_with(name) || "compress-program".starts_with(name)
+            }
             None => a.starts_with('-') && a.contains('o'),
         }),
-        // `uniq IN OUT` writes OUT.
-        "uniq" => args.iter().filter(|a| !a.starts_with('-')).count() <= 1,
+        // `uniq IN OUT` writes OUT, and `-` (stdin) is an operand like any
+        // other, as is every word after `--`.
+        "uniq" => {
+            let mut operands = 0;
+            let mut options_end = false;
+            for a in &args {
+                if options_end || *a == "-" || !a.starts_with('-') {
+                    operands += 1;
+                } else if *a == "--" {
+                    options_end = true;
+                }
+            }
+            operands <= 1
+        }
         _ => false,
     }
 }
@@ -464,13 +482,83 @@ fn split_chain(command: &str) -> Option<Vec<(String, bool)>> {
 }
 
 /// `segment` starts with the word(s) of `prefix`: `ls` matches `ls -la` but
-/// not `lsblk`. A prefix ending in a space names a command with arguments,
-/// so it does not match the bare command: `python ` is not `python`, which
-/// runs whatever its stdin or a pipe feeds it.
+/// not `lsblk`, and a bare `echo` matches `echo `.
 fn starts_with_word(segment: &str, prefix: &str) -> bool {
-    (!prefix.ends_with(' ') && segment == prefix)
+    segment == prefix.trim_end()
         || segment.starts_with(prefix)
             && (prefix.ends_with(' ') || segment[prefix.len()..].starts_with(' '))
+}
+
+/// An allowlisted interpreter (`python`, `node`) with no script among its
+/// arguments — no file, no `-c`/`-m` or `-e`/`-p`, only flags or `-` — reads
+/// its script from stdin or the pipe, which the call does not show: `python`,
+/// `python -`, `cat x | node -`, `python -u`. Asking for the version or the
+/// help exits before any script is read. A flag that takes a value
+/// (`-W ignore`, `-r ./setup.js`) does not make that value the script.
+fn interpreter_reads_stdin(segment: &str) -> bool {
+    struct Flags {
+        script: &'static str,
+        exits: &'static str,
+        valued: &'static str,
+        script_long: &'static [&'static str],
+        valued_long: &'static [&'static str],
+    }
+    let mut words = segment.split_whitespace();
+    let flags = match words.next() {
+        Some("python") => Flags {
+            script: "cm",
+            exits: "Vh",
+            valued: "WX",
+            script_long: &[],
+            valued_long: &["--check-hash-based-pycs"],
+        },
+        Some("node") => Flags {
+            script: "ep",
+            exits: "vh",
+            valued: "rC",
+            script_long: &["--eval", "--print"],
+            valued_long: &[
+                "--require",
+                "--import",
+                "--conditions",
+                "--loader",
+                "--input-type",
+            ],
+        },
+        _ => return false,
+    };
+    while let Some(word) = words.next() {
+        if word == "-" {
+            return true;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            let name = &word[..name.len() + 2];
+            if flags.script_long.contains(&name) || ["--version", "--help"].contains(&name) {
+                return false;
+            }
+            if flags.valued_long.contains(&name) && !long.contains('=') {
+                words.next();
+            }
+            continue;
+        }
+        let Some(short) = word.strip_prefix('-') else {
+            return false; // the script file
+        };
+        // Short flags combine (`-Bc "…"`, `-mpytest`): read them in order.
+        for (at, flag) in short.char_indices() {
+            if flags.script.contains(flag) || flags.exits.contains(flag) {
+                return false;
+            }
+            if flags.valued.contains(flag) {
+                if at + flag.len_utf8() == short.len() {
+                    words.next();
+                }
+                break;
+            }
+        }
+    }
+    true
 }
 
 /// One command (no chaining) that runs unasked.
@@ -513,6 +601,9 @@ fn allowlisted(segment: &str, auto_approve_git: bool) -> bool {
                 .split_whitespace()
                 .next()
                 .is_some_and(|w| w == "show" || w == "get-url");
+    }
+    if interpreter_reads_stdin(segment) {
+        return false;
     }
     BASH_ALLOWLIST.iter().any(|p| starts_with_word(segment, p))
 }
@@ -1055,6 +1146,25 @@ mod read_only_tests {
             // A filter that writes is not a filter.
             "git log | sort -o src/main.rs",
             "git log | uniq a.txt src/main.rs",
+            // Recheck round: `-` is stdin, an operand, so `uniq - OUT` writes
+            // OUT; after `--` every word is an operand; and getopt takes any
+            // unambiguous abbreviation of a long option (`--o` is `--output`,
+            // `--co` is `--compress-program`, which runs a program).
+            "git log | uniq - src/main.rs",
+            "git log | uniq -- in -out.txt",
+            "git log | sort --o=src/main.rs",
+            "ls -R / | sort --outpu=src/lib.rs",
+            "git log | sort -S 1K --co=./x.sh",
+            "git log | sort --compress-prog=./x.sh",
+            // An interpreter with no script operand reads its script from
+            // stdin or the pipe, whatever flags it has.
+            "python -",
+            "node -",
+            "python -u",
+            "cat x | python -",
+            "cat x | node -",
+            "python -W ignore",
+            "node -r ./x.js",
         ] {
             assert_eq!(
                 bash_permission(cmd, false),
@@ -1065,6 +1175,11 @@ mod read_only_tests {
                 bash_permission_writing(cmd, false),
                 PermissionLevel::RequiresApproval,
                 "{cmd:?} must be asked about in a session that edits"
+            );
+            assert_eq!(
+                bash_permission_brain(cmd),
+                PermissionLevel::RequiresApproval,
+                "{cmd:?} must not run unasked in Brain"
             );
         }
     }
@@ -1087,6 +1202,12 @@ mod read_only_tests {
             "git log --oneline | grep fix",
             "git log --oneline | sort | uniq -c",
             "cat a.txt | cut -d, -f1 | sort -rn",
+            "git log --oneline | sort -t, -k2 --reverse | uniq -c -",
+            "git log --oneline | sort --numeric-sort --key=2",
+            // A bare `echo` (an empty line) still matches `echo ` (recheck
+            // round: only an interpreter needs its arguments).
+            "git status; echo; git log",
+            "echo",
         ] {
             assert_eq!(
                 bash_permission(cmd, false),
@@ -1119,7 +1240,14 @@ mod read_only_tests {
     /// before whole-word matching (final-review follow-up).
     #[test]
     fn a_bare_interpreter_fed_a_script_on_stdin_is_asked_about() {
-        for command in ["python", "node", "python3"] {
+        for command in [
+            "python",
+            "node",
+            "python3",
+            "python -",
+            "node -",
+            "python -u",
+        ] {
             let input = serde_json::json!({
                 "command": command,
                 "stdin": "open('src/main.rs','w').write('x')",
@@ -1128,6 +1256,31 @@ mod read_only_tests {
                 bash_call_permission(&input, None, false, true),
                 PermissionLevel::RequiresApproval,
                 "{command:?}"
+            );
+        }
+    }
+
+    /// An interpreter given its script — a file, `-m`, `-c`/`-e` — or asked
+    /// only for its version still runs unasked outside Brain: the stdin rule
+    /// asks about the script it cannot see, not about the interpreter.
+    #[test]
+    fn an_interpreter_given_its_script_still_runs_unasked() {
+        for cmd in [
+            "python script.py",
+            "python -u script.py",
+            "python -m pytest",
+            "python -W ignore script.py",
+            "python -c \"print(1)\"",
+            "node x.js",
+            "node -r ./setup.js x.js",
+            "node -e \"1\"",
+            "python --version",
+            "node -v",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::Auto,
+                "{cmd:?}"
             );
         }
     }
