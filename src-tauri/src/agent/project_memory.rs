@@ -412,9 +412,14 @@ fn command_segments(lower: &str) -> Vec<Vec<String>> {
 /// The names a segment runs, by their last path part: its first word after
 /// any `NAME=value` assignments and the shell's own words that start a
 /// command (`then`, `do`, `{`, `!`, …); when that word is a shell given a
-/// script (`sh -c '…'`), the names that script runs; when it is a command
-/// that runs another (`sudo`, `xargs`, `stdbuf`, …), every word after it too,
-/// since the command it runs can sit behind its own flags.
+/// script (`sh -c '…'`), the names that script runs — its first word that is
+/// not an option (`bash -c -- '…'`, `bash -c -o pipefail '…'`); when it is a
+/// command that runs another (`sudo`, `xargs`, `eval`, `stdbuf`, …), the
+/// words after it up to the first command this guard knows, since the
+/// command it runs can sit behind its own flags and their values, and that
+/// command's arguments are not commands (`stdbuf -oL grep -rn install …`
+/// reads). A wrapper's option value named like a known command
+/// (`flock grep rm …`) hides what follows it: a heuristic, as `named_in` says.
 fn commands_of(words: &[String]) -> Vec<&str> {
     fn base(w: &str) -> &str {
         w.rsplit('/').next().unwrap_or(w)
@@ -429,24 +434,46 @@ fn commands_of(words: &[String]) -> Vec<&str> {
         return Vec::new();
     };
     let rest = &words[start + 1..];
+    let mut out = vec![first];
     if SHELLS.contains(&first) {
         // `bash -c '…'`, `sh -ec '…'`: the quotes are already dropped, so
-        // the script is the words after the flag.
-        let script = rest
+        // the script is the words after the flag and the options behind it
+        // (`-o`/`-O` take a value; `--` ends them).
+        let Some(flag) = rest
             .iter()
-            .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'));
-        let mut out = vec![first];
-        if let Some(at) = script {
-            out.extend(commands_of(&rest[at + 1..]));
+            .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))
+        else {
+            return out;
+        };
+        let mut at = flag + 1;
+        while let Some(w) = rest.get(at) {
+            if w == "--" {
+                at += 1;
+                break;
+            }
+            if !(w.starts_with('-') || w.starts_with('+')) {
+                break;
+            }
+            at += if w.ends_with('o') { 2 } else { 1 };
         }
-        out
+        out.extend(commands_of(rest.get(at..).unwrap_or_default()));
     } else if RUNS_ANOTHER.contains(&first) {
-        std::iter::once(first)
-            .chain(rest.iter().map(|w| base(w)))
-            .collect()
-    } else {
-        vec![first]
+        for (at, w) in rest.iter().enumerate() {
+            let name = base(w);
+            if SHELLS.contains(&name)
+                || RUNS_ANOTHER.contains(&name)
+                || SHELL_KEYWORDS.contains(&name)
+            {
+                out.extend(commands_of(&rest[at..]));
+                break;
+            }
+            out.push(name);
+            if KNOWN_COMMANDS.contains(&name) || FOLDER_WRITERS.contains(&name) {
+                break;
+            }
+        }
     }
+    out
 }
 
 /// Words the shell reads before the command of a segment, for `commands_of`.
@@ -461,7 +488,15 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fi
 const RUNS_ANOTHER: &[&str] = &[
     "sudo", "doas", "xargs", "env", "nohup", "nice", "time", "command", "exec", "timeout",
     "stdbuf", "ionice", "setsid", "flock", "chrt", "taskset", "unbuffer", "busybox", "chroot",
-    "strace", "watch", "su", "runuser",
+    "strace", "watch", "su", "runuser", "eval", "coproc",
+];
+
+/// Commands besides the `FOLDER_WRITERS` that end a wrapper's words in
+/// `commands_of`: the command it runs, whose arguments are its own.
+const KNOWN_COMMANDS: &[&str] = &[
+    "git", "find", "cd", "pushd", "grep", "egrep", "fgrep", "rg", "ag", "cat", "ls", "head",
+    "tail", "wc", "less", "more", "stat", "file", "du", "tree", "sort", "uniq", "cut", "awk",
+    "sed", "diff", "echo", "printf", "test", "true", "false",
 ];
 
 /// Commands that write or delete the contents of a folder named as their
@@ -1240,6 +1275,18 @@ mod tests {
             "stdbuf -o0 cp -r /tmp/q/. .claudinio/",
             "setsid cp -r /tmp/q/. .claudinio/",
             "flock /tmp/l cp -r /tmp/q/. .claudinio/",
+            // Recheck round 2: a shell's script is its first word that is
+            // not an option, so options and `--` after `-c` are skipped; and
+            // `eval` and `coproc` run the words after them.
+            "bash -c -- 'rm -rf .claudinio'",
+            "bash -c -e 'rm -rf .claudinio'",
+            "bash -c -o pipefail 'rm -rf .claudinio'",
+            "eval 'rm -rf .claudinio'",
+            "eval rm -rf .claudinio",
+            "coproc rm -rf .claudinio",
+            "coproc { rm -rf .claudinio; }",
+            "sudo -u root rm -rf .claudinio",
+            "sudo nice -n 5 cp -r /tmp/q/. .claudinio/",
         ] {
             assert!(named_in(c), "{c}");
         }
@@ -1262,6 +1309,11 @@ mod tests {
             // A shell's script is read as a command line of its own.
             "bash -c 'grep -rn install .claudinio/'",
             "if true; then ls .claudinio; fi",
+            // Recheck round 2: a wrapper runs one command, so a writer's
+            // name among that command's arguments is not a command.
+            "stdbuf -oL grep -rn install .claudinio/",
+            "timeout 10 grep -rn \"cp \" .claudinio/",
+            "eval grep -rn install .claudinio/",
         ] {
             assert!(!named_in(c), "{c}");
         }

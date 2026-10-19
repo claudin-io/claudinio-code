@@ -568,13 +568,18 @@ then `>> c/MEMORY.md`) is seen. It also counts the `.claudinio` folder itself
 as the target of a command that writes or deletes into it (`cp`, `mv`,
 `rsync`, `tar -C`, `rm`, a rewriting `git` subcommand) when that command runs
 in the segment naming the folder or after a `cd` into it — as the segment's
-command after `then`/`do`/`{`/`!`, inside a shell's `-c` script, or behind a
-wrapper that runs the command after it (`sudo`, `xargs`, `env`, `stdbuf`,
-`setsid`, `flock`, … in `project_memory::RUNS_ANOTHER`) — and `find` acting
+command after `then`/`do`/`{`/`!`, inside a shell's `-c` script (its first
+word that is not an option, so `bash -c -- '…'` and `bash -c -o pipefail '…'`
+count), or behind a wrapper that runs the command after it (`sudo`, `xargs`,
+`env`, `eval`, `coproc`, `stdbuf`, `setsid`, `flock`, … in
+`project_memory::RUNS_ANOTHER`; the wrapper's words are read up to the first
+command the guard knows, so `stdbuf -oL grep -rn install .claudinio/` reads)
+— and `find` acting
 (`-delete`, `-exec`) in a segment that names the folder or a name matching
 the file — a pattern such as `*.md` matches it, so `find . -name '*.md'
 -exec …` is refused; `find`'s `{}` placeholder is not read as a name. It cannot see a writer behind a
-wrapper it does not list, a path the
+wrapper it does not list or behind a wrapper option value named like a
+command it knows (`flock grep rm …`), a path the
 command assembles at run time (a variable, an interpreter script building the
 name), a copy or delete of a parent folder (`rm -rf .`), a link reached
 through a globbed folder name, or a hard link to the file (which only such a
