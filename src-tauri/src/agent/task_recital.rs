@@ -267,6 +267,20 @@ mod tests {
             None
         );
     }
+
+    // A title is cut at TITLE_CHARS characters; in Portuguese, CJK or emoji
+    // the byte at that count is inside a character, so the cut is by
+    // characters and keeps every one whole.
+    #[test]
+    fn a_long_multibyte_title_is_cut_on_characters() {
+        for unit in ["é", "—", "😀", "日"] {
+            let block = tasks_block(&[task("t1", "todo", &unit.repeat(400))]).unwrap();
+            let line = block.lines().find(|l| l.starts_with("t1 ")).unwrap();
+            let title = line.rsplit(" \u{b7} ").next().unwrap();
+            assert_eq!(title.chars().count(), TITLE_CHARS + 1, "{unit}");
+            assert!(title.ends_with('\u{2026}'));
+        }
+    }
 }
 
 #[cfg(test)]

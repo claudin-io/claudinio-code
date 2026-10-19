@@ -380,4 +380,25 @@ mod tests {
         );
         assert!(brief.contains("Big one") && brief.contains('…'));
     }
+
+    // The report's head and tail snap to line breaks near the cut; with lines
+    // of multi-byte text, every byte offset the snap can land on must still
+    // be a character boundary, and the brief's description clip likewise.
+    #[test]
+    fn a_multibyte_report_with_lines_is_cut_on_boundaries() {
+        for line in ["café — ação\n", "😀 日本語 😀\n", "é\n"] {
+            let report = line.repeat(4_000);
+            let capped = cap_report(&report);
+            assert!(capped.chars().count() <= REPORT_CHARS);
+            let (head, omitted, tail) = split_capped(&capped);
+            assert_eq!(
+                head.trim_end_matches('\n').chars().count()
+                    + tail.trim_start_matches('\n').chars().count()
+                    + omitted,
+                report.chars().count()
+            );
+        }
+        let clipped = clip(&"ação — 日本 😀 ".repeat(100), BRIEF_DESCRIPTION_CHARS);
+        assert_eq!(clipped.chars().count(), BRIEF_DESCRIPTION_CHARS + 1);
+    }
 }

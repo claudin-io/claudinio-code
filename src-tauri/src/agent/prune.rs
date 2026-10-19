@@ -3007,4 +3007,20 @@ mod tests {
             eprintln!("{} result={:.2}", j.0, j.1);
         }
     }
+
+    // The heads, tails and clips compaction writes are cut at byte budgets;
+    // over Portuguese, CJK or emoji text a budget falls inside a character,
+    // and the cut must step back to one boundary instead of panicking.
+    #[test]
+    fn compaction_cuts_never_split_a_multibyte_character() {
+        let text = "café — 😀 日本語\n".repeat(20);
+        for max in 0..=text.len() + 1 {
+            let head = head_at(&text, max);
+            let tail = tail_at(&text, max);
+            assert!(text.starts_with(head) && head.len() <= max);
+            assert!(text.ends_with(tail) && tail.len() <= max);
+            let clipped = clip(&text, max.max(1));
+            assert!(text.starts_with(clipped.trim_end_matches('…')));
+        }
+    }
 }

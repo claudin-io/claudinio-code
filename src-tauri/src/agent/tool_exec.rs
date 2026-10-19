@@ -1845,4 +1845,16 @@ mod tests {
         assert!(!asked.await.unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // The live event's head is cut at a byte budget and must move to a
+    // character boundary when the budget falls inside one.
+    #[test]
+    fn the_live_result_head_is_cut_on_a_character_boundary() {
+        let text = "café — 😀 日本語\n".repeat(200);
+        for max in 0..300 {
+            let out = truncate(&text, max);
+            let head = out.split("...(truncated, ").next().unwrap();
+            assert!(text.starts_with(head), "{max}");
+        }
+    }
 }

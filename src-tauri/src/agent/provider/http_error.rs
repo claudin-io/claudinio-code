@@ -178,6 +178,15 @@ mod tests {
         );
         assert!(!msg.contains("sk-live-123456"), "{msg}");
     }
+
+    // The detail is cut at DETAIL_CHARS characters, not bytes: a provider's
+    // message in Portuguese, Chinese or with emoji is cut whole.
+    #[test]
+    fn a_long_multibyte_detail_is_cut_on_characters() {
+        let detail = one_line(&"não — 日本 😀 ".repeat(100));
+        assert_eq!(detail.chars().count(), DETAIL_CHARS + 1);
+        assert!(detail.ends_with('…'));
+    }
 }
 
 /// Every `API error: HTTP` site, against the scripted stub refusing the

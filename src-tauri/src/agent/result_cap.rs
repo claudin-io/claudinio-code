@@ -970,4 +970,27 @@ mod tests {
         assert_eq!(c.total, 2_000);
         assert!(body_len(&text(&round[2])) <= room);
     }
+
+    // Every cut offset a read can produce, over text where every line holds
+    // characters of two, three and four bytes: the cap and a re-cut must
+    // never slice inside one, whatever room the round leaves.
+    #[test]
+    fn no_room_cuts_a_read_inside_a_multibyte_character() {
+        let text = (0..40)
+            .map(|i| format!("{i} café — 😀 日本語"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "é";
+        let call = Call::tool("read_file");
+        for room in 1..text.len() {
+            let (head, tail) = (head_of(&text, room), tail_of(&text, room));
+            assert!(text.starts_with(head) && text.ends_with(tail));
+            let once = cap(call, &text, room);
+            let c = parse(&once).expect("a capped read parses");
+            assert_eq!(c.total, text.len());
+            if let Some(twice) = recut(call, &once, room / 2) {
+                assert_eq!(parse(&twice).expect("cut twice").total, text.len());
+            }
+        }
+    }
 }

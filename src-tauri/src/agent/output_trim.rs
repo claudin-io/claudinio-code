@@ -549,4 +549,18 @@ mod tests {
             }
         }
     }
+
+    // A giant line is cut at the block size in bytes, which can fall inside a
+    // character of a minified bundle in any language or of an emoji log.
+    #[test]
+    fn a_giant_multibyte_line_is_cut_on_a_character_boundary() {
+        for unit in ["é", "—", "😀", "日"] {
+            for pad in 0..4 {
+                let text = "x".repeat(pad) + &unit.repeat(BLOCK_CHARS * 2);
+                let blocks = split_blocks(&text);
+                assert_eq!(blocks.len(), 1);
+                assert!(blocks[0].text.contains("(line cut"), "{unit}");
+            }
+        }
+    }
 }

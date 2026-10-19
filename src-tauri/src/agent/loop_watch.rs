@@ -452,4 +452,12 @@ mod tests {
         assert!(s.contains("first"));
         assert!(s.len() < 2000, "results must be excerpted, got {}", s.len());
     }
+
+    // An excerpt is cut at EXCERPT_CHARS characters, never inside one.
+    #[test]
+    fn a_multibyte_excerpt_is_cut_on_characters() {
+        let e = excerpt(&"café — 😀 日本語 ".repeat(100));
+        assert_eq!(e.chars().count(), EXCERPT_CHARS + " …".chars().count());
+        assert!(e.ends_with(" …"));
+    }
 }
