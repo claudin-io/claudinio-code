@@ -340,9 +340,12 @@ mod tests {
     fn the_same_capped_result_repeated_is_still_certain_without_a_judge() {
         let mut w = LoopWatch::default();
         let input = json!({"pattern": "needle"});
+        // Its own text: the saved copy is named by its content, and removing
+        // it must not remove another test's.
         let text: String = (0..500)
-            .map(|i| format!("src/f{i}.rs:3: needle {i}\n"))
+            .map(|i| format!("src/f{i}.rs:3: needle {i} (loop watch test)\n"))
             .collect();
+        let mut saved = None;
         for _ in 0..CERTAIN_EXACT {
             let capped = crate::agent::result_cap::cap(
                 crate::agent::result_cap::Call::tool("grep"),
@@ -350,6 +353,14 @@ mod tests {
                 2_000,
             );
             w.record("grep", &input, &capped);
+            saved = capped
+                .split("the full output is in ")
+                .nth(1)
+                .and_then(|rest| rest.split(';').next())
+                .map(str::to_string);
+        }
+        if let Some(path) = saved {
+            std::fs::remove_file(path).ok();
         }
         assert_eq!(w.gate(), Gate::Certain);
     }

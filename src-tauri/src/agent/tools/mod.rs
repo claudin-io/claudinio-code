@@ -2513,8 +2513,10 @@ mod tests {
             workspace_root: Some(ws.path().to_string_lossy().to_string()),
             ..test_ctx()
         };
+        // Its own text: the saved copy is named by its content, and removing
+        // it must not remove another test's.
         let text: String = (0..400)
-            .map(|i| format!("src/file_{i}.rs:1: needle number {i}\n"))
+            .map(|i| format!("src/file_{i}.rs:1: needle number {i} (read-back test)\n"))
             .collect();
         let capped = crate::agent::result_cap::cap(
             crate::agent::result_cap::Call::tool("grep"),
@@ -2542,6 +2544,7 @@ mod tests {
             panic!("text")
         };
         assert!(content.contains("needle number 217"), "{content}");
+        std::fs::remove_file(&path).ok();
     }
 
     // Reading the saved outputs is the one opening outside the workspace, and
@@ -2554,7 +2557,8 @@ mod tests {
             workspace_root: Some("/home/user/project".into()),
             ..test_ctx()
         };
-        let saved = crate::agent::output_trim::save_full("result", "x").expect("saved");
+        let saved = crate::agent::output_trim::save_full("result", "only-the-harness test output")
+            .expect("saved");
         assert!(validate_read_path(&saved, &ctx).is_ok());
         assert!(validate_path(&saved, &ctx).is_err(), "never writable");
 
@@ -2569,6 +2573,7 @@ mod tests {
         std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
         let linked = validate_read_path(&link.to_string_lossy(), &ctx);
         std::fs::remove_file(&link).ok();
+        std::fs::remove_file(&saved).ok();
         assert!(
             linked.is_err(),
             "a link in the folder does not lead out of it"
