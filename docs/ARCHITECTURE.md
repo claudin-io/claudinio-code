@@ -253,7 +253,7 @@ no `||`; every `|`-part closes its own quotes; the
 first part starts with an allowlist entry (Builder's `BASH_ALLOWLIST`:
 git inspection, reads, builds, test runners, `node`/`python`/`pnpm run`;
 Brain's `BRAIN_ALLOWLIST`: reads only; `git branch`/`git remote` only bare or
-listing, `date` only bare or `+FORMAT`) and is not an interpreter fed the call's `stdin`; every later part is
+listing, `date` only bare or `+FORMAT`) and is not an interpreter or a `date` (which reads a new date from stdin under `cmd /c`) fed the call's `stdin`; every later part is
 one of `PIPE_FILTERS` (`head`, `tail`, `wc`, `grep`, `cut`, `tr`, `nl`); and
 the write check sees nothing. With no backslash, `$` or backquote, quotes do
 not escape, so each `|` the split sees is a pipe the shell sees, and no word
@@ -264,11 +264,17 @@ one session with `auto_approve_git`) also runs `git add`, `git commit` and
 a parenthesis (`feat(ui): x`), `&`, `;`, `$`, `<`, `>` or a glob character
 asks — and a push with a word starting `--r` or `--e` asks too
 (`--receive-pack`, `--exec` and their abbreviations name a program git runs). The deny-list
-(`on_the_deny_list`, whole words outside inert quoted text, so `git log --format
-%H`, `cp /tmp/x .` or `git commit -m "fix(dd): x"` is not refused; quotes are
-inert only in a command with no `$`, backquote, backslash or `#`, so
-`echo "$(rm -rf /)"`, `echo don\'t; rm -rf /` and a quote in a `#` comment
-are read raw and refused) and the memory guard run first and refuse outright; a
+(`on_the_deny_list`: every word compared by its command name — last path
+segment, quotes dropped, `mkfs.*` folded — so `/bin/dd`, `time dd`,
+`sudo -u root dd`, `xargs chown` and `'mkfs.ext4'` are refused, while
+`format` counts only where it starts a part, so `ruff format src` is not; a
+quoted span is part of one word, so `git log --format %H`, `cp /tmp/x .` or
+`git commit -m "fix(dd): x (#12)"` is not refused; `inert_text` reads the
+text raw wherever sh could read a quote differently — a `$`, backquote or
+escaping backslash outside single quotes, a `#` or `<<` outside any quote —
+so `echo "$(rm -rf /)"`, `echo don\'t; rm -rf /`, a quote in a `#` comment
+or a heredoc body hide nothing; under `cmd /c` `'` is no quote and `^`, `%`,
+`!` or a line break read raw) and the memory guard run first and refuse outright; a
 redirection into a disk or memory device (`> /dev/sda`, `/dev/mem`, quoted or
 not) is Denied — a tripwire for the obvious spelling, not a boundary. The rule replaced a chain
 splitter, per-option `sort`/`uniq` readers, a stdin detector and runner

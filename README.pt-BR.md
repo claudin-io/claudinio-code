@@ -107,16 +107,23 @@ gravação veja (redirecionamento, `tee`, `sed -i`, `patch`, script inline que
 grava). Todo o resto é perguntado no Builder e recusado no Brain — uma cadeia de
 comandos da allowlist, um `|` entre aspas, um `2> /dev/null` com espaço
 inclusive: é o preço de uma regra simples o bastante para se ter certeza, e ele
-nunca é recuperado com parsing. Uma deny-list curta, casada por palavras
-inteiras fora de texto inerte entre aspas — as aspas só contam num comando
-sem `$`, crase, barra invertida ou `#`, então `echo "$(rm -rf /)"` continua
-recusado — (`rm -rf /`, `chmod 777`, `mkfs`, `dd`, `format`, `chown`, gravação num
-dispositivo de disco), é recusada de vez em todos os modos. Um interpretador,
+nunca é recuperado com parsing. Uma deny-list curta (`rm -rf /`, `chmod 777`,
+`mkfs`, `dd`, `format`, `chown`, gravação num dispositivo de disco), casada
+com cada palavra pelo nome do comando — então `/bin/dd`, `time dd`,
+`xargs chown` e `'mkfs.ext4'` contam, e `format` só onde começa um comando,
+então `ruff format` não — é recusada de vez em todos os modos. Uma mensagem
+entre aspas é uma palavra só (`git commit -m "fix(dd): x"` não nomeia `dd`),
+mas as aspas só contam onde o shell as lê como aspas: um `$`, crase ou barra
+invertida que escapa fora de aspas simples, ou um `#` ou `<<` fora de
+qualquer aspa, faz o texto ser lido cru, então `echo "$(rm -rf /)"` e uma
+aspa num heredoc não escondem nada; no Windows `'` não é aspa e um `^`, `%`
+ou `!` faz ler cru. Um interpretador,
 runner de teste ou build da allowlist roda o que os seus argumentos e o projeto
 escolherem — inclusive um programa a rodar ou uma pasta a limpar
 (`pytest --basetemp=…`, `go test -exec …`, `cargo --config …`) —, então a
 allowlist do Builder é uma conveniência, não um sandbox; um interpretador que
-recebe um script pelo stdin da chamada é perguntado. Ele só passa trabalho a
+recebe um script pelo stdin da chamada é perguntado, e um `date` que recebe
+stdin também (sob `cmd /c` ele lê dali uma data nova). Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo

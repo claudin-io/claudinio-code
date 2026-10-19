@@ -105,15 +105,21 @@ working folder first — and nothing the write check sees
 Everything else is asked about in Builder and refused in Brain — a chain of
 allowlisted commands, a quoted `|`, a `2> /dev/null` with a space included:
 that is the price of a rule simple enough to be sure of, and it is never won
-back with parsing. A short deny-list, matched by whole words outside inert
-quoted text — quotes count only in a command with no `$`, backquote,
-backslash or `#`, so `echo "$(rm -rf /)"` is still refused — (`rm -rf /`,
-`chmod 777`, `mkfs`, `dd`, `format`, `chown`, a write to a disk device), is
-refused outright in every mode. An allowlisted interpreter, test runner or
+back with parsing. A short deny-list (`rm -rf /`, `chmod 777`, `mkfs`, `dd`,
+`format`, `chown`, a write to a disk device), matched against every word by
+its command name — so `/bin/dd`, `time dd`, `xargs chown` and `'mkfs.ext4'`
+count, and `format` only where it starts a command, so `ruff format` does
+not — is refused outright in every mode. A quoted message is one word
+(`git commit -m "fix(dd): x"` names no `dd`), but quotes count only where
+the shell reads them as quotes: a `$`, backquote or escaping backslash
+outside single quotes, or a `#` or `<<` outside any quote, makes it read
+the text raw, so `echo "$(rm -rf /)"` and a quote in a heredoc hide
+nothing; on Windows `'` is no quote at all and a `^`, `%` or `!` reads raw. An allowlisted interpreter, test runner or
 build runs whatever its arguments and the project choose — a program to run or
 a folder to clear included (`pytest --basetemp=…`, `go test -exec …`, `cargo
 --config …`) — so Builder's allowlist is a convenience, not a sandbox; an
-interpreter fed a script on the call's stdin is asked about. It hands work to subagents only when that
+interpreter fed a script on the call's stdin is asked about, and so is a `date`
+fed stdin (under `cmd /c` it reads a new date from it). It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
 delegated edit costs a second prompt, a second exploration and the spec written
