@@ -1120,3 +1120,50 @@ A recheck of `1abde20..6d445a4` reported one blocker, four majors and seven mino
 - `fe4adf9` **A read of the memory through a filter pipe or `grep`/`rg` is not a policy refusal** (`only_reads`).
 - `bc3be3a` **A build or test runner runs unasked only with the arguments its `RunnerArgs` lists** (deliberate behaviour change, in Builder too): `pytest --basetemp=src`, `-p`, `go test -exec`, `cargo test --config …runner`, `vitest -u` are asked about, and refused in Brain.
 - `93487c4` Docs: ARCHITECTURE's runner sentence corrected; its "cannot see" list and both READMEs' gain a wrapper's long-option value named like a known command, a script piped or here-string-fed into a shell, and commands that run their own arguments (`sed`'s `e`, git aliases, `awk`'s `system()`), which stay heuristic gaps.
+
+### Shell policy simplified
+
+**Why.** Three review rounds on the shell gate ([Recheck round 1](#recheck-round-1), [Recheck round 2](#recheck-round-2), [Recheck round 3](#recheck-round-3)) each found new bypasses in `permissions.rs` (the chain splitter, the pipe-filter allowlist with per-option `sort`/`uniq` rules, `interpreter_reads_stdin`, quoting and escape handling, runner argument tables) and in `project_memory.rs` (the folder guard's command finder: `commands_of` recursion, `RUNS_ANOTHER` wrappers, `KNOWN_COMMANDS`, `-c` script extraction). Each fix opened another, and round 3 found a recursion that overflowed the stack. `permissions.rs` had grown from 626 lines on `main` to 2,080. This plan's goal is a lighter harness, and a shell parser is the wrong tool for it. So the heuristics are replaced by one conservative rule whose whole correctness argument fits in the comment at the top of the shell policy in `agent/permissions.rs`. When safety and convenience conflict, the rule asks.
+
+**The rule.** A `bash` command runs unasked only when all of the following hold, after the exact tokens `2>&1`, `2>/dev/null`, `>/dev/null` and `1>/dev/null` are dropped:
+
+- The text has no line break, backquote, `$`, `<`, `>`, `&`, `;`, backslash, brace, parenthesis or glob.
+- It has no `||`.
+- Split at `|`, every part is non-empty and closes its own quotes.
+- The first part starts with an allowlist entry. Builder's allowlist keeps `main`'s intent. Brain's allowlist only reads: no runner, build, package manager or interpreter. `git branch` and `git remote` count only bare or with listing flags.
+- The first part is not an interpreter fed the call's `stdin`.
+- Every later part is `head`, `tail`, `wc`, `grep`, `cut`, `tr` or `nl`.
+- `bash_writes_files` sees no write. It now also catches git's `--output` in any spelling.
+
+The deny-list and the memory guard run first. Everything else asks in Builder (YOLO or a hook `allow` may approve it) and is refused in Brain.
+
+The memory guard's shell side is `project_memory::mentions_memory`, a raw scan with no parsing and no recursion. It matches `memory.md`, `.claudinio` ending a word, or `.claudinio/` followed by an empty word, a glob, or a `.`/`..` part. It scans the text as written and again with quotes and backslashes removed. It covers the call's command, its `stdin`, and a `workdir` inside `.claudinio`, and still resolves names on disk to catch links. A call that mentions the memory and is not a plain read is Denied.
+
+All of the following were removed: the chain splitter, the sort/uniq option tables, `interpreter_reads_stdin`, `shell_words` in permissions, the runner argument tables, `only_reads`, `bash_permission_writing` with `RunLimits::writes_files`, and the whole command finder (`named_in`, `command_segments`, `commands_of`, `wrapper_syntax`, `SHELL_KEYWORDS`, `SHELLS`, `RUNS_ANOTHER`, `KNOWN_COMMANDS`, `FOLDER_WRITERS`, `GIT_REWRITERS`).
+
+**Tests.** Each mode has one table test, built from every command in the three rounds and the final-review recheck that must not run unasked or must be Denied, plus the everyday corpus that must stay Auto. The red run failed on an assertion (`ls foo 2> /dev/null` was Auto). The table also caught a bug in the first draft: tokenizing with `split_whitespace` erased a line break before rule 1 checked for it.
+
+**Deliberate behaviour changes** (listed in `e7bcbaa`):
+
+- Brain runs no runner or build.
+- A chain asks even when every command in it is allowlisted.
+- `sort`, `uniq` and any other filter not in the list ask after a pipe.
+- `2> /dev/null` with a space asks.
+- A bare `echo` asks.
+- An interpreter with a non-empty `stdin` asks.
+- A pipe that reads the memory (`cat .claudinio/MEMORY.md | head`) is Denied. So is any non-read that names `.claudinio`, such as `stdbuf -oL grep … .claudinio/` and `ls .claudinio && cp a b`.
+- The eval runner refuses globs.
+- Builder no longer vets runner arguments. Its allowlisted `python`/`node`/`pnpm run` already run any program unasked (`python -m pip install`, `python -m zipfile -e`), so the vetting bounded nothing.
+
+**What the guard does not see.** The shell memory guard is documented as best-effort defence in depth. It does not see a path built at run time, a glob that spells the folder's own name (`.c*`), a parent folder (`rm -rf .`), or a hard link. The `edit_file` path guard is the exact check.
+
+**Line counts.** Production lines, counted by the lib's `production_lines`:
+
+| File | Before (`11395c2`) | After |
+|---|---|---|
+| `permissions.rs` | 1,114 | 520 |
+| `project_memory.rs` | 956 | 684 |
+
+The commit message of `e7bcbaa` says 532 for `permissions.rs`. That figure was a typo; 520 is the measured count. Total file lines went from 2,080 and 2,011 to 1,446 and 1,624. The 2,000-production-line cap and the 5,000-token prefix gate were not touched. No prompt or tool text changed; only the tool-result texts `BASH_NOT_ALLOWED_IN_BRAIN` and `SHELL_REJECTION` did.
+
+**Checks.** Rust 1,535 → 1,527 passed / 10 ignored: obsolete heuristic tests were folded into the tables. vitest 977 passed, unchanged.
