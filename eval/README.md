@@ -241,8 +241,12 @@ this repository's own `node_modules` into `/tmp`. Call tools by path
 
 ## What is not here
 
-- **No baseline yet.** Phase 0 was built without a single live-model call;
-  the first `run` on the default model records it, under `eval/baselines/`.
+- **No baseline on the default model.** Phase 0 was built without a single
+  live-model call. The one baseline recorded since,
+  `eval/baselines/2026-10-18-deepseek-flash-before/` (two runs of the 25
+  tasks before the lean-harness phases: M3 23/25 and 24/25), ran on
+  `deepseek-flash` through DeepSeek's Anthropic endpoint, not on the plan's
+  default claudin.io model.
 - **Terminal-Bench is not integrated.** Its harness drives agents from its own
   Docker and Python runner rather than being driven by one, so it does not fit
   a runner that owns the agent loop. SWE-bench fits: `import-swebench` turns
