@@ -122,6 +122,14 @@ pub fn create_needs_absolute_path(path: &str, absolute: &str) -> String {
     )
 }
 
+/// `edit_file` with an `old_string` that occurs `count` times.
+pub fn ambiguous_match(path: &str, count: usize) -> String {
+    format!(
+        "old_string occurs {count} times in {path}; include more surrounding lines so it \
+         matches once, or pass replace_all: true, then retry edit_file."
+    )
+}
+
 fn partial_read(path: &str) -> String {
     format!(
         "read_file was called on {path}, but you have not read the exact text you're trying \
@@ -211,6 +219,7 @@ pub fn all() -> Vec<(&'static str, String)> {
             "create_needs_absolute_path",
             create_needs_absolute_path("src/new.rs", "/w/src/new.rs"),
         ),
+        ("ambiguous_match", ambiguous_match("/w/src/a.rs", 2)),
         ("quality_missing", quality_missing("golden-g-1")),
         ("quality_stale", quality_stale("golden-g-1")),
         (
@@ -279,6 +288,15 @@ mod tests {
         (
             "create_needs_absolute_path",
             &["absolute", "retry edit_file with path /w/src/new.rs"],
+        ),
+        (
+            "ambiguous_match",
+            &[
+                "occurs 2 times",
+                "include more surrounding lines",
+                "replace_all: true",
+                "then retry edit_file",
+            ],
         ),
         ("quality_missing", &["call run_quality"]),
         ("quality_stale", &["call run_quality"]),

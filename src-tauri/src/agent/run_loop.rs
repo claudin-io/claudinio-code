@@ -2968,6 +2968,41 @@ pub(crate) mod surface_tests {
         }
     }
 
+    /// `replace_all` reaches the file whichever way the edit is approved: an
+    /// auto-approved edit rebuilds its arguments from the proposal, and a
+    /// field left out there would turn a deliberate replace-everywhere into
+    /// an "occurs 2 times" refusal.
+    #[tokio::test]
+    async fn replace_all_survives_auto_approval_and_the_approval_prompt() {
+        let script = |path: &str| {
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": path }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "o", "new_string": "0", "replace_all": true,
+                    }),
+                },
+                Reply::Text("done"),
+            ]
+        };
+        let auto = run_script("ra-auto", None, None, script).await;
+        let asked = run_script("ra-asked", None, Some(true), script).await;
+        for run in [auto, asked] {
+            assert!(matches!(run.outcome, Ok(RunOutcome::Completed)));
+            assert_eq!(
+                std::fs::read_to_string(&run.file).unwrap(),
+                "hell0 w0rld\n",
+                "{}",
+                run.bodies[2]
+            );
+            std::fs::remove_dir_all(&run.root).ok();
+        }
+    }
+
     /// A shell command that writes a file is an edit in the Standard Builder
     /// too: asked about even when its prefix (`echo `) is allowlisted, never
     /// refused outright as it was while the session had to delegate edits.

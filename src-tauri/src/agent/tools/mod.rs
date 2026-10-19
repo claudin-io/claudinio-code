@@ -246,6 +246,9 @@ pub enum ToolOutput {
         old_string: String,
         new_string: String,
         unified_diff: String,
+        /// Carried so an edit applied from the proposal, not from the call's
+        /// own input (`tool_exec::execute_reported`), keeps it.
+        replace_all: bool,
     },
     /// Text plus images the model should actually see (screenshots, images
     /// returned by an MCP server). Producers are responsible for compressing
@@ -785,6 +788,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 old_string: diff.old_string,
                 new_string: diff.new_string,
                 unified_diff: diff.unified_diff,
+                replace_all: diff.replace_all,
             })
         }
         "code_search" => {
@@ -2120,6 +2124,103 @@ mod tests {
         assert!(
             err.contains("edit_file") && err.contains("old_string \"\""),
             "{err}"
+        );
+    }
+
+    // ── edit_file edits exactly one place (lean-harness Phase 3b) ──
+    //
+    // The description promised one replacement while the code replaced every
+    // occurrence, so a short old_string silently changed places the model
+    // never looked at.
+
+    fn read_whole(ctx: &ToolContext, path: &str) {
+        futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": path }),
+            ctx,
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn an_old_string_that_matches_once_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "x = 1\ny = 2\n").unwrap();
+        read_whole(&ctx, &path);
+        let args =
+            serde_json::json!({ "path": path, "old_string": "y = 2", "new_string": "y = 3" });
+        assert!(edit(&ctx, args.clone()).is_ok());
+        apply(&ctx, args).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x = 1\ny = 3\n");
+    }
+
+    #[test]
+    fn an_old_string_that_matches_twice_is_refused_with_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "retry()\nwait()\nretry()\n").unwrap();
+        read_whole(&ctx, &path);
+        let args =
+            serde_json::json!({ "path": path, "old_string": "retry()", "new_string": "go()" });
+        let err = edit(&ctx, args.clone()).unwrap_err();
+        assert!(
+            err.contains(&format!("old_string occurs 2 times in {path}")),
+            "{err}"
+        );
+        assert!(err.contains("replace_all: true"), "{err}");
+        assert!(apply(&ctx, args).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "retry()\nwait()\nretry()\n"
+        );
+    }
+
+    #[test]
+    fn replace_all_replaces_every_occurrence() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "retry()\nwait()\nretry()\n").unwrap();
+        read_whole(&ctx, &path);
+        let args = serde_json::json!({
+            "path": path, "old_string": "retry()", "new_string": "go()", "replace_all": true,
+        });
+        match edit(&ctx, args.clone()).unwrap() {
+            ToolOutput::EditProposal { unified_diff, .. } => {
+                assert_eq!(unified_diff.matches("+go()").count(), 2, "{unified_diff}");
+            }
+            other => panic!("expected a proposal, got {other:?}"),
+        }
+        apply(&ctx, args).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "go()\nwait()\ngo()\n"
+        );
+    }
+
+    /// The approval can come long after the proposal: the count is taken
+    /// again from the file on disk when the edit is applied.
+    #[test]
+    fn apply_counts_again_on_the_file_as_it_is_at_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "retry()\n").unwrap();
+        let diff = edit_file::preview(&edit_file::EditFileArgs {
+            path: path.clone(),
+            old_string: "retry()".into(),
+            new_string: "go()".into(),
+            replace_all: false,
+        })
+        .unwrap();
+        std::fs::write(&path, "retry()\nretry()\n").unwrap();
+        let err = edit_file::apply(&diff).unwrap_err();
+        assert!(err.contains("occurs 2 times"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "retry()\nretry()\n"
         );
     }
 

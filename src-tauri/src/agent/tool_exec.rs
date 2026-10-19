@@ -200,6 +200,7 @@ pub(super) async fn execute_reported(
             old_string,
             new_string,
             unified_diff,
+            replace_all,
         }) => {
             let proposal = EditProposalData {
                 path: path.clone(),
@@ -208,11 +209,14 @@ pub(super) async fn execute_reported(
                 unified_diff,
             };
             // Reconstruct args since tool_input was moved into execute()
-            let args = serde_json::json!({
+            let mut args = serde_json::json!({
                 "path": path,
                 "old_string": old_string,
                 "new_string": new_string,
             });
+            if replace_all {
+                args["replace_all"] = Value::Bool(true);
+            }
             let _ = event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
                 tool_id: tool_use_id.to_string(),
@@ -703,6 +707,7 @@ pub(crate) async fn run_tool(
                     old_string,
                     new_string,
                     unified_diff,
+                    ..
                 }) => {
                     let proposal = EditProposalData {
                         path,
