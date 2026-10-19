@@ -102,6 +102,19 @@ um dos dois na mão. O Auto envia essa primeira mensagem ao Jev; em Settings ›
 Agent dá para desligá-lo, ou passá-lo para *Shadow*, que só registra o que o
 Auto teria escolhido ao lado do que você escolheu.
 
+O Brain só pergunta sobre as decisões cuja resposta muda o plano — perguntas
+independentes juntas num só formulário, nenhuma para um pedido que já vem
+totalmente especificado — e confirma o design numa pergunta antes de
+escrevê-lo. O checklist mais longo (o que o consenso precisa cobrir, tamanho e
+assets de UI, o que o Low-Level Design contém, diagramas) é a skill embutida
+`plan`, lida quando um pedido precisa dela. O prompt explica como as
+ferramentas se encaixam em vez de listar regras: o que o harness impõe — ler um
+arquivo antes de editá-lo, nenhuma gravação no Brain, tarefas só depois do
+Low-Level Design, uma meta fechada só com uma verificação passando — é imposto
+pela ferramenta, cuja recusa diz o que fazer em seguida. **Settings › Agent ›
+System prompt** volta ao prompt anterior, mais longo (*v1*), durante esta
+versão.
+
 ### Ele se ajusta ao modelo que você escolheu
 
 Todo limite de uma execução vem da janela do modelo com que ela está falando,
@@ -119,7 +132,7 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
 - **Janela pequena recebe prompt pequeno.** Abaixo de 64k tokens, uma sessão
   Builder roda um perfil compacto — um prompt curto e dez ferramentas, sem
   subagentes e sem planos — cerca de 2,4k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
-  cerca de 4,8k.
+  cerca de 5k.
 - **Ferramentas e skills chegam quando são necessárias.** Uma sessão Builder
   Standard envia catorze ferramentas centrais; as demais — as buscas do índice e do LSP, as
   ferramentas de web e browser, a troca para o modo de plano, a leitura completa

@@ -100,6 +100,18 @@ everything else in Builder — and you can still pick either by hand. Auto sends
 that first message to Jev; Settings › Agent switches it off, or to *Shadow*,
 which only records what Auto would have chosen next to what you chose.
 
+Brain asks only about the decisions whose answer changes the plan —
+independent questions together in one form, none at all for a request that is
+already fully specified — and confirms the design in one question before
+writing it. The longer checklist (what consensus must cover, UI sizing and
+assets, what the Low-Level Design holds, diagrams) is the built-in `plan`
+skill, read when a request needs it. The prompt explains how the tools fit
+together rather than listing rules: what the harness enforces — reading a file
+before editing it, no writes in Brain, tasks only after the Low-Level Design, a
+goal closed only on a passing check — is enforced by the tool, whose refusal
+says what to do next. **Settings › Agent › System prompt** switches back to the
+previous, longer prompt (*v1*) for this release.
+
 ### It fits the model you chose
 
 Every limit a run is held to comes from the window of the model it is talking
@@ -116,7 +128,7 @@ requests several times its size.
 - **A small window gets a small prompt.** Under 64k tokens a Builder session
   runs a compact profile — one short prompt and ten tools, no subagents and no
   plans — about 2.4k tokens before the conversation starts, where the
-  Standard prompt and tools take about 4.8k.
+  Standard prompt and tools take about 5k.
 - **Tools and skills arrive when they are needed.** A Standard Builder
   session sends fourteen core tools; the rest — the index and LSP searches, the web and browser
   tools, the switch to plan mode, the full task reader and every MCP tool — are listed in the prompt

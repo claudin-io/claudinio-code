@@ -86,7 +86,8 @@ The loop is split by responsibility, one file each under `agent/`: `prompt.rs`
 `tool_exec.rs` (one tool call, from permission to `tool_result`), `judge.rs`
 (is a terminal turn finished, is the loop stuck), `handoff.rs` (what happens at
 a context line), `retry.rs`, `nudges.rs` (every text the harness itself puts in
-front of the model) and `events.rs` (`AgentEvent`). A refused request becomes
+front of the model), `gate_text.rs` (what each gate says when it refuses) and
+`events.rs` (`AgentEvent`). A refused request becomes
 `API error: HTTP <status> — <the provider's message>`
 (`provider/http_error.rs`: the error object's `message`, or the start of the
 body, one line, the API key redacted); `retry.rs` classifies by the status
@@ -112,6 +113,29 @@ Brain is read-only and must produce a plan; Builder executes. The handoff
 (`agent/transition.rs`) starts a *new* session seeded with the plan rather than
 continuing the old one, so execution never inherits a context window full of
 exploration. The same machinery handles the token-threshold handoff.
+
+**Two versions of the Standard prompt** (`AgentConfig::prompt_version`,
+Settings › Agent › System prompt; `prompt/v1.rs`, `prompt/v2.rs`). *v2*, the
+default since lean-harness Phase 5, is the prompt "at the right altitude":
+a base of identity, environment, how the tools relate (and why indexed search
+beats shell search), when to ask and when to stop, untrusted content, hook
+output, the living document and the language policy, about 1.4k tokens; mode
+blocks of about 450 each. It describes no gate the code enforces — the Low-
+Level Design gate on `tasks_set` in Brain, the quality gate on closing a golden
+execution goal, golden-task protection, read-before-edit, the write gates, the
+spec guard, the finish-line check — beyond one line saying a refusal says what
+to do next, and every refusal in `agent/gate_text.rs` does (`gate_text::tests`
+pins each one's next step and that none names a deferred tool). The Brain
+interview is adaptive: only decisions that change the plan, independent
+questions in one `ask_user` call, none for a fully specified request, one
+confirming question before `write_plan`; the consensus checklist, UI sizing and
+asset rules, Low-Level Design guidance and Mermaid catalog are the built-in
+`plan` skill (`agent/skills/plan.md`), listed in the catalog and read by
+reference. Capitals survive only where `v2::KEPT_IMPERATIVES` cites the failure
+they prevent (at most three; today one, VERBATIM). *v1* is the pre-Phase-5
+prompt, kept selectable for one release and pinned byte for byte against
+fixtures (`v1_pin_tests`). Compact and the git operator have one prompt each.
+The config file reads an unknown value as v2; the setter ignores one.
 
 ### Context
 
@@ -210,8 +234,8 @@ model loads a tool to obey, and a load late in a session rewrites the cached
 prefix in front of the whole conversation. That is why `finalize_plan`, the
 Builder's last call, stays core; `tasks_get` was core for the same reason (the
 first call) until the task protocol stopped asking for it (below). The default
-Builder prefix measures 4,985 tokens on the harness's meter (12,337 before),
-and 6,462 with ten skills and a twenty-tool MCP server
+Builder prefix measures 4,965 tokens on the harness's meter (12,337 before),
+and 6,441 with ten skills and a twenty-tool MCP server
 (17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
 10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
 the definitions actually sent.
