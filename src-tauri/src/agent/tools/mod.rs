@@ -992,9 +992,12 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "bash" => {
             let mut a: bash::BashArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            if a.workdir.is_none() {
-                a.workdir = ctx.workspace_root.clone();
-            }
+            // A relative workdir is a folder of the workspace, as the eval's
+            // policy and the memory guard read it, not of the process's directory.
+            a.workdir = match a.workdir {
+                None => ctx.workspace_root.clone(),
+                Some(dir) => Some(in_workspace(&dir, ctx)),
+            };
             let content = bash::execute(a, ctx).await?;
             Ok(ToolOutput::Text { content })
         }
@@ -2304,6 +2307,30 @@ mod tests {
             serde_json::json!({ "pattern": "package", "path": "Cargo.toml" }),
         ));
         assert!(!grepped.contains("[package]"), "{grepped}");
+    }
+
+    /// The eval's policy and the memory guard read a relative `workdir` as a
+    /// folder of the workspace; the shell ran it from the process's directory,
+    /// so `{"command": "cat passwd", "workdir": "etc"}` was approved as a read
+    /// inside the workspace and read `/etc/passwd` under a unit run from `/`.
+    #[tokio::test]
+    async fn a_relative_workdir_is_a_folder_of_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/ws-marker.txt"), "").unwrap();
+        let ctx = ctx_at(dir.path());
+        let out = execute(
+            "bash",
+            serde_json::json!({ "command": "ls", "workdir": "src" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("bash returns text")
+        };
+        assert!(content.contains("ws-marker.txt"), "{content}");
+        assert!(!content.contains("lib.rs"), "{content}");
     }
 
     #[test]
