@@ -575,7 +575,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_set".into(),
-            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. An existing task sent with an empty description or journal keeps its stored one. In Brain mode it is refused until the plan has a non-empty '## Low-Level Design' section.".into(),
+            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. An existing task sent with an empty description or journal keeps its stored one.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

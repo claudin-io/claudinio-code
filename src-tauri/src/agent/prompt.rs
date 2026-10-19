@@ -2265,6 +2265,23 @@ mod v2_tests {
         );
     }
 
+    /// The tool list is prefix too, in both modes: `tasks_set` carried the
+    /// Brain-only Low-Level Design gate in its description, paid by every
+    /// Builder request, while the gate's refusal (`gate_text::lld_missing`)
+    /// says what to write and then to retry.
+    #[test]
+    fn no_core_tool_description_restates_the_lld_gate() {
+        for def in crate::agent::tools::get_defs(4) {
+            let d = def.description.to_lowercase();
+            assert!(
+                !(d.contains("refused until") || d.contains("rejects tasks until")),
+                "{} restates a gate: {}",
+                def.name,
+                def.description
+            );
+        }
+    }
+
     /// The spec section rides in the prefix of every project with Gherkin
     /// specs. Under v2 it states no gate (the spec guard refuses an edit and
     /// its refusal says to ask the user: `quality::spec::edit_refusal`) and
