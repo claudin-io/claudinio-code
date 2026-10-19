@@ -401,6 +401,7 @@ pub(super) async fn maybe_context_handoff(
     estimated: u64,
     history: &mut Vec<Message>,
     system: &str,
+    tools: &[ToolDescription],
     store: &SessionStore,
     ctx: &ToolContext,
     event_tx: &Channel<AgentEvent>,
@@ -474,7 +475,11 @@ pub(super) async fn maybe_context_handoff(
             config,
             resolved_model,
             history,
-            &[], // no tools: text is the only possible output
+            // The run's own tools, though the request says not to call one:
+            // tools lead the cache prefix, so leaving them out would make this —
+            // the largest request of the session — write the whole history to
+            // the cache instead of reading it. Only the reply's text is kept.
+            tools,
             Some(system),
             event_tx,
             session_id,
@@ -833,6 +838,7 @@ mod handoff_usage_tests {
             budget.soft,
             &mut history,
             "You are a test.",
+            &[],
             &store,
             &ctx,
             &events,
@@ -856,6 +862,114 @@ mod handoff_usage_tests {
             .collect();
         assert_eq!(usage, vec![0], "one request, outside the loop's rounds");
         std::fs::remove_file(&store.path).ok();
+    }
+}
+
+/// The handoff document is the largest request a session sends, and it reads
+/// the prompt cache only if its prefix — tools first, then the system prompt —
+/// is byte-identical to the rounds before it.
+#[cfg(test)]
+mod handoff_cache_tests {
+    use super::*;
+    use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
+
+    const DOCUMENT: &str = "## Purpose of next session\nFinish the parser refactor.\n\
+        ## Current state\nThe lexer is split; tests green.\n## Key decisions\nKeep the API.\n\
+        ## Pointers\nsrc/parser.rs\n## In-flight work\nThe expression module.\n\
+        ## Next actions\nMove the expression parser, run the tests.";
+
+    fn tool(name: &str) -> ToolDescription {
+        ToolDescription {
+            name: name.into(),
+            description: format!("{name} things"),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    async fn hand_off(script: Vec<Reply>) -> (Option<RunOutcome>, Vec<Message>, Vec<String>) {
+        let (base, _, bodies) = spawn_recording(script).await;
+        let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore {
+            path: dir.path().join("s.jsonl"),
+        };
+        std::fs::write(&store.path, "").unwrap();
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let mut history = vec![
+            Message {
+                role: "user".into(),
+                content: vec![ContentBlock::text("Refactor the parser.")],
+            },
+            Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::text("Working on it.")],
+            },
+        ];
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let outcome = maybe_context_handoff(
+            &config,
+            &budget,
+            PromptProfile::Standard,
+            budget.soft,
+            &mut history,
+            "You are a test.",
+            &[tool("read_file"), tool("grep")],
+            &store,
+            &ctx,
+            &events,
+            "handoff-cache",
+            &Arc::new(SteeringCtl::new()),
+            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+            0,
+            0,
+            0,
+        )
+        .await;
+        let bodies = bodies.lock().unwrap().clone();
+        (outcome, history, bodies)
+    }
+
+    fn tool_names(body: &str) -> Vec<String> {
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        body["tools"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn the_handoff_request_carries_the_runs_tools_so_its_prefix_reads_the_cache() {
+        let (outcome, _, bodies) = hand_off(vec![Reply::Text(DOCUMENT)]).await;
+        assert!(matches!(outcome, Some(RunOutcome::Handoff(_))));
+        assert_eq!(tool_names(&bodies[0]), vec!["read_file", "grep"]);
+    }
+
+    /// Offered the tools, a model may call one; a reply that is only a call
+    /// is no document, and the call never reaches the history unanswered.
+    #[tokio::test]
+    async fn a_handoff_reply_that_only_calls_a_tool_is_asked_again_and_kept_out_of_the_history() {
+        let (outcome, history, bodies) = hand_off(vec![
+            Reply::Tool {
+                name: "read_file",
+                input: serde_json::json!({"path": "src/parser.rs"}),
+            },
+            Reply::Text(DOCUMENT),
+        ])
+        .await;
+        assert!(matches!(outcome, Some(RunOutcome::Handoff(_))));
+        assert_eq!(bodies.len(), 2, "the tool call is a malformed handoff");
+        assert!(
+            !history
+                .iter()
+                .flat_map(|m| &m.content)
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+            "no unanswered tool call is left in the history"
+        );
     }
 }
 
@@ -1272,6 +1386,7 @@ mod cache_break_tests {
             budget.soft,
             &mut history,
             "s",
+            &[],
             &store,
             &ctx,
             &events,

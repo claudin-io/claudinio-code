@@ -365,8 +365,8 @@ pub async fn run_workflow_with_profile(
     // context and the run continues in a fresh linked session. Compaction
     // below stays as the safety net when generation fails or doesn't apply.
     if let Some(outcome) = maybe_context_handoff(
-        config, &budget, profile, estimated, history, &system, store, ctx, event_tx, session_id,
-        steering, mode_ctl, 0, 0, 0,
+        config, &budget, profile, estimated, history, &system, &tools, store, ctx, event_tx,
+        session_id, steering, mode_ctl, 0, 0, 0,
     )
     .await
     {
@@ -590,6 +590,7 @@ pub async fn run_workflow_with_profile(
             pre_tokens,
             history,
             &system,
+            &tools,
             store,
             ctx,
             event_tx,
