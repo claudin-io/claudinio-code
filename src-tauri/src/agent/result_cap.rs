@@ -181,7 +181,8 @@ pub fn parse(text: &str) -> Option<Capped<'_>> {
     let total = text[at + open.len()..]
         .strip_suffix(close)?
         .parse::<usize>()
-        .ok()?;
+        .ok()
+        .filter(|&total| total >= at)?;
     Some(Capped {
         head: &text[..at],
         tail: "",
@@ -394,6 +395,26 @@ mod tests {
     fn a_head_cut_from_before_phase_6_still_parses() {
         let c = parse("abc...(truncated, 500 chars total)").expect("legacy");
         assert_eq!((c.head, c.tail, c.total), ("abc", "", 500));
+    }
+
+    // A file that merely ends with the old note's words is not a cut: its
+    // "total" is smaller than the text, and re-cutting it as one would count
+    // a negative omission.
+    #[test]
+    fn an_old_note_that_does_not_add_up_is_not_a_cut() {
+        let text_of = text;
+        let text = format!("{}...(truncated, 5 chars total)", "x".repeat(400));
+        assert_eq!(parse(&text), None);
+        let calls = vec![ContentBlock::tool_use(
+            "r",
+            "read_file",
+            serde_json::json!({}),
+        )];
+        let mut round = vec![ContentBlock::tool_result("r", text.clone())];
+        fit_round(&mut round, &calls, 300);
+        let cut = text_of(&round[0]);
+        let c = parse(&cut).expect("cut as a whole text");
+        assert_eq!(c.total, text.len());
     }
 
     // `output_trim` already saved the whole output and says where in its
