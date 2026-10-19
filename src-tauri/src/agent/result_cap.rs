@@ -143,13 +143,19 @@ impl ReadRange {
     /// the last `tail_len` bytes of the `tail` the first cut kept: each side
     /// counts back from what it still knows, the head from `first`, the tail
     /// from `last`.
+    ///
+    /// A second cut keeps less, so its range never starts after the first
+    /// one's. That bound is also what stops a head the first cut left inside
+    /// `read_file`'s size warning from counting the warning's lines as the
+    /// file's: such a head has no blank line closing the warning, so
+    /// `header_lines` cannot see it.
     fn recut(self, head: &str, tail: &str, head_len: usize, tail_len: usize) -> Option<Self> {
         let from = if head_len >= head.len() {
             self.from
         } else {
             let skip_break = usize::from(head.as_bytes()[head_len] == b'\n');
             let header = crate::agent::tools::read_file::header_lines(head);
-            file_line(&head[..head_len + skip_break], self.first, header)
+            file_line(&head[..head_len + skip_break], self.first, header).min(self.from)
         };
         let dropped = tail.len() - tail_len.min(tail.len());
         let to = if dropped == 0 {
@@ -637,6 +643,35 @@ mod tests {
             assert_range_is_what_was_cut(&c);
             assert!(c.hint.contains("of 300-5299"), "{}", c.hint);
         }
+    }
+
+    // A cut that keeps only part of read_file's size warning has shown none of
+    // the file: cut again, smaller, the range it names still starts at the
+    // file's first line, never at a line counted inside the warning.
+    #[test]
+    fn a_warned_read_cut_twice_inside_its_warning_names_the_range_from_line_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        std::fs::write(&path, numbered(30_000)).unwrap();
+        let input = serde_json::json!({"path": path.to_str().unwrap()});
+        let text =
+            crate::agent::tools::read_file::execute(serde_json::from_value(input.clone()).unwrap())
+                .unwrap();
+        let warning = crate::agent::tools::read_file::header_lines(&text);
+        assert!(warning > 0, "the read is shortened");
+        let call = Call::of("read_file", &input);
+        let once = cap(call, &text, 600);
+        let first = parse(&once).expect("capped once");
+        assert!(
+            !first.head.contains("\n\n"),
+            "the head is inside the warning"
+        );
+        assert_eq!(offered_range(first.hint).0, 1, "{}", first.hint);
+
+        let twice = recut(call, &once, 300).expect("cut again");
+        let second = parse(&twice).expect("capped twice");
+        assert!(second.head.lines().count() >= 2, "{:?}", second.head);
+        assert_eq!(offered_range(second.hint).0, 1, "{}", second.hint);
     }
 
     #[test]
