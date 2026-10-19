@@ -1566,6 +1566,19 @@ pub(crate) mod scripted_model {
         Status(u16, &'static str),
     }
 
+    /// Every model a scripted run can call — the builder, and the Brain the
+    /// completion judge and Brain-mode turns run on — is served by the stub at
+    /// `base`. A test that left one on its default would send its requests to
+    /// the real provider and pass only because that call fails open.
+    pub fn assert_only_the_stub_is_called(
+        config: &crate::agent::provider::AgentConfig,
+        base: &str,
+    ) {
+        for model in [&config.builder_model, &config.brain_model] {
+            assert_eq!(config.resolve_provider(model).base_url, base, "{model}");
+        }
+    }
+
     fn sse(event: &str, data: Value) -> String {
         format!("event: {event}\ndata: {data}\n\n")
     }
@@ -1622,7 +1635,8 @@ pub(crate) mod scripted_model {
 
     /// Serve `script` one reply per request (the last one repeats), speaking
     /// the Anthropic streaming protocol. Returns the base URL and the size in
-    /// bytes of every request body received, in order.
+    /// bytes of every conversation request body received, in order (the
+    /// completion judge's requests are answered, not recorded).
     pub async fn spawn(script: Vec<Reply>) -> (String, Arc<Mutex<Vec<usize>>>) {
         let (base, sizes, _) = spawn_recording(script).await;
         (base, sizes)
@@ -1681,17 +1695,19 @@ pub(crate) mod scripted_model {
                         break declared;
                     }
                 };
-                seen.lock().unwrap().push(body_len);
                 let body_start = raw.len().saturating_sub(body_len);
-                kept.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&raw[body_start..]).into_owned());
                 let request = String::from_utf8_lossy(&raw[body_start..]);
                 // A non-streaming request is the completion judge asking
                 // whether a terminal turn is finished. It gets a plain JSON
-                // "DONE" and does not consume a scripted reply — the script is
-                // the conversation, and the judge is not part of it.
-                let (content_type, body) = if request.contains("\"stream\":false") {
+                // "DONE", does not consume a scripted reply and is not
+                // recorded — the script is the conversation, and the judge is
+                // not part of it.
+                let judge = request.contains("\"stream\":false");
+                if !judge {
+                    seen.lock().unwrap().push(body_len);
+                    kept.lock().unwrap().push(request.clone().into_owned());
+                }
+                let (content_type, body) = if judge {
                     let mut message = json!({"content": [{"type": "text", "text": "DONE"}]});
                     if let Some(usage) = &usage {
                         message["usage"] = usage.clone();
@@ -1767,6 +1783,7 @@ mod context_budget_tests {
     fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
             builder_model: "stub/m".into(),
+            brain_model: "stub/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -1786,6 +1803,12 @@ mod context_budget_tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn the_scripted_config_calls_no_model_but_the_stub() {
+        let base = "http://127.0.0.1:9";
+        super::scripted_model::assert_only_the_stub_is_called(&config_for(base, None), base);
     }
 
     /// A workspace holding one file far larger than a small window.
@@ -2137,6 +2160,7 @@ mod transcript_tests {
     fn config_for(base_url: &str) -> AgentConfig {
         let mut config = AgentConfig {
             builder_model: "stub/m".into(),
+            brain_model: "stub/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -2156,6 +2180,12 @@ mod transcript_tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn the_scripted_config_calls_no_model_but_the_stub() {
+        let base = "http://127.0.0.1:9";
+        super::scripted_model::assert_only_the_stub_is_called(&config_for(base), base);
     }
 
     #[tokio::test]
@@ -2615,6 +2645,7 @@ mod delegation_tests {
     fn config_for(base_url: &str) -> AgentConfig {
         let mut config = AgentConfig {
             builder_model: "stub/m".into(),
+            brain_model: "stub/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -2634,6 +2665,12 @@ mod delegation_tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn the_scripted_config_calls_no_model_but_the_stub() {
+        let base = "http://127.0.0.1:9";
+        super::scripted_model::assert_only_the_stub_is_called(&config_for(base), base);
     }
 
     fn workspace(tag: &str) -> (std::path::PathBuf, String, SessionStore) {

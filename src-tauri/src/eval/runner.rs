@@ -591,7 +591,8 @@ reference:
         let result = run_task(&task, &options(&base, work.path())).await;
         assert_eq!(result.outcome, "completed");
         assert!(result.pass, "oracle: {}", result.oracle_tail);
-        let requests = bodies.lock().unwrap().len() as u32;
+        // The stub answers the completion judge without recording it.
+        let requests = bodies.lock().unwrap().len() as u32 + 1;
         assert_eq!(requests, 4, "three rounds and the completion judge");
         assert_eq!(
             result.metrics.rounds, requests,
@@ -746,7 +747,8 @@ reference:
         let task = Task::parse(TASK, "greet").unwrap();
         let (base, _, bodies) = spawn_with_usage(vec![Reply::Text("Nothing to do.")], None).await;
         let result = run_task(&task, &options(&base, work.path())).await;
-        let requests = bodies.lock().unwrap().len() as u32;
+        // The stub answers the completion judge without recording it.
+        let requests = bodies.lock().unwrap().len() as u32 + 1;
         assert_eq!(requests, 2, "one round and the completion judge");
         assert_eq!(result.metrics.rounds, requests);
     }

@@ -2053,6 +2053,8 @@ pub(crate) mod surface_tests {
     pub(crate) fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
             builder_model: "stub/m".into(),
+            // The completion judge and Brain-mode turns run on the Brain.
+            brain_model: "stub/m".into(),
             // Edits are approved without a person, so a run can finish.
             yolo_mode: true,
             ..AgentConfig::default()
@@ -2074,6 +2076,15 @@ pub(crate) mod surface_tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn the_scripted_config_calls_no_model_but_the_stub() {
+        let base = "http://127.0.0.1:9";
+        crate::agent::subagent::scripted_model::assert_only_the_stub_is_called(
+            &config_for(base, None),
+            base,
+        );
     }
 
     fn names(tools: &[ToolDescription]) -> Vec<&str> {
@@ -3606,9 +3617,8 @@ mod usage_record_tests {
         // A 32k window runs the Compact profile, which edits without a subagent,
         // so every request in this run is the main session's own. The judge
         // (the Brain model, asked whether the final turn is finished) is
-        // pointed at the same stub, so its request is counted too.
-        let mut config = config_for(&base, Some(32_768));
-        config.brain_model = "stub/m".into();
+        // served by the same stub, which answers it without recording it.
+        let config = config_for(&base, Some(32_768));
         let ctx = ToolContext {
             workspace_root: Some(root.to_string_lossy().to_string()),
             session_store_path: Some(store.path.to_string_lossy().to_string()),
@@ -3657,7 +3667,7 @@ mod usage_record_tests {
                 _ => None,
             })
             .collect();
-        let requests = bodies.lock().unwrap().len();
+        let requests = bodies.lock().unwrap().len() + 1;
         assert_eq!(requests, 4, "three rounds and the completion judge");
         assert_eq!(usage.len(), requests, "one record per provider request");
         let rounds: Vec<u32> = usage.iter().map(|u| u.0).collect();

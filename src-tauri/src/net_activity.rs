@@ -198,11 +198,17 @@ impl NetGuard {
 
 static CSV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The person's network log. A test build writes one shared file in the temp
+/// folder instead, so the suite never adds its stub traffic to it.
 pub(crate) fn csv_path() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("claudinio-code")
-        .join("network-log.csv")
+    let base = if cfg!(test) {
+        std::env::temp_dir().join("claudinio-test-net")
+    } else {
+        dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("claudinio-code")
+    };
+    base.join("network-log.csv")
 }
 
 fn append_csv_row(op: &NetOp) {
@@ -254,6 +260,15 @@ impl Drop for NetGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The suite runs requests through `NetGuard` (stub providers, the judge);
+    /// none of them is the person's traffic, so none lands in their log.
+    #[test]
+    fn tests_never_write_the_persons_network_log() {
+        if let Some(real) = dirs::config_dir() {
+            assert!(!csv_path().starts_with(real), "{}", csv_path().display());
+        }
+    }
 
     #[test]
     fn guard_registers_and_unregisters() {
