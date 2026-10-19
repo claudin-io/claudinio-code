@@ -2210,7 +2210,7 @@ mod v2_tests {
     }
 
     /// The gates the code enforces teach through their error messages
-    /// (`tool_error_tests`, and the gates' own modules); v2 says once that
+    /// (`gate_text::tests` pins each one's next step); v2 says once that
     /// they exist and keeps none of the sentences that described them.
     #[test]
     fn v2_describes_no_gate_the_code_enforces() {
@@ -2226,6 +2226,9 @@ mod v2_tests {
             "re-checks it before",
             "You must never implement",
             "Stating that the tests pass has no effect",
+            // The quality gate; the base line names it ("closing a goal
+            // without a passing check") and its refusal says to run it.
+            "needs a passing `run_quality`",
         ] {
             assert!(
                 !all.contains(described),

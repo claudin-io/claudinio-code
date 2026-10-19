@@ -6,7 +6,7 @@
 //! - **Policy the code enforces is not restated.** The LLD gate, the quality
 //!   gate, golden-task protection, read-before-edit, the write gates and the
 //!   finish-line checks each refuse with an error that says what to do next
-//!   (`prompt::tool_error_tests` pins that); the prompt says once that they
+//!   (`gate_text::tests` pins that); the prompt says once that they
 //!   exist. A sentence describing a gate is paid on every request and, when
 //!   it drifts from the code, teaches the wrong rule.
 //! - **The Brain interview is adaptive** (decision D5): ask what changes the
@@ -82,7 +82,7 @@ Links to images, video and audio open in a viewer.
 /// messages, not here.
 pub(super) const GOLDEN_PROMPT: &str = "\n\n## GOLDEN TASKS\n\
 Tasks whose id starts with 'golden-' are goals the user set with <goal> tags: the session is finished when every one is 'done'. \
-Close one when its goal is met, not when it is intended: an execution goal needs a passing `run_quality` on the code as it stands. \
+Close one when its goal is met, not when it is intended. \
 When a check fails, fix the cause; a weakened test, a deleted assertion or a skipped case is a defect, not a pass.";
 
 /// The Brain block, appended last. `{plans_subdir}` is replaced with the
