@@ -128,6 +128,33 @@ describe("parseLineList", () => {
     expect(parseLineList("list_dir", out)).toEqual([{ title: "agent", isDir: true }, { title: "main.rs" }]);
   });
 
+  // The tail of a capped grep starts inside a file whose header was in the
+  // omitted middle: its rows must not be put under the last file of the head.
+  it("does not put the rows after a capped grep's marker under the head's last file", () => {
+    const out = [
+      "40 matches in 3 files",
+      "",
+      "src/a.rs",
+      "1: alpha",
+      "2: beta",
+      "[… 900 of 1500 chars omitted; the full output is in /tmp/g.log; read_file or grep it …]",
+      "88: in c",
+      "90: in c too",
+      "",
+      "src/d.rs",
+      "3: delta",
+    ].join("\n");
+    expect(parseLineList("grep", out)).toEqual([
+      { title: "src/a.rs:1", sub: "alpha" },
+      { title: "src/a.rs:2", sub: "beta" },
+      { title: "src/d.rs:3", sub: "delta" },
+    ]);
+    // A cut right after the blank line before a header: the first tail row is
+    // a match, not a file name.
+    const afterBlank = ["3 matches in 2 files", "", "src/a.rs", "1: alpha", "", "[… 9 of 99 chars omitted …]", "88: in c"].join("\n");
+    expect(parseLineList("grep", afterBlank)).toEqual([{ title: "src/a.rs:1", sub: "alpha" }]);
+  });
+
   it("leaves anything that is not its format to be shown as text", () => {
     expect(parseLineList("list_dir", "Error: not a directory: /ws/x")).toBeNull();
     expect(parseLineList("grep", "rg error: regex parse error")).toBeNull();
