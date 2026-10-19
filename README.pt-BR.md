@@ -96,18 +96,24 @@ casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão
 aprovação mostra com a contagem. Um comando de shell roda sem perguntar sob uma
 única regra, e nada mais roda: um único comando da allowlist (inspeção do git,
 `ls`/`cat`/`head`/`tail`/`wc`, os runners de teste e builds,
-`node`/`python`/`pnpm run`, `which`/`echo`/`pwd`/`date`), opcionalmente num pipe
-para `head`, `tail`, `wc`, `grep`, `cut`, `tr` ou `nl`, sem `;`, `&`, `||`, `$`,
-crase, barra invertida, chave, parêntese, glob, quebra de linha ou
-redirecionamento (além de `2>&1` e `>/dev/null`), e sem nada que a checagem de
+`node`/`python`/`pnpm run`, `which`/`echo`/`pwd`, um `date` sozinho ou
+`date +FORMATO`), opcionalmente num pipe para `head`, `tail`, `wc`, `grep`,
+`cut`, `tr` ou `nl`, sem `;`, `&`, `||`, `$`, crase, barra invertida, chave,
+parêntese, glob, quebra de linha, espaço em branco que não seja espaço ou tab, ou
+redirecionamento (além de `2>&1` e `>/dev/null`) — no Windows, onde o comando
+roda sob `cmd /c`, também sem `%`, `^` ou `!` — e sem nada que a checagem de
 gravação veja (redirecionamento, `tee`, `sed -i`, `patch`, script inline que
-grava). Todo o resto é perguntado — uma cadeia de comandos da allowlist, um `|`
-entre aspas, um `2> /dev/null` com espaço inclusive: é o preço de uma regra
-simples o bastante para se ter certeza, e ele nunca é recuperado com parsing. Um
-interpretador ou runner de teste da allowlist ainda roda o script ou o código do
-projeto que receber, então a allowlist do Builder é uma conveniência, não um
-sandbox; um interpretador que recebe um script pelo stdin da chamada é
-perguntado. Ele só passa trabalho a
+grava). Todo o resto é perguntado no Builder e recusado no Brain — uma cadeia de
+comandos da allowlist, um `|` entre aspas, um `2> /dev/null` com espaço
+inclusive: é o preço de uma regra simples o bastante para se ter certeza, e ele
+nunca é recuperado com parsing. Uma deny-list curta, casada por palavras
+inteiras (`rm -rf /`, `chmod 777`, `mkfs`, `dd`, `format`, `chown`, gravação num
+dispositivo de disco), é recusada de vez em todos os modos. Um interpretador,
+runner de teste ou build da allowlist roda o que os seus argumentos e o projeto
+escolherem — inclusive um programa a rodar ou uma pasta a limpar
+(`pytest --basetemp=…`, `go test -exec …`, `cargo --config …`) —, então a
+allowlist do Builder é uma conveniência, não um sandbox; um interpretador que
+recebe um script pelo stdin da chamada é perguntado. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo
@@ -330,9 +336,11 @@ Uma sessão nova num repositório não começa do zero:
   caminho é a proteção de verdade. `finalize_plan` não o aceita como arquivo de
   plano. A proteção do shell é defesa em profundidade de melhor esforço por
   cima, não uma fronteira: uma chamada de shell cujo texto menciona
-  `MEMORY.md`, ou a pasta `.claudinio` como palavra inteira ou seguida de um glob
-  ou de `.`/`..` (`rm -rf .claudinio`, `cp -r q/. .claudinio/`,
-  `.claudinio/M*`), no comando, na pasta de trabalho ou no stdin — ou um nome
+  `MEMORY.md`, ou a própria pasta `.claudinio` — qualquer grafia que não
+  continue em outro nome ou num caminho simples dentro dela, listas entre chaves
+  e barras invertidas do Windows inclusive (`rm -rf .claudinio`,
+  `cp -r q/. .claudinio/`, `.claudinio/M*`, `{.claudinio,}`, `.claudinio\*`),
+  no comando, na pasta de trabalho ou no stdin — ou um nome
   que leva ao arquivo por um link no disco — é recusada a menos que seja uma
   leitura simples (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `file`, `grep`,
   `git log`/`diff`/`show`/`status`/`blame`, sem pipe); nem o modo YOLO nem os

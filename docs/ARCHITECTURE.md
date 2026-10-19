@@ -243,26 +243,31 @@ correctness argument is the comment at the top of the shell policy in
 `agent/permissions.rs`: a command runs unasked (`bash_call_permission` in
 Builder, `bash_permission_brain` in Brain) only when, after the tokens
 `2>&1`, `2>/dev/null`, `>/dev/null` and `1>/dev/null` are dropped, it has no
-line break, backquote, `$`, `<`, `>`, `&`, `;`, backslash, brace,
-parenthesis or glob and no `||`; every `|`-part closes its own quotes; the
+blank but space and tab (a form feed or NBSP splits a word for Rust and not
+for sh), no backquote, `$`, `<`, `>`, `&`, `;`, backslash, brace,
+parenthesis or glob — on Windows, where it runs under `cmd /c`, which
+expands `%NAME%` before it finds `&` and `|`, no `%`, `^` or `!` either — and
+no `||`; every `|`-part closes its own quotes; the
 first part starts with an allowlist entry (Builder's `BASH_ALLOWLIST`:
 git inspection, reads, builds, test runners, `node`/`python`/`pnpm run`;
 Brain's `BRAIN_ALLOWLIST`: reads only; `git branch`/`git remote` only bare or
-listing) and is not an interpreter fed the call's `stdin`; every later part is
+listing, `date` only bare or `+FORMAT`) and is not an interpreter fed the call's `stdin`; every later part is
 one of `PIPE_FILTERS` (`head`, `tail`, `wc`, `grep`, `cut`, `tr`, `nl`); and
 the write check sees nothing. With no backslash, `$` or backquote, quotes do
 not escape, so each `|` the split sees is a pipe the shell sees, and no word
 expands into another (only `~` becomes the home folder). Everything else asks in Builder (YOLO or a
-hook's `allow` may approve it) and is refused in Brain. The deny-list and the
-memory guard run first and refuse outright; a redirection into a disk or
-memory device (`> /dev/sda`, `/dev/mem`) is Denied. The rule replaced a chain
+hook's `allow` may approve it) and is refused in Brain. The deny-list
+(`on_the_deny_list`, whole words, so `git log --format %H` or `cp /tmp/x .` is
+not refused) and the memory guard run first and refuse outright; a
+redirection into a disk or memory device (`> /dev/sda`, `/dev/mem`, quoted or
+not) is Denied — a tripwire for the obvious spelling, not a boundary. The rule replaced a chain
 splitter, per-option `sort`/`uniq` readers, a stdin detector and runner
 argument tables after three review rounds kept finding bypasses in them
 (lean-harness plan, "Shell policy simplified"). Builder's allowlisted
-interpreters and runners still run any script or project code they are
-given. Compact adds one rule
-of its own:Compact adds one rule
-of its own: a call to any tool outside the profile's ten is refused rather than
+interpreters, runners and builds still run whatever their arguments and the
+project choose, a program to run (`go test -exec`, `cargo --config`) or a
+folder to clear (`pytest --basetemp`) included. Compact adds one rule of its
+own: a call to any tool outside the profile's ten is refused rather than
 run.
 
 **Subagents** (`agent/subagent.rs`, `agent/delegation.rs`) are the exception
@@ -562,10 +567,14 @@ below is defence in depth, a best-effort heuristic and not a boundary:
 rather than asks about — a `bash` call that names it and is not a plain read,
 so neither YOLO nor a hook's `allow` opens it. The shell check
 (`project_memory::mentions_memory`) is a raw scan of the text, in any case,
-with no parsing and no recursion: `memory.md` anywhere, or `.claudinio` ending
-a word, or followed by `/` and a word that is empty, holds a glob or has a
-`.`/`..` part — scanned as written and again with quotes and backslashes
-dropped. It reads the whole call (`shell_call_names_memory`): the command, the
+with no parsing and no recursion: `memory.md` anywhere, or `.claudinio` not
+continued into another name by a letter, digit, `-` or `_` (directly or after
+dots, so `.claudinio.json` is not it) — a brace list (`{.claudinio,}`,
+`.claudinio{,}`) or a Windows backslash or trailing dot counts — unless `/`
+follows with a path of plain names that ends cleanly and has no empty or
+all-dots part (`.claudinio/plans/x.md`); `.claudinio/`, `.claudinio/M*`,
+`{.claudinio/,}` and `.claudinio/plans/..` count — scanned as written and
+again with quotes and backslashes dropped. It reads the whole call (`shell_call_names_memory`): the command, the
 `stdin`, a `workdir` inside `.claudinio`, and, with the workspace known, the
 names resolved on disk like the path guard does, so a link an earlier call
 made (`ln -s .claudinio c`, then `>> c/M*`) is seen. A plain read —

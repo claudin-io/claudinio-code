@@ -94,16 +94,22 @@ it, missing folders included), and an `old_string` must match one place unless
 the call says `replace_all`, which the approval card shows with its count. A
 shell command runs unasked under one rule, and nothing else does: a single
 allowlisted command (git inspection, `ls`/`cat`/`head`/`tail`/`wc`, the test
-runners and builds, `node`/`python`/`pnpm run`, `which`/`echo`/`pwd`/`date`),
-optionally piped into `head`, `tail`, `wc`, `grep`, `cut`, `tr` or `nl`, with
-no `;`, `&`, `||`, `$`, backquote, backslash, brace, parenthesis, glob, line
-break or redirection (beyond `2>&1` and `>/dev/null`), and nothing the write
-check sees (redirection, `tee`, `sed -i`, `patch`, an inline script that
-writes). Everything else is asked about — a chain of allowlisted commands, a
-quoted `|`, a `2> /dev/null` with a space included: that is the price of a rule
-simple enough to be sure of, and it is never won back with parsing. An
-allowlisted interpreter or test runner still runs whatever script or project
-code it is given, so Builder's allowlist is a convenience, not a sandbox; an
+runners and builds, `node`/`python`/`pnpm run`, `which`/`echo`/`pwd`, a bare
+`date` or `date +FORMAT`), optionally piped into `head`, `tail`, `wc`, `grep`,
+`cut`, `tr` or `nl`, with no `;`, `&`, `||`, `$`, backquote, backslash, brace,
+parenthesis, glob, line break, blank other than space and tab, or redirection
+(beyond `2>&1` and `>/dev/null`) — on Windows, where the command runs under
+`cmd /c`, no `%`, `^` or `!` either — and nothing the write check sees
+(redirection, `tee`, `sed -i`, `patch`, an inline script that writes).
+Everything else is asked about in Builder and refused in Brain — a chain of
+allowlisted commands, a quoted `|`, a `2> /dev/null` with a space included:
+that is the price of a rule simple enough to be sure of, and it is never won
+back with parsing. A short deny-list, matched by whole words (`rm -rf /`,
+`chmod 777`, `mkfs`, `dd`, `format`, `chown`, a write to a disk device), is
+refused outright in every mode. An allowlisted interpreter, test runner or
+build runs whatever its arguments and the project choose — a program to run or
+a folder to clear included (`pytest --basetemp=…`, `go test -exec …`, `cargo
+--config …`) — so Builder's allowlist is a convenience, not a sandbox; an
 interpreter fed a script on the call's stdin is asked about. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
@@ -322,9 +328,11 @@ A new session in a repository does not start from nothing:
   `.claudinio/MEMORY.md` however the path is spelled — that path check is the
   real guard. `finalize_plan` will not take it as a plan file. The shell guard
   is best-effort defence in depth on top, not a boundary: a shell call whose
-  text mentions `MEMORY.md`, or the `.claudinio` folder as a whole word or
-  followed by a glob or a `.`/`..` (`rm -rf .claudinio`, `cp -r q/. .claudinio/`,
-  `.claudinio/M*`), in its command, its working folder or its stdin — or a name
+  text mentions `MEMORY.md`, or the `.claudinio` folder itself — any spelling
+  that does not continue into another name or a plain path inside it, brace
+  lists and Windows backslashes included (`rm -rf .claudinio`,
+  `cp -r q/. .claudinio/`, `.claudinio/M*`, `{.claudinio,}`, `.claudinio\*`),
+  in its command, its working folder or its stdin — or a name
   that resolves to the file through a link on disk — is refused unless it is a
   plain read (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `file`, `grep`,
   `git log`/`diff`/`show`/`status`/`blame`, with no pipe); YOLO mode and hooks
