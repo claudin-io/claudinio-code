@@ -277,9 +277,12 @@ fn resolved(path: &Path) -> PathBuf {
 /// `cd .claudinio && … >> MEMORY.md`. Used by `permissions::bash_permission`
 /// to refuse a command that names it and is not a plain read.
 ///
-/// What it cannot see is a path the command builds while it runs (a
-/// variable, an interpreter script assembling the name): the shell gate's
-/// approval is what stands there, which YOLO waives — the docs say so.
+/// A best-effort heuristic, not a boundary: `is_memory_path` on the edit
+/// tools is the exact guard. What it cannot see is a path the command builds
+/// while it runs (a variable, an interpreter script assembling the name) or a
+/// copy or delete of a parent folder; nothing certain stands there — the
+/// allowlisted interpreters run unasked, and YOLO waives the rest's approval.
+/// The docs say so.
 pub fn named_in(command: &str) -> bool {
     let lower: String = command
         .to_lowercase()
@@ -308,8 +311,33 @@ pub fn named_in(command: &str) -> bool {
     let names_file = paths
         .iter()
         .any(|p| p.len() == 1 && glob_matches(&p[0], file));
-    names_both || (names_dir && names_file)
+    // The folder as the target of a command that writes or deletes what is
+    // in it (`cp q/* .claudinio/`, `tar -C .claudinio`, `rm -rf .claudinio`),
+    // and `find` acting on what it finds by the file's name. A heuristic
+    // over the common forms, not a parse of every command (Phase 9 final
+    // review); plain reads and `git add` of the folder are not caught.
+    let words = shell_words(&lower);
+    let command_names: Vec<&str> = words
+        .iter()
+        .map(|w| w.rsplit('/').next().unwrap_or(w))
+        .collect();
+    let has = |names: &[&str]| command_names.iter().any(|w| names.contains(w));
+    let rewrites_folder = has(FOLDER_WRITERS) || (has(&["git"]) && has(GIT_REWRITERS));
+    let find_acts = has(&["find"]) && has(&["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
+    names_both
+        || (names_dir && (names_file || rewrites_folder || find_acts))
+        || (names_file && find_acts)
 }
+
+/// Commands that write or delete the contents of a folder named as their
+/// target, for `named_in`.
+const FOLDER_WRITERS: &[&str] = &[
+    "cp", "mv", "rsync", "tar", "rm", "rmdir", "ln", "install", "unzip", "cpio", "shred",
+];
+/// `git` subcommands that rewrite files in the paths they are given.
+const GIT_REWRITERS: &[&str] = &[
+    "checkout", "restore", "reset", "stash", "rm", "mv", "clean", "apply",
+];
 
 /// Whether a whole `bash` call names the memory: its `command`, run in its
 /// `workdir`, fed its `stdin`. The Phase 9 review found the guard read only
@@ -984,6 +1012,44 @@ mod tests {
             // As in the shell, `*` does not reach a dot-folder.
             "echo * > MEMORY.m?",
             "echo '日本語 — café 😀' > README.md",
+        ] {
+            assert!(!named_in(c), "{c}");
+        }
+    }
+
+    // A command that copies, extracts, checks out or deletes into the
+    // `.claudinio` folder itself writes the memory without naming the file
+    // (Phase 9 final review: `cp q/* .claudinio/` planted a memory under
+    // YOLO). The guard is a best-effort heuristic; these are the cheap,
+    // common forms. Reads of the folder and staging it stay allowed.
+    #[test]
+    fn a_command_that_writes_into_the_memory_folder_itself_names_the_memory() {
+        for c in [
+            "cp q/* .claudinio/",
+            "cp -f /tmp/q/* .claudinio/",
+            "cp -rT q .claudinio",
+            "mv q/MEMORY.md .claudinio",
+            "rsync -a q/ .claudinio/",
+            "tar xf /tmp/m.tar -C .claudinio",
+            "git checkout evil -- .claudinio",
+            "git restore --source evil .claudinio",
+            "rm -rf .claudinio",
+            "rm -rf ./.claudinio/",
+            "find . -name 'MEMORY.md' -delete",
+            "find . -name MEMORY.m? -exec cp /tmp/x {} ;",
+            "find .claudinio -delete",
+            "ls && cp q/* .c*/",
+        ] {
+            assert!(named_in(c), "{c}");
+        }
+        for c in [
+            "ls .claudinio",
+            "git add -A",
+            "git add .claudinio",
+            "git status .claudinio",
+            "find . -name '*.rs'",
+            "cp a.txt b.txt",
+            "rm -rf build",
         ] {
             assert!(!named_in(c), "{c}");
         }

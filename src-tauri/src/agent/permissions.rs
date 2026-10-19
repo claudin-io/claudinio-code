@@ -743,6 +743,8 @@ mod tests {
             "cp /tmp/x .claudinio/MEMORY.md",
             "rm .claudinio/MEMORY.md",
             "python3 -c \"open('.claudinio/MEMORY.md','a').write('x')\"",
+            "cp q/* .claudinio/",
+            "rm -rf .claudinio",
         ] {
             assert_eq!(bash_permission(c, false), PermissionLevel::Denied, "{c}");
             assert_eq!(

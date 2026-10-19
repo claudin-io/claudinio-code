@@ -312,14 +312,20 @@ A new session in a repository does not start from nothing:
   their plans); nothing in it is ever summarized or reworded. The first message
   of each new session carries its entries.
 - **Only the harness writes the memory.** `edit_file` refuses
-  `.claudinio/MEMORY.md` however the path is spelled, `finalize_plan` will not
-  take it as a plan file, and a shell command that names it — globs and quotes
-  included, through the call's working folder or its stdin, or through a link
-  made earlier — is refused unless it only reads it; YOLO mode and hooks do not
-  open either. The shell check reads the call's text, so a command that
-  builds the path while it runs (a variable, a script) is not caught by it:
-  outside YOLO you are asked before such a command runs, in YOLO nothing stops
-  it. You can edit the file yourself.
+  `.claudinio/MEMORY.md` however the path is spelled — that path check is the
+  real guard. `finalize_plan` will not take it as a plan file. The shell guard
+  is a best-effort heuristic on top, not a boundary: a shell command that names
+  the file — globs and quotes included, through the call's working folder or
+  its stdin, or through a link made earlier — or that copies, extracts, checks
+  out or deletes into the `.claudinio` folder itself (`cp q/* .claudinio/`,
+  `tar -C .claudinio`, `rm -rf .claudinio`, `find -name MEMORY.md -delete`) is
+  refused unless it only reads; YOLO mode and hooks do not open it. It reads
+  the call's text, so it does not catch a command that builds the path while
+  it runs (a variable, a script), one that copies or deletes a parent folder
+  of it (`rm -rf .`), a link reached through a globbed folder, or a hard link.
+  Such a command is not necessarily asked about either: the allowlisted
+  interpreters (`node`, `python`) run a script without a prompt, outside YOLO
+  too. You can edit the file yourself.
 - **Neither ever goes into the system prompt**, which stays the same bytes from
   one request to the next so the provider can cache it, and neither is sent
   again later in the session; a session that continues another gets the

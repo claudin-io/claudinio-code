@@ -309,14 +309,21 @@ Uma sessão nova num repositório não começa do zero:
   continuam nos seus planos); nada nele é resumido ou reescrito. A primeira
   mensagem de cada sessão nova leva as suas entradas.
 - **Só o harness escreve a memória.** `edit_file` recusa
-  `.claudinio/MEMORY.md` seja qual for a grafia do caminho, `finalize_plan` não
-  o aceita como arquivo de plano, e um comando de shell que o nomeia — com glob
-  ou aspas, pela pasta de trabalho da chamada ou pelo seu stdin, ou por um link
-  criado antes, inclusive — é recusado a menos que só o leia; nem o modo YOLO nem
-  os hooks liberam. A checagem do shell lê o texto da chamada, então um comando que
-  monta o caminho enquanto roda (uma variável, um script) não é pego por ela:
-  fora do YOLO você é consultado antes de ele rodar, no YOLO nada o impede.
-  Você pode editar o arquivo à mão.
+  `.claudinio/MEMORY.md` seja qual for a grafia do caminho — essa checagem de
+  caminho é a proteção de verdade. `finalize_plan` não o aceita como arquivo de
+  plano. A proteção do shell é uma heurística de melhor esforço por cima, não
+  uma fronteira: um comando de shell que nomeia o arquivo — com glob ou aspas,
+  pela pasta de trabalho da chamada ou pelo seu stdin, ou por um link criado
+  antes, inclusive — ou que copia, extrai, faz checkout ou apaga dentro da
+  própria pasta `.claudinio` (`cp q/* .claudinio/`, `tar -C .claudinio`,
+  `rm -rf .claudinio`, `find -name MEMORY.md -delete`) é recusado a menos que
+  só leia; nem o modo YOLO nem os hooks liberam. Ela lê o texto da chamada,
+  então não pega um comando que monta o caminho enquanto roda (uma variável, um
+  script), um que copia ou apaga uma pasta acima dela (`rm -rf .`), um link
+  alcançado por uma pasta em glob, nem um hard link. Esse comando também não é
+  necessariamente perguntado: os interpretadores da allowlist (`node`,
+  `python`) rodam um script sem perguntar, fora do YOLO também. Você pode
+  editar o arquivo à mão.
 - **Nenhum dos dois entra no system prompt**, que fica com os mesmos bytes de
   uma requisição para a outra para o provedor poder fazer cache, e nenhum é
   enviado de novo mais tarde na sessão; uma sessão que continua outra recebe o
