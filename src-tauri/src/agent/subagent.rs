@@ -614,8 +614,13 @@ pub(crate) async fn run_subagent_recorded(
         &config.builder_model,
         prefix_tokens,
     );
+    let limits = crate::agent::budget::RunLimits::for_budget(&budget);
+    // A code subagent edits files, so a shell command that writes one is asked
+    // about like an edit, as in the Builder that delegated to it. An explore
+    // subagent has no shell (`subagent_defs`), so it never reaches the gate.
+    limits.set_writes_files(matches!(spec.mode, SubagentMode::Code));
     let ctx = &ToolContext {
-        limits: Arc::new(crate::agent::budget::RunLimits::for_budget(&budget)),
+        limits: Arc::new(limits),
         // Never the parent's `Main`: a subagent writes only a section it
         // was given, and without one none.
         doc_access: match &spec.section {
@@ -2845,6 +2850,86 @@ mod delegation_tests {
             std::fs::read_to_string(&path).ok().as_deref(),
             Some("export const a = 2;\n")
         );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// A code subagent edits files, so a shell command that writes one is
+    /// asked about like an edit even when its prefix is allowlisted — as it is
+    /// in the Builder that delegated to it. Delegating must not be a way
+    /// around the approval card.
+    #[tokio::test]
+    async fn a_code_subagents_allowlisted_shell_write_is_asked_about() {
+        let (ws, ws_str, store) = workspace("shell-write");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str.clone()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let target = ws.join("out.txt");
+        let (base, _, _) = spawn_recording(vec![
+            Reply::Tool {
+                name: "bash",
+                input: serde_json::json!({ "command": "echo x > out.txt", "workdir": ws_str }),
+            },
+            Reply::Text("done"),
+        ])
+        .await;
+        let config = config_for(&base);
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let events: Channel<AgentEvent> = {
+            let asked = asked.clone();
+            Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+                if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                    && let Ok(AgentEvent::Subagent { event, .. }) =
+                        serde_json::from_str::<AgentEvent>(json)
+                    && let AgentEvent::ToolCall {
+                        tool_name,
+                        permission,
+                        ..
+                    } = *event
+                {
+                    asked
+                        .lock()
+                        .unwrap()
+                        .push(format!("{tool_name}:{permission}"));
+                }
+                Ok(())
+            })
+        };
+        // The person turns the card down as soon as it appears.
+        let approvals = ApprovalMap::default();
+        let refuser = {
+            let approvals = approvals.clone();
+            tokio::spawn(async move {
+                loop {
+                    let pending: Vec<_> = approvals.lock().await.drain().collect();
+                    for (_, tx) in pending {
+                        let _ = tx.send(false);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+        };
+        run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_parent",
+            serde_json::json!({ "agents": [
+                {"name": "writer", "goal": "write out.txt", "mode": "code"}
+            ]}),
+            &events,
+            &approvals,
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        refuser.abort();
+        assert_eq!(
+            asked.lock().unwrap().clone(),
+            vec!["bash:requires_approval".to_string()]
+        );
+        assert!(!target.exists(), "a refused write must not run");
         std::fs::remove_dir_all(&ws).ok();
     }
 

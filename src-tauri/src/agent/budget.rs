@@ -280,7 +280,8 @@ impl RunLimits {
     /// Builder under Compact or Standard): there a shell command that writes a
     /// file is an edit, and is asked about like one (`writes_files`). The run
     /// loop sets it before every tool call from the live mode, so a toggle
-    /// mid-batch cannot leave it disagreeing with the gates it applied.
+    /// mid-batch cannot leave it disagreeing with the gates it applied; a code
+    /// subagent sets it once, since its mode never changes.
     pub fn set_writes_files(&self, yes: bool) {
         self.writes_files.store(yes, Ordering::Relaxed);
     }
