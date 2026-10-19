@@ -46,7 +46,9 @@ limits and prompt profile from), `--task-timeout-s` (default 3600; a task that
 runs out is stopped as the Stop button stops a run — subagents included — and
 the oracle runs only once it has wound down),
 `--price-cache-read/--price-cache-write`, `--jev-api-key-env ENV` (Jev runs
-only when this is given) and `--work-dir DIR`. Without `--work-dir` each command
+only when this is given), `--prompt-version v1|v2` (the Standard system prompt
+the sessions are sent, default v2; v1 is the pre-Phase-5 prompt, kept so the
+two can be measured on the same model and tasks) and `--work-dir DIR`. Without `--work-dir` each command
 makes a fresh temporary directory. `run` keeps it, so every session can be read
 back; `validate` removes it when every task is valid (a full validate
 materializes ~235 MB) and keeps it, printing its path, when one is not. A
@@ -56,7 +58,7 @@ results to `results.jsonl` in the work directory, not into the current one.
 
 `run` writes one JSON line per task as it goes — `id`, `pass`, `outcome`
 (`completed`, `timeout`, `error: …`), `wall_s`, the oracle's exit code and
-output tail, and the metrics: `rounds` (`main_rounds` + `subagent_rounds`),
+output tail, `prompt_version`, and the metrics: `rounds` (`main_rounds` + `subagent_rounds`),
 `input_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `output_tokens`,
 `subagent_tokens`, `cost`, `cost_known`, `tool_calls` per tool, `subagents`
 (spawned with `spawn_agents`), `compactions` (summarizer runs, whose requests

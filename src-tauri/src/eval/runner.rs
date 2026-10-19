@@ -17,6 +17,7 @@ use super::policy;
 use super::task::Task;
 use crate::agent::events::AgentEvent;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
+use crate::agent::prompt::PromptVersion;
 use crate::agent::provider::{AgentConfig, PluginPrefs, ProviderEntry};
 use crate::agent::session::{
     AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, RunOutcome, SessionMode, SteeringCtl, UserAnswer,
@@ -56,6 +57,10 @@ pub(crate) struct RunOptions {
     /// Each task is materialized in `<work_root>/<task id>/ws`.
     pub work_root: PathBuf,
     pub task_timeout: Duration,
+    /// The Standard prompt the sessions are sent (`--prompt-version`). The
+    /// Phase 5 gate is the eval run twice, v1 and v2, on the same model and
+    /// tasks — v1 is kept for one release (decision D7) to be measured.
+    pub prompt_version: PromptVersion,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +75,9 @@ pub(crate) struct TaskResult {
     pub wall_s: f64,
     pub oracle_exit: Option<i32>,
     pub oracle_tail: String,
+    /// Which prompt produced this line, so a baseline file says what it
+    /// measured without the command line that made it.
+    pub prompt_version: PromptVersion,
     #[serde(flatten)]
     pub metrics: RunMetrics,
 }
@@ -88,6 +96,7 @@ pub(crate) fn eval_config(opts: &RunOptions, workspace: &Path) -> AgentConfig {
         hooks_enabled: false,
         auto_commit_plan: false,
         keep_awake: false,
+        prompt_version: opts.prompt_version,
         ..AgentConfig::default()
     };
     config.browser.enabled = false;
@@ -210,11 +219,9 @@ fn effective_max_rounds(cli: Option<usize>, task: Option<usize>) -> Option<usize
     cli.or(task)
 }
 
-pub(crate) async fn run_task(task: &Task, opts: &RunOptions) -> TaskResult {
-    let started = Instant::now();
-    let root = opts.work_root.join(&task.id);
-    let ws = root.join("ws");
-    let mut result = TaskResult {
+/// A task's result before anything has run: not passed, no metrics.
+fn new_result(task: &Task, opts: &RunOptions) -> TaskResult {
+    TaskResult {
         id: task.id.clone(),
         title: task.title.clone(),
         tags: task.tags.clone(),
@@ -223,8 +230,16 @@ pub(crate) async fn run_task(task: &Task, opts: &RunOptions) -> TaskResult {
         wall_s: 0.0,
         oracle_exit: None,
         oracle_tail: String::new(),
+        prompt_version: opts.prompt_version,
         metrics: RunMetrics::default(),
-    };
+    }
+}
+
+pub(crate) async fn run_task(task: &Task, opts: &RunOptions) -> TaskResult {
+    let started = Instant::now();
+    let root = opts.work_root.join(&task.id);
+    let ws = root.join("ws");
+    let mut result = new_result(task, opts);
     if let Err(e) = prepare_workspace(task, &ws) {
         result.outcome = format!("error: {e}");
         return result;
@@ -539,6 +554,7 @@ reference:
             jev_api_key: None,
             work_root: work_root.to_path_buf(),
             task_timeout: Duration::from_secs(120),
+            prompt_version: PromptVersion::default(),
         }
     }
 
@@ -865,5 +881,22 @@ reference:
         assert_eq!(effective_max_rounds(None, Some(12)), Some(12));
         assert_eq!(effective_max_rounds(Some(60), None), Some(60));
         assert_eq!(effective_max_rounds(None, None), None);
+    }
+
+    /// The Phase 5 gate compares v1 and v2 on the same model and tasks: the
+    /// run's sessions must be sent the prompt the command line chose, and
+    /// every result line must say which one that was.
+    #[test]
+    fn a_run_sends_the_chosen_prompt_version_and_records_it_in_every_result() {
+        let work = tempfile::tempdir().unwrap();
+        let mut opts = options("http://127.0.0.1:1", work.path());
+        opts.prompt_version = PromptVersion::V1;
+        assert_eq!(
+            eval_config(&opts, work.path()).prompt_version,
+            PromptVersion::V1
+        );
+        let task = Task::parse(TASK, "greet").unwrap();
+        let line = serde_json::to_value(new_result(&task, &opts)).unwrap();
+        assert_eq!(line["prompt_version"], "v1", "{line}");
     }
 }
