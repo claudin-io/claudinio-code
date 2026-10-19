@@ -448,7 +448,8 @@ fn known_options(args: &[(String, bool)], options: &Options) -> Option<usize> {
             return None;
         }
         if word == "--" {
-            return Some(operands + words.count());
+            let rest: Vec<_> = words.collect();
+            return (!rest.iter().any(|(_, expands)| *expands)).then(|| operands + rest.len());
         }
         if let Some(long) = word.strip_prefix("--") {
             let name = &word[..long.split('=').next().unwrap_or(long).len() + 2];
@@ -457,7 +458,7 @@ fn known_options(args: &[(String, bool)], options: &Options) -> Option<usize> {
                 return None;
             }
             if !long.contains('=') && options.long_valued.contains(&name) {
-                words.next()?;
+                words.next().filter(|(_, expands)| !expands)?;
             }
             continue;
         }
@@ -468,7 +469,7 @@ fn known_options(args: &[(String, bool)], options: &Options) -> Option<usize> {
         for (at, flag) in short.char_indices() {
             if options.short_valued.contains(flag) {
                 if at + flag.len_utf8() == short.len() {
-                    words.next()?;
+                    words.next().filter(|(_, expands)| !expands)?;
                 }
                 break;
             }
@@ -702,7 +703,9 @@ fn interpreter_reads_stdin(segment: &str) -> bool {
                 continue;
             }
             if flags.valued_long.contains(&name) {
-                words.next();
+                if words.next().is_some_and(|(_, expands)| *expands) {
+                    return true; // the value may be several words, `-` among them
+                }
                 continue;
             }
             return true; // it may take the next word, which is then no script
@@ -716,8 +719,10 @@ fn interpreter_reads_stdin(segment: &str) -> bool {
                 return false;
             }
             if flags.valued.contains(flag) {
-                if at + flag.len_utf8() == short.len() {
-                    words.next();
+                if at + flag.len_utf8() == short.len()
+                    && words.next().is_some_and(|(_, expands)| *expands)
+                {
+                    return true; // the value may be several words, `-` among them
                 }
                 break;
             }
@@ -1356,6 +1361,19 @@ mod read_only_tests {
             "git log | sort \\\n-o src/main.rs",
             "git log | uniq \\\n  a.txt \\\n  src/main.rs",
             "cat x | python \\\n-",
+            // An option's value and every word after `--` are expanded by
+            // the shell too: `{1,-o,F}` as `-k`'s value is `-k 1 -o F`, and
+            // `src/*.rs` after `--` may be two operands.
+            "git log | uniq -- src/*.rs",
+            "git log | uniq -- {-,src/main.rs}",
+            "git log | uniq -- $FILES",
+            "git log | sort -k {1,-o,src/main.rs}",
+            "git log | sort --key {1,-o,src/main.rs}",
+            "git log | sort -t {x,-o,src/main.rs}",
+            "git log | uniq -f {1,-,src/main.rs}",
+            "cat evil | python -W {ignore,-} x.py",
+            "cat evil | node -r {./x.js,-}",
+            "cat evil | node --require {./x.js,-}",
         ] {
             assert_eq!(
                 bash_permission(cmd, false),
