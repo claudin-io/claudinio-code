@@ -311,8 +311,8 @@ fn win32_name(text: &str) -> &str {
 /// all-dots part: `.claudinio/plans/x.md` is not the memory, `.claudinio/`,
 /// `.claudinio/M*`, `{.claudinio/,}`, `.claudinio/plans/..` and
 /// `.claudinio/MEMORY~1.MD` are. The text is scanned as written and again
-/// with quotes and backslashes dropped, as the shell drops them
-/// (`.claudi''nio`). Used by
+/// with quotes, backslashes and `^` dropped, as the shell (or cmd, whose
+/// escape `^` is) drops them (`.claudi''nio`, `.claudi^nio`). Used by
 /// `permissions::bash_call_permission` to refuse a call that mentions the
 /// memory unless it is a plain read.
 ///
@@ -323,7 +323,7 @@ fn win32_name(text: &str) -> &str {
 /// hard link. The docs say so.
 pub fn mentions_memory(command: &str) -> bool {
     let lower = command.to_lowercase();
-    let unquoted: String = lower.chars().filter(|c| !"'\"\\".contains(*c)).collect();
+    let unquoted: String = lower.chars().filter(|c| !"'\"\\^".contains(*c)).collect();
     [lower, unquoted].iter().any(|text| scan_mentions(text))
 }
 
@@ -441,13 +441,13 @@ fn names_on_disk(root: &Path, base: &Path, text: &str) -> bool {
 }
 
 /// The words of a shell command as the shell reads them before it opens a
-/// file, case kept: quotes and backslashes dropped, split on whitespace and
-/// the characters that end a word (`;|&<>()` and backquote, and `=` so
-/// `of=MEMORY.md` reads as a name).
+/// file, case kept: quotes, backslashes and cmd's escape `^` dropped, split
+/// on whitespace and the characters that end a word (`;|&<>()` and
+/// backquote, and `=` so `of=MEMORY.md` reads as a name).
 pub(crate) fn shell_words(command: &str) -> Vec<String> {
     let folded: String = command
         .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .filter(|c| !matches!(c, '\'' | '"' | '\\' | '^'))
         .collect();
     folded
         .split(|c: char| c.is_whitespace() || ";|&<>()`=".contains(c))
@@ -1164,6 +1164,8 @@ mod tests {
             serde_json::json!({"command": "echo x >> 'é—日😀'/MEMORY.m?"}),
             serde_json::json!({"command": "echo x >> M*", "workdir": "c"}),
             serde_json::json!({"command": "sh", "stdin": "echo x >> c/M*"}),
+            // cmd drops its escape `^` before the program sees the name.
+            serde_json::json!({"command": "copy x c/M^*"}),
         ] {
             assert!(shell_call_names_memory(Some(root), &call), "{call}");
             assert!(

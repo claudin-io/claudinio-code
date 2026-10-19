@@ -1374,6 +1374,9 @@ mod shell_rule_tests {
         "copy x .claudinio\\MEMORY~1.MD",
         "copy x .claudinio/MEMORY~1.MD",
         "rmdir /s /q .claudinio.",
+        // cmd drops its escape `^` before the program sees the name.
+        "copy /y evil.txt .claudi^nio\\MEMORY.m^d",
+        "rmdir /s /q .claudi^nio",
     ];
 
     /// The everyday commands that must keep running unasked in Builder.
