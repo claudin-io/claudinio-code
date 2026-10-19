@@ -202,8 +202,11 @@ and the read that gets them (`lines 412-1880 of 1-2400; read_file with
 start_line=412, end_line=1880`), counted from a ranged read's `start_line` and
 past `read_file`'s own size warning; for anything else the whole output is first
 written to a temp file, as `output_trim` does for `bash`, and the marker names
-it (the file is the user's alone, 0600 in a 0700 folder, and saved outputs
-older than a week are swept on the first save of a run). `fit_round`, which holds one round's results to a share together, re-cuts
+it (the file is the user's alone, 0600 in a 0700 folder, named by the hash of
+its content so a repeated output is the same file and `loop_watch` still sees
+the repeat, and saved outputs older than a week are swept on the first save of
+a run; `read_file`, `grep` and the other read tools may open these files, and
+only these, outside the workspace). `fit_round`, which holds one round's results to a share together, re-cuts
 a capped result from what it kept and keeps its true size and hint; `prune`
 reads the same marker (or the head-only note older sessions carry) to know a
 capped read is not the whole file. A marker counts only when its numbers add
@@ -459,7 +462,9 @@ and cache share per run, and cache breaks per session).
 Three, and they are the parts to be careful with.
 
 **1. What the model may touch.** `agent/tools/mod.rs::validate_path` gates every
-file tool; `agent/permissions.rs` gates `bash` with an allowlist/denylist and an
+file tool (the read tools go through `validate_read_path`, which also opens the
+user's skill folders and the harness's own saved outputs, with links resolved
+first — never for writing); `agent/permissions.rs` gates `bash` with an allowlist/denylist and an
 approval prompt. `edit_file` always shows a diff first. It also creates files
 (lean-harness Phase 3b): an empty `old_string` on a path that does not exist
 proposes the whole file as a diff from nothing, and applying it makes the
