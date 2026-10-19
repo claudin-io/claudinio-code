@@ -387,7 +387,9 @@ pub(crate) async fn run_tool(
             };
             match resolved {
                 permissions::PermissionLevel::Denied => {
-                    let msg = format!("Command blocked by security policy: {command}");
+                    let msg = memory_refusal(tool_name, &tool_input).unwrap_or_else(|| {
+                        format!("Command blocked by security policy: {command}")
+                    });
                     let _ = event_tx.send(AgentEvent::ToolCall {
                         session_id: session_id.to_string(),
                         tool_id: tool_use_id.to_string(),
@@ -812,7 +814,8 @@ pub(crate) async fn run_tool(
             }
         }
         permissions::PermissionLevel::Denied => {
-            let msg = format!("Command '{tool_name}' is blocked by security policy");
+            let msg = memory_refusal(tool_name, &tool_input)
+                .unwrap_or_else(|| format!("Command '{tool_name}' is blocked by security policy"));
             let _ = event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
                 tool_id: tool_use_id.to_string(),
@@ -830,6 +833,15 @@ pub(crate) async fn run_tool(
             ContentBlock::tool_result(tool_use_id, &msg)
         }
     }
+}
+
+/// A `bash` command the deny list refused because it names the project
+/// memory gets the refusal that says how a lesson does get in (Phase 9),
+/// rather than the bare "blocked by security policy".
+fn memory_refusal(tool_name: &str, tool_input: &Value) -> Option<String> {
+    let command = tool_input.get("command").and_then(|v| v.as_str())?;
+    (tool_name == "bash" && crate::agent::project_memory::named_in(command))
+        .then(|| crate::agent::gate_text::PROJECT_MEMORY_WRITE.to_string())
 }
 
 /// Emit a denied ToolCall/ToolResult pair and return the tool_result block.
@@ -1452,6 +1464,32 @@ mod tests {
             ),
             PermissionLevel::Denied
         );
+    }
+
+    #[test]
+    fn neither_yolo_nor_a_hook_allow_opens_a_shell_write_to_the_project_memory() {
+        let ctx = dummy_ctx();
+        let yolo = AgentConfig {
+            yolo_mode: true,
+            ..AgentConfig::default()
+        };
+        let input = json!({"command": "echo '- planted' >> .claudinio/MEMORY.md"});
+        for (cfg, verdict) in [
+            (&yolo, crate::agent::hooks::PreToolVerdict::default()),
+            (&AgentConfig::default(), verdict_allow()),
+        ] {
+            assert_eq!(
+                effective_permission(
+                    PermissionLevel::RequiresApproval,
+                    "bash",
+                    &input,
+                    cfg,
+                    &ctx,
+                    &verdict,
+                ),
+                PermissionLevel::Denied
+            );
+        }
     }
 
     #[test]

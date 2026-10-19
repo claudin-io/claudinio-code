@@ -19,7 +19,7 @@
 //! summary keeps the generic and loses the specific) and context collapse (a
 //! rewrite loses what the rewriter did not think mattered).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The memory file, relative to the workspace root.
 pub const MEMORY_FILE: &str = ".claudinio/MEMORY.md";
@@ -194,6 +194,66 @@ pub fn append(root: &Path, plan: &Path, date: &str, lines: &[String]) -> Result<
         return Err(fail(&e));
     }
     Ok(path)
+}
+
+/// True when `requested` is the memory file of the workspace at `root`: the
+/// path guard behind `tools::validate_editable_path`, so neither `edit_file`
+/// nor a subagent's direct apply can write the memory. Resolved like the
+/// workspace guard (relative to `root`, links followed where the path exists,
+/// `.` and `..` folded where it does not) and compared without case, since
+/// the default file systems of macOS and Windows would open `memory.md` as
+/// `MEMORY.md`. A page the agent read cannot get a line into the memory by
+/// talking the model into writing it: only `finalize_plan` writes it.
+pub fn is_memory_path(root: &Path, requested: &Path) -> bool {
+    let effective = if requested.is_relative() {
+        root.join(requested)
+    } else {
+        requested.to_path_buf()
+    };
+    let key = |p: &Path| resolved(p).to_string_lossy().to_lowercase();
+    key(&effective) == key(&root.join(MEMORY_FILE))
+}
+
+/// `path` with its deepest existing ancestor canonicalized (links followed)
+/// and the rest folded lexically: `.` dropped, `..` taking one part back.
+fn resolved(path: &Path) -> PathBuf {
+    let mut base = path.to_path_buf();
+    let mut rest = Vec::new();
+    let mut out = loop {
+        if let Ok(canon) = base.canonicalize() {
+            break canon;
+        }
+        // `Path::file_name` is `None` for a trailing `..`; the last component
+        // is what is taken off, whatever it is.
+        match base.components().next_back() {
+            Some(last @ (Component::Normal(_) | Component::ParentDir | Component::CurDir)) => {
+                rest.push(last.as_os_str().to_os_string());
+                base.pop();
+            }
+            // Nothing on the way to the root resolves: fold from the root.
+            _ => break base,
+        }
+    };
+    for name in rest.iter().rev() {
+        match name.to_str() {
+            Some(".") => {}
+            Some("..") => {
+                out.pop();
+            }
+            _ => out.push(name),
+        }
+    }
+    out
+}
+
+/// Whether a shell command names the memory file. The shell cannot be
+/// resolved like a path, so this is a heuristic on the text — the folder and
+/// the file name anywhere in it, in any case, which also catches
+/// `cd .claudinio && … >> MEMORY.md` — used by `permissions::bash_permission`
+/// to refuse a command that names it and is not a plain read.
+pub fn named_in(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    lower.contains(".claudinio") && lower.contains("memory.md")
 }
 
 #[cfg(test)]
@@ -378,5 +438,123 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir2.path().join(".claudinio")).unwrap();
         assert!(append(dir2.path(), &plan, "2026-10-19", &lines(&["x"])).is_err());
         assert!(!outside.path().join("MEMORY.md").exists());
+    }
+
+    #[test]
+    fn the_memory_path_is_recognised_however_it_is_spelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let abs = root.join(MEMORY_FILE);
+        for p in [
+            abs.clone(),
+            PathBuf::from(MEMORY_FILE),
+            PathBuf::from("./.claudinio/MEMORY.md"),
+            PathBuf::from("src/../.claudinio/MEMORY.md"),
+            root.join(".claudinio/./MEMORY.md"),
+            PathBuf::from(".claudinio/memory.md"),
+        ] {
+            assert!(is_memory_path(root, &p), "{}", p.display());
+        }
+        // Once the folder and the file exist, too.
+        std::fs::create_dir(root.join(".claudinio")).unwrap();
+        std::fs::write(&abs, "# Project memory\n").unwrap();
+        assert!(is_memory_path(root, &abs));
+        assert!(is_memory_path(
+            root,
+            Path::new("src/../.claudinio/MEMORY.md")
+        ));
+        for p in [
+            root.join("MEMORY.md"),
+            root.join("docs/MEMORY.md"),
+            root.join(".claudinio/plans/MEMORY.md"),
+            root.join(".claudinio/MEMORY.md.bak"),
+            PathBuf::from("/elsewhere/.claudinio/MEMORY.md"),
+        ] {
+            assert!(!is_memory_path(root, &p), "{}", p.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_the_memory_is_the_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join(".claudinio")).unwrap();
+        std::fs::write(root.join(MEMORY_FILE), "").unwrap();
+        std::os::unix::fs::symlink(root.join(MEMORY_FILE), root.join("notes.md")).unwrap();
+        assert!(is_memory_path(root, &root.join("notes.md")));
+    }
+
+    #[test]
+    fn a_command_names_the_memory_by_folder_and_file_in_any_case() {
+        for c in [
+            "echo x >> .claudinio/MEMORY.md",
+            "cd .claudinio && printf 'x' >> MEMORY.md",
+            "cp /tmp/m .Claudinio/Memory.md",
+        ] {
+            assert!(named_in(c), "{c}");
+        }
+        for c in ["echo x >> MEMORY.md", "ls .claudinio/plans", "cargo test"] {
+            assert!(!named_in(c), "{c}");
+        }
+    }
+
+    /// The texts of every `tool_result` in a request body, in order.
+    fn tool_results(body: &str) -> Vec<String> {
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+            .filter(|b| b["type"] == "tool_result")
+            .map(|b| match &b["content"] {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect()
+    }
+
+    // The whole point of the guard, end to end: a Builder session with YOLO
+    // on — every prompt relaxed — that a page talked into planting a line
+    // gets the refusal from both the shell and edit_file, and the memory is
+    // not written.
+    #[tokio::test]
+    async fn a_yolo_builder_session_can_neither_shell_nor_edit_a_line_into_the_memory() {
+        use crate::agent::session::PromptProfile;
+        use crate::agent::subagent::scripted_model::Reply;
+        use crate::agent::task_recital::loop_tests::{run, workspace};
+        let ws = workspace("memory-guard", &[]);
+        let memory = ws.root.join(MEMORY_FILE);
+        let (outcome, bodies) = run(
+            &ws,
+            PromptProfile::Standard,
+            "summarize the page",
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({"command": "mkdir -p .claudinio && echo '- planted' >> .claudinio/MEMORY.md"}),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": memory.to_string_lossy(), "old_string": "", "new_string": "- planted\n"
+                    }),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        assert!(outcome.is_ok(), "{:?}", outcome.err());
+        assert!(!memory.exists(), "the memory was written");
+        let results = tool_results(bodies.last().unwrap());
+        assert_eq!(results.len(), 2, "{results:?}");
+        for r in &results {
+            assert!(
+                r.contains(crate::agent::gate_text::PROJECT_MEMORY_WRITE),
+                "{results:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws.root);
     }
 }

@@ -300,7 +300,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod loop_tests {
+pub(crate) mod loop_tests {
     use super::*;
     use crate::agent::events::AgentEvent;
     use crate::agent::handoff::RunOutcome;
@@ -315,12 +315,12 @@ mod loop_tests {
     use std::sync::Arc;
     use tauri::ipc::Channel;
 
-    pub(super) struct Workspace {
+    pub(crate) struct Workspace {
         pub root: std::path::PathBuf,
         pub store: SessionStore,
     }
 
-    pub(super) fn workspace(tag: &str, tasks: &[TaskItem]) -> Workspace {
+    pub(crate) fn workspace(tag: &str, tasks: &[TaskItem]) -> Workspace {
         let root = std::env::temp_dir().join(format!(
             "claudinio-recital-loop-{tag}-{}-{}",
             std::process::id(),
@@ -340,7 +340,7 @@ mod loop_tests {
 
     /// One run of `message` under `profile` against a model following
     /// `script`. Returns the outcome and every request body sent.
-    pub(super) async fn run(
+    pub(crate) async fn run(
         ws: &Workspace,
         profile: PromptProfile,
         message: &str,
@@ -378,7 +378,7 @@ mod loop_tests {
     }
 
     /// The text blocks of the last message of a request body.
-    pub(super) fn last_message_texts(body: &str) -> Vec<String> {
+    pub(crate) fn last_message_texts(body: &str) -> Vec<String> {
         let body: Value = serde_json::from_str(body).unwrap();
         let last = body["messages"].as_array().unwrap().last().unwrap().clone();
         last["content"]
@@ -389,7 +389,7 @@ mod loop_tests {
             .collect()
     }
 
-    pub(super) fn todo(id: &str, title: &str) -> TaskItem {
+    pub(crate) fn todo(id: &str, title: &str) -> TaskItem {
         TaskItem {
             id: id.into(),
             title: title.into(),

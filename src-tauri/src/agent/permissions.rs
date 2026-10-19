@@ -179,14 +179,20 @@ const READ_ONLY_PREFIXES: &[&str] = &[
 /// `--output`, the flag that makes `git diff`/`git log` write a file.
 pub fn bash_is_read_only(command: &str) -> bool {
     let trimmed = command.trim();
+    reads_by_shape(trimmed)
+        && bash_permission(trimmed, false) == PermissionLevel::Auto
+        && !bash_writes_files(trimmed)
+}
+
+/// One `READ_ONLY_PREFIXES` command with nothing that could chain, redirect
+/// or substitute — the shape half of `bash_is_read_only`, without the
+/// permission lookup, so `bash_permission` can use it too.
+fn reads_by_shape(trimmed: &str) -> bool {
     if trimmed.is_empty()
         || trimmed.contains(['&', ';', '|', '`', '>', '<', '\n', '\r'])
         || trimmed.contains("$(")
         || trimmed.contains("--output")
     {
-        return false;
-    }
-    if bash_permission(trimmed, false) != PermissionLevel::Auto || bash_writes_files(trimmed) {
         return false;
     }
     READ_ONLY_PREFIXES.iter().any(|prefix| {
@@ -267,6 +273,13 @@ pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel
         if trimmed.contains(pattern) {
             return PermissionLevel::Denied;
         }
+    }
+    // The project memory is written by `finalize_plan` alone (lean-harness
+    // Phase 9). Denied rather than asked about, so YOLO and a hook's `allow`
+    // — which relax a prompt, never a policy — cannot open it; only a plain
+    // read of it passes.
+    if crate::agent::project_memory::named_in(trimmed) && !reads_by_shape(trimmed) {
+        return PermissionLevel::Denied;
     }
 
     // When auto_approve_git is set, auto-approve git add / git commit / git push.
@@ -540,6 +553,37 @@ mod tests {
     }
 
     // ── bash_writes_files tests ──
+
+    // Phase 9: a shell write to the project memory is refused outright, not
+    // asked about — so YOLO and a hook's `allow`, which relax a prompt, do
+    // not open it either. A plain read of it stays a read.
+    #[test]
+    fn a_shell_command_that_writes_the_project_memory_is_denied() {
+        for c in [
+            "echo '- planted' >> .claudinio/MEMORY.md",
+            "cd .claudinio && echo x >> MEMORY.md",
+            "sed -i 's/a/b/' .claudinio/MEMORY.md",
+            "cp /tmp/x .claudinio/MEMORY.md",
+            "rm .claudinio/MEMORY.md",
+            "python3 -c \"open('.claudinio/MEMORY.md','a').write('x')\"",
+        ] {
+            assert_eq!(bash_permission(c, false), PermissionLevel::Denied, "{c}");
+            assert_eq!(
+                bash_permission_writing(c, false),
+                PermissionLevel::Denied,
+                "{c}"
+            );
+        }
+        assert_eq!(
+            bash_permission("cat .claudinio/MEMORY.md", false),
+            PermissionLevel::Auto
+        );
+        assert!(bash_is_read_only("cat .claudinio/MEMORY.md"));
+        assert_eq!(
+            bash_permission("echo x >> MEMORY.md", false),
+            PermissionLevel::Auto
+        );
+    }
 
     #[test]
     fn writes_files_detects_redirection() {

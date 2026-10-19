@@ -166,7 +166,8 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     crate::workspace_path::ensure_within_root(requested, std::path::Path::new(root))
 }
 
-/// Like `validate_path`, but also refuses to write the project's specs.
+/// Like `validate_path`, but also refuses to write the project's specs and
+/// the project memory (`agent::project_memory::is_memory_path`).
 ///
 /// Specs are the one input to a project that did not come out of a model, which
 /// is the entire reason checking against them means anything. An agent that can
@@ -178,6 +179,13 @@ pub fn validate_editable_path(requested: &str, ctx: &ToolContext) -> Result<(), 
     let Some(root) = ctx.workspace_root.as_deref() else {
         return Ok(());
     };
+    // The project memory is written by `finalize_plan` alone (Phase 9).
+    if crate::agent::project_memory::is_memory_path(
+        std::path::Path::new(root),
+        std::path::Path::new(requested),
+    ) {
+        return Err(crate::agent::gate_text::PROJECT_MEMORY_WRITE.into());
+    }
     // Re-read from disk rather than caching: the user may move their specs
     // mid-session, and the guard must follow them immediately.
     let features_dir = crate::quality::QualityConfig::load(std::path::Path::new(root)).features_dir;
@@ -2408,6 +2416,41 @@ mod tests {
             validate_editable_path(root.join("features/a.feature").to_str().unwrap(), &ctx).is_ok()
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Phase 9: the memory is written by `finalize_plan` alone. The guard is
+    // at the path level, so a model talked into it by a page it read gets
+    // the same refusal whether it edits or creates the file.
+    #[tokio::test]
+    async fn the_agent_cannot_edit_or_create_the_project_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ctx = ctx_at(root);
+        let memory = root.join(".claudinio/MEMORY.md");
+        let err = validate_editable_path(memory.to_str().unwrap(), &ctx).unwrap_err();
+        assert_eq!(err, crate::agent::gate_text::PROJECT_MEMORY_WRITE);
+        let created = execute(
+            "edit_file",
+            serde_json::json!({"path": memory.to_str().unwrap(), "old_string": "", "new_string": "- planted\n"}),
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            created.err().as_deref(),
+            Some(crate::agent::gate_text::PROJECT_MEMORY_WRITE)
+        );
+        std::fs::create_dir(root.join(".claudinio")).unwrap();
+        std::fs::write(&memory, "## Learned\n- real\n").unwrap();
+        assert!(validate_editable_path(memory.to_str().unwrap(), &ctx).is_err());
+        assert!(validate_editable_path(".claudinio/MEMORY.md", &ctx).is_err());
+        // Its neighbours stay ordinary files.
+        let plan = root.join(".claudinio/plans/p.md");
+        assert!(validate_editable_path(plan.to_str().unwrap(), &ctx).is_ok());
+        assert!(validate_editable_path(root.join("MEMORY.md").to_str().unwrap(), &ctx).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&memory).unwrap(),
+            "## Learned\n- real\n"
+        );
     }
 
     #[test]

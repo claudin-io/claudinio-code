@@ -35,6 +35,12 @@ pub const BASH_NOT_ALLOWED_IN_BRAIN: &str = "Command not allowed in Brain mode â
      read_file, search with grep or the indexed search tools, and put what needs running in \
      the plan.";
 
+/// A write to the project memory, by `edit_file`, a subagent's apply or the
+/// shell (lean-harness Phase 9): only the harness writes it.
+pub const PROJECT_MEMORY_WRITE: &str = "Refused: .claudinio/MEMORY.md is the project memory, and \
+     only the harness writes it. To add a lesson, pass it in finalize_plan's `memory` list when \
+     the plan is done; to change or remove an entry, ask_user.";
+
 /// The Low-Level Design gate, before any plan file exists.
 pub fn lld_no_plan(tool: &str) -> String {
     format!(
@@ -217,6 +223,7 @@ pub fn all() -> Vec<(&'static str, String)> {
             "BASH_NOT_ALLOWED_IN_BRAIN",
             BASH_NOT_ALLOWED_IN_BRAIN.to_string(),
         ),
+        ("PROJECT_MEMORY_WRITE", PROJECT_MEMORY_WRITE.to_string()),
         ("lld_no_plan", lld_no_plan("tasks_set")),
         (
             "lld_missing",
@@ -273,6 +280,11 @@ mod tests {
         ("BASH_WRITES_IN_BRAIN", &["write_plan"]),
         // What to use instead of the refused command.
         ("BASH_NOT_ALLOWED_IN_BRAIN", &["read_file", "git status"]),
+        // The memory is written through finalize_plan, or by the person.
+        (
+            "PROJECT_MEMORY_WRITE",
+            &["finalize_plan", "`memory`", "ask_user"],
+        ),
         (
             "lld_no_plan",
             &["write_plan", "## low-level design", "then retry tasks_set"],
