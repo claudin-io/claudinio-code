@@ -352,7 +352,7 @@ impl SkillManager {
     /// The skills shipped with the binary, parsed. They are the lowest
     /// priority: any skill on disk with the same name replaces one, except
     /// the names in [`RESERVED_BUILTIN_SKILLS`].
-    fn builtin_entries() -> Vec<SkillEntry> {
+    pub(crate) fn builtin_entries() -> Vec<SkillEntry> {
         let mut entries = Vec::new();
         for (name, content) in BUILTIN_SKILLS {
             let source = std::path::Path::new("builtin");

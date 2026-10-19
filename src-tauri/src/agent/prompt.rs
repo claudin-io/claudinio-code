@@ -989,6 +989,12 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
         eprintln!(
             "--- brain clarifying questions ---\n{reply}\n----------------------------------"
         );
+        assert_interview_covers_size_and_asset(&reply);
+    }
+
+    /// The interview session 44ec41c1 needed: it asks the modal's size and
+    /// keeps the exact icon the user linked.
+    fn assert_interview_covers_size_and_asset(reply: &str) {
         let lc = reply.to_lowercase();
         let asks_size = [
             "tamanho",
@@ -1025,6 +1031,53 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
             asks_asset,
             "Brain must confirm/preserve the exact icon asset the user linked"
         );
+    }
+
+    /// The same interview under prompt v2, the default, which keeps the
+    /// sizing and asset checklists in the built-in `plan` skill its Brain
+    /// block sends the model to. This call is tool-free, so the skill's text
+    /// is handed over as the `skills` read returns it: what is checked live is
+    /// that v2's prompt with that checklist still asks both questions. Whether
+    /// the model chooses to read the skill at all is the eval's v1-vs-v2 gate
+    /// (lean-harness plan, Phase 5), not something one request can show.
+    #[tokio::test]
+    #[ignore = "hits the live claudin.io API; requires CLAUDINIO_API_KEY"]
+    async fn brain_interview_covers_modal_size_and_icon_asset_with_the_plan_skill_read() {
+        let Some(cfg) = live_cfg() else {
+            eprintln!("skipping: CLAUDINIO_API_KEY not set");
+            return;
+        };
+        let system = system_prompt(
+            Some(ROOT),
+            None,
+            None,
+            None,
+            SessionMode::Brain,
+            PromptProfile::Standard,
+            subagent::MAX_PARALLEL_AGENTS,
+            false,
+            PromptVersion::V2,
+        );
+        assert!(
+            system.contains("`plan`"),
+            "v2's Brain block names the plan skill"
+        );
+        let plan = crate::agent::skills::SkillManager::builtin_entries()
+            .into_iter()
+            .find(|e| e.name == "plan")
+            .and_then(|e| e.body)
+            .expect("the built-in plan skill");
+        let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
+        let user = format!(
+            "{SESSION_REQUEST}\n\n---\nYou already read the `plan` skill; `skills` returned:\n\n\
+{plan}\n\n---\nDo NOT call any tool and do NOT write a plan. Instead, output ONLY a numbered \
+list of the clarifying questions you must ask me before writing the plan."
+        );
+        let reply = one_shot(&cfg, &model, &system, &user, 1500)
+            .await
+            .expect("live brain call");
+        eprintln!("--- v2 brain clarifying questions ---\n{reply}\n---");
+        assert_interview_covers_size_and_asset(&reply);
     }
 
     /// Give the live Builder model a plan step that references the user's exact
