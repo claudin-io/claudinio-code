@@ -159,7 +159,7 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   carregada é acrescentada ao fim e fica pela sessão, então o prefixo em cache
   só cresce no final. As skills são listadas do mesmo jeito, uma linha cada, e
   lidas com a ferramenta `skills`. Com dez skills e um servidor MCP de vinte
-  ferramentas o prefixo fica em cerca de 6,3k tokens, onde antes passava de 17k.
+  ferramentas o prefixo fica em cerca de 6,5k tokens, onde antes passava de 17k.
 - **A lista de tarefas vem até o agente, e não o contrário.** A mensagem de
   cada execução termina com a lista de tarefas da sessão, uma linha por tarefa
   (`id · status · título`), então nenhum pedido é gasto relendo-a; o agente

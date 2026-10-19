@@ -208,7 +208,8 @@ link, another user's or writable by others gets no save and none of its files
 is trusted — named by the hash of
 its content so a repeated output is the same file and `loop_watch` still sees
 the repeat, and saved outputs older than a week are swept on the first save of
-a run; `read_file`, `grep` and the other read tools may open these files, and
+the app's process (so an app left open for days does not sweep again until
+it restarts); `read_file`, `grep` and the other read tools may open these files, and
 only these, outside the workspace). `fit_round`, which holds one round's results to a share together, re-cuts
 a capped result from what it kept and keeps its true size and hint; `prune`
 reads the same marker (or the head-only note older sessions carry) to know a
@@ -296,8 +297,8 @@ model loads a tool to obey, and a load late in a session rewrites the cached
 prefix in front of the whole conversation. That is why `finalize_plan`, the
 Builder's last call, stays core; `tasks_get` was core for the same reason (the
 first call) until the task protocol stopped asking for it (below). The default
-Builder prefix measures 4,965 tokens on the harness's meter (12,337 before),
-and 6,441 with ten skills and a twenty-tool MCP server
+Builder prefix measures 4,984 tokens on the harness's meter (12,337 before),
+and 6,460 with ten skills and a twenty-tool MCP server
 (17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
 10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
 the definitions actually sent.

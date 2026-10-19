@@ -154,7 +154,7 @@ requests several times its size.
   simply by calling one). A loaded tool is appended and stays for the session,
   so the cached prefix only ever grows at its end. Skills are listed the same
   way, one line each, and read with the `skills` tool. With ten skills and a
-  twenty-tool MCP server the prefix is about 6.3k tokens, where it used to be
+  twenty-tool MCP server the prefix is about 6.5k tokens, where it used to be
   17k.
 - **The task list comes to the agent, not the other way round.** Each run's
   message ends with the session's task list, one line per task
