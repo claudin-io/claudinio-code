@@ -463,6 +463,39 @@ request. A compaction's summarizer is a subagent too and writes
 billed into the session total but leave no `usage` record. `scripts/session-stats.py` aggregates them (`--cost` for cost, rounds
 and cache share per run, and cache breaks per session).
 
+### Project memory
+
+`agent/project_memory.rs` (lean-harness Phase 9, decision D6). Two files a
+new session reads, one the harness writes:
+
+- **`<workspace>/.claudinio/MEMORY.md`**, harness-owned: a `## Learned` list of
+  `- YYYY-MM-DD — <line> (plan: <relative plan path>)`. `finalize_plan`'s
+  optional `memory` list (at most 5 lines of at most 200 characters, checked by
+  `proposed_lines` before anything is written, so a refused call never logs the
+  plan twice) is appended after the Implementation Log; no list, no entry — the
+  journal is never copied there. Append-only, capped at 4,000 characters by
+  dropping the oldest entries whole (`appended`); never summarized or
+  rewritten, the ACE paper's brevity bias and context collapse. Written by
+  rename, never through a link at `.claudinio` or the file.
+- **`AGENTS.md`, else `CLAUDE.md`**, at the workspace root: the user's own
+  context, read and never written, capped at 6,000 characters on a character
+  boundary (snapped to a line break in the second half) with a note naming the
+  absolute path and the `start_line` to `read_file` the rest.
+
+`run_loop` reads both on the first run of a session that continues none (no
+`user` or `linked_from` record yet; `is_first_run`) under a chat profile, and
+puts them in the run's user turn after the user's words and before the
+`<tasks>` recital, as `<project-instructions path="...">` then
+`<project-memory>` — the same mechanism as `<hook-context>` and `<tasks>`:
+persisted inside the turn, so a reload replays it, and never in the system
+prompt, whose bytes must not move under the cache. A successor gets neither
+(its plan or handoff carries what it needs), nor does the git operator.
+`AgentConfig::project_memory` (default on; Settings › Agent › Project memory)
+turns both off. A link out of the workspace is not followed (a cloned repo
+cannot send another file to the provider), files are read at most 1 MiB, and
+a forged closing tag is defused with a zero-width space. The timeline never
+shows either block: the bubble is the raw `user` record.
+
 ## Trust boundaries
 
 Three, and they are the parts to be careful with.
@@ -485,6 +518,15 @@ records a created file as fully read. An `old_string` that occurs more than once
 is refused with the count unless the call sets `replace_all`, and the count is
 taken again on the file at approval; a `replace_all` proposal carries its count,
 and the approval card says "Replaces all N occurrences".
+The project memory (`.claudinio/MEMORY.md`) is written by `finalize_plan` alone,
+so a page the agent read cannot get a line into what every later session reads:
+`validate_editable_path` refuses it at the path level (resolved like the
+workspace guard, links followed, compared without case), which covers
+`edit_file` and a subagent's apply, and `bash_permission` *denies* — rather
+than asks about — a command that names it and is not a plain read, so neither
+YOLO nor a hook's `allow` opens it. The shell check is a heuristic on the
+command's text (folder and file name anywhere in it); a file written by an MCP
+server is outside it.
 
 **2. What the webview may touch.** The chat renders untrusted content, so treat
 the frontend as a place where attacker-influenced script could run. The

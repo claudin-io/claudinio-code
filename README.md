@@ -282,6 +282,34 @@ everything else in the file is yours and is kept byte for byte.
   would go is never followed, and a `.claudinio` or `.claudinio/docs` that is a
   link is refused, so a cloned repo cannot steer the write elsewhere.
 
+### It remembers what earlier sessions learned
+
+A new session in a repository does not start from nothing:
+
+- **Your project's own instructions.** The first message of each new session
+  also sends the workspace's `AGENTS.md` — or `CLAUDE.md` when there is no
+  `AGENTS.md` — up to its first 6,000 characters, with a note saying from which
+  line the agent can read the rest. The file is yours; the agent reads it and
+  never writes it.
+- **A project memory the harness keeps.** When a build finishes, `finalize_plan`
+  can take up to five one-line lessons (200 characters each) that a later
+  session would otherwise have to rediscover. They go to the `## Learned` list
+  of `.claudinio/MEMORY.md` as `- 2026-10-19 — <lesson> (plan: <plan file>)`:
+  each points at the plan that holds the detail. No lessons, no entry — nothing
+  is copied there on its own. The file is append-only and kept under about
+  4,000 characters by dropping its oldest entries whole (they are still in
+  their plans); nothing in it is ever summarized or reworded. The first message
+  of each new session carries its entries.
+- **Only the harness writes the memory.** `edit_file` and shell commands that
+  would write `.claudinio/MEMORY.md` are refused — YOLO mode and hooks do not
+  open it — so a web page the agent read cannot talk it into planting a line.
+  You can edit the file yourself.
+- **Neither ever goes into the system prompt**, which stays the same bytes from
+  one request to the next so the provider can cache it, and neither is sent
+  again later in the session or to a session that continues another (the plan
+  or the handoff carries what is needed). Settings › Agent › *Project memory*
+  turns both off.
+
 ### Nothing is a black box
 
 Every assistant turn renders as a collapsible timeline — phases, thinking, tool
@@ -415,7 +443,7 @@ resident, context used against context served, and the current token rate.
 | `tasks_set` / `tasks_update` | auto | always | Rewrite the task list, or change one or several tasks in one call |
 | `run_quality` | auto | always | Run the project's tests (and coverage) and record the result |
 | `write_plan` / `exit_plan_mode` | auto | always (Brain) | Author the plan; return to Builder |
-| `finalize_plan` | auto | always (Builder) | Close out the plan |
+| `finalize_plan` | auto | always (Builder) | Close out the plan; add lessons to the project memory |
 | `enter_plan_mode` | auto | deferred (Builder) | Switch to Brain |
 | `spawn_agents` | auto | always | Launch parallel subagents |
 | `skills` | auto | always | List the installed skills, or read one |

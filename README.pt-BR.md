@@ -278,6 +278,35 @@ resto do arquivo é seu e é preservado byte a byte.
   arquivo iria nunca é seguido, e um `.claudinio` ou `.claudinio/docs` que seja
   link é recusado, então um repositório clonado não desvia a escrita para fora.
 
+### Ele lembra o que as sessões anteriores aprenderam
+
+Uma sessão nova num repositório não começa do zero:
+
+- **As instruções do seu próprio projeto.** A primeira mensagem de cada sessão
+  nova envia também o `AGENTS.md` do workspace — ou o `CLAUDE.md` quando não há
+  `AGENTS.md` — até os seus primeiros 6.000 caracteres, com uma nota dizendo a
+  partir de que linha o agente pode ler o resto. O arquivo é seu; o agente o lê
+  e nunca o escreve.
+- **Uma memória do projeto que o harness mantém.** Quando um build termina, o
+  `finalize_plan` pode receber até cinco lições de uma linha (200 caracteres
+  cada) que uma sessão futura teria de redescobrir. Elas vão para a lista
+  `## Learned` de `.claudinio/MEMORY.md` como
+  `- 2026-10-19 — <lição> (plan: <arquivo do plano>)`: cada uma aponta para o
+  plano que guarda o detalhe. Sem lições, sem entrada — nada é copiado para lá
+  sozinho. O arquivo só cresce por acréscimo e é mantido abaixo de cerca de
+  4.000 caracteres descartando as entradas mais antigas inteiras (elas
+  continuam nos seus planos); nada nele é resumido ou reescrito. A primeira
+  mensagem de cada sessão nova leva as suas entradas.
+- **Só o harness escreve a memória.** `edit_file` e comandos de shell que
+  escreveriam `.claudinio/MEMORY.md` são recusados — nem o modo YOLO nem os
+  hooks liberam — então uma página web que o agente leu não consegue convencê-lo
+  a plantar uma linha. Você pode editar o arquivo à mão.
+- **Nenhum dos dois entra no system prompt**, que fica com os mesmos bytes de
+  uma requisição para a outra para o provedor poder fazer cache, e nenhum é
+  enviado de novo mais tarde na sessão nem para uma sessão que continua outra
+  (o plano ou o handoff já leva o necessário). Settings › Agent › *Project
+  memory* desliga os dois.
+
 ### Nada é caixa-preta
 
 Cada turno do assistente vira uma timeline colapsável — fases, pensamento,
@@ -415,7 +444,7 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `tasks_set` / `tasks_update` | automático | sempre | Reescreve a lista de tarefas, ou altera uma ou várias tarefas numa chamada |
 | `run_quality` | automático | sempre | Roda os testes (e a cobertura) do projeto e registra o resultado |
 | `write_plan` / `exit_plan_mode` | automático | sempre (Brain) | Escreve o plano; volta ao Builder |
-| `finalize_plan` | automático | sempre (Builder) | Fecha o plano |
+| `finalize_plan` | automático | sempre (Builder) | Fecha o plano; acrescenta lições à memória do projeto |
 | `enter_plan_mode` | automático | adiada (Builder) | Passa para o Brain |
 | `spawn_agents` | automático | sempre | Dispara subagentes paralelos |
 | `skills` | automático | sempre | Lista as skills instaladas ou lê uma |
