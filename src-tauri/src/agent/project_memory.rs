@@ -84,18 +84,25 @@ pub fn entry(date: &str, line: &str, plan: &str) -> String {
 /// call adds stays even when the rest of the file alone is over the cap.
 /// Text outside the list — a person's own notes — is never touched.
 pub fn appended(existing: &str, entries: &[String], cap: usize) -> String {
+    // A file checked out with CRLF keeps it: `lines` drops the `\r`, and
+    // the person's notes outside the list are theirs, terminators included.
+    let nl = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
     let Some(heading) = lines.iter().position(|l| l.trim_end() == LEARNED_HEADING) else {
         let mut text = if existing.trim().is_empty() {
             PREAMBLE.to_string()
         } else {
-            format!("{}\n\n", existing.trim_end())
+            format!("{}{nl}{nl}", existing.trim_end())
         };
         text.push_str(LEARNED_HEADING);
-        text.push('\n');
+        text.push_str(nl);
         for e in entries {
             text.push_str(e);
-            text.push('\n');
+            text.push_str(nl);
         }
         return text;
     };
@@ -109,20 +116,20 @@ pub fn appended(existing: &str, entries: &[String], cap: usize) -> String {
         .map_or(heading + 1, |i| i + 1);
     lines.splice(at..at, entries.iter().cloned());
 
-    // Every line ends with a newline in the result.
-    let mut total: usize = lines.iter().map(|l| l.chars().count() + 1).sum();
+    // Every line ends with a line break in the result.
+    let mut total: usize = lines.iter().map(|l| l.chars().count() + nl.len()).sum();
     let mut i = heading + 1;
     while total > cap && i < at {
         if lines[i].starts_with("- ") {
-            total -= lines[i].chars().count() + 1;
+            total -= lines[i].chars().count() + nl.len();
             lines.remove(i);
             at -= 1;
         } else {
             i += 1;
         }
     }
-    let mut text = lines.join("\n");
-    text.push('\n');
+    let mut text = lines.join(nl);
+    text.push_str(nl);
     text
 }
 
@@ -720,6 +727,21 @@ mod tests {
             text,
             "# Project memory\n\n## Learned\n- old\n- new\n\n## Mine\nmy own notes\n"
         );
+    }
+
+    // A MEMORY.md checked out with CRLF (Windows, core.autocrlf) keeps its
+    // line endings: the person's notes outside the list are not touched, and
+    // that includes their terminators.
+    #[test]
+    fn a_crlf_file_keeps_its_line_endings() {
+        let existing = "# Project memory\r\n\r\n## Learned\r\n- old\r\n\r\n## Mine\r\nmy notes\r\n";
+        let text = appended(existing, &lines(&["- new"]), MEMORY_CAP);
+        assert_eq!(
+            text,
+            "# Project memory\r\n\r\n## Learned\r\n- old\r\n- new\r\n\r\n## Mine\r\nmy notes\r\n"
+        );
+        let text = appended("# Notes\r\nsomething\r\n", &lines(&["- new"]), MEMORY_CAP);
+        assert_eq!(text, "# Notes\r\nsomething\r\n\r\n## Learned\r\n- new\r\n");
     }
 
     #[test]
