@@ -300,8 +300,9 @@ Uma sessão nova num repositório não começa do zero:
 - **Só o harness escreve a memória.** `edit_file` recusa
   `.claudinio/MEMORY.md` seja qual for a grafia do caminho, `finalize_plan` não
   o aceita como arquivo de plano, e um comando de shell que o nomeia — com glob
-  ou aspas, inclusive — é recusado a menos que só o leia; nem o modo YOLO nem os
-  hooks liberam. A checagem do shell lê o texto do comando, então um comando que
+  ou aspas, pela pasta de trabalho da chamada ou pelo seu stdin, ou por um link
+  criado antes, inclusive — é recusado a menos que só o leia; nem o modo YOLO nem
+  os hooks liberam. A checagem do shell lê o texto da chamada, então um comando que
   monta o caminho enquanto roda (uma variável, um script) não é pego por ela:
   fora do YOLO você é consultado antes de ele rodar, no YOLO nada o impede.
   Você pode editar o arquivo à mão.

@@ -303,8 +303,9 @@ A new session in a repository does not start from nothing:
 - **Only the harness writes the memory.** `edit_file` refuses
   `.claudinio/MEMORY.md` however the path is spelled, `finalize_plan` will not
   take it as a plan file, and a shell command that names it — globs and quotes
-  included — is refused unless it only reads it; YOLO mode and hooks do not
-  open either. The shell check reads the command's text, so a command that
+  included, through the call's working folder or its stdin, or through a link
+  made earlier — is refused unless it only reads it; YOLO mode and hooks do not
+  open either. The shell check reads the call's text, so a command that
   builds the path while it runs (a variable, a script) is not caught by it:
   outside YOLO you are asked before such a command runs, in YOLO nothing stops
   it. You can edit the file yourself.

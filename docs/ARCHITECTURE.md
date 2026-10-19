@@ -525,15 +525,21 @@ every later session reads by asking the model to write one:
 workspace guard, links followed, compared without case), which covers
 `edit_file` and a subagent's apply; `finalize_plan` refuses it as a
 `plan_file` (its log would otherwise land in the memory) and never picks it as
-the newest plan; and `bash_permission` *denies* — rather than asks about — a
-command that names it and is not a plain read, so neither YOLO nor a hook's
-`allow` opens it. The shell check (`project_memory::named_in`) reads the
-command's text as the shell would before opening a file: case folded, quotes
-and backslashes dropped, a glob or brace word counted when it can match the
-folder or the file. It cannot see a path the command assembles at run time (a
-variable, an interpreter script building the name), so that boundary is the
-shell gate's approval, which YOLO waives; a file written by an MCP server is
-outside it too. Note the memory is no more trusted than `AGENTS.md`, which the
+the newest plan (`write_plan::latest_plan_path`, which every reader of "the
+plan" uses, filters it); and `permissions::bash_call_permission` *denies* —
+rather than asks about — a `bash` call that names it and is not a plain read,
+so neither YOLO nor a hook's `allow` opens it. The shell check
+(`project_memory::named_in`) reads the command's text as the shell would before
+opening a file: case folded, quotes and backslashes dropped, a glob or brace
+word counted when it can match the folder or the file. It reads the whole call
+(`shell_call_names_memory`): the `workdir` as a leading `cd <workdir> &&`, the
+`stdin` as a script, and, with the workspace known, the names resolved on disk
+like the path guard does, so a link an earlier call made (`ln -s .claudinio c`,
+then `>> c/MEMORY.md`) is seen. It cannot see a path the command assembles at
+run time (a variable, an interpreter script building the name), a link reached
+through a globbed folder name, or a hard link to the file (which only such a
+command can make), so that boundary is the shell gate's approval, which YOLO
+waives; a file written by an MCP server is outside it too. Note the memory is no more trusted than `AGENTS.md`, which the
 agent may edit and which is also read at a session's start — the guard keeps
 the harness's file the harness's, it is not a sandbox.
 
