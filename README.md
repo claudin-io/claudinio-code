@@ -300,10 +300,14 @@ A new session in a repository does not start from nothing:
   4,000 characters by dropping its oldest entries whole (they are still in
   their plans); nothing in it is ever summarized or reworded. The first message
   of each new session carries its entries.
-- **Only the harness writes the memory.** `edit_file` and shell commands that
-  would write `.claudinio/MEMORY.md` are refused — YOLO mode and hooks do not
-  open it — so a web page the agent read cannot talk it into planting a line.
-  You can edit the file yourself.
+- **Only the harness writes the memory.** `edit_file` refuses
+  `.claudinio/MEMORY.md` however the path is spelled, `finalize_plan` will not
+  take it as a plan file, and a shell command that names it — globs and quotes
+  included — is refused unless it only reads it; YOLO mode and hooks do not
+  open either. The shell check reads the command's text, so a command that
+  builds the path while it runs (a variable, a script) is not caught by it:
+  outside YOLO you are asked before such a command runs, in YOLO nothing stops
+  it. You can edit the file yourself.
 - **Neither ever goes into the system prompt**, which stays the same bytes from
   one request to the next so the provider can cache it, and neither is sent
   again later in the session or to a session that continues another (the plan

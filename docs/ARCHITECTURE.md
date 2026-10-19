@@ -518,15 +518,24 @@ records a created file as fully read. An `old_string` that occurs more than once
 is refused with the count unless the call sets `replace_all`, and the count is
 taken again on the file at approval; a `replace_all` proposal carries its count,
 and the approval card says "Replaces all N occurrences".
-The project memory (`.claudinio/MEMORY.md`) is written by `finalize_plan` alone,
-so a page the agent read cannot get a line into what every later session reads:
+The project memory (`.claudinio/MEMORY.md`) is written by `finalize_plan`'s
+`memory` lines alone, so a page the agent read does not get a line into what
+every later session reads by asking the model to write one:
 `validate_editable_path` refuses it at the path level (resolved like the
 workspace guard, links followed, compared without case), which covers
-`edit_file` and a subagent's apply, and `bash_permission` *denies* — rather
-than asks about — a command that names it and is not a plain read, so neither
-YOLO nor a hook's `allow` opens it. The shell check is a heuristic on the
-command's text (folder and file name anywhere in it); a file written by an MCP
-server is outside it.
+`edit_file` and a subagent's apply; `finalize_plan` refuses it as a
+`plan_file` (its log would otherwise land in the memory) and never picks it as
+the newest plan; and `bash_permission` *denies* — rather than asks about — a
+command that names it and is not a plain read, so neither YOLO nor a hook's
+`allow` opens it. The shell check (`project_memory::named_in`) reads the
+command's text as the shell would before opening a file: case folded, quotes
+and backslashes dropped, a glob or brace word counted when it can match the
+folder or the file. It cannot see a path the command assembles at run time (a
+variable, an interpreter script building the name), so that boundary is the
+shell gate's approval, which YOLO waives; a file written by an MCP server is
+outside it too. Note the memory is no more trusted than `AGENTS.md`, which the
+agent may edit and which is also read at a session's start — the guard keeps
+the harness's file the harness's, it is not a sandbox.
 
 **2. What the webview may touch.** The chat renders untrusted content, so treat
 the frontend as a place where attacker-influenced script could run. The
