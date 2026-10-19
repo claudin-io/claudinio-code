@@ -2105,7 +2105,11 @@ mod tests {
         let lib = json!({"path": "src/lib.rs"});
         // More than half the file: only knowing it was capped keeps the
         // fuller copy.
-        let capped = crate::agent::result_cap::cap("read_file", &body, 3_000);
+        let capped = crate::agent::result_cap::cap(
+            crate::agent::result_cap::Call::tool("read_file"),
+            &body,
+            3_000,
+        );
         assert!(capped.len() * 2 > body.len());
         let shrunk = old_reads(&[("r1", lib.clone(), &body), ("r2", lib.clone(), &capped)]);
         assert!(plan_lossless(&shrunk).is_empty());

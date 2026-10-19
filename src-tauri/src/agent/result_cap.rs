@@ -10,8 +10,10 @@
 //! 70/30, on line boundaries when a line ends close enough) around one marker
 //! line that says how much was left out of how much, and how to get it:
 //!
-//! - a `read_file` result: read the lines in between with
-//!   `start_line`/`end_line` (the file is the copy);
+//! - a `read_file` result: the file lines left out, in the file's numbering
+//!   (a ranged read's text starts at its `start_line`; `read_file`'s own size
+//!   warning is not counted), and the `start_line`/`end_line` that read them —
+//!   the file is the copy;
 //! - anything else: the whole output is written to a temp file first, as
 //!   `output_trim` does for `bash`, and the marker names it; an output that
 //!   already names its saved copy (`output_trim`'s first line) is not saved
@@ -49,24 +51,162 @@ pub struct Capped<'a> {
     pub hint: &'a str,
 }
 
+/// The call a result answers, as far as its cap cares: the tool, which decides
+/// what the marker offers for the rest, and the file line a `read_file`
+/// result's text starts on, so the marker can name the lines it left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Call<'a> {
+    pub tool: &'a str,
+    pub first_line: usize,
+}
+
+impl<'a> Call<'a> {
+    /// The call `tool` made with `input`. `read_file` honours a range only
+    /// when both ends are given (`tools::read_file::execute`); otherwise its
+    /// text starts on line 1.
+    pub fn of(tool: &'a str, input: &serde_json::Value) -> Self {
+        let line = |key: &str| {
+            let v = input.get(key)?;
+            v.as_u64()
+                .map(|n| n as usize)
+                .or_else(|| v.as_str()?.trim().parse().ok())
+        };
+        let first_line = match (line("start_line"), line("end_line")) {
+            (Some(start), Some(_)) if tool == "read_file" => start.max(1),
+            _ => 1,
+        };
+        Call { tool, first_line }
+    }
+
+    /// A call whose input does not matter to its cap.
+    pub fn tool(tool: &'a str) -> Self {
+        Call {
+            tool,
+            first_line: 1,
+        }
+    }
+}
+
 /// `text` held to `max_chars` of its own characters: unchanged when it fits,
-/// otherwise its head and tail around the marker. `tool` decides what the
+/// otherwise its head and tail around the marker. `call` decides what the
 /// marker offers for the rest (see the module docs).
-pub fn cap(tool: &str, text: &str, max_chars: usize) -> String {
+pub fn cap(call: Call<'_>, text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
         return text.to_string();
     }
-    let hint = hint_for(tool, text);
     let (head, tail) = cut(text, text, max_chars);
+    let hint = if call.tool == "read_file" {
+        ReadRange::of(text, head.len(), text.len() - tail.len(), call.first_line)
+            .map_or_else(|| READ_HINT.to_string(), |r| r.render())
+    } else {
+        saved_copy_hint(text)
+    };
     render(head, tail, text.len(), &hint)
 }
 
-/// The hint for a result of `tool` about to be cut: a line range for a file,
-/// otherwise the path of a saved copy.
-fn hint_for(tool: &str, text: &str) -> String {
-    if tool == "read_file" {
-        return READ_HINT.to_string();
+/// The lines a cut left out of a `read_file` result, in the file's numbering:
+/// `from..=to` of the `first..=last` the read returned. The marker says them
+/// as `lines 412-1880 of 1-2400; read_file with start_line=412,
+/// end_line=1880 to see them` — `read_file` returns bare text, so a count of
+/// characters alone does not tell the model where the head stops or the tail
+/// starts, least of all in a ranged read.
+///
+/// A line the cut split counts as left out (reading it again shows all of
+/// it). `first` and `last` are in the marker so a second cut ([`recut`]) can
+/// widen the range from what the first one kept, without the text in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadRange {
+    from: usize,
+    to: usize,
+    first: usize,
+    last: usize,
+}
+
+impl ReadRange {
+    /// What a cut keeping `text[..head_end]` and `text[tail_start..]` left out,
+    /// for a read whose text starts on file line `first`; `None` when the cut
+    /// took no whole or partial line (one line break).
+    fn of(text: &str, head_end: usize, tail_start: usize, first: usize) -> Option<Self> {
+        let header = crate::agent::tools::read_file::header_lines(text);
+        let line = |at: usize| file_line(&text[..at], first, header);
+        let skip_break = usize::from(text.as_bytes().get(head_end) == Some(&b'\n'));
+        let range = ReadRange {
+            from: line(head_end + skip_break),
+            to: line(tail_start.checked_sub(1)?),
+            first,
+            last: line(text.len().checked_sub(1)?),
+        };
+        (range.from <= range.to).then_some(range)
     }
+
+    /// The range after a second cut keeps `head[..head_len]` of the `head` and
+    /// the last `tail_len` bytes of the `tail` the first cut kept: each side
+    /// counts back from what it still knows, the head from `first`, the tail
+    /// from `last`.
+    fn recut(self, head: &str, tail: &str, head_len: usize, tail_len: usize) -> Option<Self> {
+        let from = if head_len >= head.len() {
+            self.from
+        } else {
+            let skip_break = usize::from(head.as_bytes()[head_len] == b'\n');
+            let header = crate::agent::tools::read_file::header_lines(head);
+            file_line(&head[..head_len + skip_break], self.first, header)
+        };
+        let dropped = tail.len() - tail_len.min(tail.len());
+        let to = if dropped == 0 {
+            self.to
+        } else {
+            let after = tail.len().saturating_sub(1).max(dropped - 1);
+            self.last
+                .saturating_sub(tail[dropped - 1..after].matches('\n').count())
+                .max(self.first)
+        };
+        let range = ReadRange { from, to, ..self };
+        (range.from <= range.to).then_some(range)
+    }
+
+    fn render(self) -> String {
+        let ReadRange {
+            from,
+            to,
+            first,
+            last,
+        } = self;
+        format!(
+            "lines {from}-{to} of {first}-{last}; read_file with start_line={from}, \
+             end_line={to} to see them"
+        )
+    }
+
+    /// The range a read marker's hint names, if it names one (a marker of
+    /// the first Phase 6 builds did not).
+    fn parse(hint: &str) -> Option<Self> {
+        let (span, _) = hint.strip_prefix("lines ")?.split_once(';')?;
+        let (cut, of) = span.split_once(" of ")?;
+        let pair = |s: &str| -> Option<(usize, usize)> {
+            let (a, b) = s.split_once('-')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        };
+        let ((from, to), (first, last)) = (pair(cut)?, pair(of)?);
+        Some(ReadRange {
+            from,
+            to,
+            first,
+            last,
+        })
+    }
+}
+
+/// The file line of the byte right after `before`, in a read whose text starts
+/// on file line `first` behind `header` lines of `read_file`'s own warning
+/// (a byte inside the warning counts as the read's first line).
+fn file_line(before: &str, first: usize, header: usize) -> usize {
+    (first + before.matches('\n').count())
+        .saturating_sub(header)
+        .max(first)
+}
+
+/// The hint for an output about to be cut: the path of a saved copy.
+fn saved_copy_hint(text: &str) -> String {
     if text
         .lines()
         .next()
@@ -203,14 +343,20 @@ pub fn body_len(text: &str) -> usize {
 /// `text` held to `room` characters of its own text, keeping what an earlier
 /// cap said: a capped result is cut from what it kept, with the size it
 /// really had and the same way to get the rest. `None` when it fits.
-fn recut(tool: &str, text: &str, room: usize) -> Option<String> {
+fn recut(call: Call<'_>, text: &str, room: usize) -> Option<String> {
     match parse(text) {
         Some(c) if c.head.len() + c.tail.len() > room => {
             let (head, tail) = cut(c.head, c.tail, room);
-            Some(render(head, tail, c.total, c.hint))
+            let hint = match ReadRange::parse(c.hint) {
+                Some(range) => range
+                    .recut(c.head, c.tail, head.len(), tail.len())
+                    .map_or_else(|| READ_HINT.to_string(), |r| r.render()),
+                None => c.hint.to_string(),
+            };
+            Some(render(head, tail, c.total, &hint))
         }
         Some(_) => None,
-        None if text.len() > room => Some(cap(tool, text, room)),
+        None if text.len() > room => Some(cap(call, text, room)),
         None => None,
     }
 }
@@ -220,11 +366,11 @@ fn recut(tool: &str, text: &str, room: usize) -> Option<String> {
 /// search cannot take the context — a cap that follows the model's window.
 pub fn tool_result_block(
     tool_use_id: &str,
-    tool: &str,
+    call: Call<'_>,
     content: &str,
     max_chars: usize,
 ) -> ContentBlock {
-    ContentBlock::tool_result(tool_use_id, cap(tool, content, max_chars))
+    ContentBlock::tool_result(tool_use_id, cap(call, content, max_chars))
 }
 
 /// The least a result is cut to: below this it says nothing but its own note.
@@ -246,14 +392,16 @@ pub fn fit_round(blocks: &mut [ContentBlock], calls: &[ContentBlock], round_char
     if round_chars == usize::MAX {
         return;
     }
-    let tools: std::collections::HashMap<&str, &str> = calls
+    let tools: std::collections::HashMap<&str, Call<'_>> = calls
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => Some((id.as_str(), Call::of(name, input))),
             _ => None,
         })
         .collect();
-    let is_answer = |id: &str| tools.get(id) == Some(&"ask_user");
+    let is_answer = |id: &str| tools.get(id).is_some_and(|c| c.tool == "ask_user");
     let mut kept_whole = 0usize;
     let mut bodies: Vec<usize> = Vec::new();
     for b in blocks.iter() {
@@ -294,8 +442,11 @@ pub fn fit_round(blocks: &mut [ContentBlock], calls: &[ContentBlock], round_char
         } = b
             && !is_answer(tool_use_id)
         {
-            let tool = tools.get(tool_use_id.as_str()).copied().unwrap_or("");
-            if let Some(cut) = recut(tool, text, level) {
+            let call = tools
+                .get(tool_use_id.as_str())
+                .copied()
+                .unwrap_or(Call::tool(""));
+            if let Some(cut) = recut(call, text, level) {
                 *text = cut;
             }
         }
@@ -313,7 +464,7 @@ mod tests {
     #[test]
     fn a_capped_output_keeps_its_head_and_its_tail_and_saves_the_whole() {
         let text = numbered(5_000);
-        let out = cap("bash", &text, 10_000);
+        let out = cap(Call::tool("bash"), &text, 10_000);
         let c = parse(&out).expect("a capped result parses");
         assert_eq!(c.total, text.len());
         // About 70/30, on line boundaries: the opening and the verdict.
@@ -349,24 +500,156 @@ mod tests {
     #[test]
     fn a_capped_read_points_at_a_line_range_instead_of_a_copy() {
         let text = numbered(5_000);
-        let out = cap("read_file", &text, 10_000);
+        let out = cap(Call::tool("read_file"), &text, 10_000);
         let c = parse(&out).expect("a capped result parses");
-        assert!(c.hint.contains("start_line/end_line"), "{}", c.hint);
+        assert!(c.hint.contains("read_file with start_line="), "{}", c.hint);
         assert!(!c.hint.contains("full output is in"), "{}", c.hint);
         assert!(c.tail.ends_with("line 5000\n"));
+    }
+
+    /// The `start_line`/`end_line` a read marker offers, as numbers.
+    fn offered_range(hint: &str) -> (usize, usize) {
+        let num = |key: &str| -> usize {
+            let rest = hint
+                .split(key)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{key} in {hint}"));
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits
+                .parse()
+                .unwrap_or_else(|_| panic!("a number after {key} in {hint}"))
+        };
+        (num("start_line="), num("end_line="))
+    }
+
+    /// The number in a `line N` line.
+    fn line_no(line: &str) -> usize {
+        line.trim()
+            .strip_prefix("line ")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("a numbered line: {line:?}"))
+    }
+
+    /// The offered range must be exactly the lines the cut left out: the
+    /// head's last line is the one before it, the tail's first the one after.
+    fn assert_range_is_what_was_cut(c: &Capped<'_>) {
+        let (from, to) = offered_range(c.hint);
+        assert_eq!(
+            line_no(c.head.lines().last().unwrap()),
+            from - 1,
+            "{}",
+            c.hint
+        );
+        assert_eq!(
+            line_no(c.tail.lines().next().unwrap()),
+            to + 1,
+            "{}",
+            c.hint
+        );
+    }
+
+    #[test]
+    fn a_read_takes_its_first_line_from_a_range_only_when_both_ends_are_given() {
+        let call = |input| Call::of("read_file", &input);
+        use serde_json::json;
+        assert_eq!(
+            call(json!({"path": "a", "start_line": 300, "end_line": 900})).first_line,
+            300
+        );
+        assert_eq!(
+            call(json!({"path": "a", "start_line": "40", "end_line": "90"})).first_line,
+            40
+        );
+        // read_file reads the whole file unless both ends are given.
+        assert_eq!(call(json!({"path": "a", "start_line": 300})).first_line, 1);
+        assert_eq!(call(json!({"path": "a"})).first_line, 1);
+        let grep = Call::of("grep", &json!({"start_line": 5, "end_line": 9}));
+        assert_eq!(grep.first_line, 1);
+    }
+
+    #[test]
+    fn a_capped_read_names_the_lines_it_left_out() {
+        let text = numbered(5_000);
+        let out = cap(Call::tool("read_file"), &text, 10_000);
+        let c = parse(&out).expect("a capped result parses");
+        assert_range_is_what_was_cut(&c);
+        assert!(c.hint.contains("of 1-5000"), "{}", c.hint);
+    }
+
+    // A ranged read's text starts at its start_line; the lines the marker
+    // names are the file's, not the result's.
+    #[test]
+    fn a_capped_ranged_read_names_the_file_lines_it_left_out() {
+        let text = (300..=5_299)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input = serde_json::json!({"path": "a", "start_line": 300, "end_line": 5_299});
+        let out = cap(Call::of("read_file", &input), &text, 10_000);
+        let c = parse(&out).expect("a capped result parses");
+        assert!(c.head.starts_with("line 300\n"));
+        assert_range_is_what_was_cut(&c);
+        assert!(c.hint.contains("of 300-5299"), "{}", c.hint);
+    }
+
+    // A read read_file itself shortened opens with its size warning: the
+    // file's line 1 is the first line after it.
+    #[test]
+    fn a_capped_read_behind_the_size_warning_counts_lines_from_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        std::fs::write(&path, numbered(30_000)).unwrap();
+        let input = serde_json::json!({"path": path.to_str().unwrap()});
+        let text =
+            crate::agent::tools::read_file::execute(serde_json::from_value(input.clone()).unwrap())
+                .unwrap();
+        assert!(text.contains("FILE SIZE WARNING"), "the read is shortened");
+        let out = cap(Call::of("read_file", &input), &text, 10_000);
+        let c = parse(&out).expect("a capped result parses");
+        assert_range_is_what_was_cut(&c);
+        assert!(c.hint.contains("of 1-"), "{}", c.hint);
+    }
+
+    // fit_round cuts a capped read again from what it kept: the range grows
+    // to what the second cut left out, still in the file's lines.
+    #[test]
+    fn a_read_cut_twice_names_the_lines_both_cuts_left_out() {
+        let read = (300..=5_299)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input = serde_json::json!({"path": "a", "start_line": 300, "end_line": 5_299});
+        let calls = vec![
+            ContentBlock::tool_use("r0", "read_file", input.clone()),
+            ContentBlock::tool_use("r1", "read_file", input.clone()),
+        ];
+        let call = Call::of("read_file", &input);
+        let mut round = vec![
+            tool_result_block("r0", call, &read, 15_000),
+            tool_result_block("r1", call, &read, 15_000),
+        ];
+        fit_round(&mut round, &calls, 12_000);
+        for b in &round {
+            let t = text(b);
+            let c = parse(&t).expect("still a marker");
+            assert!(c.head.len() + c.tail.len() <= 6_000);
+            assert_eq!(c.total, read.len());
+            assert_range_is_what_was_cut(&c);
+            assert!(c.hint.contains("of 300-5299"), "{}", c.hint);
+        }
     }
 
     #[test]
     fn a_result_within_the_cap_is_untouched() {
         let text = numbered(10);
-        assert_eq!(cap("bash", &text, text.len()), text);
+        assert_eq!(cap(Call::tool("bash"), &text, text.len()), text);
         assert_eq!(parse(&text), None);
     }
 
     #[test]
     fn a_long_single_line_is_cut_on_characters_without_splitting_one() {
         let text = "é".repeat(20_000);
-        let out = cap("grep", &text, 9_999);
+        let out = cap(Call::tool("grep"), &text, 9_999);
         let c = parse(&out).expect("parses");
         assert_eq!(c.total, text.len());
         assert!(c.head.len() + c.tail.len() <= 9_999);
@@ -383,7 +666,7 @@ mod tests {
     fn a_lookalike_marker_in_the_kept_text_is_not_taken_for_the_cap() {
         let mut text = numbered(3_000);
         text.push_str("\n[… 5 of 10 chars omitted …]\nthe end\n");
-        let out = cap("read_file", &text, 8_000);
+        let out = cap(Call::tool("read_file"), &text, 8_000);
         let c = parse(&out).expect("parses");
         assert_eq!(c.total, text.len());
         assert!(c.tail.contains("[… 5 of 10 chars omitted …]"));
@@ -428,7 +711,7 @@ mod tests {
              omitted lines.]\n{}",
             numbered(3_000)
         );
-        let out = cap("bash", &text, 8_000);
+        let out = cap(Call::tool("bash"), &text, 8_000);
         let c = parse(&out).expect("parses");
         assert!(c.head.contains("/tmp/x.log"));
         assert!(!c.hint.contains("full output is in"), "{}", c.hint);
@@ -494,8 +777,9 @@ mod tests {
     // large the first cut left it.
     #[test]
     fn a_result_cut_twice_still_reports_the_size_it_really_had() {
-        let capped =
-            |id: &str, total: usize| tool_result_block(id, "read_file", &"x".repeat(total), 15_000);
+        let capped = |id: &str, total: usize| {
+            tool_result_block(id, Call::tool("read_file"), &"x".repeat(total), 15_000)
+        };
 
         let mut two = vec![capped("t0", 60_000), capped("t1", 48_213)];
         let before: Vec<String> = two.iter().map(text).collect();
@@ -514,9 +798,12 @@ mod tests {
             let c = parse(&t).expect("still a marker");
             assert_eq!(c.head.len() + c.tail.len(), 7_500, "{total}");
             assert_eq!(c.total, total);
+            // One long line: what is left out is all on line 1.
             assert!(
-                c.hint.contains("start_line/end_line"),
-                "the way to the rest is kept"
+                c.hint
+                    .contains("lines 1-1 of 1-1; read_file with start_line=1, end_line=1"),
+                "the way to the rest is kept: {}",
+                c.hint
             );
         }
     }

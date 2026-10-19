@@ -197,8 +197,10 @@ what an earlier compaction carried.
 A tool result over its cap (`budget::RunLimits::tool_result_chars`) keeps its
 head and its tail, about 70/30 and on line boundaries when one is close,
 around one marker line: `[… N of T chars omitted; <how to get them> …]`
-(`agent/result_cap.rs`). For `read_file` it says to read the lines in between
-with `start_line`/`end_line`; for anything else the whole output is first
+(`agent/result_cap.rs`). For `read_file` it names the file lines it left out
+and the read that gets them (`lines 412-1880 of 1-2400; read_file with
+start_line=412, end_line=1880`), counted from a ranged read's `start_line` and
+past `read_file`'s own size warning; for anything else the whole output is first
 written to a temp file, as `output_trim` does for `bash`, and the marker names
 it. `fit_round`, which holds one round's results to a share together, re-cuts
 a capped result from what it kept and keeps its true size and hint; `prune`

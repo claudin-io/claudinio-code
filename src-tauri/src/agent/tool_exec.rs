@@ -8,7 +8,7 @@ use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::provider::{AgentConfig, ContentBlock};
-use crate::agent::result_cap::tool_result_block;
+use crate::agent::result_cap::{Call, tool_result_block};
 use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, UserAnswer};
 use crate::agent::subagent;
 use crate::agent::tools::{self, ToolContext, ToolOutput};
@@ -176,6 +176,7 @@ pub(super) async fn execute_reported(
     session_id: &str,
     ctx: &ToolContext,
 ) -> ContentBlock {
+    let call = Call::of(tool_name, &tool_input);
     match tools::execute(tool_name, tool_input, ctx).await {
         Ok(ToolOutput::Text { content }) => {
             let truncated = truncate(&content, 2000);
@@ -186,12 +187,7 @@ pub(super) async fn execute_reported(
                 error: None,
             });
             crate::agent::doc_session::after_tool(tool_name, ctx, event_tx, session_id);
-            tool_result_block(
-                tool_use_id,
-                tool_name,
-                &content,
-                ctx.limits.tool_result_chars(),
-            )
+            tool_result_block(tool_use_id, call, &content, ctx.limits.tool_result_chars())
         }
         Ok(ToolOutput::Rich { content, images }) => rich_result_block(
             tool_use_id,
@@ -425,7 +421,7 @@ pub(crate) async fn run_tool(
                             });
                             tool_result_block(
                                 tool_use_id,
-                                tool_name,
+                                Call::of(tool_name, &tool_input),
                                 &content,
                                 ctx.limits.tool_result_chars(),
                             )
@@ -479,7 +475,7 @@ pub(crate) async fn run_tool(
                                     });
                                     tool_result_block(
                                         tool_use_id,
-                                        tool_name,
+                                        Call::of(tool_name, &tool_input),
                                         &content,
                                         ctx.limits.tool_result_chars(),
                                     )
@@ -654,7 +650,7 @@ pub(crate) async fn run_tool(
                         });
                         tool_result_block(
                             tool_use_id,
-                            tool_name,
+                            Call::of(tool_name, &tool_input),
                             &content,
                             ctx.limits.tool_result_chars(),
                         )
@@ -711,7 +707,7 @@ pub(crate) async fn run_tool(
                     });
                     tool_result_block(
                         tool_use_id,
-                        tool_name,
+                        Call::of(tool_name, &tool_input),
                         &content,
                         ctx.limits.tool_result_chars(),
                     )
@@ -1296,6 +1292,7 @@ async fn run_and_report(
     ctx: &ToolContext,
     event_tx: &Channel<AgentEvent>,
 ) -> ContentBlock {
+    let call = Call::of(tool_name, &tool_input);
     match tools::execute(tool_name, tool_input, ctx).await {
         Ok(ToolOutput::Text { content }) => {
             let _ = event_tx.send(AgentEvent::ToolResult {
@@ -1304,12 +1301,7 @@ async fn run_and_report(
                 output: truncate(&content, 2000),
                 error: None,
             });
-            tool_result_block(
-                tool_use_id,
-                tool_name,
-                &content,
-                ctx.limits.tool_result_chars(),
-            )
+            tool_result_block(tool_use_id, call, &content, ctx.limits.tool_result_chars())
         }
         Ok(ToolOutput::Rich { content, images }) => rich_result_block(
             tool_use_id,
@@ -1362,14 +1354,14 @@ fn rich_result_block(
         error: None,
     });
     if images.is_empty() {
-        return tool_result_block(tool_use_id, tool_name, content, max_chars);
+        return tool_result_block(tool_use_id, Call::tool(tool_name), content, max_chars);
     }
     let _ = event_tx.send(AgentEvent::ToolResultImages {
         tool_id: tool_use_id.to_string(),
         images: images.clone(),
     });
 
-    let text = crate::agent::result_cap::cap(tool_name, content, max_chars);
+    let text = crate::agent::result_cap::cap(Call::tool(tool_name), content, max_chars);
     let mut blocks = Vec::with_capacity(images.len() + 1);
     // Anthropic rejects empty text blocks, and a tool that returns only an
     // image (a bare screenshot) is a normal case, not an error.

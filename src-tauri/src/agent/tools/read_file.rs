@@ -73,6 +73,22 @@ fn truncation_warning(
     )
 }
 
+/// The lines [`truncation_warning`] put before the file's own, blank line
+/// included, or 0 when `text` does not open with it: the cap names the lines
+/// it leaves out of a read in the file's numbering (`agent::result_cap`), and
+/// the file's line 1 is the first line after the warning.
+pub(crate) fn header_lines(text: &str) -> usize {
+    let Some(end) = text.find("\n\n") else {
+        return 0;
+    };
+    let header = &text[..end + 2];
+    if header.starts_with('⚠') && header.contains("FILE SIZE WARNING") {
+        header.matches('\n').count()
+    } else {
+        0
+    }
+}
+
 pub fn execute(args: ReadFileArgs) -> Result<String, String> {
     let p = std::path::Path::new(&args.path);
     let meta = p.metadata().map_err(|e| match e.kind() {
