@@ -108,8 +108,15 @@ pub async fn compact_history(
 
     // If the summary agent somehow found an existing Compacted record and
     // returned it, still write ours — the format is append-only and the
-    // history_from_records logic picks the LAST one.
-    let summary = format!("{hook_note}{summary}");
+    // history_from_records logic picks the LAST one. The note, with the
+    // hook's text, is also appended to `.claudinio/notes/<session>.md`
+    // (`agent::notes`), and the compacted context names that file.
+    let summary = crate::agent::notes::record(
+        ctx.workspace_root.as_deref(),
+        session_id,
+        &format!("{hook_note}{summary}"),
+        now_ms(),
+    );
     store.append(&SessionRecord::Compacted {
         summary: summary.clone(),
         tail_turns,
@@ -1067,6 +1074,64 @@ mod cache_break_tests {
         .expect("the compaction");
         assert_eq!(breaks(&store.path), ["compaction"]);
         std::fs::remove_dir_all(store.path.parent().unwrap()).ok();
+    }
+
+    /// Lean-harness Phase 6: the compaction note also lands in
+    /// `.claudinio/notes/<session>.md`, where the user and a later successor
+    /// can read it, and the compacted context says where.
+    #[tokio::test]
+    async fn a_compaction_appends_its_note_to_the_sessions_notes_file() {
+        let store = temp_store("compact-note");
+        let root = store.path.parent().unwrap().to_path_buf();
+        store
+            .append(&SessionRecord::User {
+                text: "Refactor the parser.".into(),
+                ts: now_ms(),
+            })
+            .unwrap();
+        let note = "## Goal\nRefactor the parser.\n## What failed\nerror[E0308]: mismatched types";
+        let (base, _, _) = spawn_recording(vec![Reply::Text(note)]).await;
+        let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let summary = compact_history(
+            &config,
+            &store,
+            &ctx,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "compact-note",
+            &Arc::new(SteeringCtl::new()),
+            crate::agent::hooks::CompactTrigger::Manual,
+            10_000,
+        )
+        .await
+        .expect("the compaction");
+        let file = root.join(".claudinio/notes/compact-note.md");
+        let text = std::fs::read_to_string(&file).expect("the notes file");
+        assert!(text.starts_with("## Compaction — "), "{text}");
+        assert!(text.contains(note), "{text}");
+        assert!(summary.starts_with(note), "{summary}");
+        assert!(
+            summary.contains(".claudinio/notes/compact-note.md"),
+            "{summary}"
+        );
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        let history = crate::agent::persist::history_from_records(&records);
+        let first = history[0].content[0]
+            .get_text()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            first.contains(".claudinio/notes/compact-note.md"),
+            "{first}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A compaction records the session document's outline as the file

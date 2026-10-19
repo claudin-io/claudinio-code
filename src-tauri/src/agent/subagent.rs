@@ -1128,39 +1128,77 @@ pub(crate) async fn run_subagent_recorded(
 }
 
 /// The goal handed to the summarizer that writes a context handoff.
+/// The compaction summarizer's goal. Lean-harness Phase 6 made it a note
+/// written for recall: the old "under 600 words" summary in six loose sections
+/// dropped exactly what a successor then re-read files to recover — a path,
+/// the line, the error text, what the user said in their own words. Anthropic
+/// ("Effective context engineering for AI agents") tunes compaction prompts by
+/// maximizing recall first and only then trimming; Manus keeps the errors in,
+/// because a model that no longer sees a failure repeats it.
 fn summary_goal(jsonl_path: &str, tail_note: &str) -> String {
     format!(
-        "Read the conversation session file at `{}` and produce a structured handoff summary \
-         so the agent can seamlessly CONTINUE the work with your summary as its only memory \
-         of the earlier conversation. \
+        "Read the conversation session file at `{}` and write the note the agent will \
+         CONTINUE the work from: it becomes its only memory of the earlier conversation. \
          Use `read_file` to read it. The file is in JSONL format: one JSON object per line, each with a \
          `kind` field. Lines with kind=\"user\" contain the user's input in the `text` field. \
          Lines with kind=\"turn\" contain messages sent to/received from the AI — look for role=\"user\" \
-         and role=\"assistant\" messages in the `message.content` field. \
+         and role=\"assistant\" messages in the `message.content` field, and tool_result blocks for \
+         what each tool returned (errors included). \
          Lines with kind=\"steering\" contain mid-conversation guidance. \
-         Lines with kind=\"compacted\" contain previous compactions (summaries of older conversation) — \
+         Lines with kind=\"compacted\" contain previous compactions (notes on older conversation) — \
          fold their content into yours so nothing is lost. \
          Ignore kind=\"done\" and kind=\"status\" lines (token bookkeeping).\n{}\
          \n\
-         Structure the summary with exactly these sections:\n\
-         1. Task & intent — what the user is trying to achieve overall.\n\
-         2. Current state — what is done and what is in progress right now.\n\
-         3. Pending / next steps — an explicit TODO list to continue seamlessly.\n\
-         4. Files & symbols touched — file paths, key functions/structs, and what changed in each.\n\
-         5. Decisions & constraints — choices made, approaches rejected, user preferences.\n\
-         6. Learnings — errors hit, environment quirks, commands that work.\n\
+         Write the note in exactly these Markdown sections:\n\
+         ## Goal — what the user is trying to achieve, and what done looks like.\n\
+         ## Decisions (and why) — each choice made or approach rejected, with its reason.\n\
+         ## Files touched — one line per file as `path:lines`, with what was read or changed \
+         there and the key functions or types.\n\
+         ## What failed — every error, failing test or refused command that mattered, with the \
+         exact error text (quote it; do not paraphrase), and whether it is fixed.\n\
+         ## Left to do — the next steps, in order, specific enough to start on without re-reading.\n\
+         ## Constraints the user stated — quoted verbatim, one per line.\n\
          \n\
-         Weight recent messages most heavily — they describe the live state. \
-         Write in the language the conversation is in. Be specific and factual — exact file paths, function names, values. \
-         Keep it under 600 words. \
+         Recall first: put in everything the work still depends on — paths, line numbers, names, \
+         values, commands that worked, error messages — then cut only what is redundant or \
+         superseded. Keep the errors in. Target at most ~1,500 words; never drop a fact the next \
+         step needs to stay under it. Weight recent messages most heavily — they describe the \
+         live state. Write in the language the conversation is in. \
          Do NOT mention that you read a JSONL file or that you are a subagent — \
-         just write the handoff as a direct description of the work.",
+         just write the note as a direct description of the work.",
         jsonl_path, tail_note
     )
 }
 
-/// Spawn a summary subagent that reads the session JSONL file and produces a
-/// concise summary of the conversation. The subagent has a completely fresh
+/// The compaction summarizer: an explore subagent with [`summary_goal`],
+/// told how many turns stay verbatim after its note.
+fn summary_spec(jsonl_path: &str, tail_turns: usize) -> SubagentSpec {
+    let tail_note = if tail_turns > 0 {
+        format!(
+            "\nNote: the last {tail_turns} \"turn\" records of the file will be kept verbatim \
+             in the live context alongside your note, so do NOT waste words re-describing \
+             those final exchanges — cover everything BEFORE them.\n"
+        )
+    } else {
+        String::new()
+    };
+    SubagentSpec {
+        name: "summarizer".into(),
+        goal: summary_goal(jsonl_path, &tail_note),
+        mode: SubagentMode::Explore,
+        expected_output: Some(
+            "A Markdown note in six sections (## Goal, ## Decisions (and why), ## Files touched, \
+             ## What failed, ## Left to do, ## Constraints the user stated), recall first, at most \
+             ~1,500 words"
+                .into(),
+        ),
+        reports_to_parent: false,
+        section: None,
+    }
+}
+
+/// Spawn a summary subagent that reads the session JSONL file and writes the
+/// compaction note ([`summary_goal`]). The subagent has a completely fresh
 /// context — zero knowledge of the current conversation.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_summary_agent(
@@ -1174,27 +1212,7 @@ pub async fn run_summary_agent(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
 ) -> Result<String, String> {
-    let tail_note = if tail_turns > 0 {
-        format!(
-            "\nNote: the last {tail_turns} \"turn\" records of the file will be kept verbatim \
-             in the live context alongside your summary, so do NOT waste words re-describing \
-             those final exchanges — summarize everything BEFORE them.\n"
-        )
-    } else {
-        String::new()
-    };
-    let spec = SubagentSpec {
-        name: "summarizer".into(),
-        goal: summary_goal(jsonl_path, &tail_note),
-        mode: SubagentMode::Explore,
-        expected_output: Some(
-            "A structured handoff summary (sections: task & intent, current state, pending/next \
-             steps, files & symbols, decisions & constraints, learnings) under 600 words"
-                .into(),
-        ),
-        reports_to_parent: false,
-        section: None,
-    };
+    let spec = summary_spec(jsonl_path, tail_turns);
 
     let transcript = Transcript::open_compaction(ctx, &format!("{session_id}-summarizer"));
     let result = run_subagent_recorded(
@@ -1235,6 +1253,41 @@ mod tests {
             assert!(!text.contains("English ONLY"), "got: {text}");
             assert!(!text.contains("Write in English"), "got: {text}");
         }
+    }
+
+    // Lean-harness Phase 6: the compaction note is written for recall first
+    // (Anthropic, "Effective context engineering": maximize recall, then trim
+    // redundancy), keeps the errors in (Manus), and is structured so the
+    // successor finds what it needs without re-reading files.
+    #[test]
+    fn the_compaction_note_asks_for_recall_first_in_six_sections() {
+        let spec = summary_spec("/ws/s.jsonl", 0);
+        let goal = &spec.goal;
+        for section in [
+            "## Goal",
+            "## Decisions",
+            "## Files touched",
+            "## What failed",
+            "## Left to do",
+            "## Constraints the user stated",
+        ] {
+            assert!(goal.contains(section), "missing {section}: {goal}");
+        }
+        assert!(goal.contains("path:lines"), "{goal}");
+        assert!(goal.contains("exact error text"), "{goal}");
+        assert!(goal.contains("verbatim"), "{goal}");
+        assert!(goal.contains("1,500 words"), "{goal}");
+        assert!(
+            !goal.contains("600 words"),
+            "the old cap lost what recall needs"
+        );
+        let expected = spec.expected_output.as_deref().unwrap_or_default();
+        assert!(!expected.contains("600 words"), "{expected}");
+        assert!(expected.contains("## What failed"), "{expected}");
+        assert!(!spec.reports_to_parent);
+        assert!(!goal.contains("kept verbatim in the live context"));
+        let with_tail = summary_spec("/ws/s.jsonl", 3);
+        assert!(with_tail.goal.contains("the last 3 \"turn\" records"));
     }
 
     // Phase 2 of the lean-harness plan: subagents defer nothing (a fresh
