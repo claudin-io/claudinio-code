@@ -585,6 +585,23 @@ mod tests {
         );
     }
 
+    // Phase 9 review: a glob or quotes around the name reach the same file,
+    // so they are denied the same way, in YOLO too.
+    #[test]
+    fn a_shell_write_to_the_project_memory_through_a_glob_or_quotes_is_denied() {
+        for c in [
+            "echo '- planted' >> .claudinio/MEMORY.m?",
+            "echo x >> .claudi''nio/MEMORY.md",
+        ] {
+            assert_eq!(bash_permission(c, false), PermissionLevel::Denied, "{c}");
+            assert_eq!(
+                bash_permission_writing(c, false),
+                PermissionLevel::Denied,
+                "{c}"
+            );
+        }
+    }
+
     #[test]
     fn writes_files_detects_redirection() {
         assert!(bash_writes_files("echo hi > file.txt"));

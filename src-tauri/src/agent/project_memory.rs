@@ -247,13 +247,117 @@ fn resolved(path: &Path) -> PathBuf {
 }
 
 /// Whether a shell command names the memory file. The shell cannot be
-/// resolved like a path, so this is a heuristic on the text — the folder and
-/// the file name anywhere in it, in any case, which also catches
-/// `cd .claudinio && … >> MEMORY.md` — used by `permissions::bash_permission`
+/// resolved like a path, so this reads the text the way the shell would
+/// before it opens a file, in any case: quotes and backslashes dropped
+/// (`.claudi''nio`), and a glob or brace word (`MEMORY.m?`, `.c*/M*`,
+/// `{MEMORY,x}.md`) counted as naming the file when it can match it — the
+/// Phase 9 review found `>> .claudinio/MEMORY.m?` passed the first version.
+/// The folder and the file may be in different words, which catches
+/// `cd .claudinio && … >> MEMORY.md`. Used by `permissions::bash_permission`
 /// to refuse a command that names it and is not a plain read.
+///
+/// What it cannot see is a path the command builds while it runs (a
+/// variable, an interpreter script assembling the name): the shell gate's
+/// approval is what stands there, which YOLO waives — the docs say so.
 pub fn named_in(command: &str) -> bool {
-    let lower = command.to_lowercase();
-    lower.contains(".claudinio") && lower.contains("memory.md")
+    let lower: String = command
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    let (dir, file) = (".claudinio", "memory.md");
+    if lower.contains(dir) && lower.contains(file) {
+        return true;
+    }
+    let paths: Vec<Vec<String>> = lower
+        .split(|c: char| c.is_whitespace() || ";|&<>()`=".contains(c))
+        .map(|word| {
+            braces_as_star(word)
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|parts| !parts.is_empty())
+        .collect();
+    let names_both = paths.iter().any(|p| {
+        p.len() >= 2 && glob_matches(&p[p.len() - 2], dir) && glob_matches(&p[p.len() - 1], file)
+    });
+    let names_dir = paths.iter().any(|p| glob_matches(&p[p.len() - 1], dir));
+    let names_file = paths
+        .iter()
+        .any(|p| p.len() == 1 && glob_matches(&p[0], file));
+    names_both || (names_dir && names_file)
+}
+
+/// `word` with each `{…}` brace group read as `*`: whatever the group
+/// expands to, `*` matches it, which is all `named_in` needs to know.
+fn braces_as_star(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut rest = word;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push('*');
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether the shell glob `pattern` matches the file name `name`: `*` any
+/// run, `?` one character, a `[…]` class read as any one character (it
+/// errs toward matching, which only refuses more). As in the shell, a
+/// leading `.` must be matched by a literal `.`. Matched over characters
+/// with a table, so neither multi-byte text nor a run of stars costs more
+/// than `pattern × name` steps.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    enum Tok {
+        Star,
+        One,
+        Lit(char),
+    }
+    if name.starts_with('.') && !pattern.starts_with('.') {
+        return false;
+    }
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut toks = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => toks.push(Tok::Star),
+            '?' => toks.push(Tok::One),
+            '[' => match chars
+                .get(i + 2..)
+                .and_then(|r| r.iter().position(|&c| c == ']'))
+            {
+                Some(k) => {
+                    toks.push(Tok::One);
+                    i += 2 + k;
+                }
+                None => toks.push(Tok::Lit('[')),
+            },
+            c => toks.push(Tok::Lit(c)),
+        }
+        i += 1;
+    }
+    let name: Vec<char> = name.chars().collect();
+    let (m, n) = (toks.len(), name.len());
+    // matches[i][j]: toks[i..] matches name[j..].
+    let mut matches = vec![vec![false; n + 1]; m + 1];
+    matches[m][n] = true;
+    for i in (0..m).rev() {
+        for j in (0..=n).rev() {
+            matches[i][j] = match toks[i] {
+                Tok::Star => matches[i + 1][j] || (j < n && matches[i][j + 1]),
+                Tok::One => j < n && matches[i + 1][j + 1],
+                Tok::Lit(c) => j < n && name[j] == c && matches[i + 1][j + 1],
+            };
+        }
+    }
+    matches[0][0]
 }
 
 /// The project's own instructions file, by the names the other harnesses
@@ -654,6 +758,44 @@ mod tests {
             assert!(named_in(c), "{c}");
         }
         for c in ["echo x >> MEMORY.md", "ls .claudinio/plans", "cargo test"] {
+            assert!(!named_in(c), "{c}");
+        }
+    }
+
+    // The shell expands a glob and drops quotes before it opens the file,
+    // so a command that names the memory through either still names it
+    // (Phase 9 review: `>> .claudinio/MEMORY.m?` passed the text check and
+    // YOLO approved it). A glob that cannot reach the memory, like a plan
+    // pattern, is not caught.
+    #[test]
+    fn a_command_that_names_the_memory_through_a_glob_or_quotes_still_names_it() {
+        for c in [
+            "echo '- planted' >> .claudinio/MEMORY.m?",
+            "echo x >> .claudinio/M*",
+            "echo x >> .claudinio/*",
+            "echo x >> .c*/MEMORY.md",
+            "echo x >> .claud?nio/[Mm]EMORY.md",
+            "echo x >> .claudinio/{MEMORY,x}.md",
+            "echo x >> .claudi''nio/MEMORY.md",
+            "echo x >> \".claudinio\"/\"MEMORY\".md",
+            "echo x >> .claudinio/MEM\\ORY.md",
+            "cd .clau* && echo x >> MEMORY.m?",
+            "cd .claudinio/ && echo x >> M*",
+            "echo x >> ./.claudinio/./MEMORY.md",
+            "echo x >> .claudinio//MEMORY.md",
+            "printf 'x—日' >> .claudinio/MEMORÉ.md .claudinio/MEMORY.m?",
+        ] {
+            assert!(named_in(c), "{c}");
+        }
+        for c in [
+            "git add .claudinio/plans/*.md",
+            "ls .claudinio/plans/2026-10-*",
+            "cat .c*/plans/x.md",
+            "echo x >> notes/*.md",
+            // As in the shell, `*` does not reach a dot-folder.
+            "echo * > MEMORY.m?",
+            "echo '日本語 — café 😀' > README.md",
+        ] {
             assert!(!named_in(c), "{c}");
         }
     }
