@@ -621,8 +621,8 @@ fn drain_note(state: &mut DocState) -> Option<String> {
         .map(|c| format!("{} ({}) {}", c.id, c.topic, c.kind.as_str()))
         .collect();
     Some(format!(
-        "<doc-changed>\nThe user changed the document: {}. Their edits win: doc_read an edited \
-         section before writing it.\n</doc-changed>",
+        "{DOC_CHANGED_OPEN}\nThe user changed the document: {}. Their edits win: doc_read an \
+         edited section before writing it.\n</doc-changed>",
         parts.join("; ")
     ))
 }
@@ -636,8 +636,15 @@ pub fn take_change_note(ctx: &crate::agent::tools::ToolContext) -> Option<String
         .flatten()
 }
 
+/// How a `<doc-changed>` note opens (`task_recital` looks past one when it
+/// matches a run turn's recital).
+pub const DOC_CHANGED_OPEN: &str = "<doc-changed>";
+/// How the `<document>` outline block opens (`task_recital` tells a recited
+/// outline by it).
+pub const DOCUMENT_OPEN: &str = "<document path=";
+
 fn document_block(rel: &str, doc: &Document) -> String {
-    format!("<document path=\"{rel}\">\n{}\n</document>", doc.outline())
+    format!("{DOCUMENT_OPEN}\"{rel}\">\n{}\n</document>", doc.outline())
 }
 
 /// The `<document>` outline block as the file stands now, for a compaction

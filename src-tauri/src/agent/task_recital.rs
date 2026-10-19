@@ -132,8 +132,10 @@ pub fn recite_after_compaction(
     };
     // What the message already ends with — all of the recital, or its first
     // blocks (a run turn sent before the document existed) — is not said
-    // again; the rest follows it.
-    let texts: Vec<Option<&str>> = last
+    // again; the rest follows it. A run turn may end with a `<doc-changed>`
+    // note after its recital (the person edited the document): the match
+    // looks past it (Phase 6f).
+    let mut texts: Vec<Option<&str>> = last
         .content
         .iter()
         .map(|b| match b {
@@ -141,6 +143,13 @@ pub fn recite_after_compaction(
             _ => None,
         })
         .collect();
+    let doc_changed = crate::agent::doc_session::DOC_CHANGED_OPEN;
+    while texts
+        .last()
+        .is_some_and(|t| t.is_some_and(|t| t.starts_with(doc_changed)))
+    {
+        texts.pop();
+    }
     let said = (1..=blocks.len())
         .rev()
         .find(|&k| {
@@ -166,17 +175,24 @@ pub fn recite_after_compaction(
 /// from the compaction record on every replay.
 ///
 /// The same for every block the run appends that a compaction restates —
-/// the list, then the document's outline: the trailing ones that equal one
-/// of `blocks` are removed, last first, so `[summary, list, outline]`
-/// followed by the run's turn reads each once.
+/// the list, then the document's outline: the trailing ones of a kind the
+/// run appends are removed, last first, so `[summary, list, outline]`
+/// followed by the run's turn reads each once. By kind, not by equal text:
+/// the person can edit the document between the compaction and the run, and
+/// the run's fresh outline then differs from the recorded one (Phase 6f).
 pub fn take_trailing_recitals(history: &mut [crate::agent::provider::Message], blocks: &[String]) {
     let Some(last) = history.last_mut().filter(|m| m.role == "user") else {
         return;
     };
+    let kinds: Vec<&str> = [TASKS_OPEN, crate::agent::doc_session::DOCUMENT_OPEN]
+        .into_iter()
+        .filter(|open| blocks.iter().any(|b| b.starts_with(open)))
+        .collect();
     while last.content.len() > 1
         && matches!(
             last.content.last(),
-            Some(crate::agent::provider::ContentBlock::Text { text, .. }) if blocks.contains(text)
+            Some(crate::agent::provider::ContentBlock::Text { text, .. })
+                if kinds.iter().any(|open| text.starts_with(open))
         )
     {
         last.content.pop();
@@ -1046,6 +1062,68 @@ mod compaction_tests {
         assert_eq!(count_blocks(&history), 1);
         assert_eq!(history.last().unwrap().content.len(), 3, "{history:?}");
         assert_eq!(last_block_text(&history), Some(outline));
+    }
+
+    // A compaction at a run's start whose turn ends with a `<doc-changed>`
+    // note (the person edited the document since the model last heard): the
+    // list and the outline before the note are the ones the compaction would
+    // restate, and neither is said twice.
+    #[test]
+    fn a_tail_ending_with_a_doc_changed_note_after_the_recital_gets_nothing_again() {
+        let tasks = list();
+        let block = tasks_block(&tasks).unwrap();
+        let outline = "<document path=\".claudinio/docs/p.md\">\n# P\n</document>".to_string();
+        let note = "<doc-changed>\nThe user changed the document: s1.\n</doc-changed>".to_string();
+        let records = vec![
+            tasks_record(&tasks),
+            turn(
+                "user",
+                vec![
+                    ContentBlock::text("go on"),
+                    ContentBlock::text(block.clone()),
+                    ContentBlock::text(outline.clone()),
+                    ContentBlock::text(note.clone()),
+                ],
+            ),
+            SessionRecord::Compacted {
+                summary: "## Summary\nwhat happened".into(),
+                tail_turns: 1,
+                document: Some(outline.clone()),
+                ts: 2,
+            },
+        ];
+        let history = history_from_records(&records);
+        assert_eq!(count_blocks(&history), 1, "{history:?}");
+        assert_eq!(history.last().unwrap().content.len(), 4, "{history:?}");
+        assert_eq!(last_block_text(&history), Some(note));
+    }
+
+    // After a tailless compaction the history ends `[summary, list, outline]`
+    // as the compaction recorded them. If the person edits the document
+    // before the next run, that run's outline differs from the recorded one;
+    // the recital blocks are still the compaction's restatement, and the run
+    // appends its own: they go by kind, not by equal text, or the model reads
+    // the list and two outlines.
+    #[test]
+    fn the_run_drops_a_trailing_recital_whose_outline_changed_since_the_compaction() {
+        let tasks = list();
+        let block = tasks_block(&tasks).unwrap();
+        let recorded = "<document path=\".claudinio/docs/p.md\">\n# P\ns1 \u{b7} todo\n</document>";
+        let fresh = "<document path=\".claudinio/docs/p.md\">\n# P\ns1 \u{b7} done\n</document>";
+        let mut history = vec![Message {
+            role: "user".into(),
+            content: vec![
+                ContentBlock::text("## Summary\nwhat happened"),
+                ContentBlock::text(block.clone()),
+                ContentBlock::text(recorded),
+            ],
+        }];
+        take_trailing_recitals(&mut history, &[block, fresh.to_string()]);
+        assert_eq!(history[0].content.len(), 1, "{history:?}");
+        assert!(matches!(
+            &history[0].content[0],
+            ContentBlock::Text { text, .. } if text.starts_with("## Summary")
+        ));
     }
 
     // No tail kept: the list follows the summary, in the same message.
