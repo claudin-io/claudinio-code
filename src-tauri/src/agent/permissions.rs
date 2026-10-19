@@ -775,6 +775,33 @@ mod tests {
         ));
     }
 
+    /// The toggle lifts the allowlist, not rule 1: a commit message with a
+    /// parenthesis, `&`, `;`, `$`, `<`, `>` or a glob character asks like any
+    /// other command, so a scoped conventional commit is approved by hand.
+    /// Reading the message as text would take a quote parser, which is what
+    /// the simplified rule removed.
+    #[test]
+    fn auto_approve_git_commit_still_goes_through_rule_one() {
+        for c in [
+            "git commit -m \"feat(ui): add x\"",
+            "git commit -m \"lint & format\"",
+            "git commit -m \"tidy; format\"",
+            "git commit -m \"fix *all* tests\"",
+            "git commit -m \"why?\"",
+            "git commit -m \"cost in $\"",
+        ] {
+            assert_eq!(
+                bash_permission(c, true),
+                PermissionLevel::RequiresApproval,
+                "{c:?}"
+            );
+        }
+        assert_eq!(
+            bash_permission("git commit -m \"feat: add x\"", true),
+            PermissionLevel::Auto
+        );
+    }
+
     #[test]
     fn auto_approve_git_push_with_flag() {
         assert!(matches!(
