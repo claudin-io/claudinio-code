@@ -233,7 +233,9 @@ fn is_saved_output_in(path: &std::path::Path, dir: &std::path::Path) -> bool {
     let named = file.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
         n.ends_with(".log") && (n.starts_with("bash-") || n.starts_with("result-"))
     });
-    file.parent() == Some(ours.as_path()) && named && file.is_file() && is_ours(&ours)
+    // `is_ours` on `dir` as named, as `save_full_in` checks it: on the
+    // canonical path it would see a link's target, never the link.
+    file.parent() == Some(ours.as_path()) && named && file.is_file() && is_ours(dir)
 }
 
 /// Whether `dir` is a folder only this process's user can write: a real
@@ -441,6 +443,24 @@ mod tests {
             std::fs::write(&planted, "planted").unwrap();
             assert!(!is_saved_output_in(&planted, &theirs));
         }
+    }
+
+    // A saved-outputs folder that is a link gets no save, and none of its
+    // files is trusted on the read side either: the read side used to check
+    // the link's target, which `is_ours` then found to be a real folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_outputs_folder_that_is_a_link_is_not_trusted() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("real");
+        std::fs::create_dir(&target).unwrap();
+        let planted = target.join("result-2.log");
+        std::fs::write(&planted, "planted").unwrap();
+        let link = root.path().join("outputs");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(save_full_in(&link, "result", "mine"), None);
+        assert!(!is_saved_output_in(&link.join("result-2.log"), &link));
+        assert!(!is_saved_output_in(&planted, &link));
     }
 
     // The path is in the result the model and the loop watch see: the same
