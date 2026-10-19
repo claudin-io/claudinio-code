@@ -242,7 +242,7 @@ pub async fn run_workflow_with_profile(
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     // The specs are the requirement. Putting them in the prompt is what makes
     // them an input to planning rather than a document nobody opens.
-    let spec_section = build_spec_prompt_section(ctx);
+    let spec_section = build_spec_prompt_section(ctx, config.prompt_version);
     let (mut cur_mode, _) = mode_ctl.get();
     // MCP tool discovery already happened before `run_workflow` was called
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync

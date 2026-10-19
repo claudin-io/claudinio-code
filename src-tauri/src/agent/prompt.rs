@@ -102,7 +102,10 @@ const GIT_SYNC_PROMPT: &str = r#"Role: Claudinio git operator. Single goal: get 
 /// This is the point of the whole layer: a specification nobody reads while
 /// designing is decoration. Putting the scenarios in front of the planner makes
 /// them the requirement they claim to be.
-pub(super) fn build_spec_prompt_section(ctx: &ToolContext) -> Option<String> {
+pub(super) fn build_spec_prompt_section(
+    ctx: &ToolContext,
+    version: PromptVersion,
+) -> Option<String> {
     let root = ctx.workspace_root.as_deref()?;
     let cfg = crate::quality::QualityConfig::load(std::path::Path::new(root));
     let features = crate::quality::spec::load_features(
@@ -113,6 +116,18 @@ pub(super) fn build_spec_prompt_section(ctx: &ToolContext) -> Option<String> {
         return None;
     }
     let index = crate::quality::parsers::scenario_index(&features, MAX_SPEC_SECTION_CHARS);
+    if version == PromptVersion::V2 {
+        // The spec guard is code (`tools::validate_editable_path`), and its
+        // refusal says to ask the user; v2 does not restate it.
+        return Some(format!(
+            "\n## SPECIFICATION (Gherkin — the user's requirement)\n\
+             This project has executable specs: the requirement, and the one input here that \
+             did not come from a model. Plan and implement to satisfy these scenarios, and name \
+             the ones each task covers, so what is left stays visible. A scenario that looks \
+             wrong or cannot be met goes to the user; the specs are theirs to change.\n\n\
+             {index}"
+        ));
+    }
     Some(format!(
         "\n## SPECIFICATION (Gherkin — the user's requirement)\n\
          This project has executable specs. They are the requirement, and they are the one \
@@ -821,7 +836,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         let mut ctx = crate::agent::tools::tests_support::ctx();
         ctx.workspace_root = Some(root.to_string_lossy().to_string());
 
-        let section = build_spec_prompt_section(&ctx).expect("specs found");
+        let section = build_spec_prompt_section(&ctx, PromptVersion::V1).expect("specs found");
         assert!(section.contains("Member discounts"), "{section}");
         assert!(section.contains("Ten percent off"), "{section}");
         assert!(section.contains("CANNOT edit"), "{section}");
@@ -851,7 +866,9 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
         std::fs::create_dir_all(&root).unwrap();
         let mut ctx = crate::agent::tools::tests_support::ctx();
         ctx.workspace_root = Some(root.to_string_lossy().to_string());
-        assert!(build_spec_prompt_section(&ctx).is_none());
+        for version in PromptVersion::ALL {
+            assert!(build_spec_prompt_section(&ctx, version).is_none());
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2245,6 +2262,36 @@ mod v2_tests {
             gate_lines[0].contains("what to do next"),
             "{}",
             gate_lines[0]
+        );
+    }
+
+    /// The spec section rides in the prefix of every project with Gherkin
+    /// specs. Under v2 it states no gate (the spec guard refuses an edit and
+    /// its refusal says to ask the user: `quality::spec::edit_refusal`) and
+    /// adds no capitals; v1 keeps its text.
+    #[test]
+    fn the_v2_spec_section_leaves_the_spec_guard_to_its_refusal() {
+        let root = std::env::temp_dir().join(format!("cq-specv2-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("features")).unwrap();
+        std::fs::write(
+            root.join("features/a.feature"),
+            "Feature: Checkout\n  Scenario: Pay by card\n    Then it is paid\n",
+        )
+        .unwrap();
+        let mut ctx = crate::agent::tools::tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+        let v1 = build_spec_prompt_section(&ctx, PromptVersion::V1).unwrap();
+        let v2 = build_spec_prompt_section(&ctx, PromptVersion::V2).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+        assert!(v1.contains("You CANNOT edit them"), "{v1}");
+        assert!(v2.contains("Pay by card"), "{v2}");
+        assert!(v2.contains("the user"), "{v2}");
+        assert!(!v2.contains("refuses any path"), "{v2}");
+        assert!(
+            capitalised_words(&v2).is_empty(),
+            "{:?}",
+            capitalised_words(&v2)
         );
     }
 
