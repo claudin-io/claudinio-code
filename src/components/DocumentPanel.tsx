@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, on, Show, type Component } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, Show, type Component } from "solid-js";
 import { getDocument, type DocView } from "../lib/ipc";
 import { publishedDocument, requestSubagent } from "../lib/documentStore";
 import { createVisibilityAwareInterval } from "../lib/visibility";
@@ -55,12 +55,17 @@ export const DocumentPanel: Component<{
   createVisibilityAwareInterval(load, 5000);
 
   // A run's outline replaces what is shown; an invalidation (the session
-  // changed) asks the backend again.
+  // changed) asks the backend again. Only this workspace's version is
+  // tracked (a memo, so an unchanged number stops there): the record is
+  // shared, and another workspace's publish must not re-apply the outline
+  // last published here over what the poll loaded since.
+  const version = createMemo(() => publishedDocument(props.workspace).version);
   createEffect(
     on(
-      () => publishedDocument(props.workspace),
-      (p) => {
-        if (p.version === 0) return;
+      version,
+      (v) => {
+        if (v === 0) return;
+        const p = publishedDocument(props.workspace);
         if (p.doc) {
           setDoc(p.doc);
           props.onDocumentChange?.(p.doc);

@@ -98,4 +98,44 @@ describe("DocumentPanel", () => {
     expect(vi.mocked(getDocument).mock.calls.length).toBe(calls);
     dispose();
   });
+
+  // Every workspace's panel is mounted (hidden ones too), and a background
+  // run publishes on every doc_* call: another workspace's outline must not
+  // make this panel re-apply the last outline published here.
+  it("keeps what the poll loaded when another workspace publishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const mk = (title: string): DocView => ({ ...DOC, title });
+      vi.mocked(getDocument).mockResolvedValue(mk("initial"));
+      const onDocumentChange = vi.fn();
+      const dispose = render(
+        () => <DocumentPanel workspace="/ws" onOpen={vi.fn()} onDocumentChange={onDocumentChange} />,
+        document.body,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      publishDocument("/ws", mk("published by the run"));
+      await vi.advanceTimersByTimeAsync(0);
+      vi.mocked(getDocument).mockResolvedValue(mk("fresh from the poll"));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(document.body.textContent).toContain("fresh from the poll");
+
+      publishDocument("/other", mk("another workspace"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.body.textContent).toContain("fresh from the poll");
+      expect(onDocumentChange).toHaveBeenLastCalledWith(mk("fresh from the poll"));
+
+      // A session without a document (a new one, one loaded from history)
+      // does not get the previous session's document back.
+      vi.mocked(getDocument).mockResolvedValue(null);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(document.body.querySelector("[data-document-panel]")).toBeNull();
+      publishDocument("/other", mk("another workspace, again"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.body.querySelector("[data-document-panel]")).toBeNull();
+      expect(onDocumentChange).toHaveBeenLastCalledWith(null);
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
