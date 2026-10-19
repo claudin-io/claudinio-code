@@ -88,24 +88,40 @@ fn stays_in_workspace(command: &str, workdir: Option<&str>, workspace: &Path) ->
         Some(_) => return false,
     };
     let saved_outputs = crate::agent::output_trim::saved_dir();
-    command.split_whitespace().all(|word| {
-        let word = word.trim_matches(|c| c == '"' || c == '\'');
-        // `--include=/etc/passwd` names a path after the `=`.
-        let value = word.split_once('=').map_or(word, |(_, v)| v);
-        if value.contains('$') || value.starts_with('~') {
-            return false;
-        }
-        let path = Path::new(value);
-        let escapes = path.components().any(|c| c == Component::ParentDir);
-        if !path.is_absolute() && !escapes {
-            return true;
-        }
-        if path.starts_with(&saved_outputs) && !escapes {
-            return true;
-        }
-        // Joining an absolute path replaces `cwd`, so both shapes land here.
-        workspace_path::is_within_root(&cwd.join(path), workspace)
-    })
+    // The words as the shell hands them to the command: quotes and
+    // backslashes gone (`'..'` is `..`), split at `=` too, so
+    // `--include=/etc/passwd` names `/etc/passwd`.
+    crate::agent::project_memory::shell_words(command)
+        .iter()
+        .all(|value| {
+            if value.contains('$') || value.starts_with('~') {
+                return false;
+            }
+            // A glob or brace part the shell can expand to `..` (`.[.]`, `.?`,
+            // `.*` under dash, `{..,x}`) cannot be resolved here: refused.
+            if value.split('/').any(expands_to_parent) {
+                return false;
+            }
+            let path = Path::new(value.as_str());
+            let escapes = path.components().any(|c| c == Component::ParentDir);
+            if !path.is_absolute() && !escapes {
+                return true;
+            }
+            if path.starts_with(&saved_outputs) && !escapes {
+                return true;
+            }
+            // Joining an absolute path replaces `cwd`, so both shapes land here.
+            workspace_path::is_within_root(&cwd.join(path), workspace)
+        })
+}
+
+/// Whether the shell may turn one path part into `..`: a glob that can match
+/// it (a leading `.` must be literal, as in the shell), or a brace group
+/// beside a dot, whose alternatives are not worth spelling out here.
+fn expands_to_parent(part: &str) -> bool {
+    (part.contains('{') && part.contains('.'))
+        || (part.contains(['*', '?', '['])
+            && crate::agent::project_memory::glob_matches(part, ".."))
 }
 
 /// Every `path` string anywhere in a tool input (one for `edit_file`, one
@@ -376,6 +392,40 @@ mod tests {
                 !run(command, workdir),
                 "{command} in {workdir:?} must be refused"
             );
+        }
+    }
+
+    /// The shell expands a glob or a brace group, and removes quotes and
+    /// backslashes, before `cat` sees a name: `.[.]`, `.?` and `.*` match
+    /// `..` under dash, and `'..'/x` is `../x`. A word was checked as typed,
+    /// so all of these read one level up (final branch review).
+    #[test]
+    fn a_word_the_shell_turns_into_a_parent_folder_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let run = |command: &str| approves("bash", &json!({ "command": command }), &ws);
+        for command in [
+            "cat .[.]/secret.txt",
+            "ls .?/.?",
+            "ls .*",
+            "ls -d .*/",
+            "cat '..'/secret.txt",
+            "cat \"..\"/secret.txt",
+            "cat \\.\\./secret.txt",
+            "cat src/.?/.?/secret.txt",
+            "cat {..,src}/secret.txt",
+            "cat .{.,}/secret.txt",
+        ] {
+            assert!(!run(command), "{command} must be refused");
+        }
+        for command in [
+            "ls src/*.rs",
+            "cat src/?.txt",
+            "ls .gitignore",
+            "wc -l src/[ab].rs",
+        ] {
+            assert!(run(command), "{command} stays in the workspace");
         }
     }
 

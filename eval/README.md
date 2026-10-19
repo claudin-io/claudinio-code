@@ -113,7 +113,10 @@ approvals*; it does not contain a model that sets out to escape (see
   module classifies it (`ls`, `cat a.txt`, `git status`, `git diff`, `wc -l` …
   with no chaining, pipes, substitution or redirection), **and only inside the
   task's workspace**: the directory it runs in and every word naming a path
-  (absolute, with a `..` component, `~` or `$`) must resolve inside it. The
+  (absolute, with a `..` component, `~` or `$`) must resolve inside it, read
+  as the shell reads it (quotes and backslashes dropped), and a glob or brace
+  part that can expand to `..` (`.[.]`, `.?`, `.*` under dash) is refused. A
+  relative working directory is a folder of the workspace. The
   first live baseline showed agents listing the eval's own directory, reading
   other tasks' sessions and the task files that carry the reference solution;
   the harness's saved-outputs directory stays readable, since trimmed results

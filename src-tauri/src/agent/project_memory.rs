@@ -401,7 +401,7 @@ fn names_on_disk(root: &Path, base: &Path, text: &str) -> bool {
 /// file, case kept: quotes and backslashes dropped, split on whitespace and
 /// the characters that end a word (`;|&<>()` and backquote, and `=` so
 /// `of=MEMORY.md` reads as a name).
-fn shell_words(command: &str) -> Vec<String> {
+pub(crate) fn shell_words(command: &str) -> Vec<String> {
     let folded: String = command
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
@@ -436,7 +436,7 @@ fn braces_as_star(word: &str) -> String {
 /// leading `.` must be matched by a literal `.`. Matched over characters
 /// with a table, so neither multi-byte text nor a run of stars costs more
 /// than `pattern × name` steps.
-fn glob_matches(pattern: &str, name: &str) -> bool {
+pub(crate) fn glob_matches(pattern: &str, name: &str) -> bool {
     enum Tok {
         Star,
         One,
