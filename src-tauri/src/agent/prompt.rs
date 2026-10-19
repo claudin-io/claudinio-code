@@ -1914,7 +1914,8 @@ mod prefix_budget_tests {
     use super::*;
     use crate::agent::session::estimate_tokens;
 
-    /// A fresh install: the two built-in skills, no MCP server.
+    /// A fresh install: the three built-in skills (find-skills, plan,
+    /// plugin-crafter), no MCP server.
     const DEFAULT_TARGET: u64 = 5_000;
     /// Ten skills and one MCP server of twenty tools.
     const LOADED_TARGET: u64 = 10_000;

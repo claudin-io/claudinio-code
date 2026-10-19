@@ -167,8 +167,9 @@ pub fn quality_failed(goals: &str, summary: &str, detail: &str) -> String {
 /// Golden protection: ids the model gave the reserved prefix were renamed.
 pub fn golden_renamed(count: usize) -> String {
     format!(
-        " {count} task(s) used the reserved 'golden-' id prefix and were renamed — \
-         golden tasks can only be created by the user via <goal> tags."
+        " {count} task(s) used the reserved 'golden-' id prefix and were renamed to \
+         'task-…' — golden tasks can only be created by the user via <goal> tags. \
+         Carry on with the renamed ids; if a goal must be golden, ask the user to add a <goal>."
     )
 }
 
@@ -303,7 +304,13 @@ mod tests {
         ("quality_failed", &["fix the failures", "call run_quality"]),
         // v1's golden block said "keep them in the list and update their
         // status"; v2 leaves that to the note `tasks_set` returns.
-        ("golden_renamed", &["<goal>"]),
+        (
+            "golden_renamed",
+            &[
+                "Carry on with the renamed ids",
+                "ask the user to add a <goal>",
+            ],
+        ),
         (
             "golden_preserved",
             &["keep them in the list", "update their status"],
