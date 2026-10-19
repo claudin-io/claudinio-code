@@ -100,21 +100,22 @@ pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
 // **The rule.** After the exact blank-separated tokens `2>&1`,
 // `2>/dev/null`, `>/dev/null` and `1>/dev/null` are dropped:
 //
-// 1. the text holds no line break and none of `SHELL_SYNTAX` — no
-//    substitution, variable, redirection, `&`, `;`, backslash, brace,
-//    parenthesis or glob;
+// 1. the text holds no blank but space and tab (`has_odd_char`: a line
+//    break, form feed or Unicode space splits a word for Rust and not for
+//    sh) and none of `SHELL_SYNTAX` — no substitution, variable,
+//    redirection, `&`, `;`, backslash, brace, parenthesis or glob;
 // 2. it holds no `||`, and split at every `|` each part is non-empty and
 //    closes every quote it opens;
 // 3. the first part starts with the words of an allowlist entry (an entry
 //    ending in a space needs one more word; `git branch` and `git remote`
-//    only bare or with `LISTING_FLAGS`), and is not an interpreter fed the
-//    call's `stdin`;
+//    only bare or with `LISTING_FLAGS`, `date` only bare or with one
+//    `+FORMAT`), and is not an interpreter fed the call's `stdin`;
 // 4. every later part is one of `PIPE_FILTERS`, which read their input and
 //    print, and have no option that writes a file or runs a program;
 // 5. the write detector (`bash_writes_files`) sees no write.
 //
-// Before the rule, the deny-list (`BASH_BLACKLIST`, a write to a disk device)
-// and the memory guard (`project_memory::mentions_memory` on a command that
+// Before the rule, the deny-list (`on_the_deny_list`, by whole words; a
+// write to a disk device) and the memory guard (`project_memory::mentions_memory` on a command that
 // is not a plain read) refuse outright, in every mode and under YOLO.
 //
 // **Why that is enough.** With no backslash, `$` or backquote left, nothing
@@ -128,6 +129,12 @@ pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
 // written with, feeding filters that only print. (A quoted `|`, a filter
 // outside the list, a `2> /dev/null` with a space: they ask. That is the
 // price, and it is never won back with parsing.)
+//
+// The argument is about a POSIX sh, which runs the command everywhere but
+// Windows. There the tool runs `cmd /c`, which expands `%NAME%` before it
+// looks for `&`, `|` and `>`, and escapes with `^`: `has_odd_char` refuses
+// `%`, `^` and `!` there too, and cmd has no `$`, glob or brace expansion
+// of its own. The rule only ever lets fewer commands run than it sees.
 
 /// Builder's allowlist: inspection, builds and test runners, and the
 /// interpreters, which run whatever script they are given — as the README
@@ -247,26 +254,53 @@ const MEMORY_READS: &[&str] = &[
     "git blame",
 ];
 
-const BASH_BLACKLIST: &[&str] = &[
-    "rm -rf /",
-    "rm -rf /*",
-    "rm -rf ~",
-    "sudo rm",
-    "dd if=",
-    ":(){",
-    "mkfs.",
-    "fdisk",
-    "format ",
-    "chmod 777",
-    "chown ",
-    "mv /",
-    "cp /",
-];
+/// Commands refused outright wherever they start a part of the command
+/// (split at `;`, `&`, `|`, a parenthesis or a line break; a leading `sudo`
+/// skipped).
+const BASH_BLACKLIST: &[&str] = &["chown", "dd", "fdisk", "format", "mkfs"];
+
+/// The deny-list (`BASH_BLACKLIST`), by whole words: a tripwire for the
+/// obvious spelling of a destructive command (`rm -rf /`, `chmod 777`, a
+/// fork bomb), not a boundary — `rm -fr /` only asks. Words, not
+/// substrings, so `git log --format %H`, `cp /tmp/x .` and `rm -rf
+/// /tmp/build` reach the rule instead of a refusal nothing can lift.
+fn on_the_deny_list(command: &str) -> bool {
+    command.contains(":(){")
+        || command.split([';', '&', '|', '(', ')', '\n']).any(|part| {
+            let words: Vec<&str> = part.split_whitespace().collect();
+            let command = words.iter().find(|w| **w != "sudo").copied().unwrap_or("");
+            BASH_BLACKLIST.contains(&command.split('.').next().unwrap_or(""))
+                || words.windows(2).any(|w| {
+                    matches!(
+                        w,
+                        ["sudo", "rm"] | ["chmod", "777"] | ["mv" | "cp", "/" | "/*"]
+                    )
+                })
+                || words.windows(3).any(|w| {
+                    matches!(
+                        w,
+                        ["rm", "-rf", "/" | "/*" | "~" | "~/"] | ["chmod", "-R", "777"]
+                    )
+                })
+        })
+}
+
+/// Whether `command` holds a character the rule's word split and the shell
+/// would read differently (rule 1): any blank but space and tab — a line
+/// break, a form feed, a vertical tab or a Unicode space (NBSP, U+3000) is
+/// a blank to `split_whitespace` and part of a word to sh, so `ls\fx/y`
+/// would read as `ls` while sh runs the program at that path — and, where
+/// the tool runs `cmd /c` (`windows`), `%`, `^` and `!`, which cmd expands
+/// or escapes before it finds `&`, `|` and `>`.
+fn has_odd_char(command: &str, windows: bool) -> bool {
+    command
+        .chars()
+        .any(|c| (c.is_whitespace() && c != ' ' && c != '\t') || (windows && "%^!".contains(c)))
+}
 
 /// The parts of `command` split at `|` when rules 1 and 2 hold, else `None`.
 fn pipeline(command: &str) -> Option<Vec<String>> {
-    // Line breaks are blanks to `split_whitespace`: checked before it.
-    if command.contains(['\n', '\r']) {
+    if has_odd_char(command, cfg!(windows)) {
         return None;
     }
     let text = command
@@ -320,6 +354,12 @@ fn allowlisted(part: &str, allowlist: &[&str], auto_approve_git: bool) -> bool {
         return allowlist.contains(&format!("git {sub}").as_str())
             && rest.iter().all(|w| LISTING_FLAGS.contains(w));
     }
+    // `date -s`, `--set` or a bare date operand sets the clock: only a bare
+    // `date` or one `+FORMAT` runs unasked.
+    if let ["date", rest @ ..] = words.as_slice() {
+        return allowlist.contains(&"date")
+            && (rest.is_empty() || matches!(rest, [format] if format.starts_with('+')));
+    }
     allowlist.iter().any(|e| starts_with_entry(part, e))
 }
 
@@ -356,7 +396,7 @@ fn decide(
     auto_approve_git: bool,
 ) -> PermissionLevel {
     let trimmed = command.trim();
-    if BASH_BLACKLIST.iter().any(|p| trimmed.contains(p)) || redirects_into_a_disk(trimmed) {
+    if on_the_deny_list(trimmed) || redirects_into_a_disk(&trimmed.replace(['"', '\''], "")) {
         return PermissionLevel::Denied;
     }
     // The project memory is written by `finalize_plan` alone (Phase 9).
@@ -497,8 +537,9 @@ fn without_harmless_redirections(command: &str) -> String {
     text
 }
 
-/// A redirection (`>`, `>>`, `>|`, spaced or not) into a disk or memory
-/// device (`/dev/sda`, `/dev/nvme0n1`, `/dev/mem`, …): refused outright.
+/// A redirection (`>`, `>>`, `>|`, spaced or not; the caller drops quotes)
+/// into a disk or memory device (`/dev/sda`, `/dev/nvme0n1`, `/dev/mem`, …):
+/// refused outright.
 /// `/dev/null`, `/dev/stderr` and the like are not among them.
 fn redirects_into_a_disk(command: &str) -> bool {
     const DISKS: &[&str] = &[
@@ -1173,6 +1214,19 @@ mod shell_rule_tests {
         "git branch -D main",
         "git remote add origin x",
         "git remote set-url origin x",
+        // Review of the simplified rule: a blank sh does not split on (form
+        // feed, vertical tab, NBSP, ideographic space) made Rust read `ls`
+        // and `x/y` where the shell runs the program at `ls\fx/y`; and
+        // `date -s` sets the clock.
+        "ls\x0cx/y",
+        "ls\x0bx/y",
+        "ls\u{a0}x/y",
+        "ls\u{3000}x/y",
+        "cat\x0cx/y src",
+        "git log | head\x0bx/y",
+        "date -s 2020-01-01",
+        "date --set=2020-01-01",
+        "date 0101000020",
     ];
 
     /// An interpreter fed a script through the bash tool's `stdin` runs a
@@ -1324,6 +1378,7 @@ mod shell_rule_tests {
         "git branch -vv",
         "git remote",
         "git remote -v",
+        "date +%Y-%m-%d",
     ];
 
     /// Builder runs these, Brain plans and runs none of them: no test
@@ -1442,5 +1497,86 @@ mod shell_rule_tests {
         for e in READ_ONLY_PREFIXES {
             assert!(BRAIN_ALLOWLIST.contains(e), "{e:?}");
         }
+    }
+
+    /// The deny-list refuses the obvious spelling of a destructive command,
+    /// by whole words, and nothing else: Denied is a refusal no approval,
+    /// YOLO or hook can lift, so an ordinary command that merely contains
+    /// `format `, `cp /` or `rm -rf /tmp` must reach the rule instead
+    /// (review of the simplified rule; the substring list predates it).
+    #[test]
+    fn the_deny_list_refuses_destructive_commands_by_whole_words_only() {
+        for c in [
+            "git log --format %H -1",
+            "git log --format \"%h %s\" -5",
+            "git log --grep \"format \"",
+            "ruff format src",
+            "pnpm format --check",
+            "clang-format --dry-run a.c",
+            "cp /tmp/out.txt .",
+            "mv /tmp/build/app.js dist/",
+            "rm -rf /tmp/build",
+            "grep -rn \"chown \" src",
+            "grep -rn \"chmod\" src",
+        ] {
+            assert_ne!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+            assert_ne!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(
+            builder("git log --format %H -1", None),
+            PermissionLevel::Auto
+        );
+        for c in [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -rf / --no-preserve-root",
+            "rm -rf ~",
+            "rm -rf ~/",
+            "ls; rm -rf /",
+            "ls;rm -rf /",
+            "(rm -rf /)",
+            "sudo rm -rf /tmp",
+            "chmod 777 /etc",
+            "chmod -R 777 /etc",
+            "chown root x",
+            "sudo chown root x",
+            "ls && chown root x",
+            "format c:",
+            "fdisk /dev/sda",
+            "mkfs.ext4 /dev/sda1",
+            "mkfs -t ext4 /dev/sda1",
+            "dd if=/dev/zero of=x",
+            "dd of=/dev/sda if=x",
+            ":(){ :|:& };:",
+            "mv / x",
+            "cp / x",
+            "echo x > \"/dev/sda\"",
+            "echo x >'/dev/sda'",
+        ] {
+            assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+            assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
+        }
+    }
+
+    /// On Windows the tool runs `cmd /c`, which expands `%NAME%` (and
+    /// `%NAME:~n,1%`) before it looks for `&`, `|` or `>`, and escapes with
+    /// `^`: there those characters make a command ask too. On a POSIX shell
+    /// they are plain characters, so `git log --format %H` keeps running.
+    #[test]
+    fn cmd_expansion_characters_ask_only_where_cmd_runs_the_command() {
+        for c in [
+            "echo %CD:~3,1% del x",
+            "git log | grep %PATH%",
+            "git diff HEAD^",
+            "echo !x!",
+        ] {
+            assert!(has_odd_char(c, true), "{c:?}");
+            assert!(!has_odd_char(c, false), "{c:?}");
+        }
+        for c in ["ls\x0cx", "ls\x0bx", "ls\u{a0}x", "ls\nx", "ls\rx"] {
+            assert!(has_odd_char(c, false), "{c:?}");
+        }
+        assert!(!has_odd_char("ls\t-la  src", false));
     }
 }
