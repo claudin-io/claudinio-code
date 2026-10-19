@@ -7,6 +7,7 @@ import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsJev } from "./settings/SettingsJev";
 import { SettingsPromptVersion } from "./settings/SettingsPromptVersion";
+import { SettingsProjectMemory } from "./settings/SettingsProjectMemory";
 import { SettingsToolSurface } from "./settings/SettingsToolSurface";
 import { SettingsMcp } from "./settings/SettingsMcp";
 import { SettingsPlugins } from "./settings/SettingsPlugins";
@@ -104,7 +105,7 @@ const CATEGORIES: Category[] = [
   { id: 'models', icon: 'brain', searchTerms: ["Brain Model","Builder Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override","Tools offered to each model","Lean","Tool surface"] },
   { id: 'local', icon: 'monitor', searchTerms: ["Local models","llama.cpp","GGUF","Hugging Face","Quantization","Offline","VRAM","Backend","Vulkan","Download a model","Runtime"] },
   { id: 'account', icon: 'key', searchTerms: ["Account","Sign in with claudin.io","Sign out","API Key","Support","Providers","More providers\u2026","Add custom provider\u2026","Custom","LiteLLM","Ollama","localhost","Base URL","Connect","Access hundreds of models through one account, via OAuth."] },
-  { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)","Jev decisions (TypeSafe)","TypeSafe API key (optional)","Jev","TypeSafe","Auto mode for new sessions","Auto","Shadow","System prompt","Prompt version"] },
+  { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)","Jev decisions (TypeSafe)","TypeSafe API key (optional)","Jev","TypeSafe","Auto mode for new sessions","Auto","Shadow","System prompt","Prompt version","Project memory","AGENTS.md","CLAUDE.md","MEMORY.md"] },
   { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
   { id: 'browser', icon: 'globe', searchTerms: ["Browser","Chromium","Screenshot","Console","Network","Headless","Viewport","Download","Install a browser"] },
@@ -341,6 +342,7 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   workspaceConfigFields={props.workspaceConfigFields}
                 />
                 <SettingsPromptVersion />
+                <SettingsProjectMemory />
                 <SettingsJev />
               </Show>
 

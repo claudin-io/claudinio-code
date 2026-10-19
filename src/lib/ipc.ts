@@ -126,6 +126,10 @@ export interface AgentConfig {
   /** Which Standard system prompt sessions are sent; absent in a config
    *  written before the setting existed, which means "v2". */
   promptVersion?: PromptVersion;
+  /** Whether a new session's first run reads AGENTS.md/CLAUDE.md and
+   *  .claudinio/MEMORY.md; absent in a config written before the setting
+   *  existed, which means on. */
+  projectMemory?: boolean;
   workspaceConfig?: Record<string, unknown> | null;
 }
 
@@ -196,6 +200,7 @@ export interface SetConfigArgs {
   /** Set one model's tool surface; "full" clears it. */
   toolSurface?: { model: string; surface: ToolSurface };
   promptVersion?: PromptVersion;
+  projectMemory?: boolean;
 }
 
 export interface ApproveArgs {

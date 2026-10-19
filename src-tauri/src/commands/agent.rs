@@ -778,6 +778,9 @@ pub struct SetConfigArgs {
     /// "v1" | "v2" — which Standard prompt sessions are sent (lean-harness
     /// Phase 5, decision D7). See `agent::prompt::PromptVersion`.
     pub prompt_version: Option<String>,
+    /// Whether a new session's first run reads AGENTS.md/CLAUDE.md and the
+    /// project memory (lean-harness Phase 9). See `agent::project_memory`.
+    pub project_memory: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -886,6 +889,9 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(auto_commit_plan) = args.auto_commit_plan {
         cfg.auto_commit_plan = auto_commit_plan;
     }
+    if let Some(project_memory) = args.project_memory {
+        cfg.project_memory = project_memory;
+    }
     if let Some(thinking_effort) = args.thinking_effort
         && ["low", "medium", "high", "xhigh", "max"].contains(&thinking_effort.as_str())
     {
@@ -978,6 +984,7 @@ pub async fn get_config(
     });
     // Outside the literal: `json!` is at its macro recursion limit here.
     value["promptVersion"] = Value::from(cfg.prompt_version.as_str());
+    value["projectMemory"] = Value::from(cfg.project_memory);
     Ok(value)
 }
 

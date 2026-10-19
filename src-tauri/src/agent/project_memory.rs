@@ -937,6 +937,20 @@ mod tests {
         assert!(run_start_blocks(true, Some(root), &later).is_empty());
     }
 
+    // A config.json written before Phase 9 has no `project_memory` key; the
+    // feature is on by default, so such a file reads it as on.
+    #[test]
+    fn a_config_written_before_the_setting_existed_reads_it_as_on() {
+        use crate::agent::provider::AgentConfig;
+        let mut file = serde_json::to_value(AgentConfig::default()).unwrap();
+        file.as_object_mut().unwrap().remove("project_memory");
+        let old: AgentConfig = serde_json::from_value(file.clone()).unwrap();
+        assert!(old.project_memory);
+        file["project_memory"] = false.into();
+        let off: AgentConfig = serde_json::from_value(file).unwrap();
+        assert!(!off.project_memory);
+    }
+
     mod run_tests {
         use super::super::*;
         use crate::agent::persist::SessionRecord;
