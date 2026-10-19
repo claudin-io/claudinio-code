@@ -1221,3 +1221,17 @@ A review of the deny-list after `f46ad72` reported five findings. All five were 
 - **`date` fed stdin under cmd** (`120ddb4`, minor, real by cmd's rules). A bare `date` under `cmd /c` reads a new date from stdin. `date` joined the interpreters in `STDIN_READERS`, so `{command: "date", stdin: …}` asks in Builder. In Brain the gate does not see stdin, so the tool's own check then asks rather than refuses.
 
 **Line counts** (production): `permissions.rs` 601 → 666. **Checks:** Rust lib 1,535 passed / 10 ignored, examples pass, clippy and fmt clean, tsc clean, vitest 977 passed.
+
+#### Fifth review of the simplified rule
+
+A review of the deny-list after `e3a9cfc` reported seven findings. The sh cases were run in `dash` and `bash` with stub binaries on PATH. The cmd cases follow cmd's documented parsing and were not run on a Windows host. All are fixed in `5d7fae9` except where noted.
+
+- **A backslash inside a name** (blocker, real). sh reads `\x` as `x`, so `d\d`, `ch\own`, `m\kfs.ext4`, `c\hmod 777 /` and `r\m -rf \/` ran `dd`, `chown`, `mkfs.ext4`, `chmod` and `rm -rf /`, and they only asked. Under sh, a word now has every backslash dropped before it is compared. Under cmd, `\` is still a path separator.
+- **Device redirects** (blocker, real). `/dev//sda`, `/dev/./sda`, `/dev/root`, `/dev/\sda` and `>& /dev/sda` only asked. The check is inverted: a redirect into `/dev/` is refused unless it is a stream sink (`null`, `stdout`, `stderr`, `tty`, `pts/`, `fd/`) or a file under `shm/` with no `..`. Backslashes are dropped, `//` and `/./` are collapsed, and `>&` is read first. `>/dev/nullX` still only asks.
+- **`@format` under cmd** (blocker, real by cmd's rules). Under cmd, a leading `@` is now dropped from a word.
+- **Ordinary commands refused with no override** (major, real; a deliberate behaviour change that refuses less). A path now counts by its last segment only where it runs: at the start of a part, after `X=1`, or after a wrapper in `RUNS_WHAT_FOLLOWS` (`sudo`, `env`, `time`, `xargs`, `find -exec`, `then`, `{`, …). In text read raw, only those positions count. As a result, `cat docs/dd`, `git checkout -b fix/chown`, a heredoc commit message naming `dd`, `git commit -m "fix dd" # x`, `git commit -m "Fix chown on \"weird\" paths"` and, on Windows, `git commit -m "50% faster dd"` are no longer refused. Not changed: an unquoted bare name is still refused anywhere (`git log --grep dd`, `which dd`), which is the cost already recorded for `e3a9cfc`. In raw text, a deny-listed word after an English word that is also a wrapper (`if`, `do`, `time`) is still refused.
+- **sfdisk, cfdisk, dcfldd** (major, real). These three, plus `gdisk`, `sgdisk`, `parted` and `wipefs`, were added to the list.
+- **`date` under cmd** (minor, real by cmd's rules). `date` no longer runs unasked on Windows (`date_only_prints`). The claim that a bare `date` with no call stdin waits on an open pipe is not real: tokio's `Child::wait` closes the stdin handle first. `9eae478` pins this, and `cat` with no stdin returns at once.
+- **`rm -rf --no-preserve-root /`** (minor, real). A root or home target now counts anywhere after `rm -rf`, not only as the next word. `rm -fr /` still only asks, as documented.
+
+**Line counts** (production): `permissions.rs` 666 → 722. **Checks:** Rust lib 1,543 passed / 10 ignored, examples pass, clippy and fmt clean, tsc clean, vitest 977 passed.

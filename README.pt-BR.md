@@ -97,7 +97,7 @@ aprovação mostra com a contagem. Um comando de shell roda sem perguntar sob um
 única regra, e nada mais roda: um único comando da allowlist (inspeção do git,
 `ls`/`cat`/`head`/`tail`/`wc`, os runners de teste e builds,
 `node`/`python`/`pnpm run`, `which`/`echo`/`pwd`, um `date` sozinho ou
-`date +FORMATO`), opcionalmente num pipe para `head`, `tail`, `wc`, `grep`,
+`date +FORMATO` exceto no Windows), opcionalmente num pipe para `head`, `tail`, `wc`, `grep`,
 `cut`, `tr` ou `nl`, sem `;`, `&`, `||`, `$`, crase, barra invertida, chave,
 parêntese, glob, quebra de linha, espaço em branco que não seja espaço ou tab, ou
 redirecionamento (além de `2>&1` e `>/dev/null`) — no Windows, onde o comando
@@ -108,22 +108,26 @@ grava). Todo o resto é perguntado no Builder e recusado no Brain — uma cadeia
 comandos da allowlist, um `|` entre aspas, um `2> /dev/null` com espaço
 inclusive: é o preço de uma regra simples o bastante para se ter certeza, e ele
 nunca é recuperado com parsing. Uma deny-list curta (`rm -rf /`, `chmod 777`,
-`mkfs`, `dd`, `format`, `chown`, gravação num dispositivo de disco), casada
-com cada palavra pelo nome do comando — então `/bin/dd`, `time dd`,
-`xargs chown` e `'mkfs.ext4'` contam, e `format` só onde começa um comando,
-então `ruff format` não — é recusada de vez em todos os modos. Uma mensagem
-entre aspas é uma palavra só (`git commit -m "fix(dd): x"` não nomeia `dd`),
-mas as aspas só contam onde o shell as lê como aspas: um `$`, crase ou barra
-invertida que escapa fora de aspas simples, ou um `#` ou `<<` fora de
-qualquer aspa, faz o texto ser lido cru, então `echo "$(rm -rf /)"` e uma
-aspa num heredoc não escondem nada; no Windows `'` não é aspa e um `^`, `%`
-ou `!` faz ler cru. Um interpretador,
+`mkfs`, `dd`, `format`, `chown`, `fdisk` e afins, um redirecionamento para
+qualquer dispositivo que não seja `/dev/null` e os outros destinos de fluxo)
+é recusada de vez em todos os modos. Uma palavra que roda — o início de um
+comando, ou depois de `sudo`, `env`, `time`, `xargs` e afins — conta pelo
+nome do comando, então `/bin/dd`, `time dd`, `xargs chown`, `'mkfs.ext4'` e
+`d\d` contam; qualquer outra palavra só conta como nome solto (`which dd` é
+recusado, `cat docs/dd` não), e `format` só onde começa um comando, então
+`ruff format` não. Uma mensagem entre aspas é uma palavra só
+(`git commit -m "fix(dd): x"` não nomeia `dd`), mas as aspas só contam onde
+o shell as lê como aspas: um `$`, crase ou barra invertida que escapa fora
+de aspas simples, ou um `#` ou `<<` fora de qualquer aspa, faz o texto ser
+lido cru, onde só contam as palavras que rodam, então `echo "$(rm -rf /)"` e
+um comando num heredoc não escondem nada; no Windows `'` não é aspa e um
+`^`, `%` ou `!` faz ler cru. Um interpretador,
 runner de teste ou build da allowlist roda o que os seus argumentos e o projeto
 escolherem — inclusive um programa a rodar ou uma pasta a limpar
 (`pytest --basetemp=…`, `go test -exec …`, `cargo --config …`) —, então a
 allowlist do Builder é uma conveniência, não um sandbox; um interpretador que
 recebe um script pelo stdin da chamada é perguntado, e um `date` que recebe
-stdin também (sob `cmd /c` ele lê dali uma data nova). Ele só passa trabalho a
+stdin também (sob `cmd /c` ele lê dali uma data nova; lá todo `date` pergunta). Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo
