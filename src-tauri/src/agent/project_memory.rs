@@ -325,41 +325,112 @@ pub fn named_in(command: &str) -> bool {
     if lower.contains(dir) && lower.contains(file) {
         return true;
     }
+    let parts_of = |word: &str| -> Vec<String> {
+        braces_as_star(word)
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_string)
+            .collect()
+    };
+    // `{}` is `find`'s and `xargs -I`'s placeholder, not a glob of every name.
     let paths: Vec<Vec<String>> = shell_words(&lower)
-        .into_iter()
-        .map(|word| {
-            braces_as_star(&word)
-                .split('/')
-                .filter(|part| !part.is_empty() && *part != ".")
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+        .iter()
+        .filter(|word| word.as_str() != "{}")
+        .map(|word| parts_of(word))
         .filter(|parts| !parts.is_empty())
         .collect();
+    let names_dir_in = |paths: &[Vec<String>]| {
+        paths
+            .iter()
+            .any(|p| glob_matches(&p[p.len() - 1], dir))
+    };
+    let names_file_in = |paths: &[Vec<String>]| {
+        paths
+            .iter()
+            .any(|p| p.len() == 1 && glob_matches(&p[0], file))
+    };
     let names_both = paths.iter().any(|p| {
         p.len() >= 2 && glob_matches(&p[p.len() - 2], dir) && glob_matches(&p[p.len() - 1], file)
     });
-    let names_dir = paths.iter().any(|p| glob_matches(&p[p.len() - 1], dir));
-    let names_file = paths
-        .iter()
-        .any(|p| p.len() == 1 && glob_matches(&p[0], file));
+    if names_both || (names_dir_in(&paths) && names_file_in(&paths)) {
+        return true;
+    }
     // The folder as the target of a command that writes or deletes what is
     // in it (`cp q/* .claudinio/`, `tar -C .claudinio`, `rm -rf .claudinio`),
     // and `find` acting on what it finds by the file's name. A heuristic
     // over the common forms, not a parse of every command (Phase 9 final
-    // review); plain reads and `git add` of the folder are not caught.
-    let words = shell_words(&lower);
-    let command_names: Vec<&str> = words
-        .iter()
-        .map(|w| w.rsplit('/').next().unwrap_or(w))
-        .collect();
-    let has = |names: &[&str]| command_names.iter().any(|w| names.contains(w));
-    let rewrites_folder = has(FOLDER_WRITERS) || (has(&["git"]) && has(GIT_REWRITERS));
-    let find_acts = has(&["find"]) && has(&["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
-    names_both
-        || (names_dir && (names_file || rewrites_folder || find_acts))
-        || (names_file && find_acts)
+    // review): the writer must be the command of a segment (not an argument,
+    // so `grep -rn install .claudinio/` reads), and that segment must name
+    // the folder or the file, or follow a `cd` into the folder. Plain reads
+    // and `git add` of the folder are not caught.
+    let mut in_dir = false;
+    for words in command_segments(&lower) {
+        let paths: Vec<Vec<String>> = words
+            .iter()
+            .filter(|word| word.as_str() != "{}")
+            .map(|word| parts_of(word))
+            .filter(|parts| !parts.is_empty())
+            .collect();
+        let names_dir = names_dir_in(&paths);
+        let commands = commands_of(&words);
+        let runs = |names: &[&str]| commands.iter().any(|c| names.contains(c));
+        if runs(&["cd", "pushd"]) && names_dir {
+            in_dir = true;
+            continue;
+        }
+        let rewrites_folder = runs(FOLDER_WRITERS)
+            || (runs(&["git"]) && words.iter().any(|w| GIT_REWRITERS.contains(&w.as_str())));
+        let find_acts = runs(&["find"])
+            && words.iter().any(|w| {
+                ["-delete", "-exec", "-execdir", "-ok", "-okdir"].contains(&w.as_str())
+            });
+        if (rewrites_folder && (names_dir || in_dir))
+            || (find_acts && (names_dir || in_dir || names_file_in(&paths)))
+        {
+            return true;
+        }
+    }
+    false
 }
+
+/// The segments of a lower-cased shell command — split at `;`, `|`, `&`,
+/// line breaks, parentheses and backquotes — each as its words, quotes and
+/// backslashes dropped.
+fn command_segments(lower: &str) -> Vec<Vec<String>> {
+    let folded: String = lower
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    folded
+        .split(|c: char| ";|&\n\r()`".contains(c))
+        .map(|seg| seg.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+        .filter(|words| !words.is_empty())
+        .collect()
+}
+
+/// The names a segment runs, by their last path part: its first word after
+/// any `NAME=value` assignments and, when that word is a command that runs
+/// another (`sudo`, `xargs`, `env`, …), every word after it too, since the
+/// command it runs can sit behind its own flags.
+fn commands_of(words: &[String]) -> Vec<&str> {
+    fn base(w: &str) -> &str {
+        w.rsplit('/').next().unwrap_or(w)
+    }
+    let mut rest = words.iter().skip_while(|w| w.contains('=') && !w.starts_with('-'));
+    let Some(first) = rest.next().map(|w| base(w)) else {
+        return Vec::new();
+    };
+    if RUNS_ANOTHER.contains(&first) {
+        std::iter::once(first).chain(rest.map(|w| base(w))).collect()
+    } else {
+        vec![first]
+    }
+}
+
+/// Commands whose arguments name the command they run, for `commands_of`.
+const RUNS_ANOTHER: &[&str] = &[
+    "sudo", "doas", "xargs", "env", "nohup", "nice", "time", "command", "exec", "timeout",
+];
 
 /// Commands that write or delete the contents of a folder named as their
 /// target, for `named_in`.
@@ -1119,6 +1190,11 @@ mod tests {
             "find . -name MEMORY.m? -exec cp /tmp/x {} ;",
             "find .claudinio -delete",
             "ls && cp q/* .c*/",
+            "cd .claudinio && cp /tmp/q/* .",
+            "ls | xargs cp -t .claudinio",
+            "sudo rm -rf .claudinio",
+            "FOO=1 rm -rf .claudinio",
+            "/bin/rm -rf .claudinio",
         ] {
             assert!(named_in(c), "{c}");
         }
@@ -1130,6 +1206,14 @@ mod tests {
             "find . -name '*.rs'",
             "cp a.txt b.txt",
             "rm -rf build",
+            // Final-review follow-up: `{}` is find's placeholder, not a glob
+            // that matches every name, and a writer's name is a command only
+            // in command position, in the segment that names the folder.
+            "find . -name '*.rs' -exec wc -l {} +",
+            "find src -type f -exec grep -l TODO {} \\;",
+            "grep -rn install .claudinio/",
+            "ls .claudinio && cp a.txt b.txt",
+            "cat .claudinio/notes.txt | grep rm",
         ] {
             assert!(!named_in(c), "{c}");
         }
