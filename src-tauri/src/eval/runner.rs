@@ -626,6 +626,58 @@ reference:
         );
     }
 
+    /// The failure every lost run of the clean baseline (2026-10-18) shared:
+    /// a task that needs a new file, in a folder the workspace does not have.
+    /// The policy approves the creation like any edit, and the oracle sees
+    /// the file.
+    #[tokio::test]
+    async fn a_scripted_model_creates_a_new_file_the_policy_approves() {
+        const NEW_FILE_TASK: &str = r##"
+id: notes
+title: Write the notes
+tags: [docs]
+prompt: Write docs/NEW.md saying final.
+setup:
+  files:
+    README.md: "# Project\n"
+oracle:
+  command: grep -q '^final$' docs/NEW.md
+  timeout_s: 20
+reference:
+  files:
+    docs/NEW.md: "final\n"
+"##;
+        let work = tempfile::tempdir().unwrap();
+        let task = Task::parse(NEW_FILE_TASK, "notes").unwrap();
+        let path = work
+            .path()
+            .join("notes/ws/docs/NEW.md")
+            .to_string_lossy()
+            .to_string();
+        let (base, _, _) = spawn_with_usage(
+            vec![
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "", "new_string": "draft\n",
+                    }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "draft", "new_string": "final",
+                    }),
+                },
+                Reply::Text("Wrote docs/NEW.md."),
+            ],
+            None,
+        )
+        .await;
+        let result = run_task(&task, &options(&base, work.path())).await;
+        assert_eq!(result.outcome, "completed");
+        assert!(result.pass, "oracle: {}", result.oracle_tail);
+    }
+
     /// A task that runs out of time is stopped the way the app's Stop button
     /// stops a run, and wound down before its oracle runs: a subagent still
     /// waiting on the provider when the clock runs out must not edit the

@@ -3003,6 +3003,114 @@ pub(crate) mod surface_tests {
         }
     }
 
+    /// The Phase 3b regression at the harness level. Every failed run of the
+    /// clean baseline eval (2026-10-18) was a new file: read_file could not
+    /// read it, read-before-edit then refused the edit, and the agent gave up
+    /// or wrote it from a test's side effect. One `edit_file` with an empty
+    /// old_string creates `docs/NEW.md` in a folder that does not exist yet,
+    /// and the next edit of it needs no read_file — on every path an edit is
+    /// applied by: auto-approved, through the approval prompt, and in the
+    /// Compact profile a small window gets.
+    #[tokio::test]
+    async fn the_model_creates_a_file_in_a_missing_folder_then_edits_it_without_reading() {
+        let new_file = |greet: &str| {
+            std::path::Path::new(greet)
+                .parent()
+                .unwrap()
+                .join("docs")
+                .join("NEW.md")
+                .to_string_lossy()
+                .to_string()
+        };
+        let script = move |greet: &str| {
+            let path = new_file(greet);
+            vec![
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "", "new_string": "# Notes\n\ndraft\n",
+                    }),
+                },
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "draft", "new_string": "final",
+                    }),
+                },
+                Reply::Text("wrote the notes"),
+            ]
+        };
+        let auto = run_script("create-auto", None, None, script).await;
+        let asked = run_script("create-asked", None, Some(true), script).await;
+        let compact = run_script("create-compact", Some(32_768), None, script).await;
+        assert_eq!(run_config(&compact.store).0, "compact");
+        for run in [auto, asked, compact] {
+            assert!(matches!(run.outcome, Ok(RunOutcome::Completed)));
+            let created = new_file(&run.file.to_string_lossy());
+            assert_eq!(
+                std::fs::read_to_string(&created).ok().as_deref(),
+                Some("# Notes\n\nfinal\n"),
+                "{}",
+                run.bodies.last().unwrap()
+            );
+            let results: Vec<&String> = run.bodies.iter().skip(1).take(2).collect();
+            assert!(results[0].contains("Created"), "{}", results[0]);
+            assert!(
+                !results[1].contains("read_file must be called"),
+                "{}",
+                results[1]
+            );
+            std::fs::remove_dir_all(&run.root).ok();
+        }
+    }
+
+    /// The approval prompt shows a creation as a diff from nothing: the
+    /// proposal's old_string is empty and every line of the diff is added.
+    #[tokio::test]
+    async fn a_creation_is_proposed_as_a_diff_from_nothing_and_a_no_writes_nothing() {
+        let script = |greet: &str| {
+            let path = std::path::Path::new(greet)
+                .parent()
+                .unwrap()
+                .join("docs/NEW.md")
+                .to_string_lossy()
+                .to_string();
+            vec![
+                Reply::Tool {
+                    name: "edit_file",
+                    input: serde_json::json!({
+                        "path": path, "old_string": "", "new_string": "one\ntwo\n",
+                    }),
+                },
+                Reply::Text("done"),
+            ]
+        };
+        let run = run_script("create-no", None, Some(false), script).await;
+        let proposal = run
+            .events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::ToolCall {
+                    tool_name,
+                    edit_proposal: Some(p),
+                    ..
+                } if tool_name == "edit_file" => Some(p.clone()),
+                _ => None,
+            })
+            .expect("the creation is shown as a proposal");
+        assert_eq!(proposal.old_string, "");
+        assert!(
+            proposal.unified_diff.contains("+one\n+two"),
+            "{}",
+            proposal.unified_diff
+        );
+        assert!(
+            !run.root.join("docs").exists(),
+            "a refused creation writes nothing"
+        );
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
     /// A shell command that writes a file is an edit in the Standard Builder
     /// too: asked about even when its prefix (`echo `) is allowlisted, never
     /// refused outright as it was while the session had to delegate edits.

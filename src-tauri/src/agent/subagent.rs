@@ -2688,6 +2688,58 @@ mod delegation_tests {
         std::fs::remove_dir_all(&ws).ok();
     }
 
+    /// A code subagent creates a file the same way the main session does
+    /// (lean-harness Phase 3b): the baseline eval's subagents reported
+    /// "BLOCKED — could not be created" for every new file they were given.
+    #[tokio::test]
+    async fn a_code_subagent_creates_a_file_in_a_missing_folder_and_edits_it() {
+        let (ws, ws_str, store) = workspace("create");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let path = ws.join("src/lib/path.ts").to_string_lossy().to_string();
+        let (base, _, _) = spawn_recording(vec![
+            Reply::Tool {
+                name: "edit_file",
+                input: serde_json::json!({
+                    "path": path, "old_string": "", "new_string": "export const a = 1;\n",
+                }),
+            },
+            Reply::Tool {
+                name: "edit_file",
+                input: serde_json::json!({
+                    "path": path, "old_string": "= 1", "new_string": "= 2",
+                }),
+            },
+            Reply::Text("created src/lib/path.ts"),
+        ])
+        .await;
+        let mut config = config_for(&base);
+        config.yolo_mode = true;
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_parent",
+            serde_json::json!({ "agents": [
+                {"name": "writer", "goal": "create src/lib/path.ts", "mode": "code"}
+            ]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&path).ok().as_deref(),
+            Some("export const a = 2;\n")
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
     #[tokio::test]
     async fn a_code_subagent_starts_from_the_shared_brief_and_an_explore_one_does_not() {
         let (ws, ws_str, store) = workspace("brief");
