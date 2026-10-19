@@ -257,18 +257,25 @@ const MEMORY_READS: &[&str] = &[
 ];
 
 /// Commands refused outright wherever they start a part of the command
-/// (split at `;`, `&`, `|`, a parenthesis or a line break outside quotes; a
-/// leading `sudo` skipped).
+/// (split at `;`, `&`, `|`, a parenthesis or a line break outside inert
+/// quotes; a leading `sudo` skipped).
 const BASH_BLACKLIST: &[&str] = &["chown", "dd", "fdisk", "format", "mkfs"];
 
 /// The deny-list (`BASH_BLACKLIST`), by whole words: a tripwire for the
 /// obvious spelling of a destructive command (`rm -rf /`, `chmod 777`, a
 /// fork bomb), not a boundary — `rm -fr /` only asks. Words, not
 /// substrings, so `git log --format %H`, `cp /tmp/x .` and `rm -rf
-/// /tmp/build` reach the rule instead of a refusal nothing can lift. Quoted
-/// text is blanked first: `git commit -m "fix(dd): x"` holds no command
-/// `dd`, and a quoted script (`sh -c 'dd …'`) asks, as a tripwire may.
+/// /tmp/build` reach the rule instead of a refusal nothing can lift. Inert
+/// quoted text is blanked first: `git commit -m "fix(dd): x"` holds no
+/// command `dd`, and a quoted script (`sh -c 'dd …'`) asks, as a tripwire
+/// may. Quotes are inert only when the text has no `$`, backquote,
+/// backslash or `#` — `"$(rm -rf /)"` runs, `\'` and `$'…'` open no plain
+/// quote and a `'` in a comment opens nothing — so any of those is read raw,
+/// split at a backquote too.
 fn on_the_deny_list(command: &str) -> bool {
+    if command.contains(['$', '`', '\\', '#']) {
+        return command.contains(":(){") || deny_listed_part(command, &['`']);
+    }
     let mut open = None;
     let unquoted: String = command
         .chars()
@@ -286,8 +293,14 @@ fn on_the_deny_list(command: &str) -> bool {
             }
         })
         .collect();
-    command.contains(":(){")
-        || unquoted.split([';', '&', '|', '(', ')', '\n']).any(|part| {
+    command.contains(":(){") || deny_listed_part(&unquoted, &[])
+}
+
+/// Whether a part of `text` split at `;`, `&`, `|`, a parenthesis, a line
+/// break or one of `more` starts with a deny-listed command.
+fn deny_listed_part(text: &str, more: &[char]) -> bool {
+    text.split(|c| ";&|()\n".contains(c) || more.contains(&c))
+        .any(|part| {
             let words: Vec<&str> = part.split_whitespace().collect();
             let command = words.iter().find(|w| **w != "sudo").copied().unwrap_or("");
             BASH_BLACKLIST.contains(&command.split('.').next().unwrap_or(""))
@@ -1609,7 +1622,8 @@ mod shell_rule_tests {
             "rm -rf /tmp/build",
             "grep -rn \"chown \" src",
             "grep -rn \"chmod\" src",
-            // A word inside quotes is text, not a command, even after a
+            // A word inside inert quotes (no `$`, backquote, backslash or
+            // `#` in the command) is text, not a command, even after a
             // parenthesis, `;` or `&` (review of the simplified rule:
             // conventional-commit scopes were refused with no override).
             "grep -rn \"fix(format)\" CHANGELOG.md",
@@ -1657,6 +1671,19 @@ mod shell_rule_tests {
             "cp / x",
             "echo x > \"/dev/sda\"",
             "echo x >'/dev/sda'",
+            // sh does not read every quote as a closed span of text: inside
+            // `"..."` a `$(...)` or a backquote still runs, `\'` outside
+            // quotes opens nothing, `$'...'` is ANSI-C quoting and a quote
+            // inside a `#` comment opens nothing. Text with `$`, a backquote,
+            // a backslash or `#` is read raw, so these stay refused.
+            "echo \"$(rm -rf /)\"",
+            "echo \"`rm -rf /`\"",
+            "echo \"$(dd if=/dev/zero of=/dev/sda)\"",
+            "echo \"$(mkfs.ext4 /dev/sda1)\"",
+            "git log --grep \"$(chown root /etc/passwd)\"",
+            "echo don\\'t; rm -rf /",
+            "echo $'it\\'s'; rm -rf /",
+            "ls # don't\nrm -rf /",
         ] {
             assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
             assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
