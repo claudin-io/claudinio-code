@@ -28,6 +28,7 @@ import {
   createsFile,
   describeTaskUpdate,
   detectLanguageFromPath,
+  listArg,
   parseOutline,
   taskUpdates,
   toolTitle,
@@ -706,7 +707,7 @@ export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }
         <SpawnAgentsBody agents={(props.call.args.agents as AgentSpec[]) ?? []} />
       </Match>
       <Match when={name() === "load_tools"}>
-        <LoadToolsBody names={(props.call.args.names as string[]) ?? []} result={props.result} />
+        <LoadToolsBody names={listArg(props.call.args.names).map(String)} result={props.result} />
       </Match>
       <Match when={name().startsWith("doc_")}>
         <DocBody name={name()} args={props.call.args} result={props.result} />

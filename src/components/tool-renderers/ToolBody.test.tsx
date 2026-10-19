@@ -571,6 +571,35 @@ describe("load_tools and skills", () => {
   });
 });
 
+// Model-supplied args are not checked against the schema before they reach
+// the UI (the backend answers a malformed call with an error), so a summary
+// that assumed an array threw, and the error boundary replaced the whole live
+// run with its fallback (final branch review).
+describe("malformed tool args", () => {
+  it("summarises a load_tools call whose names is a string", () => {
+    expect(toolSummary(makeCall("load_tools", { names: "semantic_search" }))).toBe("semantic_search");
+    expect(toolSummary(makeCall("load_tools", { names: 3 }))).toBe("");
+  });
+
+  it("renders one row for a load_tools call whose names is a string", () => {
+    const call = makeCall("load_tools", { names: "semantic_search" });
+    const result = makeResult("load_tools", "", "load_tools needs the names to load");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.querySelectorAll("[data-loaded-tool]").length).toBe(1);
+    dispose();
+  });
+
+  it("skips entries of a tasks_update batch that are not objects", () => {
+    expect(toolSummary(makeCall("tasks_update", { updates: [null, { id: "t1", status: "done" }, "x"] }))).toBe(
+      "t1 → done",
+    );
+  });
+
+  it("summarises a tasks_set call whose tasks is not an array", () => {
+    expect(toolSummary(makeCall("tasks_set", { tasks: "t1" }))).toBe("0/0 done");
+  });
+});
+
 // Lean-harness Phase 4b: the living document's tools. Each reads as what it
 // did to the document — started it, wrote or claimed a section, read one,
 // added one — and the outline the backend answers with renders as rows.

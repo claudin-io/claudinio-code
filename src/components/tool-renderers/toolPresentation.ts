@@ -83,9 +83,21 @@ export function describeTaskUpdate(u: TaskUpdateArg): string {
   return notes > 0 ? `${id} · ${notes} note${notes === 1 ? "" : "s"}` : id;
 }
 
-/** The changes a `tasks_update` call asked for: its `updates`, or itself. */
+/** The changes a `tasks_update` call asked for: its `updates`, or itself.
+ * Entries that are not objects are skipped: the args are the model's, as sent. */
 export function taskUpdates(args: Record<string, unknown>): TaskUpdateArg[] {
-  return Array.isArray(args.updates) ? (args.updates as TaskUpdateArg[]) : [args as TaskUpdateArg];
+  if (!Array.isArray(args.updates)) return [args as TaskUpdateArg];
+  return args.updates.filter((u): u is TaskUpdateArg => typeof u === "object" && u !== null);
+}
+
+/** A list argument as sent by the model: an array kept, a lone string as a
+ * one-item list, anything else empty. Nothing checks the args against the
+ * schema before they reach the UI, and a summary that throws takes the whole
+ * run down with it through the error boundary. */
+export function listArg<T = unknown>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value === "string") return [value as T];
+  return [];
 }
 
 export function toolTitle(name: string): string {
@@ -252,7 +264,9 @@ export function toolSummary(call: ToolCallData): string {
       return `${qs.length} question${qs.length === 1 ? "" : "s"}`;
     }
     case "tasks_set": {
-      const tasks = (args.tasks as { status: string }[] | undefined) ?? [];
+      const tasks = listArg<{ status?: string } | null>(args.tasks).filter(
+        (t): t is { status?: string } => typeof t === "object" && t !== null,
+      );
       const done = tasks.filter((task) => task.status === "done").length;
       return `${done}/${tasks.length} done`;
     }
@@ -273,7 +287,7 @@ export function toolSummary(call: ToolCallData): string {
     case "enter_plan_mode":
       return truncate(String(args.reason ?? ""), 80);
     case "load_tools":
-      return truncate(((args.names as string[] | undefined) ?? []).join(", "), 80);
+      return truncate(listArg(args.names).map(String).join(", "), 80);
     case "skills":
       return args.action === "read" ? String(args.name ?? "") : "";
     case "doc_create": {
