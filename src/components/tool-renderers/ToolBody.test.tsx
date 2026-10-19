@@ -110,6 +110,18 @@ describe("toolPresentation", () => {
     );
   });
 
+  // "Created" claims a file now exists on disk: a creation the person
+  // rejected, or one the harness refused (the file exists, the path is
+  // relative), did not happen and must not be titled as if it had.
+  it("titles a creation that did not happen as not created", () => {
+    const call = makeCall("edit_file", { path: "a.md", old_string: "", new_string: "x" });
+    expect(toolHeader(call, makeResult("edit_file", "Created a.md")).title).toBe("Created file");
+    expect(toolHeader(call, makeResult("edit_file", "Edit rejected by user")).title).toBe("File not created");
+    expect(toolHeader(call, makeResult("edit_file", "", "a.md already exists, ...")).title).toBe("File not created");
+    // A reloaded session carries the refusal as plain output, no error flag.
+    expect(toolHeader(call, makeResult("edit_file", "Error: a.md is relative; ...")).title).toBe("File not created");
+  });
+
   it("keeps Ran command for bash that merely mentions grep", () => {
     expect(toolHeader(makeCall("bash", { command: "cat file | grep foo" })).title).toBe("Ran command");
     expect(toolHeader(makeCall("bash", { command: "git status" })).title).toBe("Ran command");

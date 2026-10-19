@@ -1316,7 +1316,7 @@ export const ToolRow: Component<{
   isExpanded: boolean;
   onToggle: () => void;
 }> = (props) => {
-  const header = () => toolHeader(props.tool.call);
+  const header = () => toolHeader(props.tool.call, props.tool.result);
   const icon = () => header().icon;
   const title = () => header().title;
   const summary = () => toolSummary(props.tool.call);

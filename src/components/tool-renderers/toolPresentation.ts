@@ -1,4 +1,4 @@
-import type { ToolCallData } from "../../lib/ipc";
+import type { ToolCallData, ToolResultData } from "../../lib/ipc";
 import type { IconName } from "../Icon";
 import { toolIcon } from "../Icon";
 
@@ -119,7 +119,7 @@ function splitBashCommand(command: string): { lead: string; args: string } {
  * but reclassifies bash invocations that are really searches (grep/rg/…) so
  * the timeline reads "Searched files" instead of "Ran command".
  */
-export function toolHeader(call: ToolCallData): { icon: IconName; title: string } {
+export function toolHeader(call: ToolCallData, result?: ToolResultData): { icon: IconName; title: string } {
   if (call.toolName === "bash" && SEARCH_COMMANDS.has(splitBashCommand(String(call.args.command ?? "")).lead)) {
     return { icon: "search", title: TITLES.grep };
   }
@@ -147,7 +147,7 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
     if (title) return { icon: "globe", title };
   }
   if (createsFile(call)) {
-    return { icon: toolIcon("edit_file"), title: "Created file" };
+    return { icon: toolIcon("edit_file"), title: createdFile(result) ? "Created file" : "File not created" };
   }
   // A batched update moves several tasks; the title says so.
   if (call.toolName === "tasks_update" && Array.isArray(call.args.updates)) {
@@ -172,6 +172,18 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
  */
 export function createsFile(call: Pick<ToolCallData, "toolName" | "args">): boolean {
   return call.toolName === "edit_file" && call.args.old_string === "";
+}
+
+/**
+ * Whether a creating `edit_file` created its file, as far as its result says:
+ * "Created" claims the file is on disk, so a creation the person rejected or
+ * the harness refused (the file exists, the path is relative) is not titled
+ * that way. The success text is edit_file's own ("Created <path>"); a
+ * reloaded session's result carries no error flag, so the text is what tells.
+ * Before a result arrives the call is still in flight and keeps the title.
+ */
+function createdFile(result: ToolResultData | undefined): boolean {
+  return !result || (!result.error && result.output.startsWith("Created "));
 }
 
 /** Tools whose body is always shown — small enough to skip the click-to-expand step. */
