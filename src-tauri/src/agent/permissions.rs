@@ -114,9 +114,10 @@ pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
 //    print, and have no option that writes a file or runs a program;
 // 5. the write detector (`bash_writes_files`) sees no write.
 //
-// Before the rule, the deny-list (`on_the_deny_list`: any word named like
-// a deny-listed command, quotes read as the shell reads them or not at all;
-// a write to a disk device) and the memory guard
+// Before the rule, the deny-list (`on_the_deny_list`: a word that runs
+// named like a deny-listed command, or any bare word so named where quotes
+// were read as the shell reads them; a redirect into a device that is not
+// a stream sink) and the memory guard
 // (`project_memory::mentions_memory` on a command that is not a plain read)
 // refuse outright, in every mode and under YOLO.
 //
@@ -259,11 +260,23 @@ const MEMORY_READS: &[&str] = &[
     "git blame",
 ];
 
-/// Commands refused outright wherever they are a word of the command,
+/// Commands refused outright where a word names them (`deny_listed_part`),
 /// compared by name (`command_name`) — `format` only where it starts a part
 /// (after a `sudo`), since `ruff format`, `pnpm format` and `dotnet format`
 /// are everyday subcommands and a wrapped `format` only asks.
-const BASH_BLACKLIST: &[&str] = &["chown", "dd", "fdisk", "format", "mkfs"];
+const BASH_BLACKLIST: &[&str] = &[
+    "cfdisk", "chown", "dcfldd", "dd", "fdisk", "format", "gdisk", "mkfs", "parted", "sfdisk",
+    "sgdisk", "wipefs",
+];
+
+/// Words that run the command after them (`sudo -u root dd`, `xargs -0
+/// chown`, `find -exec dd`), and the keywords and brace that start one: a
+/// word anywhere after one of these runs, as far as the deny-list knows.
+const RUNS_WHAT_FOLLOWS: &[&str] = &[
+    "sudo", "doas", "env", "time", "xargs", "exec", "command", "builtin", "nice", "nohup",
+    "timeout", "stdbuf", "ionice", "chrt", "taskset", "strace", "watch", "-exec", "-execdir",
+    "-ok", "if", "then", "do", "else", "elif", "while", "until", "{", "!",
+];
 
 /// Where the deny-list splits a command into parts.
 const DENY_SEPARATORS: &str = ";&|()\n`";
@@ -277,13 +290,15 @@ const DENY_SEPARATORS: &str = ";&|()\n`";
 /// "fix(dd): x"` holds one word, not a command `dd`, while `'mkfs.ext4'`
 /// is `mkfs.ext4`; a quoted script (`sh -c 'dd …'`) asks, as a tripwire
 /// may. When the scan could misread a quote the text is read raw, split at
-/// every separator, quoted or not.
+/// every separator, quoted or not, and only a word that runs counts there.
 fn on_the_deny_list(command: &str, windows: bool) -> bool {
-    let text = inert_text(command, windows).unwrap_or_else(|| command.to_string());
+    let inert = inert_text(command, windows);
+    let raw = inert.is_none();
+    let text = inert.unwrap_or_else(|| command.to_string());
     command.contains(":(){")
         || text
             .split(|c| DENY_SEPARATORS.contains(c))
-            .any(deny_listed_part)
+            .any(|part| deny_listed_part(part, raw, windows))
 }
 
 /// `command` with every quoted span turned into part of one word, as the
@@ -332,12 +347,24 @@ fn inert_text(command: &str, windows: bool) -> Option<String> {
     Some(text)
 }
 
-/// The name a word runs as a command: quotes and cmd's `^` dropped, the
-/// last path segment (`/bin/dd`, `C:\…\format.com`), lowercase, without
-/// `.exe` or `.com`, and `mkfs.ext4` read as `mkfs`.
-fn command_name(word: &str) -> String {
+/// A word as the deny-list compares it: quotes and cmd's `^` dropped,
+/// lowercase, and under sh every backslash dropped (sh reads `\x` as `x`,
+/// so `d\d` is `dd`); under cmd a leading `@` (echo off) dropped.
+fn deny_word(word: &str, windows: bool) -> String {
     let word = word.replace(['\'', '"', '^'], "").to_lowercase();
-    let base = word.rsplit(['/', '\\']).next().unwrap_or("");
+    if windows {
+        word.trim_start_matches('@').to_string()
+    } else {
+        word.replace('\\', "")
+    }
+}
+
+/// The name a word (`deny_word`) runs as a command: the last path segment
+/// (`/bin/dd`, and under cmd `C:\…\format.com`), without `.exe` or `.com`,
+/// and `mkfs.ext4` read as `mkfs`.
+fn command_name(word: &str, windows: bool) -> String {
+    let separators: &[char] = if windows { &['/', '\\'] } else { &['/'] };
+    let base = word.rsplit(separators).next().unwrap_or("");
     let base = base
         .strip_suffix(".exe")
         .or_else(|| base.strip_suffix(".com"))
@@ -349,37 +376,54 @@ fn command_name(word: &str) -> String {
     }
 }
 
-/// Whether one part of the command names a deny-listed command anywhere in
-/// its words (so a path, `time`, `env`, `X=1`, `sudo -u root`, `xargs`, a
-/// brace group or `then` hides nothing), or spells `rm -rf /`, `sudo rm`,
-/// `chmod 777` or a move or copy of `/`.
-fn deny_listed_part(part: &str) -> bool {
+/// Whether one part of the command names a deny-listed command, or spells
+/// `rm -rf /`, `sudo rm`, `chmod 777` or a move or copy of `/`. A word runs
+/// where it starts the part (after `X=1` assignments) or follows one of
+/// `RUNS_WHAT_FOLLOWS` (so `time`, `env`, `sudo -u root`, `xargs`, a brace
+/// group or `then` hides nothing): there it counts by its name, a path by
+/// its last segment. Elsewhere only a bare name counts (`which dd`), and
+/// only where the quotes were read as the shell reads them: read `raw`, a
+/// word of a message cannot be told from a command, and `cat docs/dd` or
+/// `git checkout -b fix/chown` names no command.
+fn deny_listed_part(part: &str, raw: bool, windows: bool) -> bool {
     let words: Vec<String> = part
         .split_whitespace()
-        .map(|w| w.replace(['\'', '"', '^'], "").to_lowercase())
+        .map(|w| deny_word(w, windows))
         .collect();
-    let names: Vec<String> = words.iter().map(|w| command_name(w)).collect();
-    let command = names.iter().position(|n| n != "sudo");
+    let names: Vec<String> = words.iter().map(|w| command_name(w, windows)).collect();
+    let assignment = |w: &String| w.contains('=') && !w.starts_with('-');
+    let runs = |i: usize| {
+        words[..i].iter().all(|w| w.is_empty() || assignment(w))
+            || names[..i]
+                .iter()
+                .any(|n| RUNS_WHAT_FOLLOWS.contains(&n.as_str()))
+    };
+    let bare = |i: usize| !raw && !words[i].contains(['/', '\\']);
+    let command = (0..words.len())
+        .position(|i| !words[i].is_empty() && names[i] != "sudo" && !assignment(&words[i]));
     let pair = |i: usize, name: &str, next: &[&str]| {
         names[i] == name && words.get(i + 1).is_some_and(|w| next.contains(&w.as_str()))
     };
-    names
-        .iter()
-        .enumerate()
-        .any(|(i, n)| BASH_BLACKLIST.contains(&n.as_str()) && (n != "format" || Some(i) == command))
-        || (0..names.len()).any(|i| {
-            names
-                .get(i + 1)
-                .is_some_and(|n| names[i] == "sudo" && n == "rm")
-                || pair(i, "chmod", &["777"])
-                || pair(i, "mv", &["/", "/*"])
-                || pair(i, "cp", &["/", "/*"])
-                || (pair(i, "rm", &["-rf"])
-                    && words
-                        .get(i + 2)
-                        .is_some_and(|w| ["/", "/*", "~", "~/", "~/*"].contains(&w.as_str())))
-                || (pair(i, "chmod", &["-r"]) && words.get(i + 2).is_some_and(|w| w == "777"))
-        })
+    names.iter().enumerate().any(|(i, n)| {
+        BASH_BLACKLIST.contains(&n.as_str())
+            && if n == "format" {
+                Some(i) == command
+            } else {
+                runs(i) || bare(i)
+            }
+    }) || (0..names.len()).any(|i| {
+        names
+            .get(i + 1)
+            .is_some_and(|n| names[i] == "sudo" && n == "rm")
+            || pair(i, "chmod", &["777"])
+            || pair(i, "mv", &["/", "/*"])
+            || pair(i, "cp", &["/", "/*"])
+            || (pair(i, "rm", &["-rf"])
+                && words[i + 2..]
+                    .iter()
+                    .any(|w| ["/", "/*", "~", "~/", "~/*"].contains(&w.as_str())))
+            || (pair(i, "chmod", &["-r"]) && words.get(i + 2).is_some_and(|w| w == "777"))
+    })
 }
 
 /// Whether `command` holds a character the rule's word split and the shell
@@ -457,13 +501,18 @@ fn allowlisted(part: &str, allowlist: &[&str], auto_approve_git: bool) -> bool {
         return allowlist.contains(&format!("git {sub}").as_str())
             && rest.iter().all(|w| LISTING_FLAGS.contains(w));
     }
-    // `date -s`, `--set` or a bare date operand sets the clock: only a bare
-    // `date` or one `+FORMAT` runs unasked.
     if let ["date", rest @ ..] = words.as_slice() {
-        return allowlist.contains(&"date")
-            && (rest.is_empty() || matches!(rest, [format] if format.starts_with('+')));
+        return allowlist.contains(&"date") && date_only_prints(rest, cfg!(windows));
     }
     allowlist.iter().any(|e| starts_with_entry(part, e))
+}
+
+/// Whether `date` with `args` only prints. On sh `-s`, `--set` or a bare
+/// date operand sets the clock, so only a bare `date` or one `+FORMAT`
+/// does. Under `cmd /c` (`windows`) the internal `DATE` reads any argument
+/// as a new date and, bare, prompts for one, so none does.
+fn date_only_prints(args: &[&str], windows: bool) -> bool {
+    !windows && (args.is_empty() || matches!(args, [format] if format.starts_with('+')))
 }
 
 /// The rule (see the top of this section): `command` runs unasked.
@@ -642,22 +691,29 @@ fn without_harmless_redirections(command: &str) -> String {
     text
 }
 
-/// A redirection (`>`, `>>`, `>|`, spaced or not; the caller drops quotes)
-/// into a disk or memory device (`/dev/sda`, `/dev/nvme0n1`, `/dev/mem`, …):
-/// refused outright.
-/// `/dev/null`, `/dev/stderr` and the like are not among them.
+/// A redirection (`>`, `>>`, `>|`, `>&`, spaced or not; the caller drops
+/// quotes) into `/dev/` that is not a stream sink — `null`, `stdout`,
+/// `stderr`, `tty`, `pts/`, `fd/` — or a file under `shm/`: refused
+/// outright, so `/dev/sda`, `/dev/root`, `/dev/mem` and devices no list
+/// names are covered. The target is read as sh reads the path: backslashes
+/// dropped, `//` and `/./` collapsed, and a `..` never a sink.
 fn redirects_into_a_disk(command: &str) -> bool {
-    const DISKS: &[&str] = &[
-        "sd", "hd", "vd", "xvd", "nvme", "mmcblk", "disk", "rdisk", "mem", "kmem", "port",
-        "mapper/", "md", "dm-", "loop", "nbd", "sr", "cpu/", "watchdog",
-    ];
+    const SINKS: &[&str] = &["null", "stdout", "stderr", "tty", "pts/", "fd/", "shm/"];
     command.match_indices('>').any(|(at, _)| {
-        let target = command[at + 1..]
-            .trim_start_matches(['>', '|'])
-            .trim_start();
-        target
-            .strip_prefix("/dev/")
-            .is_some_and(|device| DISKS.iter().any(|disk| device.starts_with(disk)))
+        let target: String = command[at + 1..]
+            .trim_start_matches(['>', '|', '&'])
+            .trim_start()
+            .split(|c: char| c.is_whitespace() || ";|&)<>".contains(c))
+            .next()
+            .unwrap_or("")
+            .replace('\\', "");
+        let mut path = target;
+        while path.contains("//") || path.contains("/./") {
+            path = path.replace("//", "/").replace("/./", "/");
+        }
+        path.strip_prefix("/dev/").is_some_and(|device| {
+            device.contains("..") || !SINKS.iter().any(|sink| device.starts_with(sink))
+        })
     })
 }
 
@@ -1882,5 +1938,146 @@ mod shell_rule_tests {
         );
         assert_eq!(builder("date", None), PermissionLevel::Auto);
         assert_eq!(builder("date", Some("")), PermissionLevel::Auto);
+    }
+
+    /// sh reads `\x` outside quotes as `x`, so a backslash inside a name
+    /// spells the same command: `d\d` runs `dd` and `r\m -rf \/` runs `rm -rf
+    /// /` (run in dash and bash with stub binaries; review of `e3a9cfc`).
+    #[test]
+    fn a_backslash_inside_a_name_hides_nothing_from_the_deny_list() {
+        for c in [
+            "d\\d if=/dev/zero of=/dev/sda",
+            "ch\\own -R nobody /",
+            "m\\kfs.ext4 /dev/sda1",
+            "c\\hmod 777 /",
+            "r\\m -rf \\/",
+        ] {
+            assert!(on_the_deny_list(c, false), "{c:?}");
+            assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+            assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
+        }
+    }
+
+    /// A redirect into `/dev/` is refused unless it names a stream sink
+    /// (`null`, `stdout`, `stderr`, `tty`, `fd/N`) or `shm/`, after the
+    /// spelling sh reads as the same path is normalised: `//`, `/./`, a
+    /// backslash, `>&` (review of `e3a9cfc`; `ls -la /dev//null /dev/./null`
+    /// is one node).
+    #[test]
+    fn a_redirect_into_any_device_but_a_stream_sink_is_refused() {
+        for c in [
+            "echo x > /dev//sda",
+            "echo x > /dev/./sda",
+            "echo x > /dev/root",
+            "echo x > /dev/\\sda",
+            "echo x >& /dev/sda",
+            "echo x >&/dev/sda",
+            "echo x > //dev/sda",
+            "echo x > /dev/shm/../sda",
+            "echo x > /dev/zram0",
+        ] {
+            assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+        }
+        for c in [
+            "ls > /dev/null",
+            "ls >/dev/null 2>&1",
+            "ls &> /dev/null",
+            "echo x >&2",
+            "echo x > /dev/stderr",
+            "echo x > /dev/stdout",
+            "echo x > /dev/tty",
+            "echo x > /dev/fd/3",
+            "echo x > /dev/shm/scratch.txt",
+            "git log >/dev/nullX",
+        ] {
+            assert_ne!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+        }
+    }
+
+    /// Under `cmd /c` a leading `@` only turns echo off, and the rest runs as
+    /// the command (cmd's documented prefix; not run on a Windows host).
+    #[test]
+    fn a_leading_at_sign_hides_nothing_where_cmd_runs_the_command() {
+        for c in [
+            "@format d: /q /y",
+            "@FORMAT d: /q /y",
+            "ls & @format d: /q /y",
+        ] {
+            assert!(on_the_deny_list(c, true), "{c:?}");
+        }
+    }
+
+    /// A path counts by its last segment only where it runs: at the start of
+    /// a part or after a wrapper. And read raw, a word of a message cannot be
+    /// told from a command, so only those positions count there (review of
+    /// `e3a9cfc`: each was refused with no override).
+    #[test]
+    fn only_a_word_that_runs_counts_by_its_path_or_in_raw_text() {
+        for c in [
+            "cat docs/dd",
+            "git checkout -b fix/chown",
+            "git commit -m \"$(cat <<'EOF'\nRemove the dd wrapper\nEOF\n)\"",
+            "git commit -m \"fix dd\" # x",
+            "git commit -m \"Fix chown on \\\"weird\\\" paths\"",
+        ] {
+            assert!(!on_the_deny_list(c, false), "{c:?}");
+            assert_ne!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(builder("cat docs/dd", None), PermissionLevel::Auto);
+        assert!(!on_the_deny_list("git commit -m \"50% faster dd\"", true));
+        for c in [
+            "echo x | xargs /bin/chown nobody",
+            "sudo -u root /bin/dd if=/dev/zero of=/dev/sda",
+            "nice -n 19 /sbin/mkfs.ext4 /dev/sda1",
+            "find / -exec /bin/chown nobody {} +",
+        ] {
+            assert!(on_the_deny_list(c, false), "{c:?}");
+        }
+    }
+
+    /// Partitioning and raw-write tools of the deny-listed kind, which
+    /// `main`'s substrings (`fdisk`, `dd if=`) refused (review of `e3a9cfc`).
+    #[test]
+    fn partitioning_and_raw_write_tools_are_refused() {
+        for c in [
+            "sfdisk /dev/sda",
+            "cfdisk /dev/sda",
+            "gdisk /dev/sda",
+            "sgdisk -Z /dev/sda",
+            "parted /dev/sda mklabel gpt",
+            "wipefs -a /dev/sda",
+            "dcfldd if=/dev/zero of=/dev/sda",
+        ] {
+            assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+            assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
+        }
+    }
+
+    /// GNU `rm` refuses a plain `rm -rf /`; `--no-preserve-root` is the
+    /// spelling that wipes it, so a root target counts wherever it follows.
+    #[test]
+    fn rm_rf_with_a_root_target_anywhere_after_it_is_refused() {
+        for c in [
+            "rm -rf --no-preserve-root /",
+            "rm -rf build /",
+            "rm -rf -- ~",
+        ] {
+            assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
+        }
+        assert_ne!(builder("rm -rf build dist", None), PermissionLevel::Denied);
+    }
+
+    /// Under `cmd /c` the internal `DATE` reads any argument as a new date
+    /// and, bare, prompts for one: there no `date` runs unasked. On sh a bare
+    /// `date` or one `+FORMAT` only prints (review of `120ddb4`).
+    #[test]
+    fn date_runs_unasked_only_on_sh() {
+        assert!(date_only_prints(&[], false));
+        assert!(date_only_prints(&["+%s"], false));
+        assert!(!date_only_prints(&["-s", "x"], false));
+        assert!(!date_only_prints(&[], true));
+        assert!(!date_only_prints(&["+x"], true));
+        assert!(!date_only_prints(&["/t"], true));
     }
 }
