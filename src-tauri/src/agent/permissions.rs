@@ -143,7 +143,6 @@ const BASH_BLACKLIST: &[&str] = &[
     "mkfs.",
     "fdisk",
     "format ",
-    "> /dev/",
     "chmod 777",
     "chown ",
     "mv /",
@@ -226,15 +225,7 @@ pub fn bash_permission_writing(command: &str, auto_approve_git: bool) -> Permiss
 /// stay governed by the normal approval flow).
 pub fn bash_writes_files(command: &str) -> bool {
     // Strip redirections that don't produce file content before checking '>'.
-    let stripped = command
-        .replace("2>&1", "")
-        .replace("&>/dev/null", "")
-        .replace("&> /dev/null", "")
-        .replace("2>/dev/null", "")
-        .replace("2> /dev/null", "")
-        .replace(">/dev/null", "")
-        .replace("> /dev/null", "");
-    if stripped.contains('>') {
+    if without_harmless_redirections(command).contains('>') {
         return true;
     }
     let lower = command.to_lowercase();
@@ -323,10 +314,12 @@ const BRAIN_RUNS_NOTHING_BUT: &[&str] =
 pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel {
     let trimmed = command.trim();
 
-    for pattern in BASH_BLACKLIST {
-        if trimmed.contains(pattern) {
-            return PermissionLevel::Denied;
-        }
+    if BASH_BLACKLIST
+        .iter()
+        .any(|pattern| trimmed.contains(pattern))
+        || redirects_into_a_disk(trimmed)
+    {
+        return PermissionLevel::Denied;
     }
     // The project memory is written by `finalize_plan` alone (lean-harness
     // Phase 9). Denied rather than asked about, so YOLO and a hook's `allow`
@@ -518,6 +511,59 @@ fn shell_words(segment: &str) -> Vec<(String, bool)> {
     out
 }
 
+/// The redirections that only merge or discard streams (`2>&1`,
+/// `> /dev/null`), each a space in `command` — but only where it ends at a
+/// blank, a control character or the end, so `>/dev/nullX`, which creates a
+/// file, stays.
+fn without_harmless_redirections(command: &str) -> String {
+    let mut text = command.to_string();
+    for harmless in [
+        "&>/dev/null",
+        "&> /dev/null",
+        "2>&1",
+        "1>&2",
+        ">&2",
+        "2>/dev/null",
+        "2> /dev/null",
+        ">/dev/null",
+        "> /dev/null",
+    ] {
+        let mut kept = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(harmless) {
+            let after = &rest[at + harmless.len()..];
+            let ends = after
+                .chars()
+                .next()
+                .is_none_or(|c| c.is_whitespace() || ";|&)<>".contains(c));
+            kept.push_str(&rest[..at]);
+            kept.push_str(if ends { " " } else { harmless });
+            rest = after;
+        }
+        kept.push_str(rest);
+        text = kept;
+    }
+    text
+}
+
+/// A redirection (`>`, `>>`, `>|`, spaced or not) into a disk or memory
+/// device (`/dev/sda`, `/dev/nvme0n1`, `/dev/mem`, …): refused outright.
+/// `/dev/null`, `/dev/stderr` and the like are not among them.
+fn redirects_into_a_disk(command: &str) -> bool {
+    const DISKS: &[&str] = &[
+        "sd", "hd", "vd", "xvd", "nvme", "mmcblk", "disk", "rdisk", "mem", "kmem", "port",
+        "mapper/", "md", "dm-", "loop", "nbd", "sr", "cpu/", "watchdog",
+    ];
+    command.match_indices('>').any(|(at, _)| {
+        let target = command[at + 1..]
+            .trim_start_matches(['>', '|'])
+            .trim_start();
+        target
+            .strip_prefix("/dev/")
+            .is_some_and(|device| DISKS.iter().any(|disk| device.starts_with(disk)))
+    })
+}
+
 /// `split_chain` without the pipe marks.
 fn segments(command: &str) -> Option<Vec<String>> {
     split_chain(command).map(|segs| segs.into_iter().map(|(seg, _)| seg).collect())
@@ -541,20 +587,7 @@ fn split_chain(command: &str) -> Option<Vec<(String, bool)>> {
     {
         return None;
     }
-    let mut text = command.to_string();
-    for harmless in [
-        "&>/dev/null",
-        "&> /dev/null",
-        "2>&1",
-        "1>&2",
-        ">&2",
-        "2>/dev/null",
-        "2> /dev/null",
-        ">/dev/null",
-        "> /dev/null",
-    ] {
-        text = text.replace(harmless, " ");
-    }
+    let text = without_harmless_redirections(command);
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut piped = false;
@@ -1432,6 +1465,54 @@ mod read_only_tests {
                 bash_permission_brain(cmd),
                 PermissionLevel::Auto,
                 "{cmd:?} in Brain"
+            );
+        }
+    }
+
+    /// Discarding output (`2> /dev/null`, `> /dev/null`) is everyday shell,
+    /// not a write: the blacklist once matched `> /dev/` and refused it in
+    /// every mode, with no override. Writing a disk device stays refused, and
+    /// a file whose name only starts with `/dev/null` is a write (recheck
+    /// round 3).
+    #[test]
+    fn discarding_output_is_not_a_write_and_a_disk_device_is_refused() {
+        for cmd in [
+            "ls foo 2> /dev/null",
+            "cargo test > /dev/null",
+            "cargo test > /dev/null 2>&1",
+            "git status >/dev/null",
+            "cargo test 2> /dev/null | tail -5",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::Auto,
+                "{cmd:?}"
+            );
+            assert!(!bash_writes_files(cmd), "{cmd:?} writes no file");
+        }
+        for cmd in [
+            "echo x > /dev/sda",
+            "cat img >/dev/nvme0n1",
+            "echo x >> /dev/sda1",
+            "cat img > /dev/disk2",
+            "ls; cat img >| /dev/mmcblk0",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::Denied,
+                "{cmd:?}"
+            );
+        }
+        for cmd in [
+            "git log >/dev/nullX",
+            "git log > /dev/null.txt",
+            "git log 2>/dev/null_",
+        ] {
+            assert!(bash_writes_files(cmd), "{cmd:?} creates a file");
+            assert_eq!(
+                bash_permission_writing(cmd, false),
+                PermissionLevel::RequiresApproval,
+                "{cmd:?}"
             );
         }
     }
