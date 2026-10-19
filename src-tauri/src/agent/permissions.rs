@@ -134,7 +134,9 @@ pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
 // Windows. There the tool runs `cmd /c`, which expands `%NAME%` before it
 // looks for `&`, `|` and `>`, and escapes with `^`: `has_odd_char` refuses
 // `%`, `^` and `!` there too, and cmd has no `$`, glob or brace expansion
-// of its own. The rule only ever lets fewer commands run than it sees.
+// of its own; cmd would also run a `git.cmd` or `ls.bat` from the working
+// folder before PATH, so the tool sets `NoDefaultCurrentDirectoryInExePath`
+// for the child. The rule only ever lets fewer commands run than it sees.
 
 /// Builder's allowlist: inspection, builds and test runners, and the
 /// interpreters, which run whatever script they are given — as the README

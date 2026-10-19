@@ -117,7 +117,9 @@ pub struct BashArgs {
     pub timeout_seconds: Option<u64>,
 }
 
-pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String> {
+/// The child process for `args`: the platform shell running the command in
+/// its working folder, with the login PATH and the askpass bridge.
+fn shell_command(args: &BashArgs) -> Command {
     let shell = if cfg!(target_os = "windows") {
         "cmd"
     } else {
@@ -128,8 +130,6 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
     } else {
         "-c"
     };
-
-    let timeout_secs = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
     // Resolve and inject the login PATH (cached in OnceLock after first call).
     // This avoids the LLM needing to prepend `export PATH=...` to every command,
@@ -145,13 +145,23 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         // instead of a TTY the child doesn't have — a bare `git push` over
         // SSH used to hang until the timeout killed it.
         .envs(crate::askpass::env_for_child())
+        // cmd.exe looks for a bare command name in the working folder before
+        // PATH: a repository shipping `git.cmd` or `ls.bat` would run on an
+        // auto-run `git status` or `ls`. This turns that lookup off (cmd's
+        // documented switch; nothing on Unix reads it).
+        .env("NoDefaultCurrentDirectoryInExePath", "1")
         .current_dir(args.workdir.as_deref().unwrap_or("."))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     no_window_tokio(&mut child);
-    let mut child = child
+    child
+}
+
+pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String> {
+    let timeout_secs = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let mut child = shell_command(&args)
         .spawn()
         .map_err(|e| format!("failed to spawn command: {e}"))?;
 
@@ -341,6 +351,29 @@ mod tests {
         assert!(out.contains("\n100000"), "the last line must survive");
         assert!(out.len() <= 22_000, "got {} chars", out.len());
         assert!(out.contains("saved to"), "the full output must be findable");
+    }
+
+    /// cmd.exe looks for a bare command name in the working folder before
+    /// PATH, so a repository shipping `git.cmd` or `ls.bat` would run on an
+    /// Auto `git status`. The child gets the variable that turns that off
+    /// (harmless where nothing reads it, so it is set everywhere).
+    #[test]
+    fn the_child_does_not_look_for_programs_in_the_working_folder() {
+        let args = BashArgs {
+            command: "git status".into(),
+            workdir: None,
+            stdin: None,
+            timeout_seconds: None,
+        };
+        let child = shell_command(&args);
+        let set: Vec<_> = child.as_std().get_envs().collect();
+        assert!(
+            set.contains(&(
+                std::ffi::OsStr::new("NoDefaultCurrentDirectoryInExePath"),
+                Some(std::ffi::OsStr::new("1"))
+            )),
+            "{set:?}"
+        );
     }
 
     #[test]
