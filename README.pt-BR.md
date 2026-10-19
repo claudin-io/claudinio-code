@@ -168,6 +168,14 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   um passo só não precisa de lista, e o painel de tarefas mostra *Single step*.
   Uma compactação repete a lista depois do resumo, e um turno que termina com
   uma tarefa ainda em andamento recebe um lembrete antes de poder encerrar.
+- **O contexto fica em cache onde o provedor precisa ser avisado.** Num
+  provedor configurado com o protocolo Anthropic (a própria Anthropic, um proxy
+  da empresa na frente dela) um prefixo só fica em cache até um breakpoint
+  explícito, então cada pedido marca o prompt de sistema e o fim da conversa; a
+  rodada seguinte lê tudo isso do cache em vez de pagar o preço cheio de novo.
+  O claudin.io e os servidores com protocolo OpenAI — o login embutido do
+  OpenRouter entre eles — não recebem marcadores; um servidor que os recusa
+  ganha uma nova tentativa sem eles, e nenhuma depois disso.
 - **Ferramentas por modelo.** Em Settings › Models um modelo pode ser posto em
   *Lean*, que deixa de fora as três ferramentas de navegação por LSP e as
   linhas do prompt sobre elas. Nada é Lean por padrão: se menos ferramentas
@@ -482,7 +490,10 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 *Enviada* é o que uma sessão Standard põe em todo pedido. Uma ferramenta
 *adiada* aparece no prompt de sistema em uma linha, e sua definição entra no
 pedido quando o modelo a carrega com `load_tools` — ou a chama, o que também a
-carrega. Subagentes não adiam nada; só deixam de fora as três ferramentas LSP.
+carrega. As três ferramentas do documento não são listadas: entram com o
+documento (`doc_create` as carrega, e uma sessão que já tem um começa com
+elas). Subagentes não adiam nada; só deixam de fora as três ferramentas LSP, e
+recebem `doc_write` / `doc_read` apenas quando disparados com uma seção.
 
 As chamadas às ferramentas só de leitura (`read_file`, `list_dir`, `grep`, as
 buscas do índice e do LSP, `web_search` e `tasks_get`) que o modelo faz lado a
@@ -495,6 +506,33 @@ destrutivos. Tudo que o browser lê de uma página é embrulhado e marcado como
 dado não-confiável, porque uma página pode conter texto escrito para manipular o
 modelo. O modelo de ameaças completo — incluindo o que o projeto explicitamente
 *não* defende — está em [SECURITY.md](SECURITY.md).
+
+## Medindo o harness
+
+Mudanças no harness são julgadas por três números, nesta ordem: **custo
+cobrado por tarefa resolvida** (levando o cache em conta), **rodadas de
+provedor por tarefa**, e a **taxa de acerto**, que não pode cair. `eval/` traz
+um conjunto fixo de 25 tarefas — fixtures autocontidas em Python e JavaScript
+mais commits reais do frontend deste repositório — cada uma com um oráculo e
+uma solução conhecida, e um runner headless que passa o loop real do agente
+por elas:
+
+```bash
+cd src-tauri
+cargo run --example claudinio-eval -- validate ../eval/tasks     # sem modelo: todo oráculo falha, depois passa
+cargo run --example claudinio-eval -- run ../eval/tasks \
+  --model <id> --base-url <url> --api-key-env <ENV>               # uma sessão nova por tarefa
+```
+
+O runner aprova só edições de arquivo e comandos de shell somente-leitura,
+nunca shell arbitrário. Isso impede que um modelo errado cause estrago por
+acidente; não é um sandbox — os testes da tarefa rodam código que o modelo
+escreveu — então rode o `run` num container ou VM descartável. Todo pedido ao
+provedor fica registrado como um registro `usage` na sessão (leituras e
+escritas de cache incluídas), as transcrições dos subagentes ficam ao lado da
+sessão, e `scripts/session-stats.py --cost` mostra custo, rodadas e fatia de
+cache das suas próprias sessões. Detalhes, o formato das tarefas e a política
+de aprovação: [eval/README.md](eval/README.md).
 
 ## Arquitetura
 
