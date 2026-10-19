@@ -301,12 +301,18 @@ fn win32_name(text: &str) -> &str {
 
 /// Whether a shell command's text mentions the memory: a raw scan, in any
 /// case, with no parsing and no recursion. True when the text holds
-/// `memory.md`; or `.claudinio` ending a word (followed by the end, a blank,
-/// a quote or one of `;|&)}<>` and backquote); or `.claudinio/` followed by
-/// a word that is empty, holds a glob character (`*?[{`) or a `.`/`..` part
-/// (`cp -r q/. .claudinio/`, `.claudinio/M*`, `.claudinio/plans/..`). The
-/// text is scanned as written and again with quotes and backslashes
-/// dropped, as the shell drops them (`.claudi''nio`). Used by
+/// `memory.md`, or `.claudinio` not continued into another name. Only a
+/// letter, digit, `-` or `_` continues it (`.claudinio-backup`), directly or
+/// after dots (`.claudinio.json`); anything else names the folder — a blank,
+/// a quote, a `,` or `{` of a brace list (`{.claudinio,}`, `.claudinio{,}`),
+/// a Windows backslash or trailing dot (`.claudinio\*`, `.claudinio.`) —
+/// except a `/` followed by a path of names that ends cleanly (at the end, a
+/// blank, a quote or one of `;|&)<>` and backquote) with no empty or
+/// all-dots part: `.claudinio/plans/x.md` is not the memory, `.claudinio/`,
+/// `.claudinio/M*`, `{.claudinio/,}`, `.claudinio/plans/..` and
+/// `.claudinio/MEMORY~1.MD` are. The text is scanned as written and again
+/// with quotes and backslashes dropped, as the shell drops them
+/// (`.claudi''nio`). Used by
 /// `permissions::bash_call_permission` to refuse a call that mentions the
 /// memory unless it is a plain read.
 ///
@@ -323,20 +329,26 @@ pub fn mentions_memory(command: &str) -> bool {
 
 fn scan_mentions(text: &str) -> bool {
     const FOLDER: &str = ".claudinio";
-    let ends_word = |c: char| c.is_whitespace() || "'\";|&)}<>`".contains(c);
+    let name_char = |c: char| c.is_alphanumeric() || c == '-' || c == '_';
+    let ends_cleanly = |c: char| c.is_whitespace() || "'\";|&)<>`".contains(c);
     text.contains("memory.md")
         || text.match_indices(FOLDER).any(|(at, _)| {
             let after = &text[at + FOLDER.len()..];
-            match after.chars().next() {
-                None => true,
+            let undotted = after.trim_start_matches('.');
+            match undotted.chars().next() {
+                Some(c) if name_char(c) => false,
                 Some('/') => {
-                    let word = after[1..].split(ends_word).next().unwrap_or("");
-                    let parts: Vec<&str> = word.split('/').filter(|p| !p.is_empty()).collect();
+                    let path = &undotted[1..];
+                    let end = path
+                        .find(|c: char| !(name_char(c) || c == '.' || c == '/'))
+                        .unwrap_or(path.len());
+                    let parts: Vec<&str> =
+                        path[..end].split('/').filter(|p| !p.is_empty()).collect();
                     parts.is_empty()
-                        || word.contains(['*', '?', '[', '{'])
-                        || parts.iter().any(|p| *p == "." || *p == "..")
+                        || parts.iter().any(|p| p.chars().all(|c| c == '.'))
+                        || !path[end..].chars().next().is_none_or(ends_cleanly)
                 }
-                Some(c) => ends_word(c),
+                _ => true,
             }
         })
 }
@@ -1046,6 +1058,20 @@ mod tests {
             "rm -rf .claudi\\nio",
             "ls .claudinio && cp a.txt b.txt",
             "ls .claudinio/plans/2026-10-*",
+            // A brace list names the folder (review of the simplified
+            // rule), and so do the Windows spellings `cmd /c` reads.
+            "rm -rf {.claudinio,}",
+            "rm -rf .claudinio{,}",
+            "cp -r q/. {.claudinio/,}",
+            "cp -r q/. .claudinio/{,}",
+            "del /q .claudinio\\*",
+            "xcopy /e /y q .claudinio\\.",
+            "copy x .claudinio\\MEMORY~1.MD",
+            "copy x .claudinio/MEMORY~1.MD",
+            "rmdir /s /q .claudinio.",
+            "rmdir /s /q .claudinio./",
+            "echo x >> .claudinio/plans:x",
+            "rm -rf .claudinio/plans/...",
         ] {
             assert!(mentions_memory(c), "{c}");
         }
@@ -1054,6 +1080,10 @@ mod tests {
             "git add .claudinio/plans/x.md",
             "cat .claudinio.json",
             "cat .claudiniox",
+            "cp -r .claudinio-backup x",
+            "rm -rf .claudinio_old/x",
+            "cat .claudinio.yaml.bak",
+            "git add .claudinio/plans/2026-10-19_x.md",
             "cargo test",
             "find . -name '*.rs' -exec wc -l {} +",
             "echo '日本語 — café 😀' > README.md",

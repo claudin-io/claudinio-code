@@ -1312,6 +1312,20 @@ mod shell_rule_tests {
         "git diff --output=.claudinio/MEMORY.md",
         "cat .claudinio/MEMORY.md | sort -o .claudinio/MEMORY.md",
         "grep x .claudinio/MEMORY.md; rm .claudinio/MEMORY.md",
+        // Review of the simplified rule: brace lists name the folder (bash,
+        // and `sh` on macOS, Fedora and Arch), and so do Windows spellings
+        // under `cmd /c` — a backslash, a trailing dot, an 8.3 short name.
+        "cp -r q/. {.claudinio,}",
+        "rm -rf {.claudinio,}",
+        "bash -c 'rm -rf {.claudinio,x}'",
+        "rm -rf .claudinio{,}",
+        "cp -r q/. .claudinio{,}",
+        "cp -r q/. {.claudinio/,}",
+        "del /q .claudinio\\*",
+        "xcopy /e /y q .claudinio\\.",
+        "copy x .claudinio\\MEMORY~1.MD",
+        "copy x .claudinio/MEMORY~1.MD",
+        "rmdir /s /q .claudinio.",
     ];
 
     /// The everyday commands that must keep running unasked in Builder.
