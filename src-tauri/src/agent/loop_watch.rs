@@ -332,6 +332,28 @@ mod tests {
         assert!(matches!(w.act(Gate::Certain, None), LoopAction::Nudge(_)));
     }
 
+    // The watch sees a result as the history holds it, capped. The same grep
+    // over the cap, repeated, is the same answer every time and must still
+    // reach the judge-free gate: the copy its marker names may not make five
+    // identical answers look like five different ones.
+    #[test]
+    fn the_same_capped_result_repeated_is_still_certain_without_a_judge() {
+        let mut w = LoopWatch::default();
+        let input = json!({"pattern": "needle"});
+        let text: String = (0..500)
+            .map(|i| format!("src/f{i}.rs:3: needle {i}\n"))
+            .collect();
+        for _ in 0..CERTAIN_EXACT {
+            let capped = crate::agent::result_cap::cap(
+                crate::agent::result_cap::Call::tool("grep"),
+                &text,
+                2_000,
+            );
+            w.record("grep", &input, &capped);
+        }
+        assert_eq!(w.gate(), Gate::Certain);
+    }
+
     #[test]
     fn a_jev_no_outranks_even_the_certain_gate() {
         // Five identical polls of a CI run are exactly what the certain gate

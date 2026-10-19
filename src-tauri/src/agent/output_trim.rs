@@ -235,6 +235,15 @@ pub(crate) fn is_saved_output(path: &std::path::Path) -> bool {
 /// Write the full output where the model can read it back, in a file named
 /// after `kind` (`bash`, or `result` for a capped tool result). Best effort.
 ///
+/// The name is the content's hash, so the same output is one file under one
+/// name however often it is saved. The path goes into the result the model
+/// and `loop_watch` see: with a fresh name per save, five identical greps over
+/// the cap read as five different answers and never reached the loop watch's
+/// judge-free gate (`CERTAIN_EXACT`), and each repeat left another copy on
+/// disk. A file already under that name with other bytes in it (a hash
+/// collision, a half-written save of another thread) is left alone and the
+/// output goes to a name of its own.
+///
 /// The folder is the user's alone (0700) and so is each file (0600): what is
 /// saved can be private code or a tool's answer, and the temp folder is
 /// shared. The first save of a process sweeps outputs past [`SAVED_MAX_AGE`].
@@ -248,14 +257,31 @@ pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
     }
     static SWEPT: std::sync::Once = std::sync::Once::new();
     SWEPT.call_once(|| sweep(&dir, SAVED_MAX_AGE));
+    let hash = xxhash_rust::xxh3::xxh3_128(text.as_bytes());
+    let path = dir.join(format!("{kind}-{hash:032x}.log"));
+    if let Some(saved) = write_new(&path, text) {
+        return Some(saved);
+    }
+    if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) {
+        // Saved before: keep it from the sweep for as long as it is named.
+        if let Ok(file) = std::fs::File::options().append(true).open(&path) {
+            file.set_modified(std::time::SystemTime::now()).ok();
+        }
+        return Some(path.to_string_lossy().to_string());
+    }
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = format!(
-        "{kind}-{}-{}-{seq}.log",
+    let unique = format!(
+        "{kind}-{hash:032x}-{}-{}-{seq}.log",
         crate::agent::persist::now_ms(),
         std::process::id()
     );
-    let path = dir.join(name);
+    write_new(&dir.join(unique), text)
+}
+
+/// `text` in a file created at `path`, readable by its owner only; `None`
+/// when something is already there or the write fails.
+fn write_new(path: &std::path::Path, text: &str) -> Option<String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -263,7 +289,7 @@ pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&path).ok()?;
+    let mut file = options.open(path).ok()?;
     std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
     Some(path.to_string_lossy().to_string())
 }
@@ -333,6 +359,22 @@ mod tests {
         assert_eq!(mode(file), 0o600, "{path}");
         assert_eq!(mode(file.parent().unwrap()), 0o700);
         std::fs::remove_file(file).ok();
+    }
+
+    // The path is in the result the model and the loop watch see: the same
+    // output saved twice is one file under one name, a different output
+    // another.
+    #[test]
+    fn the_same_output_saved_twice_is_one_file_under_one_name() {
+        let text = format!("same output {}", std::process::id());
+        let first = save_full("result", &text).expect("saved");
+        let again = save_full("result", &text).expect("saved");
+        let other = save_full("result", &format!("{text}!")).expect("saved");
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), text);
+        std::fs::remove_file(&first).ok();
+        std::fs::remove_file(&other).ok();
     }
 
     #[test]
