@@ -831,10 +831,278 @@ fn allowlisted(segment: &str, auto_approve_git: bool) -> bool {
                 .next()
                 .is_some_and(|w| w == "show" || w == "get-url");
     }
-    if interpreter_reads_stdin(segment) {
+    if interpreter_reads_stdin(segment) || runner_picks_more_than_tests(segment) {
         return false;
     }
     BASH_ALLOWLIST.iter().any(|p| starts_with_word(segment, p))
+}
+
+/// The arguments an allowlisted build or test runner runs unasked with, for
+/// `runner_picks_more_than_tests`: the options that pick tests, features and
+/// how results are reported, the short flags that may be clustered
+/// (`-xvs`), and the options allowed after `--` (the test binary's).
+struct RunnerArgs {
+    flags: &'static [&'static str],
+    clusters: &'static str,
+    after_dashes: &'static [&'static str],
+}
+
+const CARGO_ARGS: RunnerArgs = RunnerArgs {
+    flags: &[
+        "run",
+        "--lib",
+        "--bins",
+        "--bin",
+        "--tests",
+        "--test",
+        "--examples",
+        "--example",
+        "--benches",
+        "--bench",
+        "--doc",
+        "--all-targets",
+        "--workspace",
+        "--all",
+        "-p",
+        "--package",
+        "--exclude",
+        "--release",
+        "-r",
+        "--profile",
+        "--features",
+        "-F",
+        "--all-features",
+        "--no-default-features",
+        "-j",
+        "--jobs",
+        "--no-fail-fast",
+        "--no-run",
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+        "--locked",
+        "--offline",
+        "--frozen",
+        "--color",
+        "--message-format",
+        "--keep-going",
+        "--target",
+        "--no-capture",
+        "--nocapture",
+        "--retries",
+        "--test-threads",
+        "-E",
+        "--run-ignored",
+        "--no-tests",
+        "--summary-only",
+    ],
+    clusters: "qv",
+    after_dashes: &[
+        "--nocapture",
+        "--no-capture",
+        "--test-threads",
+        "--ignored",
+        "--include-ignored",
+        "--exact",
+        "--skip",
+        "-q",
+        "--quiet",
+        "--show-output",
+        "--list",
+        "--color",
+        "--format",
+    ],
+};
+
+const PYTEST_ARGS: RunnerArgs = RunnerArgs {
+    flags: &[
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+        "-x",
+        "--exitfirst",
+        "-s",
+        "--capture",
+        "-k",
+        "-m",
+        "-l",
+        "--showlocals",
+        "--tb",
+        "-r",
+        "--lf",
+        "--last-failed",
+        "--ff",
+        "--failed-first",
+        "--nf",
+        "--new-first",
+        "--co",
+        "--collect-only",
+        "--maxfail",
+        "--no-header",
+        "--no-summary",
+        "--durations",
+        "--durations-min",
+        "-n",
+        "--numprocesses",
+        "--sw",
+        "--stepwise",
+        "--strict-markers",
+        "--disable-warnings",
+        "--color",
+        "--runxfail",
+        "--setup-show",
+        "--deselect",
+        "--ignore",
+        "--version",
+        "--fixtures",
+        "--markers",
+    ],
+    clusters: "qvxsl",
+    after_dashes: &[],
+};
+
+const GO_ARGS: RunnerArgs = RunnerArgs {
+    flags: &[
+        "-v",
+        "-run",
+        "-count",
+        "-short",
+        "-race",
+        "-cover",
+        "-covermode",
+        "-timeout",
+        "-bench",
+        "-benchmem",
+        "-benchtime",
+        "-failfast",
+        "-json",
+        "-p",
+        "-parallel",
+        "-tags",
+        "-skip",
+        "-list",
+        "-cpu",
+        "-shuffle",
+        "-fullpath",
+    ],
+    clusters: "",
+    after_dashes: &[],
+};
+
+const JS_TEST_ARGS: RunnerArgs = RunnerArgs {
+    flags: &[
+        "run",
+        "--run",
+        "-t",
+        "--testNamePattern",
+        "--bail",
+        "--silent",
+        "--passWithNoTests",
+        "--verbose",
+        "--no-coverage",
+        "--runInBand",
+        "-i",
+        "--ci",
+        "--testPathPattern",
+        "--testPathPatterns",
+        "--maxWorkers",
+        "--no-color",
+        "--color",
+        "--changed",
+        "--project",
+        "--allowOnly",
+        "--retry",
+        "--listTests",
+        "--detectOpenHandles",
+        "--if-present",
+    ],
+    clusters: "",
+    after_dashes: JS_TEST_ARGS_AFTER,
+};
+const JS_TEST_ARGS_AFTER: &[&str] = &[
+    "--run",
+    "-t",
+    "--testNamePattern",
+    "--bail",
+    "--silent",
+    "--passWithNoTests",
+    "--verbose",
+    "--no-coverage",
+    "--runInBand",
+    "-i",
+    "--ci",
+    "--testPathPattern",
+    "--testPathPatterns",
+    "--maxWorkers",
+    "--no-color",
+    "--color",
+    "--changed",
+    "--project",
+    "--allowOnly",
+    "--retry",
+    "--listTests",
+    "--detectOpenHandles",
+];
+
+/// The allowlisted builds and test runners, by prefix, with their arguments.
+const RUNNERS: &[(&str, &RunnerArgs)] = &[
+    ("cargo build", &CARGO_ARGS),
+    ("cargo check", &CARGO_ARGS),
+    ("cargo test", &CARGO_ARGS),
+    ("cargo nextest", &CARGO_ARGS),
+    ("cargo llvm-cov", &CARGO_ARGS),
+    ("pytest", &PYTEST_ARGS),
+    ("go test", &GO_ARGS),
+    ("npx vitest", &JS_TEST_ARGS),
+    ("pnpm exec vitest", &JS_TEST_ARGS),
+    ("pnpm vitest", &JS_TEST_ARGS),
+    ("npx jest", &JS_TEST_ARGS),
+    ("pnpm exec jest", &JS_TEST_ARGS),
+    ("npm test", &JS_TEST_ARGS),
+    ("pnpm test", &JS_TEST_ARGS),
+    ("yarn test", &JS_TEST_ARGS),
+];
+
+/// An allowlisted build or test runner given an argument that does more than
+/// pick tests and how they report: one not in its `RunnerArgs` (`pytest
+/// --basetemp=src` deletes `src`, `pytest -p` loads a plugin, `go test
+/// -exec` and `cargo --config …runner` run any program, `vitest -u` rewrites
+/// snapshots), or a word the shell may still expand into one. Such a call is
+/// asked about, and refused in Brain. A word not starting with `-` (a test
+/// path, a filter, an option's value) is read as harmless.
+fn runner_picks_more_than_tests(segment: &str) -> bool {
+    let Some((prefix, args)) = RUNNERS.iter().find(|(p, _)| starts_with_word(segment, p)) else {
+        return false;
+    };
+    let mut known = args.flags;
+    for (word, expands) in shell_words(&segment[prefix.len()..]) {
+        if expands {
+            return true;
+        }
+        if word == "--" {
+            known = args.after_dashes;
+            continue;
+        }
+        if !word.starts_with('-') || word == "-" {
+            continue;
+        }
+        let name = word.split('=').next().unwrap_or(&word);
+        let clustered = !word.starts_with("--")
+            && word.len() > 2
+            && word[1..].chars().all(|c| args.clusters.contains(c));
+        // pytest's `-rA`, `-rfE`: `-r` takes the rest of the word as the
+        // report characters.
+        let report = *prefix == "pytest"
+            && word
+                .strip_prefix("-r")
+                .is_some_and(|r| !r.is_empty() && r.chars().all(|c| "fEsxXpPaAwN".contains(c)));
+        if !(known.contains(&name) || clustered || report) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Every word of `args` is one of the listing flags in `allowed`.
@@ -1713,6 +1981,77 @@ mod read_only_tests {
             bash_permission("git add . && rm -rf src", true),
             PermissionLevel::RequiresApproval
         );
+    }
+
+    /// An allowlisted build or test runner runs unasked only with arguments
+    /// that pick tests and how they report — never ones that pick a program,
+    /// a plugin, a config or a folder to write or delete (`pytest
+    /// --basetemp=src` empties `src`, `go test -exec` runs anything). Brain
+    /// "changes nothing", and in Builder deleting a folder is asked about
+    /// (recheck round 3).
+    #[test]
+    fn a_runner_given_a_program_config_or_folder_is_asked_about() {
+        for cmd in [
+            "pytest --basetemp=src",
+            "pytest --basetemp src",
+            "pytest --basetemp=.claudinio",
+            "pytest -q -p evil",
+            "pytest -xp evil",
+            "pytest -o cache_dir=src",
+            "pytest -c evil.ini",
+            "pytest $ARGS",
+            "pytest tests/{a,--basetemp=src}",
+            "go test -exec \"sh -c 'rm -rf src'\" ./...",
+            "go test -toolexec=./x ./...",
+            "go test -o src/main ./...",
+            "go test -coverprofile=src/x ./...",
+            "cargo test --config 'target.x86_64-unknown-linux-gnu.runner=[\"sh\",\"-c\",\"rm -rf src\",\"x\"]'",
+            "cargo build --target-dir src",
+            "cargo test --manifest-path ../evil/Cargo.toml",
+            "cargo test -- --logfile src/main.rs",
+            "cargo nextest run --tool-config-file x.toml",
+            "npx vitest -u",
+            "npx vitest run --config evil.config.ts",
+            "npx jest --rootDir /",
+            "pnpm test -- --outputFile=src/main.rs",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::RequiresApproval,
+                "{cmd:?} must be asked about"
+            );
+            assert_ne!(
+                bash_permission_brain(cmd),
+                PermissionLevel::Auto,
+                "{cmd:?} must not run unasked in Brain"
+            );
+        }
+        for cmd in [
+            "cargo test",
+            "cargo test --lib -j 2",
+            "cargo test -p claudinio-code --lib -- --nocapture --test-threads=1",
+            "cargo build --release",
+            "cargo check --all-targets --message-format=json",
+            "cargo nextest run --no-capture",
+            "pytest",
+            "pytest -xvs tests/test_x.py",
+            "pytest -q -k 'not slow' --tb=short",
+            "pytest -rA --maxfail=1",
+            "go test ./... -run TestX -v -count=1",
+            "go test -race ./pkg/...",
+            "npx vitest run src/a.test.ts",
+            "pnpm exec vitest run -t 'adds two'",
+            "pnpm test",
+            "npm test -- --run",
+            "yarn test --silent",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::Auto,
+                "{cmd:?}"
+            );
+            assert_eq!(bash_permission_brain(cmd), PermissionLevel::Auto, "{cmd:?}");
+        }
     }
 
     /// Brain plans; a general interpreter or a project script is a way to
