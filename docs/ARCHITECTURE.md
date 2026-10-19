@@ -243,10 +243,14 @@ a heuristic (redirection, `tee`, in-place `sed`/`perl`, `patch`, inline scripts
 that call a write); what bounds the rest is `bash_permission`, which runs a
 command unasked only when every command of its chain or pipe is allowlisted
 (`permissions::split_chain`, which reads quotes as POSIX does — a backslash is
-literal inside `'…'`; substitution and `--output` disqualify it; a prefix
-ending in a space needs arguments, so a bare `python` is not `python `; a
-read-only filter — `grep`, `cut`, `sort` without `-o`, `uniq` without an
-output file — is allowlisted only where a pipe feeds it). The
+literal inside `'…'`; substitution and `--output` disqualify it; an
+interpreter with no script among its arguments — `python`, `python -`,
+`node -u`, only flags or `-` — reads stdin or the pipe and is not allowlisted
+(`interpreter_reads_stdin`), while a bare `echo`/`cat`/`which` still is; a
+read-only filter — `grep`, `cut`, `sort` without `-o` or
+`--compress-program` under any abbreviation getopt accepts (`--o=`, `--co=`),
+`uniq` without a second operand (`-` and every word after `--` count) — is
+allowlisted only where a pipe feeds it). The
 allowlisted interpreters and runners still run any script unasked in Builder;
 Brain refuses those too (`bash_permission_brain`), though its builds and test
 runners still run project code. Compact adds one rule
@@ -558,10 +562,14 @@ like the path guard does, so a link an earlier call made (`ln -s .claudinio c`,
 then `>> c/MEMORY.md`) is seen. It also counts the `.claudinio` folder itself
 as the target of a command that writes or deletes into it (`cp`, `mv`,
 `rsync`, `tar -C`, `rm`, a rewriting `git` subcommand) when that command runs
-in the segment naming the folder or after a `cd` into it, and `find` acting
+in the segment naming the folder or after a `cd` into it — as the segment's
+command after `then`/`do`/`{`/`!`, inside a shell's `-c` script, or behind a
+wrapper that runs the command after it (`sudo`, `xargs`, `env`, `stdbuf`,
+`setsid`, `flock`, … in `project_memory::RUNS_ANOTHER`) — and `find` acting
 (`-delete`, `-exec`) in a segment that names the folder or a name matching
 the file — a pattern such as `*.md` matches it, so `find . -name '*.md'
--exec …` is refused; `find`'s `{}` placeholder is not read as a name. It cannot see a path the
+-exec …` is refused; `find`'s `{}` placeholder is not read as a name. It cannot see a writer behind a
+wrapper it does not list, a path the
 command assembles at run time (a variable, an interpreter script building the
 name), a copy or delete of a parent folder (`rm -rf .`), a link reached
 through a globbed folder name, or a hard link to the file (which only such a

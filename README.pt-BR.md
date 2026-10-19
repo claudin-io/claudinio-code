@@ -100,8 +100,8 @@ allowlist só roda sem perguntar quando cada comando da cadeia ou do pipe está 
 allowlist (um filtro como `grep`, `sort` ou `cut` conta como allowlist na ponta
 que recebe um pipe), mas os interpretadores e runners da allowlist (`node`,
 `python`, `pnpm run`, runners de teste) rodam o script que receberem sem
-perguntar; um `python` ou `node` sozinho, que lê o script de um pipe ou do
-stdin, é perguntado. Ele só passa trabalho a
+perguntar; um `python` ou `node` sem script (sem arquivo, `-c`, `-m` ou `-e` —
+só flags ou `-`), que o lê de um pipe ou do stdin, é perguntado. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo
@@ -330,7 +330,8 @@ Uma sessão nova num repositório não começa do zero:
   `rm -rf .claudinio`, `find -name MEMORY.md -delete`) é recusado a menos que
   só leia; nem o modo YOLO nem os hooks liberam. Ela lê o texto da chamada,
   então não pega um comando que monta o caminho enquanto roda (uma variável, um
-  script), um que copia ou apaga uma pasta acima dela (`rm -rf .`), um link
+  script), um cujo comando que grava está atrás de um wrapper que a proteção
+  não conhece, um que copia ou apaga uma pasta acima dela (`rm -rf .`), um link
   alcançado por uma pasta em glob, nem um hard link. Esse comando também não é
   necessariamente perguntado: os interpretadores da allowlist (`node`,
   `python`) rodam um script sem perguntar, fora do YOLO também. Você pode

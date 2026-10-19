@@ -98,9 +98,9 @@ is allowlisted. That check is a heuristic: an allowlisted command runs unasked
 only when every command of its chain or pipe is allowlisted (a filter such as
 `grep`, `sort` or `cut` counts as allowlisted at the receiving end of a pipe),
 but the allowlisted interpreters and runners (`node`, `python`, `pnpm run`,
-test runners) run whatever script they are given without asking; a bare
-`python` or `node`, which reads its script from a pipe or stdin, is asked
-about. It hands work to subagents only when that
+test runners) run whatever script they are given without asking; a `python`
+or `node` given no script (no file, `-c`, `-m` or `-e` — only flags or `-`),
+which reads it from a pipe or stdin, is asked about. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
 delegated edit costs a second prompt, a second exploration and the spec written
@@ -324,7 +324,8 @@ A new session in a repository does not start from nothing:
   `tar -C .claudinio`, `rm -rf .claudinio`, `find -name MEMORY.md -delete`) is
   refused unless it only reads; YOLO mode and hooks do not open it. It reads
   the call's text, so it does not catch a command that builds the path while
-  it runs (a variable, a script), one that copies or deletes a parent folder
+  it runs (a variable, a script), one whose writer sits behind a wrapper the
+  guard does not know, one that copies or deletes a parent folder
   of it (`rm -rf .`), a link reached through a globbed folder, or a hard link.
   Such a command is not necessarily asked about either: the allowlisted
   interpreters (`node`, `python`) run a script without a prompt, outside YOLO
