@@ -264,6 +264,10 @@ pub struct AgentConfig {
     /// pre-Phase-5 prompt kept for one release — see `agent::prompt`.
     #[serde(default)]
     pub prompt_version: crate::agent::prompt::PromptVersion,
+    /// The first run of a new session reads the workspace's AGENTS.md or
+    /// CLAUDE.md and `.claudinio/MEMORY.md` — see `agent::project_memory`.
+    #[serde(default = "default_true")]
+    pub project_memory: bool,
 }
 
 /// A connected external provider. Credentials follow the existing plaintext
@@ -577,6 +581,7 @@ impl Default for AgentConfig {
             local: crate::llama::LocalPrefs::default(),
             tool_surface: std::collections::HashMap::new(),
             prompt_version: Default::default(),
+            project_memory: true,
         }
     }
 }

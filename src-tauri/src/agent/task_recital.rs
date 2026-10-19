@@ -346,8 +346,21 @@ pub(crate) mod loop_tests {
         message: &str,
         script: Vec<Reply>,
     ) -> (Result<RunOutcome, String>, Vec<String>) {
+        run_configured(ws, profile, message, script, |_| {}).await
+    }
+
+    /// `run`, with the test's config adjusted by `adjust` first.
+    pub(crate) async fn run_configured(
+        ws: &Workspace,
+        profile: PromptProfile,
+        message: &str,
+        script: Vec<Reply>,
+        adjust: impl FnOnce(&mut AgentConfig),
+    ) -> (Result<RunOutcome, String>, Vec<String>) {
         let (base, _, bodies) = spawn_recording(script).await;
-        let config: AgentConfig = crate::agent::run_loop::surface_tests::config_for(&base, None);
+        let mut config: AgentConfig =
+            crate::agent::run_loop::surface_tests::config_for(&base, None);
+        adjust(&mut config);
         let ctx = crate::agent::tools::ToolContext {
             workspace_root: Some(ws.root.to_string_lossy().to_string()),
             session_store_path: Some(ws.store.path.to_string_lossy().to_string()),

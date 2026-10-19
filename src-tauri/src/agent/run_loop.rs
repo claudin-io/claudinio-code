@@ -194,6 +194,18 @@ pub async fn run_workflow_with_profile(
         }
     }
 
+    // Read before this message's own `user` record is written: the first run
+    // of a session that continues none (`agent::project_memory`).
+    let project_blocks = if profile.is_chat() {
+        crate::agent::project_memory::run_start_blocks(
+            config.project_memory,
+            ctx.workspace_root.as_deref(),
+            &crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+                .unwrap_or_default(),
+        )
+    } else {
+        Vec::new()
+    };
     let route_cost = route_first_prompt(
         config,
         profile,
@@ -213,6 +225,7 @@ pub async fn run_workflow_with_profile(
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
     let mut blocks = vec![ContentBlock::text(&user_message)];
     blocks.extend(attachment_blocks);
+    blocks.extend(project_blocks.into_iter().map(ContentBlock::text));
     // Injected context rides inside the same turn as the user's text, which is
     // what makes it replay correctly from the JSONL on reload — no second
     // replay mechanism, no chance of the context and the prompt drifting apart.
