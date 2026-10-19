@@ -182,11 +182,49 @@ fn block_state(command: &str, b: &Block, total_lines: usize) -> String {
     )
 }
 
+/// How long a saved output is kept: long enough for any run, and a resumed
+/// session older than this re-runs the command instead.
+const SAVED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Remove the files in `dir` last written more than `max_age` ago. Since
+/// lean-harness Phase 6 every capped result that is not a read is saved here
+/// (a grep, an MCP answer, a subagent report), not just `bash` output, so the
+/// folder no longer stays small on its own. Best effort.
+fn sweep(dir: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if meta.is_file() && old {
+            std::fs::remove_file(entry.path()).ok();
+        }
+    }
+}
+
 /// Write the full output where the model can read it back, in a file named
 /// after `kind` (`bash`, or `result` for a capped tool result). Best effort.
+///
+/// The folder is the user's alone (0700) and so is each file (0600): what is
+/// saved can be private code or a tool's answer, and the temp folder is
+/// shared. The first save of a process sweeps outputs past [`SAVED_MAX_AGE`].
 pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
     let dir = std::env::temp_dir().join("claudinio-code").join("outputs");
     std::fs::create_dir_all(&dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
+    }
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| sweep(&dir, SAVED_MAX_AGE));
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!(
@@ -195,7 +233,15 @@ pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
         std::process::id()
     );
     let path = dir.join(name);
-    std::fs::write(&path, text).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).ok()?;
+    std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
     Some(path.to_string_lossy().to_string())
 }
 
@@ -251,6 +297,40 @@ pub async fn fit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What a capped result saves can be a grep of private code or an MCP
+    // answer: only the user may read it.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_output_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = save_full("result", "secret").expect("saved");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let file = std::path::Path::new(&path);
+        assert_eq!(mode(file), 0o600, "{path}");
+        assert_eq!(mode(file.parent().unwrap()), 0o700);
+        std::fs::remove_file(file).ok();
+    }
+
+    #[test]
+    fn the_sweep_removes_saved_outputs_older_than_their_age_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("result-1.log");
+        let fresh = dir.path().join("bash-2.log");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&fresh, "fresh").unwrap();
+        let week_ago =
+            std::time::SystemTime::now() - SAVED_MAX_AGE - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(week_ago)
+            .unwrap();
+        sweep(dir.path(), SAVED_MAX_AGE);
+        assert!(!old.exists(), "an output past its age is removed");
+        assert!(fresh.exists(), "a recent output stays");
+    }
 
     fn cargo_log(passing: usize) -> String {
         let mut s = String::from(

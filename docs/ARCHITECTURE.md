@@ -202,7 +202,8 @@ and the read that gets them (`lines 412-1880 of 1-2400; read_file with
 start_line=412, end_line=1880`), counted from a ranged read's `start_line` and
 past `read_file`'s own size warning; for anything else the whole output is first
 written to a temp file, as `output_trim` does for `bash`, and the marker names
-it. `fit_round`, which holds one round's results to a share together, re-cuts
+it (the file is the user's alone, 0600 in a 0700 folder, and saved outputs
+older than a week are swept on the first save of a run). `fit_round`, which holds one round's results to a share together, re-cuts
 a capped result from what it kept and keeps its true size and hint; `prune`
 reads the same marker (or the head-only note older sessions carry) to know a
 capped read is not the whole file. A marker counts only when its numbers add
