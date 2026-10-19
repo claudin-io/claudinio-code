@@ -167,25 +167,10 @@ fn is_memory(ctx: &ToolContext, path: &Path) -> bool {
 }
 
 /// The most recently modified `*.md` in the plans directory, if any — never
-/// the project memory, which a repository whose plans directory is
-/// `.claudinio` would otherwise pick right after a memory append.
+/// the project memory (`write_plan::latest_plan_path` holds the one filter).
 pub fn latest_plan_file(ctx: &ToolContext) -> Option<PathBuf> {
-    let dir = plans_dir(ctx).ok()?;
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") || is_memory(ctx, &path) {
-            continue;
-        }
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
-            newest = Some((mtime, path));
-        }
-    }
-    newest.map(|(_, p)| p)
+    let root = ctx.workspace_root.as_deref()?;
+    write_plan::latest_plan_path(root, ctx.plan_save_path.as_deref())
 }
 
 /// Resolve the target plan file from an optional user-supplied name/path.

@@ -913,6 +913,30 @@ mod lld_gate_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // With plans saved in `.claudinio`, the memory a `finalize_plan` appended
+    // is the newest `.md` in the folder. The gate reads the plan's Low-Level
+    // Design, never the memory's (a file edit_file refuses to write).
+    #[test]
+    fn brain_lld_gate_reads_the_plan_not_a_newer_project_memory() {
+        let (mut ctx, root) = ctx_for("lld-mem", Some(SessionMode::Brain));
+        ctx.plan_save_path = Some(".claudinio".into());
+        let dir = root.join(".claudinio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("2026-10-19_plan.md");
+        std::fs::write(
+            &plan,
+            "# Plan\n## Low-Level Design\nsrc/foo.rs: add bar()\n",
+        )
+        .unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let f = std::fs::File::options().write(true).open(&plan).unwrap();
+        f.set_modified(past).unwrap();
+        std::fs::write(dir.join("MEMORY.md"), "## Learned\n- a lesson\n").unwrap();
+        let res = execute_set(one_task(), &ctx);
+        assert!(res.is_ok(), "unexpected error: {res:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn brain_plan_with_lld_accepted() {
         let (ctx, root) = ctx_for("with-lld", Some(SessionMode::Brain));

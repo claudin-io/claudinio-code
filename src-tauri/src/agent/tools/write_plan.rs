@@ -51,13 +51,23 @@ pub fn has_nonempty_section(content: &str, heading: &str) -> bool {
 
 /// Newest `.md` file in the plans dir by modified time (ties broken by name).
 /// None when the dir is missing or holds no plan files.
+///
+/// Never the project memory: a repository whose plans directory is
+/// `.claudinio` keeps `MEMORY.md` beside its plans, and right after a
+/// `finalize_plan` append it is the newest `.md` there. Every reader of "the
+/// plan" comes through here — the Builder kickoff, the plan auto-commit, the
+/// handoff, delegation, the Brain LLD gate and `finalize_plan` — so this is
+/// the one place the memory is filtered out (Phase 9 review).
 pub fn latest_plan_path(workspace_root: &str, plan_save_path: Option<&str>) -> Option<PathBuf> {
     let dir = plans_dir(workspace_root, plan_save_path);
     let entries = std::fs::read_dir(&dir).ok()?;
+    let root = std::path::Path::new(workspace_root);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        if path.extension().and_then(|e| e.to_str()) != Some("md")
+            || crate::agent::project_memory::is_memory_path(root, &path)
+        {
             continue;
         }
         let mtime = entry
@@ -323,6 +333,27 @@ mod tests {
         f.set_modified(past).unwrap();
         let got = latest_plan_path(tmp.to_str().unwrap(), Some("docs/plans"));
         assert_eq!(got, Some(new));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // A repository whose plans directory is `.claudinio` itself holds the
+    // project memory beside its plans, and right after a `finalize_plan`
+    // append the memory is the newest `.md` there. It is never the plan: the
+    // Builder kickoff, the plan auto-commit, the handoff and the Brain LLD
+    // gate all read "the plan" through this function (Phase 9 review).
+    #[test]
+    fn latest_plan_path_never_picks_the_project_memory() {
+        let tmp = std::env::temp_dir().join(format!("wp-latest-mem-{}", std::process::id()));
+        let dir = tmp.join(".claudinio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("2026-10-19_plan.md");
+        std::fs::write(&plan, "# Plan").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let f = std::fs::File::options().write(true).open(&plan).unwrap();
+        f.set_modified(past).unwrap();
+        std::fs::write(dir.join("MEMORY.md"), "## Learned\n").unwrap();
+        let got = latest_plan_path(tmp.to_str().unwrap(), Some(".claudinio"));
+        assert_eq!(got, Some(plan));
         std::fs::remove_dir_all(&tmp).ok();
     }
 

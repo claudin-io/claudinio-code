@@ -462,6 +462,30 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // Plans saved in `.claudinio` sit beside the project memory: the kickoff
+    // inlines the plan, never the memory that a later append made newer.
+    #[test]
+    fn a_builder_kickoff_inlines_the_plan_not_a_newer_project_memory() {
+        let root = std::env::temp_dir().join(format!("kickoff-mem-{}", std::process::id()));
+        let dir = root.join(".claudinio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("2026-10-19_p.md");
+        std::fs::write(&plan, "# Plan\nDo X").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let f = std::fs::File::options().write(true).open(&plan).unwrap();
+        f.set_modified(past).unwrap();
+        std::fs::write(dir.join("MEMORY.md"), "## Learned\n- a lesson\n").unwrap();
+        let msg = resolve_first_message(
+            &manual_builder_spec(),
+            Some(root.to_str().unwrap()),
+            Some(".claudinio"),
+            &[brain_task()],
+        );
+        assert!(msg.contains("Do X"), "{msg}");
+        assert!(!msg.contains("a lesson"), "{msg}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn context_handoff_message_wraps_document() {
         let msg = compose_context_handoff_message("## Purpose\nfinish it", Some("/p/plan.md"));
