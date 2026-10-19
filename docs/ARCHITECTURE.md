@@ -131,7 +131,12 @@ questions in one `ask_user` call, none for a fully specified request, one
 confirming question before `write_plan`; the consensus checklist, UI sizing and
 asset rules, Low-Level Design guidance and Mermaid catalog are the built-in
 `plan` skill (`agent/skills/plan.md`), listed in the catalog and read by
-reference. Capitals survive only where `v2::KEPT_IMPERATIVES` cites the failure
+reference. Because the prompt points at it by name, `plan` is reserved
+(`RESERVED_BUILTIN_SKILLS`): a project, user or plugin skill of that name is
+ignored rather than allowed to shadow it. Under v1 the Brain-exploring nudge is
+the pre-phase text too (`nudges::brain_exploring`), so it does not contradict
+v1's interview. The eval selects either prompt with `--prompt-version`.
+Capitals survive only where `v2::KEPT_IMPERATIVES` cites the failure
 they prevent (at most three; today one, VERBATIM). *v1* is the pre-Phase-5
 prompt, kept selectable for one release and pinned byte for byte against
 fixtures (`v1_pin_tests`). Compact and the git operator have one prompt each.

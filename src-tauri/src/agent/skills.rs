@@ -310,6 +310,13 @@ const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("plugin-crafter", BUILTIN_PLUGIN_CRAFTER),
 ];
 
+/// Built-in skills a system prompt sends the model to by name. Every other
+/// built-in is a fallback a skill on disk may replace; these are not: prompt
+/// v2's Brain block reads `plan` for the checklists it gave up (Phase 5), and
+/// a project or user skill that happened to share the name would leave that
+/// guidance unreachable while the prompt still pointed at it.
+const RESERVED_BUILTIN_SKILLS: &[&str] = &["plan"];
+
 // ─── Skill Manager ────────────────────────────────────────────────────────────
 
 pub struct SkillManager {
@@ -343,7 +350,8 @@ impl SkillManager {
     }
 
     /// The skills shipped with the binary, parsed. They are the lowest
-    /// priority: any skill on disk with the same name replaces one.
+    /// priority: any skill on disk with the same name replaces one, except
+    /// the names in [`RESERVED_BUILTIN_SKILLS`].
     fn builtin_entries() -> Vec<SkillEntry> {
         let mut entries = Vec::new();
         for (name, content) in BUILTIN_SKILLS {
@@ -435,6 +443,21 @@ impl SkillManager {
         // 3. User-level skills (lowest priority)
         if let Some(home) = dirs::home_dir() {
             scan_for_skills(&home, SkillScope::User, &mut all);
+        }
+
+        // 4. The names a prompt points at stay the built-in's.
+        for entry in Self::builtin_entries() {
+            if RESERVED_BUILTIN_SKILLS.contains(&entry.name.as_str()) {
+                if let Some((shadow, _)) = all.get(&entry.name)
+                    && shadow.scope != SkillScope::Builtin
+                {
+                    eprintln!(
+                        "[skills] '{}' at {} is ignored: the name is reserved for the built-in skill",
+                        entry.name, shadow.location
+                    );
+                }
+                all.insert(entry.name.clone(), (entry, SkillScope::Builtin));
+            }
         }
 
         // Flatten: keep only the entry, drop the scope (already embedded in the entry)
@@ -1118,5 +1141,32 @@ mod plan_skill_tests {
             assert!(!body.contains(gone), "the plan skill says {gone:?}");
         }
         assert!(body.contains("one `ask_user` call"), "{body}");
+    }
+
+    /// Prompt v2's Brain block sends the model to the `plan` skill by name for
+    /// the checklists it no longer carries. A project, user or plugin skill
+    /// that happened to be called `plan` would answer instead, and the
+    /// guidance v2 moved out of the prompt would be unreachable: the name the
+    /// prompt points at stays the built-in's. Other skills on disk still load.
+    #[test]
+    fn a_skill_on_disk_named_plan_does_not_replace_the_built_in_one() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["plan", "deploy"] {
+            let dir = root.path().join(".claude").join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: the project's own {name}\n---\n\nbody\n"),
+            )
+            .unwrap();
+        }
+        let mgr = SkillManager::new(Some(root.path().to_path_buf()));
+        let plan = mgr.get("plan").expect("plan");
+        assert_eq!(plan.scope, SkillScope::Builtin, "{}", plan.location);
+        assert!(plan.body.as_deref().unwrap().contains("false consensus"));
+        assert_eq!(
+            mgr.get("deploy").expect("deploy").scope,
+            SkillScope::Project
+        );
     }
 }
