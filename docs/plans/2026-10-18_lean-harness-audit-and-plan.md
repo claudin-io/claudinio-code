@@ -1167,3 +1167,18 @@ All of the following were removed: the chain splitter, the sort/uniq option tabl
 The commit message of `e7bcbaa` says 532 for `permissions.rs`. That figure was a typo; 520 is the measured count. Total file lines went from 2,080 and 2,011 to 1,446 and 1,624. The 2,000-production-line cap and the 5,000-token prefix gate were not touched. No prompt or tool text changed; only the tool-result texts `BASH_NOT_ALLOWED_IN_BRAIN` and `SHELL_REJECTION` did.
 
 **Checks.** Rust 1,535 → 1,527 passed / 10 ignored: obsolete heuristic tests were folded into the tables. vitest 977 passed, unchanged.
+
+#### Review of the simplified rule
+
+A review of `11395c2..b76aca6` found new holes, all of them checked in a real shell. Each fix is a table row plus the smallest change that makes the rule ask or refuse more often. None adds parsing to make anything run unasked.
+
+- **Odd blanks** (`d50ba53`): `split_whitespace` splits words on form feed, vertical tab, NBSP and U+3000, and sh does not. So `ls\fx/y` ran a planted executable at that path, with no prompt in Builder or Brain and through the eval gate. Rule 1 now refuses every blank except space and tab.
+- **Windows** (`d50ba53`): the tool runs `cmd /c`, which expands `%NAME%` before it looks for `&` and `|`. On Windows only, rule 1 also refuses `%`, `^` and `!`.
+- **`date -s`** (`d50ba53`): `date` now runs unasked only bare or with one `+FORMAT`, in both modes.
+- **Deny-list** (`d50ba53`): it matched substrings, so it hard-Denied `git log --format %H`, `ruff format src`, `cp /tmp/x .` and `rm -rf /tmp/build`. It now matches whole words in each part of the command. These commands now reach the rule instead of being refused outright, which is a deliberate behaviour change. `dd` is refused in any form, and a quoted disk target (`> "/dev/sda"`) is now Denied.
+- **Memory scan** (`646b892`): `.claudinio{,}`, `{.claudinio,}`, `{.claudinio/,}` and the Windows spellings (`.claudinio\*`, `.claudinio.`, `MEMORY~1.MD`) were only asked about, so YOLO ran them. Under `bash --posix` they deleted or overwrote the memory. The scan is now inverted: `.claudinio` names the folder unless a letter, digit, `-` or `_` continues it into another name. After the `/`, it counts as a file inside only when a plain path follows that ends cleanly.
+- **Docs**: a runner or build "runs whatever its arguments and the project choose", which includes `pytest --basetemp`, `go test -exec` and `cargo --config`. The READMEs now mention the deny-list, and the duplicated sentence in ARCHITECTURE.md is gone.
+
+Not changed: design B's `memory.md` trigger still hard-Denies `git add MEMORY.md` and `rg MEMORY.md`, because the design asks for it.
+
+**Line counts** (production): `permissions.rs` 520 → 561, `project_memory.rs` 684 → 696. Both are still well under the 1,114 and 956 they had before the simplification. **Checks:** Rust lib 1,529 passed / 10 ignored, vitest 977 passed.
