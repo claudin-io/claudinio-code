@@ -420,7 +420,22 @@ fn command_segments(lower: &str) -> Vec<Vec<String>> {
 /// command's arguments are not commands (`stdbuf -oL grep -rn install …`
 /// reads). A wrapper's option value named like a known command
 /// (`flock grep rm …`) hides what follows it: a heuristic, as `named_in` says.
+///
+/// Nesting deeper than `MAX_NESTING` wrappers and shells is read as a writer
+/// that also runs `find`, so a folder named there is refused rather than the
+/// recursion taking the stack (recheck round 3).
 fn commands_of(words: &[String]) -> Vec<&str> {
+    nested_commands(words, 0)
+}
+
+/// How many wrappers and shells `commands_of` reads into: far past what a
+/// person writes, far short of a 2 MiB stack.
+const MAX_NESTING: usize = 64;
+
+fn nested_commands(words: &[String], depth: usize) -> Vec<&str> {
+    if depth > MAX_NESTING {
+        return vec!["rm", "find"];
+    }
     fn base(w: &str) -> &str {
         w.rsplit('/').next().unwrap_or(w)
     }
@@ -456,7 +471,10 @@ fn commands_of(words: &[String]) -> Vec<&str> {
             }
             at += if w.ends_with('o') { 2 } else { 1 };
         }
-        out.extend(commands_of(rest.get(at..).unwrap_or_default()));
+        out.extend(nested_commands(
+            rest.get(at..).unwrap_or_default(),
+            depth + 1,
+        ));
     } else if RUNS_ANOTHER.contains(&first) {
         for (at, w) in rest.iter().enumerate() {
             let name = base(w);
@@ -464,7 +482,7 @@ fn commands_of(words: &[String]) -> Vec<&str> {
                 || RUNS_ANOTHER.contains(&name)
                 || SHELL_KEYWORDS.contains(&name)
             {
-                out.extend(commands_of(&rest[at..]));
+                out.extend(nested_commands(&rest[at..], depth + 1));
                 break;
             }
             out.push(name);
@@ -1317,6 +1335,28 @@ mod tests {
         ] {
             assert!(!named_in(c), "{c}");
         }
+    }
+
+    // A command nested past any depth a person writes must not take the
+    // guard's stack with it: `commands_of` once recursed per nested wrapper
+    // or shell, and 4,000 `eval `s aborted the process (recheck round 3).
+    // Past its depth the segment is read as a writer, so a folder named
+    // there is still refused.
+    #[test]
+    fn a_deeply_nested_command_is_read_without_overflowing_the_stack() {
+        let worker = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let evals = "eval ".repeat(50_000);
+                let shells = "sh -c ".repeat(20_000);
+                (
+                    named_in(&format!("{evals}rm -rf .claudinio")),
+                    named_in(&format!("{shells}rm -rf .claudinio")),
+                    named_in(&format!("{evals}ls src")),
+                )
+            })
+            .unwrap();
+        assert_eq!(worker.join().unwrap(), (true, true, false));
     }
 
     // The bash tool's `workdir` and `stdin` are part of the command: a
