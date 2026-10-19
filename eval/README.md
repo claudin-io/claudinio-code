@@ -111,7 +111,7 @@ approvals*; it does not contain a model that sets out to escape (see
   read-only command into any command at all.
 - **A shell command is approved only when it only looks**, as the permissions
   module classifies it (`ls`, `cat a.txt`, `git status`, `git diff`, `wc -l` …
-  with no chaining, pipes, substitution or redirection), **and only inside the
+  with no chaining, pipes, substitution, redirection or glob), **and only inside the
   task's workspace**: the directory it runs in and every word naming a path
   (absolute, with a `..` component, `~` or `$`) must resolve inside it, read
   as the shell reads it (quotes and backslashes dropped), and a glob or brace

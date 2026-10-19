@@ -82,29 +82,32 @@ Build a partir do código-fonte está em [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Dois modos com superfícies de ferramenta diferentes. O **Brain** explora, te
 entrevista sobre os requisitos e escreve um plano. Ele não tem ferramenta de
-edição, e o shell dele roda só comandos de inspeção, build e teste da allowlist —
-nunca um interpretador, um script do projeto ou uma cadeia com um comando fora
-da allowlist — e recusa um comando que reconhece como gravando um arquivo.
-Builds e testes ainda rodam código do projeto, então é um shell estreito, não
-uma prova de que nada muda. O **Builder** executa — escrevendo código, rodando comandos,
+edição, e o shell dele roda só comandos de leitura (`git status`/`diff`/`log`,
+`ls`, `cat`, `head`, `tail`, `wc`, …) sob a regra abaixo — nenhum build,
+runner de teste, gerenciador de pacotes ou interpretador; o resto é recusado.
+O **Builder** executa — escrevendo código, rodando comandos,
 verificando. O handoff entre eles abre uma sessão nova semeada com o plano, para
 a execução não herdar uma janela de contexto cheia de exploração.
 
 O Builder edita os arquivos ele mesmo: cada `edit_file` aparece para você como
 um diff a aprovar — um arquivo novo também, como diff a partir do nada (um
 `old_string` vazio o cria, pastas que faltam incluídas), e um `old_string` precisa
-casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão de aprovação mostra com a contagem — e um comando de shell que grava um arquivo por redirecionamento, `tee`,
-`sed -i`, `patch` ou script inline é perguntado do mesmo jeito, mesmo quando o
-prefixo está na allowlist. Essa checagem é uma heurística: um comando da
-allowlist só roda sem perguntar quando cada comando da cadeia ou do pipe está na
-allowlist (um filtro como `grep`, `sort` ou `cut` conta como allowlist na ponta
-que recebe um pipe), mas os interpretadores da allowlist (`node`, `python`,
-`pnpm run`) rodam o script que receberem sem perguntar, e um runner de teste ou
-build roda os testes e scripts de build do seu próprio projeto — com um
-argumento que escolhe um programa, plugin, config ou pasta (`pytest
---basetemp=src`, `go test -exec`, `cargo test --config`), ele é perguntado; um `python` ou `node` sem script (sem arquivo, `-c`, `-m` ou `-e` —
-só flags ou `-`), ou com uma opção que a checagem não conhece, que pode lê-lo
-de um pipe ou do stdin, é perguntado. Ele só passa trabalho a
+casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão de
+aprovação mostra com a contagem. Um comando de shell roda sem perguntar sob uma
+única regra, e nada mais roda: um único comando da allowlist (inspeção do git,
+`ls`/`cat`/`head`/`tail`/`wc`, os runners de teste e builds,
+`node`/`python`/`pnpm run`, `which`/`echo`/`pwd`/`date`), opcionalmente num pipe
+para `head`, `tail`, `wc`, `grep`, `cut`, `tr` ou `nl`, sem `;`, `&`, `||`, `$`,
+crase, barra invertida, chave, parêntese, glob, quebra de linha ou
+redirecionamento (além de `2>&1` e `>/dev/null`), e sem nada que a checagem de
+gravação veja (redirecionamento, `tee`, `sed -i`, `patch`, script inline que
+grava). Todo o resto é perguntado — uma cadeia de comandos da allowlist, um `|`
+entre aspas, um `2> /dev/null` com espaço inclusive: é o preço de uma regra
+simples o bastante para se ter certeza, e ele nunca é recuperado com parsing. Um
+interpretador ou runner de teste da allowlist ainda roda o script ou o código do
+projeto que receber, então a allowlist do Builder é uma conveniência, não um
+sandbox; um interpretador que recebe um script pelo stdin da chamada é
+perguntado. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo
@@ -325,24 +328,20 @@ Uma sessão nova num repositório não começa do zero:
 - **Só o harness escreve a memória.** `edit_file` recusa
   `.claudinio/MEMORY.md` seja qual for a grafia do caminho — essa checagem de
   caminho é a proteção de verdade. `finalize_plan` não o aceita como arquivo de
-  plano. A proteção do shell é uma heurística de melhor esforço por cima, não
-  uma fronteira: um comando de shell que nomeia o arquivo — com glob ou aspas,
-  pela pasta de trabalho da chamada ou pelo seu stdin, ou por um link criado
-  antes, inclusive — ou que copia, extrai, faz checkout ou apaga dentro da
-  própria pasta `.claudinio` (`cp q/* .claudinio/`, `tar -C .claudinio`,
-  `rm -rf .claudinio`, `find -name MEMORY.md -delete`) é recusado a menos que
-  só leia; nem o modo YOLO nem os hooks liberam. Ela lê o texto da chamada,
-  então não pega um comando que monta o caminho enquanto roda (uma variável, um
-  script), um cujo comando que grava está atrás de um wrapper que a proteção
-  não conhece ou atrás de uma opção longa de um wrapper cujo valor tem o nome
-  de um comando que ela conhece (`sudo --user git rm …`), um script passado a
-  um shell por pipe ou here-string (`echo '…' | sh`, `bash <<< '…'`), um
-  comando que roda os próprios argumentos (o `e` do `sed`, um alias do `git`,
-  o `system()` do `awk`), um que copia ou apaga uma pasta acima dela
-  (`rm -rf .`), um link alcançado por uma pasta em glob, nem um hard link. Esse comando também não é
-  necessariamente perguntado: os interpretadores da allowlist (`node`,
-  `python`) rodam um script sem perguntar, fora do YOLO também. Você pode
-  editar o arquivo à mão.
+  plano. A proteção do shell é defesa em profundidade de melhor esforço por
+  cima, não uma fronteira: uma chamada de shell cujo texto menciona
+  `MEMORY.md`, ou a pasta `.claudinio` como palavra inteira ou seguida de um glob
+  ou de `.`/`..` (`rm -rf .claudinio`, `cp -r q/. .claudinio/`,
+  `.claudinio/M*`), no comando, na pasta de trabalho ou no stdin — ou um nome
+  que leva ao arquivo por um link no disco — é recusada a menos que seja uma
+  leitura simples (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `file`, `grep`,
+  `git log`/`diff`/`show`/`status`/`blame`, sem pipe); nem o modo YOLO nem os
+  hooks liberam. Ela varre texto, então não vê um caminho que o comando monta
+  enquanto roda (uma variável, um script), um glob que soletra o nome da
+  própria pasta (`.c*`), uma pasta acima dela (`rm -rf .`) nem um hard link — e
+  esse comando também não é necessariamente perguntado: os interpretadores da
+  allowlist do Builder rodam um script sem perguntar. Você pode editar o
+  arquivo à mão.
 - **Nenhum dos dois entra no system prompt**, que fica com os mesmos bytes de
   uma requisição para a outra para o provedor poder fazer cache, e nenhum é
   enviado de novo mais tarde na sessão; uma sessão que continua outra recebe o

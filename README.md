@@ -81,10 +81,9 @@ Building from source is covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Two modes with different tool surfaces. **Brain** explores, interviews you about
 requirements and writes a plan. It has no edit tool, and its shell runs only
-allowlisted inspection, build and test commands — never an interpreter, a
-project script or a chain with a command off the allowlist — and refuses a
-command it recognises as writing a file. Builds and tests still run project
-code, so that is a narrow shell, not a proof that nothing changes. **Builder**
+read-only commands (`git status`/`diff`/`log`, `ls`, `cat`, `head`, `tail`,
+`wc`, …) under the rule below — no build, test runner, package manager or
+interpreter; anything else is refused. **Builder**
 executes it — writing code, running commands, verifying. The handoff between
 them starts a fresh session seeded with the plan, so execution never inherits a
 context window full of exploration.
@@ -92,19 +91,20 @@ context window full of exploration.
 Builder edits files itself: each `edit_file` is shown to you as a diff to
 approve — a new file too, as a diff from nothing (an empty `old_string` creates
 it, missing folders included), and an `old_string` must match one place unless
-the call says `replace_all`, which the approval card shows with its count — and a shell command that writes a file by redirection, `tee`, `sed -i`,
-`patch` or an inline script is asked about the same way, even one whose prefix
-is allowlisted. That check is a heuristic: an allowlisted command runs unasked
-only when every command of its chain or pipe is allowlisted (a filter such as
-`grep`, `sort` or `cut` counts as allowlisted at the receiving end of a pipe),
-but the allowlisted interpreters (`node`, `python`, `pnpm run`) run whatever
-script they are given without asking, and a test runner or build runs your
-project's own tests and build scripts — given an argument that picks a
-program, plugin, config or folder (`pytest --basetemp=src`, `go test -exec`,
-`cargo test --config`), it is asked about; a `python`
-or `node` given no script (no file, `-c`, `-m` or `-e` — only flags or `-`),
-or given an option the check does not know, which may read it from a pipe or
-stdin, is asked about. It hands work to subagents only when that
+the call says `replace_all`, which the approval card shows with its count. A
+shell command runs unasked under one rule, and nothing else does: a single
+allowlisted command (git inspection, `ls`/`cat`/`head`/`tail`/`wc`, the test
+runners and builds, `node`/`python`/`pnpm run`, `which`/`echo`/`pwd`/`date`),
+optionally piped into `head`, `tail`, `wc`, `grep`, `cut`, `tr` or `nl`, with
+no `;`, `&`, `||`, `$`, backquote, backslash, brace, parenthesis, glob, line
+break or redirection (beyond `2>&1` and `>/dev/null`), and nothing the write
+check sees (redirection, `tee`, `sed -i`, `patch`, an inline script that
+writes). Everything else is asked about — a chain of allowlisted commands, a
+quoted `|`, a `2> /dev/null` with a space included: that is the price of a rule
+simple enough to be sure of, and it is never won back with parsing. An
+allowlisted interpreter or test runner still runs whatever script or project
+code it is given, so Builder's allowlist is a convenience, not a sandbox; an
+interpreter fed a script on the call's stdin is asked about. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
 delegated edit costs a second prompt, a second exploration and the spec written
@@ -321,23 +321,18 @@ A new session in a repository does not start from nothing:
 - **Only the harness writes the memory.** `edit_file` refuses
   `.claudinio/MEMORY.md` however the path is spelled — that path check is the
   real guard. `finalize_plan` will not take it as a plan file. The shell guard
-  is a best-effort heuristic on top, not a boundary: a shell command that names
-  the file — globs and quotes included, through the call's working folder or
-  its stdin, or through a link made earlier — or that copies, extracts, checks
-  out or deletes into the `.claudinio` folder itself (`cp q/* .claudinio/`,
-  `tar -C .claudinio`, `rm -rf .claudinio`, `find -name MEMORY.md -delete`) is
-  refused unless it only reads; YOLO mode and hooks do not open it. It reads
-  the call's text, so it does not catch a command that builds the path while
-  it runs (a variable, a script), one whose writer sits behind a wrapper the
-  guard does not know or behind a wrapper's long option whose value is named
-  like a command it knows (`sudo --user git rm …`), a script piped or
-  here-string-fed into a shell (`echo '…' | sh`, `bash <<< '…'`), a command
-  that runs its own arguments (`sed`'s `e`, a `git` alias, `awk`'s
-  `system()`), one that copies or deletes a parent folder
-  of it (`rm -rf .`), a link reached through a globbed folder, or a hard link.
-  Such a command is not necessarily asked about either: the allowlisted
-  interpreters (`node`, `python`) run a script without a prompt, outside YOLO
-  too. You can edit the file yourself.
+  is best-effort defence in depth on top, not a boundary: a shell call whose
+  text mentions `MEMORY.md`, or the `.claudinio` folder as a whole word or
+  followed by a glob or a `.`/`..` (`rm -rf .claudinio`, `cp -r q/. .claudinio/`,
+  `.claudinio/M*`), in its command, its working folder or its stdin — or a name
+  that resolves to the file through a link on disk — is refused unless it is a
+  plain read (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `file`, `grep`,
+  `git log`/`diff`/`show`/`status`/`blame`, with no pipe); YOLO mode and hooks
+  do not open it. It scans text, so it does not see a path the command builds
+  while it runs (a variable, a script), a glob that spells the folder's own
+  name (`.c*`), a parent folder (`rm -rf .`) or a hard link — and such a
+  command is not necessarily asked about either: Builder's allowlisted
+  interpreters run a script unasked. You can edit the file yourself.
 - **Neither ever goes into the system prompt**, which stays the same bytes from
   one request to the next so the provider can cache it, and neither is sent
   again later in the session; a session that continues another gets the
