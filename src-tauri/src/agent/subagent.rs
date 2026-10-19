@@ -1561,6 +1561,10 @@ pub(crate) mod scripted_model {
         /// connection stays open, as a provider mid-generation does when the
         /// user presses stop.
         Hang(&'static str),
+        /// `Hang`, with a thinking delta after the text: the client reports
+        /// it as a `Thinking` event, which can only come once the text before
+        /// it was read — a test's signal that the words are in.
+        HangSignalled(&'static str),
         /// An HTTP error: this status and this JSON body, no stream. A
         /// provider refusing the request outright.
         Status(u16, &'static str),
@@ -1617,6 +1621,13 @@ pub(crate) mod scripted_model {
                 out += &sse(
                     "content_block_delta",
                     json!({"index": 0, "delta": {"type": "text_delta", "text": text}}),
+                );
+            }
+            Reply::HangSignalled(text) => {
+                out += &render(&Reply::Hang(text), n);
+                out += &sse(
+                    "content_block_delta",
+                    json!({"index": 1, "delta": {"type": "thinking_delta", "thinking": "."}}),
                 );
             }
             Reply::Text(text) => {
@@ -1716,9 +1727,15 @@ pub(crate) mod scripted_model {
                 } else {
                     let n = next.fetch_add(1, Ordering::SeqCst);
                     let reply = script.get(n).or(script.last()).expect("a script");
-                    if let Reply::Delayed(ms, _) = reply {
-                        tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
-                    }
+                    // A delayed reply is the inner one, late: a delayed hang
+                    // still hangs.
+                    let reply = match reply {
+                        Reply::Delayed(ms, inner) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+                            &**inner
+                        }
+                        other => other,
+                    };
                     let mut body = render(reply, n);
                     if let Some(usage) = &usage {
                         body = sse(
@@ -1736,7 +1753,7 @@ pub(crate) mod scripted_model {
                         let _ = socket.flush().await;
                         continue;
                     }
-                    if let Reply::Hang(_) = reply {
+                    if let Reply::Hang(_) | Reply::HangSignalled(_) = reply {
                         // Promise more than is sent, then hold the line.
                         let head = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
@@ -2499,7 +2516,16 @@ mod transcript_tests {
     #[tokio::test]
     async fn an_interrupted_subagent_keeps_what_it_had_said_in_its_transcript() {
         let (ws, ws_str, store) = session_in("interrupted");
-        let (base, _, _) = spawn_with_usage(vec![Reply::Hang("halfway through the")], None).await;
+        // The first words arrive late, as from a slow or loaded provider: the
+        // stop must follow them, not a clock.
+        let (base, _, _) = spawn_with_usage(
+            vec![Reply::Delayed(
+                700,
+                Box::new(Reply::HangSignalled("halfway through the")),
+            )],
+            None,
+        )
+        .await;
         let config = config_for(&base);
         let ctx = ToolContext {
             workspace_root: Some(ws_str),
@@ -2507,12 +2533,20 @@ mod transcript_tests {
             ..crate::agent::tools::tests_support::ctx()
         };
         let steering = Arc::new(SteeringCtl::new());
+        // The person presses stop once the subagent's first words are in
+        // (`HangSignalled`).
         let stop = steering.interrupt.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            stop.store(true, Ordering::SeqCst);
-        });
-        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let events: Channel<AgentEvent> =
+            Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+                if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                    && let Ok(AgentEvent::Subagent { event, .. }) =
+                        serde_json::from_str::<AgentEvent>(json)
+                    && matches!(*event, AgentEvent::Thinking(_))
+                {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            });
         let (block, _, _, _) = run_spawn_agents(
             &config,
             &ctx,
