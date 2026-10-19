@@ -418,8 +418,11 @@ fn command_segments(lower: &str) -> Vec<Vec<String>> {
 /// words after it up to the first command this guard knows, since the
 /// command it runs can sit behind its own flags and their values, and that
 /// command's arguments are not commands (`stdbuf -oL grep -rn install …`
-/// reads). A wrapper's option value named like a known command
-/// (`flock grep rm …`) hides what follows it: a heuristic, as `named_in` says.
+/// reads); the wrapper's own option values and operands are skipped
+/// (`wrapper_syntax`). A value the guard does not know to skip — a long
+/// option's, given as a separate word — named like a known command
+/// (`sudo --user git rm …`) hides what follows it: a heuristic, as
+/// `named_in` says.
 ///
 /// Nesting deeper than `MAX_NESTING` wrappers and shells is read as a writer
 /// that also runs `find`, so a folder named there is refused rather than the
@@ -483,6 +486,12 @@ fn nested_commands(words: &[String], depth: usize) -> Vec<&str> {
             depth + 1,
         ));
     } else if RUNS_ANOTHER.contains(&first) {
+        // The wrapper's own words — its option values and the operands
+        // before the command (`flock FILE`, `chroot NEWROOT`, `coproc NAME
+        // {`) — are skipped so a reader's name there does not end the scan;
+        // a writer, shell or wrapper there is still read as one.
+        let (valued, mut operands, script_c) = wrapper_syntax(first, rest);
+        let mut value_next = false;
         for (at, w) in rest.iter().enumerate() {
             let name = base(w);
             if SHELLS.contains(&name)
@@ -492,13 +501,74 @@ fn nested_commands(words: &[String], depth: usize) -> Vec<&str> {
                 out.extend(nested_commands(&rest[at..], depth + 1));
                 break;
             }
+            if FOLDER_WRITERS.contains(&name) {
+                out.push(name);
+                break;
+            }
+            if std::mem::take(&mut value_next) || w == "-" || w == "--" {
+                continue;
+            }
+            if let Some(flags) = w.strip_prefix('-').filter(|f| !f.starts_with('-')) {
+                if script_c && flags.contains('c') {
+                    out.extend(nested_commands(&rest[at + 1..], depth + 1));
+                    break;
+                }
+                value_next = flags
+                    .find(|c| valued.contains(c))
+                    .is_some_and(|i| i + 1 == flags.len());
+                // `runuser -u USER` names its user as an option, not an operand.
+                if first == "runuser" && flags.contains('u') {
+                    operands = 0;
+                }
+                continue;
+            }
+            if script_c && w == "--command" {
+                out.extend(nested_commands(&rest[at + 1..], depth + 1));
+                break;
+            }
+            if operands > 0 && !w.starts_with('-') {
+                operands -= 1;
+                continue;
+            }
             out.push(name);
-            if KNOWN_COMMANDS.contains(&name) || FOLDER_WRITERS.contains(&name) {
+            if KNOWN_COMMANDS.contains(&name) {
                 break;
             }
         }
     }
     out
+}
+
+/// A wrapper's words before the command it runs, for `commands_of`: its
+/// short options that take the next word as their value (lower-cased, as
+/// the guard reads words, so `xargs -I` and `-i` both count), how many
+/// operands precede the command, and whether its `-c` is a script (`su`,
+/// `runuser`, `flock`). A long option given its value as a separate word is
+/// not known, so that value can still end the scan.
+fn wrapper_syntax(wrapper: &str, rest: &[String]) -> (&'static str, usize, bool) {
+    match wrapper {
+        "sudo" => ("cdghprtu", 0, false),
+        "doas" => ("cu", 0, false),
+        "xargs" => ("adeilnps", 0, false),
+        "env" => ("cu", 0, false),
+        "nice" => ("n", 0, false),
+        "time" => ("fo", 0, false),
+        "exec" => ("a", 0, false),
+        "timeout" => ("ks", 1, false),
+        "stdbuf" => ("eio", 0, false),
+        "ionice" => ("cnp", 0, false),
+        "flock" => ("ew", 1, true),
+        "chrt" | "taskset" | "chroot" => ("", 1, false),
+        "strace" => ("abeiopsux", 0, false),
+        "watch" => ("n", 0, false),
+        "su" | "runuser" => ("gsuw", 1, true),
+        "coproc" => (
+            "",
+            usize::from(rest.get(1).is_some_and(|w| w == "{")),
+            false,
+        ),
+        _ => ("", 0, false),
+    }
 }
 
 /// Words the shell reads before the command of a segment, for `commands_of`.
@@ -1322,6 +1392,21 @@ mod tests {
             "sh -co pipefail 'rm -rf .claudinio'",
             "bash -c -oo pipefail errexit 'rm -rf .claudinio'",
             "bash -O extglob -co pipefail 'rm -rf .claudinio'",
+            // A wrapper's own operands and option values are not the command
+            // it runs, even when named like a command the guard knows: a
+            // lock file, a new root, coproc's NAME, `xargs -a`/`-I`,
+            // `strace -o`, `sudo -u`, and su's user before its `-c` script.
+            "flock /tmp/file rm -rf .claudinio",
+            "flock .git/test rm -rf .claudinio",
+            "chroot /srv/tree rm -rf .claudinio",
+            "xargs -a file rm -rf .claudinio",
+            "ls /tmp/q | xargs -I file cp /tmp/q/file .claudinio/",
+            "strace -o file rm -rf .claudinio",
+            "sudo -u git rm -rf .claudinio",
+            "coproc cat { rm -rf .claudinio; }",
+            "su git -c 'cp -r /tmp/q/. .claudinio/'",
+            "runuser -u git -- rm -rf .claudinio",
+            "flock -c 'cp -r /tmp/q/. .claudinio/' /tmp/l",
         ] {
             assert!(named_in(c), "{c}");
         }
@@ -1349,6 +1434,11 @@ mod tests {
             "stdbuf -oL grep -rn install .claudinio/",
             "timeout 10 grep -rn \"cp \" .claudinio/",
             "eval grep -rn install .claudinio/",
+            "sudo -u git grep -rn install .claudinio/",
+            "flock /tmp/l grep -rn install .claudinio/",
+            "xargs -I file grep -rn install .claudinio/",
+            "timeout -s term 5 grep -rn install .claudinio/",
+            "runuser -u git -- grep -rn install .claudinio/",
         ] {
             assert!(!named_in(c), "{c}");
         }
