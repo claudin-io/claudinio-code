@@ -109,7 +109,7 @@ pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
 // 3. the first part starts with the words of an allowlist entry (an entry
 //    ending in a space needs one more word; `git branch` and `git remote`
 //    only bare or with `LISTING_FLAGS`, `date` only bare or with one
-//    `+FORMAT`), and is not an interpreter fed the call's `stdin`;
+//    `+FORMAT`), and is not an interpreter or `date` fed the call's `stdin`;
 // 4. every later part is one of `PIPE_FILTERS`, which read their input and
 //    print, and have no option that writes a file or runs a program;
 // 5. the write detector (`bash_writes_files`) sees no write.
@@ -228,9 +228,10 @@ const LISTING_FLAGS: &[&str] = &["-a", "-r", "-v", "-vv", "--list", "--show-curr
 /// and none has an option that writes a file or runs a program.
 const PIPE_FILTERS: &[&str] = &["head", "tail", "wc", "grep", "cut", "tr", "nl"];
 
-/// Interpreters that read a script from stdin: fed the call's `stdin`, they
-/// run a script the command does not show.
-const INTERPRETERS: &[&str] = &["node", "python", "ruby", "perl", "sh", "bash"];
+/// Commands that act on what they read from stdin: fed the call's `stdin`,
+/// an interpreter runs a script the command does not show, and under
+/// `cmd /c` a bare `date` reads the new date and sets the clock.
+const STDIN_READERS: &[&str] = &["node", "python", "ruby", "perl", "sh", "bash", "date"];
 
 /// Redirections that only merge or discard streams, dropped as whole tokens.
 const HARMLESS_REDIRECTIONS: &[&str] = &["2>&1", "2>/dev/null", ">/dev/null", "1>/dev/null"];
@@ -471,7 +472,7 @@ fn auto_runs(command: &str, has_stdin: bool, allowlist: &[&str], auto_approve_gi
         return false;
     };
     let first_word = |p: &str| p.split_whitespace().next().unwrap_or("").to_string();
-    let reads_stdin = has_stdin && INTERPRETERS.contains(&first_word(&parts[0]).as_str());
+    let reads_stdin = has_stdin && STDIN_READERS.contains(&first_word(&parts[0]).as_str());
     allowlisted(&parts[0], allowlist, auto_approve_git)
         && !reads_stdin
         && parts[1..]
@@ -1868,5 +1869,18 @@ mod shell_rule_tests {
         ] {
             assert!(!on_the_deny_list(c, true), "{c:?}");
         }
+    }
+
+    /// Under `cmd /c` a bare `date` prompts for a new date and reads it from
+    /// stdin, so a `date` fed the call's `stdin` sets the clock: it asks,
+    /// like an interpreter fed a script (review of the simplified rule).
+    #[test]
+    fn a_date_fed_stdin_asks() {
+        assert_eq!(
+            builder("date", Some("01-01-2030")),
+            PermissionLevel::RequiresApproval
+        );
+        assert_eq!(builder("date", None), PermissionLevel::Auto);
+        assert_eq!(builder("date", Some("")), PermissionLevel::Auto);
     }
 }
