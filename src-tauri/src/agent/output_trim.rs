@@ -630,7 +630,10 @@ mod tests {
     /// to it — still verdict-last, still with the full text on disk.
     #[tokio::test]
     async fn a_smaller_budget_trims_harder_and_keeps_the_verdict() {
-        let text = cargo_log(3000);
+        // Not `cargo_log(3000)`: saves are named by their content, and the
+        // test above saves and removes that text, so in parallel one test
+        // could delete the other's file between its save and its read.
+        let text = cargo_log(3001);
         let (wide, _) = fit("cargo test", text.clone(), None, BUDGET_CHARS).await;
         let (narrow, _) = fit("cargo test", text.clone(), None, 8_000).await;
         assert!(narrow.len() < wide.len());
