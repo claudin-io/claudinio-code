@@ -1034,11 +1034,11 @@ pub(crate) async fn run_subagent_recorded(
 
         // Subagents have no handoff and no summary: past the soft line their
         // old tool traffic is dropped verbatim-style (`agent::prune`), in
-        // memory — a subagent has no session file to record it in. Nothing
-        // gentler comes after this, so it runs as a last resort: by age even
-        // when Jev judged the history and that was not enough, and dropping
-        // the oldest calls outright when cutting their results is not enough
-        // either.
+        // memory — a subagent has no session file to record it in. The same
+        // ladder as the main session (lossless, then masking by age with Jev
+        // arbitrating the newest rounds' cuts), run as a last resort: nothing
+        // gentler comes after this, so the oldest calls are dropped outright
+        // when cutting their results is not enough.
         let limit = budget.soft;
         let estimate = session::estimate_tokens(&history, &system, &tools);
         if estimate >= limit {

@@ -251,10 +251,11 @@ pub(crate) fn shed_options(
 
 /// Before handing off or summarizing, try the verbatim way: drop old tool
 /// traffic and keep every word of the conversation (`agent::prune::shed` —
-/// what is superseded first, then what Jev says is no longer needed, or the
-/// oldest results when there is no Jev to ask). Returns the new context
-/// estimate and what Jev cost, or `None` — not enough freed — and the caller
-/// falls through to the handoff / compaction exactly as before.
+/// what is superseded first, then the oldest results masked to their head,
+/// with Jev, when there is one, keeping what it says the newest rounds still
+/// need). Returns the new context estimate and what Jev cost, or `None` — not
+/// enough freed — and the caller falls through to the handoff / compaction
+/// exactly as before.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn try_verbatim_compaction(
     config: &AgentConfig,
@@ -273,8 +274,7 @@ pub(super) async fn try_verbatim_compaction(
         return None;
     }
     let backend = crate::agent::jev::backend(config);
-    // What Jev chose to keep stays kept: when its pass is not enough, the
-    // handoff is gentler on a main session than cutting by age over its head.
+    // Not a last resort: no call is dropped outright, a handoff comes next.
     let (outcome, pruned) = crate::agent::prune::shed(
         history,
         backend.as_ref(),

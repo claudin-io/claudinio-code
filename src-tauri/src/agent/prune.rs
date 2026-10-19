@@ -1,61 +1,55 @@
-//! Verbatim compaction: drop the tool calls and tool results Jev says are no
-//! longer needed, keep everything else exactly as it was. A dropped call is
-//! stubbed in place — its `tool_use` block stays, emptied, and its result
-//! becomes a one-line note — because removing a block breaks DeepSeek's
-//! thinking mode (see [`apply`]).
+//! Verbatim compaction: cut or drop old tool traffic, keep everything else
+//! exactly as it was. A dropped call is stubbed in place — its `tool_use`
+//! block stays, emptied, and its result becomes a one-line note — because
+//! removing a block breaks DeepSeek's thinking mode (see [`apply`]).
 //!
-//! Ported from tamaratran/fast-jev-compaction. The summarizing compaction and
-//! the context handoff both replace the conversation with prose a model wrote,
-//! and prose loses things — a file path, the exact error, a constraint the user
-//! gave twenty turns ago. Here nothing is rewritten: user and assistant text
-//! stay verbatim and in order; only old tool traffic goes, and Jev decides
-//! which, while seeing the whole conversation.
+//! The summarizing compaction and the context handoff both replace the
+//! conversation with prose a model wrote, and prose loses things — a file
+//! path, the exact error, a constraint the user gave twenty turns ago. Here
+//! nothing is rewritten: user and assistant text stay verbatim and in order;
+//! only old tool outputs go.
 //!
-//! For every tool call outside the pinned first and newest messages Jev answers
-//! two `noul`s: should the **call** stay (knowing it was made, with its input,
-//! still matters), and should its **result** stay verbatim (the contents are
-//! still needed and re-running the tool would not do). Then, against
-//! [`KEEP_RESULT_THRESHOLD`] / [`KEEP_CALL_THRESHOLD`]: keep both · keep the call with the result cut to a short
-//! head · drop the call together with its result (stubbed, see [`apply`]).
-//!
-//! The state is the whole history oldest-first with tool results replaced by a
-//! one-line note, fitted into [`MAX_STATE_CHARS`] in stages. It is resent with
-//! every batch of [`CALLS_PER_REQUEST`] calls (two questions each), which keeps
-//! each request inside what every backend accepts, the claudin.io plan
-//! endpoint included. Anything going wrong yields `None` and the caller falls
-//! back to the handoff or the summarizing compaction.
-//!
-//! Jev is one of three stages ([`shed`]), and the only one that needs a
-//! credential:
+//! [`shed`] runs the ladder, masking first (lean-harness Phase 6):
 //!
 //! 0. **Lossless** ([`plan_lossless`]) — what a newer copy in the same history
 //!    already supersedes: older task-list snapshots, and a file read again
 //!    later with the same range. Nothing is judged because nothing is lost.
-//! 1. **Judged** ([`plan`]) — the Jev pass above, on what stage 0 left.
-//! 2. **By age** ([`plan_by_age`]) — no judge to ask: the oldest tool results
-//!    are cut to their head until enough is freed. Outputs go, calls stay:
-//!    knowing a call was made is cheap and stops the model from making it
-//!    again. Only as a last resort — a subagent, which has no handoff and no
-//!    summary behind it — are the oldest calls dropped outright, because the
-//!    stubs of a long run add up too and the alternative is to overflow.
+//! 2. **Masking by age** ([`plan_by_age`]) — the oldest tool results are cut
+//!    to their head until enough is freed. Outputs go, calls stay: knowing a
+//!    call was made is cheap and stops the model from making it again. Only as
+//!    a last resort — a subagent, which has no handoff and no summary behind
+//!    it — are the oldest calls dropped outright, because the stubs of a long
+//!    run add up too and the alternative is to overflow.
 //!
-//! Stage 2 is what a session without Jev gets instead of nothing.
+//! **Jev arbitrates, it no longer plans** ([`arbitrate`]). When a Jev backend
+//! exists, it is asked only about the cuts masking would make in the
+//! [`ARBITRATION_ROUNDS`] newest rounds — the outputs most likely still in
+//! use — one `noul` each: should this output stay verbatim. What it keeps
+//! comes out of the cut. Older cuts are not asked about: plain observation
+//! masking costs about half of LLM summarization at an equal or slightly
+//! better solve rate (Lindenbauer et al., *The Complexity Trap*, JetBrains,
+//! arXiv 2508.21433), so the judge's money goes where age is the worst proxy. Before Phase 6 Jev judged every
+//! old call first (up to 160, ~40 requests) and masking ran only when Jev was
+//! absent or not enough.
+//!
+//! The state Jev reads is the whole history oldest-first with tool results
+//! replaced by a one-line note, fitted into [`MAX_STATE_CHARS`] in stages. It
+//! is resent with every batch of [`CALLS_PER_REQUEST`] questions, which keeps
+//! each request inside what every backend accepts, the claudin.io plan
+//! endpoint included. Anything going wrong yields `None` and masking stands
+//! as it is. (The Jev pass is ported from tamaratran/fast-jev-compaction.)
 
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
 use crate::agent::provider::{ContentBlock, Message, ToolResultContent};
 
-/// P(keep result) from which a tool output stays verbatim. Upstream uses 0.5;
-/// our live probes (2026-10-05) put a schema the current task still depended
-/// on at 0.41 and every no-longer-needed output at 0.07–0.24, so the line
-/// sits between them — deleting a needed output costs a re-read, keeping a
-/// stale one only costs context.
+/// P(keep result) from which a tool output masking would cut stays verbatim.
+/// Upstream uses 0.5; our live probes (2026-10-05) put a schema the current
+/// task still depended on at 0.41 and every no-longer-needed output at
+/// 0.07–0.24, so the line sits between them — deleting a needed output costs
+/// a re-read, keeping a stale one only costs context.
 pub const KEEP_RESULT_THRESHOLD: f64 = 0.35;
-/// P(keep call) from which a call stays (with its output cut to a head) even
-/// when its output goes. Relevant-but-done steps scored 0.23–0.37, unrelated
-/// reads 0.11–0.13.
-pub const KEEP_CALL_THRESHOLD: f64 = 0.2;
 /// Newest messages never touched; the first message is always kept too.
 pub const PRESERVE_RECENT_MESSAGES: usize = 6;
 /// Characters of a dropped result that stay, before the note.
@@ -63,10 +57,15 @@ pub const TRUNCATE_HEAD_CHARS: usize = 300;
 /// Ceiling for the serialized state. Under the 60k the Jev client clips at
 /// and the 64k the plan endpoint accepts, and well under Jev's 32k tokens.
 pub const MAX_STATE_CHARS: usize = 56_000;
-/// Two questions per call, eight per request — the plan endpoint's cap.
-pub const CALLS_PER_REQUEST: usize = 4;
-/// At most this many calls are judged per compaction (oldest first); the rest
-/// stay. Bounds the bill at ~40 requests.
+/// One question per call, eight per request — the plan endpoint's cap.
+pub const CALLS_PER_REQUEST: usize = 8;
+/// Jev arbitrates masking's cuts in this many newest rounds (assistant
+/// messages that made tool calls); older cuts stand without a question. The
+/// recent window masking never touches is at most three rounds, so this is
+/// the five rounds just before it.
+pub const ARBITRATION_ROUNDS: usize = 8;
+/// At most this many calls are arbitrated per shed (oldest first); the rest
+/// stay cut. Bounds the bill at 20 requests.
 pub const MAX_JUDGED_CALLS: usize = 160;
 /// A compaction that frees less than this share of the characters is not
 /// worth breaking the cache for; the caller falls back.
@@ -90,13 +89,6 @@ pub struct ToolCall {
     pub result_chars: usize,
     pub is_error: bool,
     pub pinned: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    Keep,
-    DropResult,
-    DropCall,
 }
 
 /// What to remove. Persisted as `SessionRecord::Pruned` and re-applied on load.
@@ -155,8 +147,8 @@ pub struct Outcome {
     /// last decision this shed has to offer.
     pub last: bool,
     pub cost: f64,
-    /// (tool_use_id, P(keep call), P(keep result)) for every judged call.
-    pub judged: Vec<(String, f64, f64)>,
+    /// (tool_use_id, P(keep result)) for every call Jev arbitrated.
+    pub judged: Vec<(String, f64)>,
 }
 
 impl Outcome {
@@ -174,7 +166,7 @@ impl Outcome {
             "judged": self
                 .judged
                 .iter()
-                .map(|(id, c, r)| json!([id, c, r]))
+                .map(|(id, r)| json!([id, r]))
                 .collect::<Vec<_>>(),
         })
     }
@@ -246,18 +238,9 @@ pub fn collect_tool_calls(history: &[Message]) -> Vec<ToolCall> {
     calls
 }
 
-/// The two questions for one call.
-pub fn questions_for(call: &ToolCall) -> Value {
+/// The question for one call masking would cut.
+pub fn question_for(call: &ToolCall) -> Value {
     json!({
-        format!("call_{}", call.id): crate::agent::jev::noul(
-            &format!(
-                "Tool call {} ({}) should stay in the history: knowing this call was made, \
-                 with its input, still matters for what the assistant does next",
-                call.id, call.tool
-            ),
-            "Keep the call",
-            "The call no longer matters",
-        ),
         format!("result_{}", call.id): crate::agent::jev::noul(
             &format!(
                 "The full output of tool call {} ({}, {} chars) should stay in the history \
@@ -271,14 +254,9 @@ pub fn questions_for(call: &ToolCall) -> Value {
     })
 }
 
-pub fn decide_call(pinned: bool, keep_call: f64, keep_result: f64) -> Action {
-    if pinned || keep_result >= KEEP_RESULT_THRESHOLD {
-        Action::Keep
-    } else if keep_call >= KEEP_CALL_THRESHOLD {
-        Action::DropResult
-    } else {
-        Action::DropCall
-    }
+/// Whether Jev's P(keep result) keeps an output masking would cut.
+pub fn keeps_result(p_keep: f64) -> bool {
+    p_keep >= KEEP_RESULT_THRESHOLD
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -654,36 +632,81 @@ pub fn history_chars(history: &[Message]) -> usize {
         .sum()
 }
 
-/// Ask Jev about every unpinned call and return what to remove. `None` on any
-/// failure — no backend answer, a state that does not fit, nothing to judge.
-pub async fn plan(history: &[Message], backend: &crate::agent::jev::JevBackend) -> Option<Outcome> {
+/// The calls `decision` (masking's) cuts or drops whose call sits in one of
+/// the [`ARBITRATION_ROUNDS`] newest rounds, in history order: what Jev is
+/// asked about.
+pub fn arbitration_candidates(history: &[Message], decision: &Decision) -> Vec<String> {
+    let rounds: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.role == "assistant"
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let Some(&first) = rounds.get(rounds.len().saturating_sub(ARBITRATION_ROUNDS)) else {
+        return Vec::new();
+    };
+    let cut: HashSet<&str> = decision
+        .truncate_results
+        .iter()
+        .chain(&decision.drop_calls)
+        .map(String::as_str)
+        .collect();
+    collect_tool_calls(history)
+        .into_iter()
+        .filter(|c| c.call_msg >= first && cut.contains(c.tool_use_id.as_str()))
+        .map(|c| c.tool_use_id)
+        .take(MAX_JUDGED_CALLS)
+        .collect()
+}
+
+/// What Jev answered about masking's recent cuts.
+#[derive(Debug, Clone, Default)]
+pub struct Arbitration {
+    /// The candidates whose output stays verbatim, in history order.
+    pub keep: Vec<String>,
+    /// (tool_use_id, P(keep result)) for every candidate.
+    pub judged: Vec<(String, f64)>,
+    pub cost: f64,
+    pub requests: usize,
+    /// How the state had to be fitted ([`fit_state`]).
+    pub stage: &'static str,
+}
+
+/// Ask Jev whether the output of each call in `ids` must stay verbatim.
+/// `None` on any failure — no backend answer, a state that does not fit,
+/// nothing to ask — and masking then stands as it is.
+pub async fn arbitrate(
+    history: &[Message],
+    ids: &[String],
+    backend: &crate::agent::jev::JevBackend,
+) -> Option<Arbitration> {
     let calls = collect_tool_calls(history);
     let candidates: Vec<&ToolCall> = calls
         .iter()
-        .filter(|c| !c.pinned)
-        .take(MAX_JUDGED_CALLS)
+        .filter(|c| ids.contains(&c.tool_use_id))
         .collect();
     if candidates.is_empty() {
         return None;
     }
     let (state, stage) = fit_state(history, &calls)?;
-    let batches: Vec<Vec<&ToolCall>> = candidates
+    let question_sets: Vec<Value> = candidates
         .chunks(CALLS_PER_REQUEST)
-        .map(<[&ToolCall]>::to_vec)
-        .collect();
-    let requests = batches.len();
-    let question_sets: Vec<Value> = batches
-        .iter()
         .map(|batch| {
             let mut q = serde_json::Map::new();
             for c in batch {
-                if let Value::Object(m) = questions_for(c) {
+                if let Value::Object(m) = question_for(c) {
                     q.extend(m);
                 }
             }
             Value::Object(q)
         })
         .collect();
+    let requests = question_sets.len();
     let mut answered: Vec<Option<crate::agent::jev::Decision>> = Vec::with_capacity(requests);
     for chunk in question_sets.chunks(CONCURRENCY) {
         let calls = chunk
@@ -694,35 +717,27 @@ pub async fn plan(history: &[Message], backend: &crate::agent::jev::JevBackend) 
     let mut cost = 0.0;
     let mut answers = serde_json::Map::new();
     for d in answered {
-        let d = d?; // one failed batch fails the plan: no half-judged history
+        let d = d?; // one failed batch fails the arbitration: no half-asked cut
         cost += d.cost;
         answers.extend(d.answers);
     }
-    let p = |key: String| answers.get(&key)?.get("noul")?.as_f64();
-    let mut decision = Decision::default();
-    let mut judged = Vec::with_capacity(candidates.len());
-    for c in &candidates {
-        let keep_call = p(format!("call_{}", c.id))?;
-        let keep_result = p(format!("result_{}", c.id))?;
-        judged.push((c.tool_use_id.clone(), keep_call, keep_result));
-        match decide_call(false, keep_call, keep_result) {
-            Action::Keep => {}
-            Action::DropResult => decision.truncate_results.push(c.tool_use_id.clone()),
-            Action::DropCall => decision.drop_calls.push(c.tool_use_id.clone()),
-        }
-    }
-    let after = apply(history, &decision, TRUNCATE_HEAD_CHARS);
-    Some(Outcome {
-        decision,
-        chars_before: history_chars(history),
-        chars_after: history_chars(&after),
+    let mut out = Arbitration {
+        cost,
         requests,
         stage,
-        source: SOURCE_JEV,
-        last: false,
-        cost,
-        judged,
-    })
+        ..Default::default()
+    };
+    for c in &candidates {
+        let p = answers
+            .get(&format!("result_{}", c.id))?
+            .get("noul")?
+            .as_f64()?;
+        out.judged.push((c.tool_use_id.clone(), p));
+        if keeps_result(p) {
+            out.keep.push(c.tool_use_id.clone());
+        }
+    }
+    Some(out)
 }
 
 /// Tools whose call or result carries the whole task list.
@@ -1098,17 +1113,16 @@ pub fn plan_by_age(
 /// How [`shed`] should go about it.
 #[derive(Debug, Clone, Copy)]
 pub struct ShedOptions {
-    /// What stage 2 aims to free, counted from the history as given.
+    /// What masking aims to free, counted from the history as given.
     pub free_chars: usize,
-    /// Size of the recent window stage 2 leaves alone.
+    /// Size of the recent window masking leaves alone.
     pub recent_chars: usize,
-    /// Nothing gentler comes after this shed: run stage 2 even when Jev judged
-    /// the history and it was not enough, and let it drop the oldest calls
-    /// outright when cutting results falls short.
+    /// Nothing gentler comes after this shed: let masking drop the oldest
+    /// calls outright when cutting their results falls short.
     ///
-    /// False for the main session, which hands off next — what Jev chose to
-    /// keep is kept, and no call disappears. True for a subagent, which has
-    /// nothing after this but running out of window.
+    /// False for the main session, which hands off next — no call
+    /// disappears. True for a subagent, which has nothing after this but
+    /// running out of window.
     pub last_resort: bool,
 }
 
@@ -1121,10 +1135,38 @@ pub struct Shed {
     pub cost: f64,
 }
 
-/// Free context in three stages, stopping at the first one `accept` takes:
-/// lossless, judged, by age. Each stage builds on the lossless one, and the
-/// outcome is cumulative — one decision that, applied to `history`, gives the
-/// returned history.
+impl Decision {
+    /// This decision without the calls in `keep`.
+    fn without(&self, keep: &[String]) -> Decision {
+        let kept = |id: &String| !keep.contains(id);
+        Decision {
+            drop_calls: self
+                .drop_calls
+                .iter()
+                .filter(|id| kept(id))
+                .cloned()
+                .collect(),
+            truncate_results: self
+                .truncate_results
+                .iter()
+                .filter(|id| kept(id))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+/// Free context, stopping at the first outcome `accept` takes: lossless;
+/// masking with Jev's keeps taken out of its recent cuts (when a backend
+/// exists and masking cuts anything in the [`ARBITRATION_ROUNDS`] newest
+/// rounds); masking alone, offered last. Each stage builds on the lossless
+/// one, and the outcome is cumulative — one decision that, applied to
+/// `history`, gives the returned history.
+///
+/// Masking alone comes after Jev's version even in a main session: what Jev
+/// keeps is honoured when the cut still frees enough, but a handoff or a
+/// summary — what follows a refused shed there — loses far more than a few
+/// outputs the model can read again.
 pub async fn shed<F>(
     history: &[Message],
     backend: Option<&crate::agent::jev::JevBackend>,
@@ -1154,43 +1196,14 @@ where
         }
     }
 
-    let mut cost = 0.0;
-    let mut requests = 0;
-    if let Some(backend) = backend
-        && let Some(judged) = plan(&after_lossless, backend).await
-    {
-        cost = judged.cost;
-        requests = judged.requests;
-        let decision = lossless.merged(&judged.decision);
-        let after = apply(history, &decision, TRUNCATE_HEAD_CHARS);
-        let outcome = Outcome {
-            decision,
-            chars_before,
-            chars_after: history_chars(&after),
-            ..judged
-        };
-        if accept(&outcome, &after) {
-            return Shed {
-                accepted: Some((outcome, after)),
-                cost,
-            };
-        }
-        if !opts.last_resort {
-            return Shed {
-                accepted: None,
-                cost,
-            };
-        }
-    }
-
     let already_freed = chars_before - history_chars(&after_lossless).min(chars_before);
-    let by_age = plan_by_age(
+    let masking = plan_by_age(
         &after_lossless,
         opts.free_chars.saturating_sub(already_freed),
         opts.recent_chars,
         opts.last_resort,
     );
-    if by_age.is_empty() {
+    if masking.is_empty() {
         // Nothing to cut by age. What the lossless stage found was offered
         // above as one stage of several; it is offered again as all there is.
         let outcome = Outcome {
@@ -1205,10 +1218,56 @@ where
         let take = !outcome.decision.is_empty() && accept(&outcome, &after_lossless);
         return Shed {
             accepted: take.then_some((outcome, after_lossless)),
-            cost,
+            cost: 0.0,
         };
     }
-    let decision = lossless.merged(&by_age);
+
+    let mut cost = 0.0;
+    let mut requests = 0;
+    let mut judged = Vec::new();
+    let candidates = match backend {
+        Some(_) => arbitration_candidates(&after_lossless, &masking),
+        None => Vec::new(),
+    };
+    if let Some(backend) = backend
+        && !candidates.is_empty()
+        && let Some(arbitration) = arbitrate(&after_lossless, &candidates, backend).await
+    {
+        cost = arbitration.cost;
+        requests = arbitration.requests;
+        judged = arbitration.judged.clone();
+        // Jev cut everything it was asked about: this is masking alone.
+        let last = arbitration.keep.is_empty();
+        let decision = lossless.merged(&masking.without(&arbitration.keep));
+        if !decision.is_empty() {
+            let after = apply(history, &decision, TRUNCATE_HEAD_CHARS);
+            let outcome = Outcome {
+                decision,
+                chars_before,
+                chars_after: history_chars(&after),
+                requests,
+                stage: arbitration.stage,
+                source: SOURCE_JEV,
+                last,
+                cost,
+                judged: arbitration.judged,
+            };
+            if accept(&outcome, &after) {
+                return Shed {
+                    accepted: Some((outcome, after)),
+                    cost,
+                };
+            }
+        }
+        if last {
+            return Shed {
+                accepted: None,
+                cost,
+            };
+        }
+    }
+
+    let decision = lossless.merged(&masking);
     let after = apply(history, &decision, TRUNCATE_HEAD_CHARS);
     let outcome = Outcome {
         decision,
@@ -1219,7 +1278,7 @@ where
         source: SOURCE_RULES,
         last: true,
         cost,
-        judged: Vec::new(),
+        judged,
     };
     let accepted = accept(&outcome, &after).then_some((outcome, after));
     Shed { accepted, cost }
@@ -1346,18 +1405,19 @@ mod tests {
         assert!(!again.truncate_results.contains(&"toolu_1".to_string()));
     }
 
+    // Behaviour deliberately changed by lean-harness Phase 6: Jev no longer
+    // chooses between keep / cut / drop for every call, it only says whether a
+    // result masking would cut must stay. The P(keep result) of the two live
+    // probes (2026-10-05) still decides it against the same line.
     #[test]
-    fn the_live_probes_map_to_conservative_decisions() {
-        // (P(keep call), P(keep result)) from the two live probes, 2026-10-05.
+    fn the_live_probes_map_to_conservative_arbitration() {
         // The schema the current task depends on: kept whole.
-        assert_eq!(decide_call(false, 0.50, 0.41), Action::Keep);
-        // The file with the bug, already fixed: the call stays, its output is cut.
-        assert_eq!(decide_call(false, 0.31, 0.23), Action::DropResult);
-        // A build log nobody needs any more: the call stays, the log goes.
-        assert_eq!(decide_call(false, 0.23, 0.14), Action::DropResult);
-        // README / unrelated UI files: gone.
-        assert_eq!(decide_call(false, 0.13, 0.11), Action::DropCall);
-        assert_eq!(decide_call(false, 0.11, 0.07), Action::DropCall);
+        assert!(keeps_result(0.41));
+        // The file with the bug, already fixed; a build log nobody needs any
+        // more; README and unrelated UI files: masking cuts them.
+        for p in [0.23, 0.14, 0.11, 0.07] {
+            assert!(!keeps_result(p), "{p}");
+        }
     }
 
     #[test]
@@ -1368,22 +1428,14 @@ mod tests {
             requests: 3,
             stage: "full",
             cost: 2e-5,
-            judged: vec![("toolu_1".into(), 0.31, 0.23)],
+            judged: vec![("toolu_1".into(), 0.23)],
             ..Default::default()
         };
         let v = o.stats_json();
         assert_eq!(v["requests"], 3);
         assert_eq!(v["stage"], "full");
         assert_eq!(v["reduction"], 0.6);
-        assert_eq!(v["judged"][0], json!(["toolu_1", 0.31, 0.23]));
-    }
-
-    #[test]
-    fn decisions_follow_the_two_probabilities() {
-        assert_eq!(decide_call(false, 0.9, 0.9), Action::Keep);
-        assert_eq!(decide_call(false, 0.9, 0.1), Action::DropResult);
-        assert_eq!(decide_call(false, 0.1, 0.1), Action::DropCall);
-        assert_eq!(decide_call(true, 0.0, 0.0), Action::Keep);
+        assert_eq!(v["judged"][0], json!(["toolu_1", 0.23]));
     }
 
     #[test]
@@ -1582,41 +1634,62 @@ mod tests {
         assert_eq!(history_chars(&h), 8);
     }
 
-    #[tokio::test]
-    async fn plan_asks_jev_and_returns_what_to_drop() {
-        // Every call gets keep_call 0.1 / keep_result 0.1 → dropped.
+    /// Jev's answers: P(keep result) per short call id (`t1`, `t2`, …).
+    fn jev_answers(results: &[(usize, f64)]) -> &'static str {
         let mut answers = serde_json::Map::new();
-        for i in 1..=4 {
-            answers.insert(format!("call_t{i}"), json!({"type": "noul", "noul": 0.1}));
-            answers.insert(format!("result_t{i}"), json!({"type": "noul", "noul": 0.1}));
+        for (i, p) in results {
+            answers.insert(format!("result_t{i}"), json!({"type": "noul", "noul": p}));
         }
-        let body: &'static str = Box::leak(
+        Box::leak(
             json!({"answers": answers, "usage": {"input_tokens": 100, "cost": 1e-6}})
                 .to_string()
                 .into_boxed_str(),
-        );
-        let (url, h) = spawn_stub(200, body);
+        )
+    }
+
+    // Behaviour deliberately changed by lean-harness Phase 6 (this was
+    // `plan_asks_jev_and_returns_what_to_drop`): Jev is asked one question per
+    // call masking would cut — does its output still have to stay verbatim —
+    // and answers which of them stay.
+    #[tokio::test]
+    async fn arbitration_asks_one_question_per_candidate_and_returns_what_stays() {
+        let (url, h) = spawn_stub(200, jev_answers(&[(2, 0.9), (3, 0.1)]));
         let hist = session(4);
-        let out = plan(&hist, &stub_backend(&url)).await.expect("outcome");
-        h.join().unwrap();
+        let ids = vec!["toolu_1".to_string(), "toolu_2".to_string()];
+        let out = arbitrate(&hist, &ids, &stub_backend(&url))
+            .await
+            .expect("an answer");
+        let request = h.join().unwrap();
         assert_eq!(out.requests, 1);
-        assert_eq!(out.decision.drop_calls.len(), 4);
-        assert!(out.reduction() > MIN_REDUCTION, "{}", out.reduction());
+        assert_eq!(out.keep, vec!["toolu_1".to_string()]);
+        assert_eq!(
+            out.judged,
+            vec![("toolu_1".to_string(), 0.9), ("toolu_2".to_string(), 0.1)]
+        );
         assert!(out.cost > 0.0);
+        assert!(request.contains("result_t2") && request.contains("result_t3"));
+        assert!(
+            !request.contains("result_t1") && !request.contains("call_t"),
+            "only the candidates are asked about, and only about their output"
+        );
     }
 
     #[tokio::test]
-    async fn a_jev_failure_is_no_plan() {
+    async fn a_jev_failure_is_no_arbitration() {
         let (url, h) = spawn_stub(529, r#"{"error":"overloaded"}"#);
-        assert!(plan(&session(4), &stub_backend(&url)).await.is_none());
+        let ids = vec!["toolu_1".to_string()];
+        assert!(
+            arbitrate(&session(4), &ids, &stub_backend(&url))
+                .await
+                .is_none()
+        );
         h.join().unwrap();
     }
 
     #[tokio::test]
-    async fn nothing_to_judge_is_no_plan() {
-        let h = vec![user("hi"), assistant("hello")];
+    async fn nothing_to_arbitrate_is_no_arbitration() {
         let b = stub_backend("http://127.0.0.1:9/unused");
-        assert!(plan(&h, &b).await.is_none());
+        assert!(arbitrate(&session(4), &[], &b).await.is_none());
     }
 
     // ── Stage 0: lossless ────────────────────────────────────────────────────
@@ -2433,20 +2506,18 @@ mod tests {
     }
 
     fn jev_keeps_everything(calls: usize) -> &'static str {
-        let mut answers = serde_json::Map::new();
-        for i in 1..=calls {
-            answers.insert(format!("call_t{i}"), json!({"type": "noul", "noul": 0.9}));
-            answers.insert(format!("result_t{i}"), json!({"type": "noul", "noul": 0.9}));
-        }
-        Box::leak(
-            json!({"answers": answers, "usage": {"input_tokens": 100, "cost": 1e-6}})
-                .to_string()
-                .into_boxed_str(),
-        )
+        let all: Vec<(usize, f64)> = (1..=calls).map(|i| (i, 0.9)).collect();
+        jev_answers(&all)
     }
 
+    // Behaviour deliberately changed by lean-harness Phase 6 (this was
+    // `what_jev_chose_to_keep_is_kept_in_a_main_session`, which handed off):
+    // masking comes first and Jev only arbitrates its recent cuts. When what
+    // Jev keeps leaves too little freed, the cuts masking alone would make are
+    // offered last — a handoff or a summary loses far more than a few
+    // re-readable outputs.
     #[tokio::test]
-    async fn what_jev_chose_to_keep_is_kept_in_a_main_session() {
+    async fn when_what_jev_keeps_is_not_enough_masking_alone_is_offered_last() {
         let (url, stub) = spawn_stub(200, jev_keeps_everything(4));
         let h = session(4);
         let shed = shed(
@@ -2457,11 +2528,136 @@ mod tests {
         )
         .await;
         stub.join().unwrap();
-        // Jev said every result is still needed. Cutting them by age anyway
-        // would override the one judge that read the conversation; the caller
-        // hands off instead.
-        assert!(shed.accepted.is_none());
+        let (outcome, _) = shed.accepted.expect("masking alone frees enough");
+        assert_eq!(outcome.source, SOURCE_RULES);
+        assert!(outcome.last);
+        assert_eq!(outcome.decision.truncate_results.len(), 4);
         assert!(shed.cost > 0.0, "the question was still paid for");
+    }
+
+    /// `session(12)` has twelve reads and an edit; the edit sits in the recent
+    /// window, so the eight newest rounds hold the edit and reads 5–11.
+    #[test]
+    fn the_arbitration_window_is_what_masking_cuts_in_the_eight_newest_rounds() {
+        let h = session(12);
+        let all = plan_by_age(&h, usize::MAX, usize::MAX, false);
+        assert_eq!(all.truncate_results.len(), 12);
+        let ids = arbitration_candidates(&h, &all);
+        let expected: Vec<String> = (5..12).map(|i| format!("toolu_{i}")).collect();
+        assert_eq!(ids, expected);
+        // Masking that stops among the old rounds leaves Jev nothing to say.
+        let one = "fn body() {}\n".repeat(400).len();
+        let old_only = plan_by_age(&h, (one - TRUNCATE_HEAD_CHARS) * 3, usize::MAX, false);
+        assert_eq!(old_only.truncate_results.len(), 3);
+        assert!(arbitration_candidates(&h, &old_only).is_empty());
+    }
+
+    /// Two calls in one assistant message are one round, not two.
+    #[test]
+    fn a_round_of_several_calls_counts_once_in_the_arbitration_window() {
+        let body = "fn body() {}\n".repeat(400);
+        let mut h = vec![user("Look.")];
+        for i in 0..9 {
+            let mut content = vec![ContentBlock::tool_use(
+                format!("a{i}"),
+                "read_file",
+                json!({"path": format!("a{i}")}),
+            )];
+            content.push(ContentBlock::tool_use(
+                format!("b{i}"),
+                "read_file",
+                json!({"path": format!("b{i}")}),
+            ));
+            h.push(Message {
+                role: "assistant".into(),
+                content,
+            });
+            h.push(Message {
+                role: "user".into(),
+                content: vec![
+                    ContentBlock::tool_result(format!("a{i}"), body.clone()),
+                    ContentBlock::tool_result(format!("b{i}"), body.clone()),
+                ],
+            });
+        }
+        for _ in 0..3 {
+            h.push(assistant("…"));
+            h.push(user("go on"));
+        }
+        let all = plan_by_age(&h, usize::MAX, usize::MAX, false);
+        let ids = arbitration_candidates(&h, &all);
+        assert_eq!(ids.len(), 16, "{ids:?}");
+        assert!(!ids.contains(&"a0".to_string()) && !ids.contains(&"b0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn jev_only_arbitrates_what_masking_cuts_in_the_eight_newest_rounds() {
+        // t6..t12 are reads 5..11; Jev keeps the two newest.
+        let answers: Vec<(usize, f64)> = (6..=12)
+            .map(|i| (i, if i >= 11 { 0.9 } else { 0.1 }))
+            .collect();
+        let (url, stub) = spawn_stub(200, jev_answers(&answers));
+        let h = session(12);
+        let shed = shed(
+            &h,
+            Some(&stub_backend(&url)),
+            opts(false),
+            frees(MIN_REDUCTION),
+        )
+        .await;
+        let request = stub.join().unwrap();
+        let (outcome, after) = shed.accepted.expect("masking with Jev's keeps");
+        assert_eq!(outcome.source, SOURCE_JEV);
+        assert_eq!(outcome.requests, 1);
+        assert_eq!(outcome.judged.len(), 7);
+        let cut: Vec<String> = (0..10).map(|i| format!("toolu_{i}")).collect();
+        assert_eq!(outcome.decision.truncate_results, cut);
+        assert!(outcome.decision.drop_calls.is_empty());
+        for i in 6..=12 {
+            assert!(
+                request.contains(&format!("result_t{i}\"")),
+                "t{i}: {request}"
+            );
+        }
+        for i in [1, 5, 13] {
+            assert!(
+                !request.contains(&format!("result_t{i}\"")),
+                "t{i} is outside the window or not cut"
+            );
+        }
+        // The decision alone reproduces the history.
+        let replayed = apply(&h, &outcome.decision, TRUNCATE_HEAD_CHARS);
+        assert_eq!(
+            serde_json::to_string(&after).unwrap(),
+            serde_json::to_string(&replayed).unwrap()
+        );
+    }
+
+    // No Jev: the ladder is lossless then masking, nothing else, and the
+    // decision is exactly what those two stages make.
+    #[tokio::test]
+    async fn without_jev_the_decision_is_the_lossless_stage_then_masking() {
+        let mut h = task_session();
+        let tail = h.split_off(h.len() - 6);
+        for i in 0..6 {
+            h.push(assistant_call(
+                "",
+                &format!("r{i}"),
+                "read_file",
+                json!({"path": format!("f{i}")}),
+            ));
+            h.push(result(&format!("r{i}"), &"fn body() {}\n".repeat(400)));
+        }
+        h.extend(tail);
+        let shed = shed(&h, None, opts(false), |o, _| o.last).await;
+        let (outcome, _) = shed.accepted.expect("masking is offered last");
+        let lossless = plan_lossless(&h);
+        let after_lossless = apply(&h, &lossless, TRUNCATE_HEAD_CHARS);
+        let masking = plan_by_age(&after_lossless, usize::MAX, usize::MAX, false);
+        assert_eq!(outcome.decision, lossless.merged(&masking));
+        assert_eq!(outcome.source, SOURCE_RULES);
+        assert!(outcome.judged.is_empty() && outcome.requests == 0);
+        assert_eq!(shed.cost, 0.0);
     }
 
     #[tokio::test]
@@ -2496,9 +2692,13 @@ mod tests {
         assert_eq!(shed.accepted.expect("by age").0.source, SOURCE_RULES);
     }
 
+    // Behaviour deliberately changed by lean-harness Phase 6 (this was
+    // `the_judged_stage_builds_on_the_lossless_one`, where Jev judged every
+    // call stage 0 left): Jev now sees only what masking would cut after
+    // stage 0, and its keeps come out of that cut.
     #[tokio::test]
-    async fn the_judged_stage_builds_on_the_lossless_one() {
-        // Two superseded task snapshots, then three reads Jev says to drop.
+    async fn the_arbitration_builds_on_the_lossless_stage() {
+        // Two superseded task snapshots, then three reads masking would cut.
         let mut h = vec![user("Build.")];
         for id in ["set_a", "set_b", "set_c"] {
             h.push(assistant_call("", id, "tasks_set", tasks(4)));
@@ -2517,35 +2717,20 @@ mod tests {
             h.push(assistant("…"));
             h.push(user("go on"));
         }
-        // After stage 0 Jev sees set_c and the three reads — t1..t4, which is
-        // one request. It keeps the task list and lets the reads go.
-        let mut answers = serde_json::Map::new();
-        for i in 1..=4 {
-            let p = if i == 1 { 0.9 } else { 0.1 };
-            answers.insert(format!("call_t{i}"), json!({"type": "noul", "noul": p}));
-            answers.insert(format!("result_t{i}"), json!({"type": "noul", "noul": p}));
-        }
-        let body: &'static str = Box::leak(
-            json!({"answers": answers, "usage": {"input_tokens": 100, "cost": 1e-6}})
-                .to_string()
-                .into_boxed_str(),
-        );
-        let (url, stub) = spawn_stub(200, body);
-        // Stage 0 alone is not enough here, so the ladder goes on to Jev.
-        let shed = shed(&h, Some(&stub_backend(&url)), opts(false), frees(0.9)).await;
+        // After stage 0, set_c is t1 (the current list: masking keeps it) and
+        // the reads are t2..t4. Jev keeps the newest read.
+        let (url, stub) = spawn_stub(200, jev_answers(&[(2, 0.1), (3, 0.1), (4, 0.9)]));
+        // Stage 0 alone is not enough here, so the ladder goes on.
+        let shed = shed(&h, Some(&stub_backend(&url)), opts(false), frees(0.5)).await;
         let request = stub.join().unwrap();
         let (outcome, after) = shed.accepted.expect("both stages together");
         assert_eq!(outcome.source, SOURCE_JEV);
-        assert_eq!(
-            outcome.decision.drop_calls,
-            vec!["set_a", "set_b", "r0", "r1", "r2"]
-        );
-        // Jev was never asked about what stage 0 had already removed.
-        assert!(request.contains("call_t4"), "{request}");
-        assert!(
-            !request.contains("call_t5"),
-            "four calls were left to judge"
-        );
+        assert_eq!(outcome.decision.drop_calls, vec!["set_a", "set_b"]);
+        assert_eq!(outcome.decision.truncate_results, vec!["r0", "r1"]);
+        // Jev was never asked about what stage 0 removed or masking kept.
+        assert!(request.contains("result_t4"), "{request}");
+        assert!(!request.contains("result_t1"), "{request}");
+        assert!(!request.contains("result_t5"), "{request}");
         // The decision alone reproduces the history: that is what makes a
         // resumed session identical to the live one.
         let replayed = apply(&h, &outcome.decision, TRUNCATE_HEAD_CHARS);
@@ -2656,7 +2841,7 @@ mod tests {
     /// Live probe against the real Jev. Needs JEV_LIVE_OPENROUTER_KEY.
     #[tokio::test]
     #[ignore]
-    async fn live_plan_on_a_realistic_session() {
+    async fn live_arbitration_on_a_realistic_session() {
         let key = std::env::var("JEV_LIVE_OPENROUTER_KEY").expect("JEV_LIVE_OPENROUTER_KEY");
         let b = crate::agent::jev::JevBackend {
             source: crate::agent::jev::JevSource::OpenRouter,
@@ -2710,15 +2895,18 @@ mod tests {
         h.push(result("toolu_e", "ok"));
         h.push(assistant("Fixed; re-running the test."));
         h.push(user("ok"));
-        let out = plan(&h, &b).await.expect("outcome");
         let calls = collect_tool_calls(&h);
+        let ids: Vec<String> = calls
+            .iter()
+            .filter(|c| !c.pinned)
+            .map(|c| c.tool_use_id.clone())
+            .collect();
+        let out = arbitrate(&h, &ids, &b).await.expect("outcome");
         for c in &calls {
-            let action = if out.decision.drop_calls.contains(&c.tool_use_id) {
-                "DROP"
-            } else if out.decision.truncate_results.contains(&c.tool_use_id) {
-                "TRUNC"
-            } else {
+            let action = if out.keep.contains(&c.tool_use_id) {
                 "keep"
+            } else {
+                "cut"
             };
             let p = out.judged.iter().find(|j| j.0 == c.tool_use_id);
             eprintln!(
@@ -2726,22 +2914,19 @@ mod tests {
                 c.id,
                 c.tool,
                 c.input,
-                p.map(|j| (j.1, j.2))
+                p.map(|j| j.1)
             );
         }
         eprintln!(
-            "reduction {:.0}% requests {} stage {} cost ${:.6}",
-            out.reduction() * 100.0,
-            out.requests,
-            out.stage,
-            out.cost
+            "requests {} stage {} cost ${:.6}",
+            out.requests, out.stage, out.cost
         );
     }
 
     /// Second live probe: an old result the current work still depends on.
     #[tokio::test]
     #[ignore]
-    async fn live_plan_keeps_what_the_current_work_needs() {
+    async fn live_arbitration_keeps_what_the_current_work_needs() {
         let key = std::env::var("JEV_LIVE_OPENROUTER_KEY").expect("JEV_LIVE_OPENROUTER_KEY");
         let b = crate::agent::jev::JevBackend {
             source: crate::agent::jev::JevSource::OpenRouter,
@@ -2792,9 +2977,14 @@ mod tests {
         h.push(result("toolu_w", "ok"));
         h.push(assistant("Writing the queries now."));
         h.push(user("ok"));
-        let out = plan(&h, &b).await.expect("outcome");
+        let ids: Vec<String> = collect_tool_calls(&h)
+            .into_iter()
+            .filter(|c| !c.pinned)
+            .map(|c| c.tool_use_id)
+            .collect();
+        let out = arbitrate(&h, &ids, &b).await.expect("outcome");
         for j in &out.judged {
-            eprintln!("{} call={:.2} result={:.2}", j.0, j.1, j.2);
+            eprintln!("{} result={:.2}", j.0, j.1);
         }
     }
 }
