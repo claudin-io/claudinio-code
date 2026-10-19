@@ -162,10 +162,17 @@ just read is the one thing no prune cuts, so it has to fit by itself. And a
 prefix that does not fit the window at all is refused before anything is tried:
 no handoff or summary makes a system prompt smaller.
 
-Crossing a line sheds weight in three stages (`agent/prune.rs`), cheapest
-first: copies a newer result supersedes; what Jev judges disposable; then the
-oldest tool results by age. Text is never touched, nor are the user's answers
-to `ask_user` or the current task list. A dropped call is stubbed, never
+Crossing a line sheds weight masking first (`agent/prune.rs`, lean-harness
+Phase 6): copies a newer result supersedes (lossless); then the oldest tool
+results cut to their head, the call kept (masking by age). Jev, when a backend
+exists, no longer judges the whole history first: it is asked one question —
+must this output stay verbatim — about each cut masking would make in the
+eight newest rounds (`ARBITRATION_ROUNDS`), and what it keeps comes out of the
+cut; older cuts stand unasked, and when Jev's version does not free enough the
+cuts of masking alone are offered last, since a handoff or a summary loses
+more than outputs that can be read again. Subagents run the same ladder as a
+last resort (they may also drop the oldest calls outright). Text is never
+touched, nor are the user's answers to `ask_user` or the current task list. A dropped call is stubbed, never
 removed: its `tool_use` block stays with input `{}` and its result becomes a
 one-line note, because DeepSeek's thinking mode re-attaches its reasoning by the
 tool_use blocks of earlier assistant messages and refuses a history that lost
@@ -173,6 +180,37 @@ one (HTTP 400, first live eval, 2026-10-18). A stage is accepted only if
 it frees enough to be worth the cache it invalidates — which is also why
 nothing is pruned early: on a caching provider the history is cheap to resend
 and expensive to rewrite.
+
+When shedding is not enough a chat session hands off to a successor;
+summarizing (`handoff::compact_history`) is the last resort, and what a manual
+compaction runs. The summarizer
+(`subagent::summary_goal`) writes a note for recall, not brevity — `## Goal`,
+`## Decisions (and why)`, `## Files touched` (`path:lines`), `## What failed`
+(the exact error text), `## Left to do`, `## Constraints the user stated`
+(verbatim) — recall first, then trimmed, to about 1,500 words (it was a
+600-word summary). The note, after any `PreCompact` hook output, is appended to
+`.claudinio/notes/<session>.md` under a timestamp header (`agent/notes.rs`;
+never through a link, and a failed write never fails the compaction), and the
+compacted context ends with a line naming that file, so a successor can read
+what an earlier compaction carried.
+
+A tool result over its cap (`budget::RunLimits::tool_result_chars`) keeps its
+head and its tail, about 70/30 and on line boundaries when one is close,
+around one marker line: `[… N of T chars omitted; <how to get them> …]`
+(`agent/result_cap.rs`). For `read_file` it says to read the lines in between
+with `start_line`/`end_line`; for anything else the whole output is first
+written to a temp file, as `output_trim` does for `bash`, and the marker names
+it. `fit_round`, which holds one round's results to a share together, re-cuts
+a capped result from what it kept and keeps its true size and hint; `prune`
+reads the same marker (or the head-only note older sessions carry) to know a
+capped read is not the whole file. A marker counts only when its numbers add
+up to the text around it.
+
+An `edit_file` that leaves a file the tree-sitter grammars cover no longer
+parsing, when it parsed before, answers with the edit applied and one warning
+line naming the first error's line and its text (`agent/tools/syntax_check.rs`);
+the edit is never reverted. `file_outline` is not capped: measured on this
+repository's own sources (Phase 6), its mean output is 3,587 characters.
 
 What is sent ahead of the conversation is chosen once per run
 (`agent/surface.rs`): the profile the window calls for (`Standard`, or

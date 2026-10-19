@@ -124,9 +124,17 @@ requests several times its size.
 
 - **Context is shed before it is summarized.** First what is a copy of
   something newer (an older read of the same file, an older task list), then
-  what a small decision model judges no longer needed, then simply the oldest
-  tool results. In that step your words and the model's are never cut; only
-  when it is not enough does the session hand off or compact.
+  the oldest tool results, cut to their first lines — with a small decision
+  model, when there is one, keeping the recent ones it judges still needed. In
+  that step your words and the model's are never cut; only when it is not
+  enough does the session hand off or compact. A compaction writes a note —
+  goal, decisions, files touched, what failed with the exact error, what is
+  left, your constraints word for word — and also appends it to
+  `.claudinio/notes/<session>.md`, where you can read it.
+- **A long tool output keeps its end.** A result over the size limit keeps its
+  beginning and its end — where a test run or a build puts the verdict — and
+  says how much was left out and where the whole output is. An edit that
+  breaks a file's syntax gets a warning with the line, in the same result.
 - **A small window gets a small prompt.** Under 64k tokens a Builder session
   runs a compact profile — one short prompt and ten tools, no subagents and no
   plans — about 2.4k tokens before the conversation starts, where the

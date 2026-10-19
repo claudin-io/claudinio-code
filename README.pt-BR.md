@@ -127,10 +127,18 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
 
 - **O contexto é enxugado antes de ser resumido.** Primeiro o que é cópia de
   algo mais novo (uma leitura anterior do mesmo arquivo, uma lista de tarefas
-  anterior), depois o que um modelo de decisão pequeno julga não ser mais
-  necessário, depois simplesmente os resultados de ferramenta mais antigos.
-  Nessa etapa nem as suas palavras nem as do modelo são cortadas; só quando ela
-  não basta a sessão faz handoff ou compacta.
+  anterior), depois os resultados de ferramenta mais antigos, cortados às
+  primeiras linhas — e um modelo de decisão pequeno, quando existe, mantém os
+  recentes que julga ainda necessários. Nessa etapa nem as suas palavras nem
+  as do modelo são cortadas; só quando ela não basta a sessão faz handoff ou
+  compacta. Uma compactação escreve uma nota — objetivo, decisões, arquivos
+  tocados, o que falhou com o erro exato, o que falta, as suas restrições
+  palavra por palavra — e também a acrescenta a
+  `.claudinio/notes/<sessão>.md`, onde você pode lê-la.
+- **Uma saída longa de ferramenta mantém o final.** Um resultado acima do
+  limite mantém o começo e o fim — onde um teste ou um build põe o veredito — e
+  diz quanto ficou de fora e onde está a saída inteira. Uma edição que quebra
+  a sintaxe de um arquivo recebe um aviso com a linha, no mesmo resultado.
 - **Janela pequena recebe prompt pequeno.** Abaixo de 64k tokens, uma sessão
   Builder roda um perfil compacto — um prompt curto e dez ferramentas, sem
   subagentes e sem planos — cerca de 2,4k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
