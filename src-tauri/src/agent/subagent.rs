@@ -615,10 +615,6 @@ pub(crate) async fn run_subagent_recorded(
         prefix_tokens,
     );
     let limits = crate::agent::budget::RunLimits::for_budget(&budget);
-    // A code subagent edits files, so a shell command that writes one is asked
-    // about like an edit, as in the Builder that delegated to it. An explore
-    // subagent has no shell (`subagent_defs`), so it never reaches the gate.
-    limits.set_writes_files(matches!(spec.mode, SubagentMode::Code));
     let ctx = &ToolContext {
         limits: Arc::new(limits),
         // Never the parent's `Main`: a subagent writes only a section it

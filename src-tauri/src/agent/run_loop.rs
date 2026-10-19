@@ -296,7 +296,6 @@ pub async fn run_workflow_with_profile(
         has_golden_goals,
         &loaded,
     );
-    ctx.limits.set_writes_files(profile.edits_files(cur_mode));
     // Every line the run is held to comes from the model it is about to talk
     // to, and is re-derived whenever a mode switch changes that model.
     let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -557,7 +556,6 @@ pub async fn run_workflow_with_profile(
                 has_golden_goals,
                 &loaded,
             );
-            ctx.limits.set_writes_files(profile.edits_files(cur_mode));
             // A mode switch is also a model switch (brain_model vs
             // builder_model), and the two need not share a window.
             prefix_tokens = estimate_tokens(&[], &system, &tools);
@@ -650,7 +648,6 @@ pub async fn run_workflow_with_profile(
                             has_golden_goals,
                             &loaded,
                         );
-                        ctx.limits.set_writes_files(profile.edits_files(cur_mode));
                         prefix_tokens = estimate_tokens(&[], &system, &tools);
                         budget = ContextBudget::for_model(
                             config,
@@ -1475,17 +1472,11 @@ pub async fn run_workflow_with_profile(
             let in_brain = mode_now == SessionMode::Brain;
             // A Builder session changes files itself (`edits_files`: Compact,
             // and Standard since decision D1). Each change is asked about — an
-            // `edit_file` as always, and a shell command that writes a file
-            // even when its prefix is allowlisted (`run_tool`, through
-            // `RunLimits::writes_files`). Brain's read-only gates are
-            // untouched — a toggle mid-round is read here, per call.
+            // `edit_file` as always, and a shell command that writes a file,
+            // which the shell rule never runs unasked
+            // (`permissions::bash_call_permission`). Brain's read-only gates
+            // are untouched — a toggle mid-round is read here, per call.
             let direct_edit = profile.edits_files(mode_now);
-            // ...and handed to `run_tool` from this same reading. Set only at
-            // round boundaries, a flip from Brain to Builder mid-batch left it
-            // false while `direct_edit` was true: the write was let past the
-            // refusal below and then judged by the plain allowlist, so
-            // `echo x > f` ran unasked.
-            ctx.limits.set_writes_files(direct_edit);
             // Compact also refuses whatever lies outside its ten tools.
             let compact = profile == PromptProfile::Compact && !in_brain;
             // A denial short-circuits everything downstream, including the mode

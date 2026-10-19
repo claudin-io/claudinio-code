@@ -25,7 +25,7 @@
 
 use crate::agent::provider::AgentConfig;
 use crate::agent::session::{COMPACT_THRESHOLD, MAX_CONTEXT_TOKENS};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// History cap for one tool result when the window is not the constraint.
 pub const TOOL_RESULT_CHARS: usize = 24_000;
@@ -246,7 +246,6 @@ impl ContextBudget {
 pub struct RunLimits {
     tool_result_chars: AtomicUsize,
     trim_chars: AtomicUsize,
-    writes_files: AtomicBool,
 }
 
 impl Default for RunLimits {
@@ -254,7 +253,6 @@ impl Default for RunLimits {
         Self {
             tool_result_chars: AtomicUsize::new(TOOL_RESULT_CHARS),
             trim_chars: AtomicUsize::new(TRIM_CHARS),
-            writes_files: AtomicBool::new(false),
         }
     }
 }
@@ -274,22 +272,6 @@ impl RunLimits {
 
     pub fn tool_result_chars(&self) -> usize {
         self.tool_result_chars.load(Ordering::Relaxed)
-    }
-
-    /// Set for a session that edits files itself (`PromptProfile::edits_files`:
-    /// Builder under Compact or Standard): there a shell command that writes a
-    /// file is an edit, and is asked about like one (`writes_files`). The run
-    /// loop sets it before every tool call from the live mode, so a toggle
-    /// mid-batch cannot leave it disagreeing with the gates it applied; a code
-    /// subagent sets it once, since its mode never changes.
-    pub fn set_writes_files(&self, yes: bool) {
-        self.writes_files.store(yes, Ordering::Relaxed);
-    }
-
-    /// True when a file-writing shell command reaches the tool at all. Where
-    /// it is false such a command was refused before it got here.
-    pub fn writes_files(&self) -> bool {
-        self.writes_files.load(Ordering::Relaxed)
     }
 
     pub fn trim_chars(&self) -> usize {

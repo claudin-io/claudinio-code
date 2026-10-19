@@ -197,7 +197,7 @@ impl PromptProfile {
 
     /// True when the main session in `mode` changes files itself: offered
     /// `edit_file`, and a shell command that writes a file is asked about like
-    /// an edit (`RunLimits::writes_files`) instead of refused. Builder under a
+    /// an edit instead of refused. Builder under a
     /// chat profile — Compact always did; Standard since decision D1
     /// (lean-harness Phase 3), because delegating every edit cost a second
     /// prefix, a second exploration and the spec re-emitted as output on each

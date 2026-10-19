@@ -58,7 +58,6 @@ pub(super) fn effective_permission(
                     tool_input,
                     ctx.workspace_root.as_deref().map(std::path::Path::new),
                     ctx.auto_approve_git,
-                    false,
                 ) == PermissionLevel::Denied
             }
             "browser" => {
@@ -382,7 +381,6 @@ pub(crate) async fn run_tool(
                 &tool_input,
                 ctx.workspace_root.as_deref().map(std::path::Path::new),
                 ctx.auto_approve_git,
-                ctx.limits.writes_files(),
             );
             // An unattended caller decides every command itself; see
             // `ToolContext::shell_gate`.

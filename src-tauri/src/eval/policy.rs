@@ -10,7 +10,7 @@
 //!   the workspace — the temporary directory the task was materialized in.
 //! - **A shell command is approved only when it only looks**
 //!   (`permissions::bash_is_read_only`: `ls`, `cat`, `git status`, … with no
-//!   chaining, pipes, substitution or redirection). Every other command is
+//!   chaining, pipes, substitution, redirection or glob). Every other command is
 //!   refused with `SHELL_REJECTION`, which tells the model to run checks with
 //!   `run_quality` — the task's own check command, which comes from the
 //!   workspace config and never from the model. The runner also sets
@@ -37,7 +37,7 @@ use std::path::{Component, Path};
 /// The tool result a refused shell command gets.
 pub(crate) const SHELL_REJECTION: &str = "Not run: this evaluation runs unattended and approves \
 only read-only shell commands (ls, cat, head, tail, wc, git status/diff/log, without pipes, \
-chaining or redirection). Create and change files with edit_file, and run the project's tests and checks \
+chaining, redirection or globs). Create and change files with edit_file, and run the project's tests and checks \
 with the run_quality tool.";
 
 /// What `ask_user` gets when the task has no scripted answer left.
@@ -419,14 +419,13 @@ mod tests {
         ] {
             assert!(!run(command), "{command} must be refused");
         }
-        for command in [
-            "ls src/*.rs",
-            "cat src/?.txt",
-            "ls .gitignore",
-            "wc -l src/[ab].rs",
-        ] {
-            assert!(run(command), "{command} stays in the workspace");
+        // A glob is refused before its words are read at all: the shell
+        // rule (`permissions::bash_is_read_only`) lets no expansion through
+        // (shell policy simplified, 2026-10-19).
+        for command in ["ls src/*.rs", "cat src/?.txt", "wc -l src/[ab].rs"] {
+            assert!(!run(command), "{command} is refused: it expands");
         }
+        assert!(run("ls .gitignore"), "a plain name stays in the workspace");
     }
 
     #[test]

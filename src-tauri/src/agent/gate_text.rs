@@ -31,7 +31,8 @@ pub const BASH_WRITES_IN_BRAIN: &str = "This bash command writes files. In Brain
 
 /// A `bash` command outside Brain's read-only allowlist.
 pub const BASH_NOT_ALLOWED_IN_BRAIN: &str = "Command not allowed in Brain mode — only read-only allowlisted \
-     commands (git status/diff/log, ls, cat, cargo check, ...) run here. Read files with \
+     commands (git status/diff/log, ls, cat, head, tail, wc, ...) run here, alone or piped into \
+     head, tail, wc, grep, cut, tr or nl; no builds, tests or interpreters. Read files with \
      read_file, search with grep or the indexed search tools, and put what needs running in \
      the plan.";
 

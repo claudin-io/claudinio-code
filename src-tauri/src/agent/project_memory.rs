@@ -299,339 +299,67 @@ fn win32_name(text: &str) -> &str {
     file.trim_end_matches(['.', ' '])
 }
 
-/// Whether a shell command names the memory file. The shell cannot be
-/// resolved like a path, so this reads the text the way the shell would
-/// before it opens a file, in any case: quotes and backslashes dropped
-/// (`.claudi''nio`), and a glob or brace word (`MEMORY.m?`, `.c*/M*`,
-/// `{MEMORY,x}.md`) counted as naming the file when it can match it — the
-/// Phase 9 review found `>> .claudinio/MEMORY.m?` passed the first version.
-/// The folder and the file may be in different words, which catches
-/// `cd .claudinio && … >> MEMORY.md`. Used by `permissions::bash_permission`
-/// to refuse a command that names it and is not a plain read.
+/// Whether a shell command's text mentions the memory: a raw scan, in any
+/// case, with no parsing and no recursion. True when the text holds
+/// `memory.md`; or `.claudinio` ending a word (followed by the end, a blank,
+/// a quote or one of `;|&)}<>` and backquote); or `.claudinio/` followed by
+/// a word that is empty, holds a glob character (`*?[{`) or a `.`/`..` part
+/// (`cp -r q/. .claudinio/`, `.claudinio/M*`, `.claudinio/plans/..`). The
+/// text is scanned as written and again with quotes and backslashes
+/// dropped, as the shell drops them (`.claudi''nio`). Used by
+/// `permissions::bash_call_permission` to refuse a call that mentions the
+/// memory unless it is a plain read.
 ///
-/// A best-effort heuristic, not a boundary: `is_memory_path` on the edit
-/// tools is the exact guard. What it cannot see is a path the command builds
-/// while it runs (a variable, an interpreter script assembling the name) or a
-/// copy or delete of a parent folder; nothing certain stands there — the
-/// allowlisted interpreters run unasked, and YOLO waives the rest's approval.
-/// The docs say so.
-pub fn named_in(command: &str) -> bool {
-    // A backslash before a line break continues the line: the shell drops
-    // both, so `rm -rf \⏎.claudinio` is one command (recheck round 3).
-    let lower: String = command
-        .to_lowercase()
-        .replace("\\\n", "")
-        .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-        .collect();
-    let (dir, file) = (".claudinio", "memory.md");
-    if lower.contains(dir) && lower.contains(file) {
-        return true;
-    }
-    let parts_of = |word: &str| -> Vec<String> {
-        braces_as_star(word)
-            .split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .map(str::to_string)
-            .collect()
-    };
-    // `{}` is `find`'s and `xargs -I`'s placeholder, not a glob of every name.
-    let paths: Vec<Vec<String>> = shell_words(&lower)
-        .iter()
-        .filter(|word| word.as_str() != "{}")
-        .map(|word| parts_of(word))
-        .filter(|parts| !parts.is_empty())
-        .collect();
-    let names_dir_in =
-        |paths: &[Vec<String>]| paths.iter().any(|p| glob_matches(&p[p.len() - 1], dir));
-    let names_file_in = |paths: &[Vec<String>]| {
-        paths
-            .iter()
-            .any(|p| p.len() == 1 && glob_matches(&p[0], file))
-    };
-    let names_both = paths.iter().any(|p| {
-        p.len() >= 2 && glob_matches(&p[p.len() - 2], dir) && glob_matches(&p[p.len() - 1], file)
-    });
-    if names_both || (names_dir_in(&paths) && names_file_in(&paths)) {
-        return true;
-    }
-    // The folder as the target of a command that writes or deletes what is
-    // in it (`cp q/* .claudinio/`, `tar -C .claudinio`, `rm -rf .claudinio`),
-    // and `find` acting on what it finds by the file's name. A heuristic
-    // over the common forms, not a parse of every command (Phase 9 final
-    // review): the writer must be the command of a segment (not an argument,
-    // so `grep -rn install .claudinio/` reads), and that segment must name
-    // the folder or the file, or follow a `cd` into the folder. Plain reads
-    // and `git add` of the folder are not caught.
-    let mut in_dir = false;
-    for words in command_segments(&lower) {
-        let paths: Vec<Vec<String>> = words
-            .iter()
-            .filter(|word| word.as_str() != "{}")
-            .map(|word| parts_of(word))
-            .filter(|parts| !parts.is_empty())
-            .collect();
-        let names_dir = names_dir_in(&paths);
-        let commands = commands_of(&words);
-        let runs = |names: &[&str]| commands.iter().any(|c| names.contains(c));
-        if runs(&["cd", "pushd"]) && names_dir {
-            in_dir = true;
-            continue;
-        }
-        let rewrites_folder = runs(FOLDER_WRITERS)
-            || (runs(&["git"]) && words.iter().any(|w| GIT_REWRITERS.contains(&w.as_str())));
-        let find_acts = runs(&["find"])
-            && words
-                .iter()
-                .any(|w| ["-delete", "-exec", "-execdir", "-ok", "-okdir"].contains(&w.as_str()));
-        if (rewrites_folder && (names_dir || in_dir))
-            || (find_acts && (names_dir || in_dir || names_file_in(&paths)))
-        {
-            return true;
-        }
-    }
-    false
+/// Best-effort defence in depth, not a boundary: `is_memory_path` on the edit
+/// tools is the exact guard. The scan does not see a path the command builds
+/// while it runs (a variable, a script assembling the name), a glob that
+/// spells the folder's own name (`.c*`), a parent folder (`rm -rf .`), or a
+/// hard link. The docs say so.
+pub fn mentions_memory(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    let unquoted: String = lower.chars().filter(|c| !"'\"\\".contains(*c)).collect();
+    [lower, unquoted].iter().any(|text| scan_mentions(text))
 }
 
-/// The segments of a lower-cased shell command — split at `;`, `|`, `&`,
-/// line breaks, parentheses and backquotes — each as its words, quotes and
-/// backslashes dropped.
-fn command_segments(lower: &str) -> Vec<Vec<String>> {
-    let folded: String = lower
-        .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-        .collect();
-    folded
-        .split(|c: char| ";|&\n\r()`".contains(c))
-        .map(|seg| {
-            seg.split_whitespace()
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter(|words| !words.is_empty())
-        .collect()
-}
-
-/// The names a segment runs, by their last path part: its first word after
-/// any `NAME=value` assignments and the shell's own words that start a
-/// command (`then`, `do`, `{`, `!`, …); when that word is a shell given a
-/// script (`sh -c '…'`), the names that script runs — its first word that is
-/// not an option (`bash -c -- '…'`, `bash -co pipefail '…'`); when it is a
-/// command that runs another (`sudo`, `xargs`, `eval`, `stdbuf`, …), the
-/// words after it up to the first command this guard knows, since the
-/// command it runs can sit behind its own flags and their values, and that
-/// command's arguments are not commands (`stdbuf -oL grep -rn install …`
-/// reads); the wrapper's own option values and operands are skipped
-/// (`wrapper_syntax`). A value the guard does not know to skip — a long
-/// option's, given as a separate word — named like a known command
-/// (`sudo --user git rm …`) hides what follows it: a heuristic, as
-/// `named_in` says.
-///
-/// Nesting deeper than `MAX_NESTING` wrappers and shells is read as a writer
-/// that also runs `find`, so a folder named there is refused rather than the
-/// recursion taking the stack (recheck round 3).
-fn commands_of(words: &[String]) -> Vec<&str> {
-    nested_commands(words, 0)
-}
-
-/// How many wrappers and shells `commands_of` reads into: far past what a
-/// person writes, far short of a 2 MiB stack.
-const MAX_NESTING: usize = 64;
-
-fn nested_commands(words: &[String], depth: usize) -> Vec<&str> {
-    if depth > MAX_NESTING {
-        return vec!["rm", "find"];
-    }
-    fn base(w: &str) -> &str {
-        w.rsplit('/').next().unwrap_or(w)
-    }
-    let start = words
-        .iter()
-        .position(|w| {
-            !(SHELL_KEYWORDS.contains(&w.as_str()) || w.contains('=') && !w.starts_with('-'))
-        })
-        .unwrap_or(words.len());
-    let Some(first) = words.get(start).map(|w| base(w)) else {
-        return Vec::new();
-    };
-    let rest = &words[start + 1..];
-    let mut out = vec![first];
-    if SHELLS.contains(&first) {
-        // `bash -c '…'`, `sh -ec '…'`: the quotes are already dropped, so
-        // the script is the first word after the flag and the options behind
-        // it, read as getopt reads them: each `o` (`-O` lower-cased) in an
-        // option word takes the next word as its value, the `-c` word's own
-        // included (`-co pipefail`), and `--` ends them.
-        let Some(flag) = rest
-            .iter()
-            .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))
-        else {
-            return out;
-        };
-        let values_of = |w: &str| w[1..].matches('o').count();
-        let mut values = values_of(&rest[flag]);
-        let mut at = flag + 1;
-        while let Some(w) = rest.get(at) {
-            at += 1;
-            if values > 0 {
-                values -= 1;
-            } else if w == "--" {
-                break;
-            } else if w.starts_with('-') || w.starts_with('+') {
-                values = values_of(w);
-            } else {
-                at -= 1;
-                break;
-            }
-        }
-        out.extend(nested_commands(
-            rest.get(at..).unwrap_or_default(),
-            depth + 1,
-        ));
-    } else if RUNS_ANOTHER.contains(&first) {
-        // The wrapper's own words — its option values and the operands
-        // before the command (`flock FILE`, `chroot NEWROOT`, `coproc NAME
-        // {`) — are skipped so a reader's name there does not end the scan;
-        // a writer, shell or wrapper there is still read as one.
-        let (valued, mut operands, script_c) = wrapper_syntax(first, rest);
-        let mut value_next = false;
-        for (at, w) in rest.iter().enumerate() {
-            let name = base(w);
-            if SHELLS.contains(&name)
-                || RUNS_ANOTHER.contains(&name)
-                || SHELL_KEYWORDS.contains(&name)
-            {
-                out.extend(nested_commands(&rest[at..], depth + 1));
-                break;
-            }
-            if FOLDER_WRITERS.contains(&name) {
-                out.push(name);
-                break;
-            }
-            if std::mem::take(&mut value_next) || w == "-" || w == "--" {
-                continue;
-            }
-            if let Some(flags) = w.strip_prefix('-').filter(|f| !f.starts_with('-')) {
-                if script_c && flags.contains('c') {
-                    out.extend(nested_commands(&rest[at + 1..], depth + 1));
-                    break;
+fn scan_mentions(text: &str) -> bool {
+    const FOLDER: &str = ".claudinio";
+    let ends_word = |c: char| c.is_whitespace() || "'\";|&)}<>`".contains(c);
+    text.contains("memory.md")
+        || text.match_indices(FOLDER).any(|(at, _)| {
+            let after = &text[at + FOLDER.len()..];
+            match after.chars().next() {
+                None => true,
+                Some('/') => {
+                    let word = after[1..].split(ends_word).next().unwrap_or("");
+                    let parts: Vec<&str> = word.split('/').filter(|p| !p.is_empty()).collect();
+                    parts.is_empty()
+                        || word.contains(['*', '?', '[', '{'])
+                        || parts.iter().any(|p| *p == "." || *p == "..")
                 }
-                value_next = flags
-                    .find(|c| valued.contains(c))
-                    .is_some_and(|i| i + 1 == flags.len());
-                // `runuser -u USER` names its user as an option, not an operand.
-                if first == "runuser" && flags.contains('u') {
-                    operands = 0;
-                }
-                continue;
+                Some(c) => ends_word(c),
             }
-            if script_c && w == "--command" {
-                out.extend(nested_commands(&rest[at + 1..], depth + 1));
-                break;
-            }
-            if operands > 0 && !w.starts_with('-') {
-                operands -= 1;
-                continue;
-            }
-            out.push(name);
-            if KNOWN_COMMANDS.contains(&name) {
-                break;
-            }
-        }
-    }
-    out
+        })
 }
 
-/// A wrapper's words before the command it runs, for `commands_of`: its
-/// short options that take the next word as their value (lower-cased, as
-/// the guard reads words, so `xargs -I` and `-i` both count), how many
-/// operands precede the command, and whether its `-c` is a script (`su`,
-/// `runuser`, `flock`). A long option given its value as a separate word is
-/// not known, so that value can still end the scan.
-fn wrapper_syntax(wrapper: &str, rest: &[String]) -> (&'static str, usize, bool) {
-    match wrapper {
-        "sudo" => ("cdghprtu", 0, false),
-        "doas" => ("cu", 0, false),
-        "xargs" => ("adeilnps", 0, false),
-        "env" => ("cu", 0, false),
-        "nice" => ("n", 0, false),
-        "time" => ("fo", 0, false),
-        "exec" => ("a", 0, false),
-        "timeout" => ("ks", 1, false),
-        "stdbuf" => ("eio", 0, false),
-        "ionice" => ("cnp", 0, false),
-        "flock" => ("ew", 1, true),
-        "chrt" | "taskset" | "chroot" => ("", 1, false),
-        "strace" => ("abeiopsux", 0, false),
-        "watch" => ("n", 0, false),
-        "su" | "runuser" => ("gsuw", 1, true),
-        "coproc" => (
-            "",
-            usize::from(rest.get(1).is_some_and(|w| w == "{")),
-            false,
-        ),
-        _ => ("", 0, false),
-    }
-}
-
-/// Words the shell reads before the command of a segment, for `commands_of`.
-const SHELL_KEYWORDS: &[&str] = &[
-    "then", "do", "else", "elif", "if", "while", "until", "{", "!",
-];
-
-/// Shells, whose `-c` takes a script, for `commands_of`.
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish"];
-
-/// Commands whose arguments name the command they run, for `commands_of`.
-const RUNS_ANOTHER: &[&str] = &[
-    "sudo", "doas", "xargs", "env", "nohup", "nice", "time", "command", "exec", "timeout",
-    "stdbuf", "ionice", "setsid", "flock", "chrt", "taskset", "unbuffer", "busybox", "chroot",
-    "strace", "watch", "su", "runuser", "eval", "coproc",
-];
-
-/// Commands besides the `FOLDER_WRITERS` that end a wrapper's words in
-/// `commands_of`: the command it runs, whose arguments are its own.
-const KNOWN_COMMANDS: &[&str] = &[
-    "git", "find", "cd", "pushd", "grep", "egrep", "fgrep", "rg", "ag", "cat", "ls", "head",
-    "tail", "wc", "less", "more", "stat", "file", "du", "tree", "sort", "uniq", "cut", "awk",
-    "sed", "diff", "echo", "printf", "test", "true", "false",
-];
-
-/// Commands that write or delete the contents of a folder named as their
-/// target, for `named_in`.
-const FOLDER_WRITERS: &[&str] = &[
-    "cp", "mv", "rsync", "tar", "rm", "rmdir", "ln", "install", "unzip", "cpio", "shred",
-];
-/// `git` subcommands that rewrite files in the paths they are given.
-const GIT_REWRITERS: &[&str] = &[
-    "checkout", "restore", "reset", "stash", "rm", "mv", "clean", "apply",
-];
-
-/// Whether a whole `bash` call names the memory: its `command`, run in its
-/// `workdir`, fed its `stdin`. The Phase 9 review found the guard read only
-/// `command`, so YOLO approved `{"command": ">> MEMORY.md", "workdir":
-/// "<root>/.claudinio"}` — the structured twin of `cd .claudinio && …`,
-/// which `named_in` catches — and `{"command": "sh", "stdin": ">>
-/// .claudinio/MEMORY.md"}`. The call is read as the text `cd <workdir> &&
-/// <command>` and its stdin as a script.
+/// Whether a whole `bash` call names the memory: its `command`, its
+/// `workdir` (one inside `.claudinio` counts) or its `stdin` mentions it
+/// (`mentions_memory`), or a name in the command or the stdin resolves to it
+/// on disk. The Phase 9 review found the guard read only `command`, so YOLO
+/// approved `{"command": ">> MEMORY.md", "workdir": "<root>/.claudinio"}`
+/// and `{"command": "sh", "stdin": ">> .claudinio/MEMORY.md"}`.
 ///
-/// With the workspace known, the names in the text are also resolved on
-/// disk, the way `is_memory_path` resolves an edit's path: a link an earlier
-/// call made (`ln -s .claudinio c`, then `>> c/MEMORY.md`) reaches the
-/// memory under a name the text never shows. Only names whose folders hold
-/// no glob are resolved (a glob in the file name is read as the memory when
-/// it can match it); a link reached through a globbed folder is the gap
-/// that is left, beside a path the command builds while it runs.
+/// With the workspace known, the names are resolved on disk the way
+/// `is_memory_path` resolves an edit's path: a link an earlier call made
+/// (`ln -s .claudinio c`, then `>> c/M*`) reaches the memory under a name the
+/// text never shows. Only names whose folders hold no glob are resolved.
 pub fn shell_call_names_memory(root: Option<&Path>, input: &serde_json::Value) -> bool {
     let field = |key: &str| input.get(key).and_then(|v| v.as_str());
     let command = field("command").unwrap_or("");
     let stdin = field("stdin").unwrap_or("");
     let workdir = field("workdir").filter(|w| !w.is_empty());
-    let as_typed = match workdir {
-        Some(w) => format!("cd {w} && {command}"),
-        None => command.to_string(),
-    };
-    if named_in(&as_typed) || named_in(stdin) {
+    let in_folder =
+        |w: &str| mentions_memory(w) || w.to_lowercase().replace('\\', "/").contains(".claudinio/");
+    if mentions_memory(command) || mentions_memory(stdin) || workdir.is_some_and(in_folder) {
         return true;
     }
     let Some(root) = root else {
@@ -644,7 +372,7 @@ pub fn shell_call_names_memory(root: Option<&Path>, input: &serde_json::Value) -
         .any(|text| names_on_disk(root, &base, text))
 }
 
-/// `named_in` with the names resolved on disk from `base`: a word naming a
+/// The names of `text` resolved on disk from `base`: a word naming a
 /// file that resolves to the memory, or a word naming a folder that
 /// resolves to `.claudinio` (or `base` being it) beside a bare `MEMORY.md`.
 /// Nothing touches the disk unless a word can match `MEMORY.md`, so a long
@@ -717,7 +445,7 @@ pub(crate) fn shell_words(command: &str) -> Vec<String> {
 }
 
 /// `word` with each `{…}` brace group read as `*`: whatever the group
-/// expands to, `*` matches it, which is all `named_in` needs to know.
+/// expands to, `*` matches it, which is all `names_on_disk` needs to know.
 fn braces_as_star(word: &str) -> String {
     let mut out = String::with_capacity(word.len());
     let mut rest = word;
@@ -1281,202 +1009,86 @@ mod tests {
         assert!(is_memory_path(root, &root.join("notes.md")));
     }
 
+    // The shell side of the guard is a raw scan (shell policy simplified,
+    // 2026-10-19): the file's name anywhere, or the folder's name ending a
+    // word or followed by a glob or a `.`/`..` part. The old command finder
+    // read wrappers, `-c` scripts and keywords, and every review round found
+    // one it missed; the scan has nothing to miss them by, so every finding
+    // is here, found by its text.
     #[test]
-    fn a_command_names_the_memory_by_folder_and_file_in_any_case() {
+    fn a_command_that_mentions_the_memory_or_its_folder_is_seen_by_its_text() {
         for c in [
             "echo x >> .claudinio/MEMORY.md",
             "cd .claudinio && printf 'x' >> MEMORY.md",
             "cp /tmp/m .Claudinio/Memory.md",
-        ] {
-            assert!(named_in(c), "{c}");
-        }
-        for c in ["echo x >> MEMORY.md", "ls .claudinio/plans", "cargo test"] {
-            assert!(!named_in(c), "{c}");
-        }
-    }
-
-    // The shell expands a glob and drops quotes before it opens the file,
-    // so a command that names the memory through either still names it
-    // (Phase 9 review: `>> .claudinio/MEMORY.m?` passed the text check and
-    // YOLO approved it). A glob that cannot reach the memory, like a plan
-    // pattern, is not caught.
-    #[test]
-    fn a_command_that_names_the_memory_through_a_glob_or_quotes_still_names_it() {
-        for c in [
-            "echo '- planted' >> .claudinio/MEMORY.m?",
+            "echo x >> MEMORY.md",
+            "echo x >> .claudinio/MEMORY.m?",
             "echo x >> .claudinio/M*",
             "echo x >> .claudinio/*",
             "echo x >> .c*/MEMORY.md",
-            "echo x >> .claud?nio/[Mm]EMORY.md",
             "echo x >> .claudinio/{MEMORY,x}.md",
             "echo x >> .claudi''nio/MEMORY.md",
             "echo x >> \".claudinio\"/\"MEMORY\".md",
             "echo x >> .claudinio/MEM\\ORY.md",
-            "cd .clau* && echo x >> MEMORY.m?",
             "cd .claudinio/ && echo x >> M*",
-            "echo x >> ./.claudinio/./MEMORY.md",
-            "echo x >> .claudinio//MEMORY.md",
             "printf 'x—日' >> .claudinio/MEMORÉ.md .claudinio/MEMORY.m?",
-        ] {
-            assert!(named_in(c), "{c}");
-        }
-        for c in [
-            "git add .claudinio/plans/*.md",
-            "ls .claudinio/plans/2026-10-*",
-            "cat .c*/plans/x.md",
-            "echo x >> notes/*.md",
-            // As in the shell, `*` does not reach a dot-folder.
-            "echo * > MEMORY.m?",
-            "echo '日本語 — café 😀' > README.md",
-        ] {
-            assert!(!named_in(c), "{c}");
-        }
-    }
-
-    // A command that copies, extracts, checks out or deletes into the
-    // `.claudinio` folder itself writes the memory without naming the file
-    // (Phase 9 final review: `cp q/* .claudinio/` planted a memory under
-    // YOLO). The guard is a best-effort heuristic; these are the cheap,
-    // common forms. Reads of the folder and staging it stay allowed.
-    #[test]
-    fn a_command_that_writes_into_the_memory_folder_itself_names_the_memory() {
-        for c in [
-            "cp q/* .claudinio/",
-            "cp -f /tmp/q/* .claudinio/",
-            "cp -rT q .claudinio",
-            "mv q/MEMORY.md .claudinio",
-            "rsync -a q/ .claudinio/",
-            "tar xf /tmp/m.tar -C .claudinio",
-            "git checkout evil -- .claudinio",
-            "git restore --source evil .claudinio",
+            "cp -r q/. .claudinio/",
+            "cp -r q/. .claudinio/.",
             "rm -rf .claudinio",
-            "rm -rf ./.claudinio/",
-            "find . -name 'MEMORY.md' -delete",
-            "find . -name MEMORY.m? -exec cp /tmp/x {} ;",
-            "find .claudinio -delete",
-            "ls && cp q/* .c*/",
-            "cd .claudinio && cp /tmp/q/* .",
-            "ls | xargs cp -t .claudinio",
-            "sudo rm -rf .claudinio",
-            "FOO=1 rm -rf .claudinio",
-            "/bin/rm -rf .claudinio",
-            // Recheck round: a writer behind a shell's `-c`, a compound
-            // command's keyword or a grouping brace, or a wrapper that runs
-            // the command after it, is still the command of the segment.
+            "rm -rf .claudinio/plans/..",
+            "rm -rf .claudinio//",
             "sh -c 'rm -rf .claudinio'",
-            "bash -c 'cp -r /tmp/q/. .claudinio/'",
-            "bash -ec 'cp -r /tmp/q/. .claudinio/'",
-            "if true; then cp -r /tmp/q/. .claudinio/; fi",
-            "for f in x; do cp -r /tmp/q/. .claudinio/; done",
             "{ rm -rf .claudinio; }",
-            "! rm -rf .claudinio",
-            "stdbuf -o0 cp -r /tmp/q/. .claudinio/",
-            "setsid cp -r /tmp/q/. .claudinio/",
-            "flock /tmp/l cp -r /tmp/q/. .claudinio/",
-            // Recheck round 2: a shell's script is its first word that is
-            // not an option, so options and `--` after `-c` are skipped; and
-            // `eval` and `coproc` run the words after them.
-            "bash -c -- 'rm -rf .claudinio'",
-            "bash -c -e 'rm -rf .claudinio'",
-            "bash -c -o pipefail 'rm -rf .claudinio'",
-            "eval 'rm -rf .claudinio'",
-            "eval rm -rf .claudinio",
-            "coproc rm -rf .claudinio",
-            "coproc { rm -rf .claudinio; }",
-            "sudo -u root rm -rf .claudinio",
-            "sudo nice -n 5 cp -r /tmp/q/. .claudinio/",
-            // Recheck round 3: an `o` clustered with the `-c` takes the next
-            // word as its value, as getopt reads it, so `pipefail` is not
-            // the script.
-            "bash -co pipefail 'rm -rf .claudinio'",
-            "bash -oc pipefail 'rm -rf .claudinio'",
-            "bash -eco pipefail 'rm -rf .claudinio'",
-            "bash -lco pipefail 'rm -rf .claudinio'",
-            "sh -co pipefail 'rm -rf .claudinio'",
-            "bash -c -oo pipefail errexit 'rm -rf .claudinio'",
-            "bash -O extglob -co pipefail 'rm -rf .claudinio'",
-            // A wrapper's own operands and option values are not the command
-            // it runs, even when named like a command the guard knows: a
-            // lock file, a new root, coproc's NAME, `xargs -a`/`-I`,
-            // `strace -o`, `sudo -u`, and su's user before its `-c` script.
-            "flock /tmp/file rm -rf .claudinio",
-            "flock .git/test rm -rf .claudinio",
-            "chroot /srv/tree rm -rf .claudinio",
-            "xargs -a file rm -rf .claudinio",
-            "ls /tmp/q | xargs -I file cp /tmp/q/file .claudinio/",
-            "strace -o file rm -rf .claudinio",
-            "sudo -u git rm -rf .claudinio",
-            "coproc cat { rm -rf .claudinio; }",
-            "su git -c 'cp -r /tmp/q/. .claudinio/'",
-            "runuser -u git -- rm -rf .claudinio",
-            "flock -c 'cp -r /tmp/q/. .claudinio/' /tmp/l",
-            // A backslash before a line break continues the line: the shell
-            // drops both, so the writer and the folder are one command.
+            "if true; then cp -r /tmp/q/. .claudinio/; fi",
+            "(rm -rf .claudinio)",
+            "rm -rf .claudinio&",
             "rm -rf \\\n.claudinio",
-            "cp -r /tmp/q/. \\\n  .claudinio/",
+            "rm -rf .claudi\\nio",
+            "ls .claudinio && cp a.txt b.txt",
+            "ls .claudinio/plans/2026-10-*",
         ] {
-            assert!(named_in(c), "{c}");
+            assert!(mentions_memory(c), "{c}");
         }
         for c in [
-            "ls .claudinio",
-            "git add -A",
-            "git add .claudinio",
-            "git status .claudinio",
-            "find . -name '*.rs'",
-            "cp a.txt b.txt",
-            "rm -rf build",
-            // Final-review follow-up: `{}` is find's placeholder, not a glob
-            // that matches every name, and a writer's name is a command only
-            // in command position, in the segment that names the folder.
+            "ls .claudinio/plans",
+            "git add .claudinio/plans/x.md",
+            "cat .claudinio.json",
+            "cat .claudiniox",
+            "cargo test",
             "find . -name '*.rs' -exec wc -l {} +",
-            "find src -type f -exec grep -l TODO {} \\;",
-            "grep -rn install .claudinio/",
-            "ls .claudinio && cp a.txt b.txt",
-            "cat .claudinio/notes.txt | grep rm",
-            // A shell's script is read as a command line of its own.
-            "bash -c 'grep -rn install .claudinio/'",
-            "if true; then ls .claudinio; fi",
-            // Recheck round 2: a wrapper runs one command, so a writer's
-            // name among that command's arguments is not a command.
-            "stdbuf -oL grep -rn install .claudinio/",
-            "timeout 10 grep -rn \"cp \" .claudinio/",
-            "eval grep -rn install .claudinio/",
-            "sudo -u git grep -rn install .claudinio/",
-            "flock /tmp/l grep -rn install .claudinio/",
-            "xargs -I file grep -rn install .claudinio/",
-            "timeout -s term 5 grep -rn install .claudinio/",
-            "runuser -u git -- grep -rn install .claudinio/",
+            "echo '日本語 — café 😀' > README.md",
+            // What the scan cannot see, and the docs say so: a glob spelling
+            // the folder's name, a parent folder, a name built at run time.
+            "echo x >> .claud?nio/notes",
+            "rm -rf .",
+            "d=.claudi; rm -rf ${d}nio",
         ] {
-            assert!(!named_in(c), "{c}");
+            assert!(!mentions_memory(c), "{c}");
         }
     }
 
-    // A command nested past any depth a person writes must not take the
-    // guard's stack with it: `commands_of` once recursed per nested wrapper
-    // or shell, and 4,000 `eval `s aborted the process (recheck round 3).
-    // Past its depth the segment is read as a writer, so a folder named
-    // there is still refused.
+    // One pass over the text, however deep the nesting: the old finder
+    // recursed per wrapper and 4,000 `eval `s aborted the process (recheck
+    // round 3).
     #[test]
-    fn a_deeply_nested_command_is_read_without_overflowing_the_stack() {
+    fn a_deeply_nested_command_is_scanned_without_overflowing_the_stack() {
         let worker = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
             .spawn(|| {
                 let evals = "eval ".repeat(50_000);
-                let shells = "sh -c ".repeat(20_000);
                 (
-                    named_in(&format!("{evals}rm -rf .claudinio")),
-                    named_in(&format!("{shells}rm -rf .claudinio")),
-                    named_in(&format!("{evals}ls src")),
+                    mentions_memory(&format!("{evals}rm -rf .claudinio")),
+                    mentions_memory(&format!("{evals}ls src")),
                 )
             })
             .unwrap();
-        assert_eq!(worker.join().unwrap(), (true, true, false));
+        assert_eq!(worker.join().unwrap(), (true, false));
     }
 
-    // The bash tool's `workdir` and `stdin` are part of the command: a
-    // `workdir` of `.claudinio` is the structured twin of `cd .claudinio &&`,
-    // and `sh` fed a script runs that script (Phase 9 review: YOLO approved
-    // both, because only `command` was read).
+    // The bash tool's `workdir` and `stdin` are part of the call: a
+    // `workdir` inside `.claudinio` is the structured twin of `cd .claudinio
+    // &&`, and `sh` fed a script runs that script (Phase 9 review: YOLO
+    // approved both, because only `command` was read).
     #[test]
     fn a_bash_call_names_the_memory_through_its_workdir_or_its_stdin() {
         let dir = tempfile::tempdir().unwrap();
@@ -1484,21 +1096,20 @@ mod tests {
         std::fs::create_dir_all(root.join(".claudinio/plans")).unwrap();
         let abs = root.join(".claudinio").to_string_lossy().into_owned();
         for call in [
-            serde_json::json!({"command": "echo '- planted' >> MEMORY.md", "workdir": abs}),
-            serde_json::json!({"command": "echo x >> MEMORY.m?", "workdir": ".claudinio"}),
-            serde_json::json!({"command": "echo x >> ./MEMORY.md", "workdir": ".claudinio/"}),
-            serde_json::json!({"command": "echo x >> ../MEMORY.md", "workdir": ".claudinio/plans"}),
+            serde_json::json!({"command": "echo '- planted' >> notes", "workdir": abs}),
+            serde_json::json!({"command": "rm *", "workdir": ".claudinio"}),
+            serde_json::json!({"command": "rm -rf ..", "workdir": ".claudinio/plans"}),
             serde_json::json!({"command": "sh", "stdin": "echo x >> .claudinio/MEMORY.md"}),
-            serde_json::json!({"command": "bash -s", "stdin": "cd .claudinio\necho x >> MEMORY.md"}),
+            serde_json::json!({"command": "bash -s", "stdin": "cd .claudinio\nrm -f *"}),
         ] {
             assert!(shell_call_names_memory(Some(root), &call), "{call}");
             // Without a workspace the text alone still sees them.
             assert!(shell_call_names_memory(None, &call), "{call}");
         }
         for call in [
-            serde_json::json!({"command": "echo x >> MEMORY.md"}),
-            serde_json::json!({"command": "echo x >> MEMORY.md", "workdir": root.to_string_lossy()}),
-            serde_json::json!({"command": "cat MEMORY.md", "workdir": "docs"}),
+            serde_json::json!({"command": "ls docs"}),
+            serde_json::json!({"command": "rm x", "workdir": root.to_string_lossy()}),
+            serde_json::json!({"command": "cat README.md", "workdir": "docs"}),
             serde_json::json!({"command": "sh", "stdin": "echo '日本語 — café 😀' > README.md"}),
         ] {
             assert!(!shell_call_names_memory(Some(root), &call), "{call}");
@@ -1506,9 +1117,9 @@ mod tests {
     }
 
     // A link made by an earlier call reaches the memory under a name the
-    // text never shows (`ln -s .claudinio c`, then `>> c/MEMORY.md`). The
-    // names are resolved on disk like the edit guard resolves a path, so the
-    // link is seen whatever it is called — a multi-byte name included.
+    // text never shows (`ln -s .claudinio c`, then `>> c/M*`). The names are
+    // resolved on disk like the edit guard resolves a path, so the link is
+    // seen whatever it is called — a multi-byte name included.
     #[cfg(unix)]
     #[test]
     fn a_link_made_by_an_earlier_call_still_names_the_memory() {
@@ -1519,19 +1130,21 @@ mod tests {
         std::os::unix::fs::symlink(root.join(".claudinio"), root.join("c")).unwrap();
         std::os::unix::fs::symlink(".claudinio", root.join("é—日😀")).unwrap();
         for call in [
-            serde_json::json!({"command": "echo x >> c/MEMORY.md"}),
+            serde_json::json!({"command": "echo x >> c/M*"}),
             serde_json::json!({"command": "echo x >> 'é—日😀'/MEMORY.m?"}),
-            serde_json::json!({"command": "cd c && echo x >> MEMORY.md"}),
-            serde_json::json!({"command": "echo x >> MEMORY.md", "workdir": "c"}),
+            serde_json::json!({"command": "echo x >> M*", "workdir": "c"}),
             serde_json::json!({"command": "sh", "stdin": "echo x >> c/M*"}),
-            serde_json::json!({"command": format!("echo x >> {}/c/MEMORY.md", root.display())}),
         ] {
             assert!(shell_call_names_memory(Some(root), &call), "{call}");
+            assert!(
+                !shell_call_names_memory(None, &call),
+                "{call}: only the disk sees it"
+            );
         }
         for call in [
-            serde_json::json!({"command": "echo x >> docs/MEMORY.md"}),
             serde_json::json!({"command": "ls c"}),
-            serde_json::json!({"command": "echo x >> c/plans/MEMORY.md"}),
+            serde_json::json!({"command": "echo x >> c/plans/notes.md"}),
+            serde_json::json!({"command": "echo x >> docs/M*"}),
         ] {
             assert!(!shell_call_names_memory(Some(root), &call), "{call}");
         }
