@@ -93,6 +93,35 @@ pub fn partial_read_unreadable(path: &str, error: &str) -> String {
     )
 }
 
+/// `edit_file` with text to replace in a file that does not exist. Not the
+/// read gate: `read_file` cannot read it either, and that loop is what every
+/// failed run of the clean baseline eval (2026-10-18) was stuck in.
+pub fn edit_target_missing(path: &str) -> String {
+    format!(
+        "{path} does not exist. To create it, retry edit_file with old_string \"\" and the \
+         whole file as new_string (missing folders are created)."
+    )
+}
+
+/// `edit_file` with an empty `old_string` on a file that exists: creating
+/// never overwrites.
+pub fn create_over_existing(path: &str) -> String {
+    format!(
+        "{path} already exists, and an empty old_string only creates a new file. Call \
+         read_file on it, then retry edit_file with the exact text to replace as old_string."
+    )
+}
+
+/// A new file named by a relative path, which the containment check resolves
+/// against the workspace and the write would resolve against the process's
+/// own directory.
+pub fn create_needs_absolute_path(path: &str, absolute: &str) -> String {
+    format!(
+        "{path} is relative; a new file needs an absolute path inside the workspace. Retry \
+         edit_file with path {absolute}."
+    )
+}
+
 fn partial_read(path: &str) -> String {
     format!(
         "read_file was called on {path}, but you have not read the exact text you're trying \
@@ -176,6 +205,12 @@ pub fn all() -> Vec<(&'static str, String)> {
             "partial_read_unreadable",
             partial_read_unreadable("/w/src/a.rs", "permission denied"),
         ),
+        ("edit_target_missing", edit_target_missing("/w/src/new.rs")),
+        ("create_over_existing", create_over_existing("/w/src/a.rs")),
+        (
+            "create_needs_absolute_path",
+            create_needs_absolute_path("src/new.rs", "/w/src/new.rs"),
+        ),
         ("quality_missing", quality_missing("golden-g-1")),
         ("quality_stale", quality_stale("golden-g-1")),
         (
@@ -231,6 +266,19 @@ mod tests {
         (
             "partial_read_unreadable",
             &["permission denied", "read_file", "then retry edit_file"],
+        ),
+        // Creating a file is edit_file with an empty old_string, never a shell write.
+        (
+            "edit_target_missing",
+            &["does not exist", "retry edit_file with old_string \"\""],
+        ),
+        (
+            "create_over_existing",
+            &["already exists", "read_file", "then retry edit_file"],
+        ),
+        (
+            "create_needs_absolute_path",
+            &["absolute", "retry edit_file with path /w/src/new.rs"],
         ),
         ("quality_missing", &["call run_quality"]),
         ("quality_stale", &["call run_quality"]),

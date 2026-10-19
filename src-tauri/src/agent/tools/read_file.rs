@@ -75,7 +75,17 @@ fn truncation_warning(
 
 pub fn execute(args: ReadFileArgs) -> Result<String, String> {
     let p = std::path::Path::new(&args.path);
-    let meta = p.metadata().map_err(|e| format!("cannot access: {e}"))?;
+    let meta = p.metadata().map_err(|e| match e.kind() {
+        // The model asked for a file it is about to write: say how, since
+        // the read it was told to make first cannot succeed (lean-harness
+        // Phase 3b; the baseline eval's agents looped here).
+        std::io::ErrorKind::NotFound => format!(
+            "cannot access: {e}. {} does not exist; to create it, call edit_file with \
+             old_string \"\" and the whole file as new_string.",
+            args.path
+        ),
+        _ => format!("cannot access: {e}"),
+    })?;
     if !meta.is_file() {
         return Err(format!("not a file: {}", args.path));
     }

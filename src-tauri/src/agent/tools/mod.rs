@@ -778,11 +778,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                         .into(),
                 );
             }
-            // Enforce read-before-edit
-            {
-                let tracker = ctx.read_tracker.lock().await;
-                tracker.check_can_edit(&a.path, &a.old_string)?;
-            }
+            edit_gates(&a, ctx).await?;
             let diff = edit_file::preview(&a)?;
             Ok(ToolOutput::EditProposal {
                 path: diff.path,
@@ -1051,14 +1047,44 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<String, String> {
     let a: edit_file::EditFileArgs =
         serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-    validate_editable_path(&a.path, ctx)?;
-    // Enforce read-before-edit
-    {
-        let tracker = ctx.read_tracker.lock().await;
-        tracker.check_can_edit(&a.path, &a.old_string)?;
-    }
+    edit_gates(&a, ctx).await?;
     let diff = edit_file::preview(&a)?;
-    edit_file::apply(&diff)
+    let applied = edit_file::apply(&diff)?;
+    if diff.creates() {
+        // The model wrote every byte of the file, so its next edit needs no
+        // read_file first.
+        let mut tracker = ctx.read_tracker.lock().await;
+        tracker.record_read(&a.path, None, None, &a.new_string);
+    }
+    Ok(applied)
+}
+
+/// The checks an edit passes both when it is proposed and when it is applied
+/// after approval: the workspace and spec guards, then read-before-edit.
+///
+/// Read-before-edit has nothing to check on a path that does not exist:
+/// `read_file` cannot read it, and demanding it was the loop every failed run
+/// of the clean baseline eval (2026-10-18) was caught in. `edit_file::preview`
+/// then creates the file (an empty `old_string`) or says how to.
+async fn edit_gates(a: &edit_file::EditFileArgs, ctx: &ToolContext) -> Result<(), String> {
+    validate_editable_path(&a.path, ctx)?;
+    // `symlink_metadata`: a dangling link is something there, not a new file.
+    if std::fs::symlink_metadata(&a.path).is_err() {
+        let path = Path::new(&a.path);
+        if let Some(root) = ctx.workspace_root.as_deref()
+            && a.old_string.is_empty()
+            && path.is_relative()
+        {
+            let absolute = Path::new(root).join(path);
+            return Err(crate::agent::gate_text::create_needs_absolute_path(
+                &a.path,
+                &absolute.to_string_lossy(),
+            ));
+        }
+        return Ok(());
+    }
+    let tracker = ctx.read_tracker.lock().await;
+    tracker.check_can_edit(&a.path, &a.old_string)
 }
 
 /// How many top semantic hits get a source snippet, and how large each can be.
@@ -1897,6 +1923,204 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&p);
+    }
+
+    // ── edit_file creates files (lean-harness Phase 3b) ──
+    //
+    // The clean baseline eval (2026-10-18) failed only on new files: the read
+    // gate demanded a read_file of a path that did not exist, read_file could
+    // not read it, and the model looped or gave up. A path that does not
+    // exist has nothing to read, so `old_string: ""` creates it.
+
+    fn edit(ctx: &ToolContext, args: serde_json::Value) -> Result<ToolOutput, String> {
+        futures::executor::block_on(execute("edit_file", args, ctx))
+    }
+
+    fn apply(ctx: &ToolContext, args: serde_json::Value) -> Result<String, String> {
+        futures::executor::block_on(apply_edit_with_ctx(args, ctx))
+    }
+
+    #[test]
+    fn an_empty_old_string_creates_a_missing_file_and_its_missing_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("docs/notes/NEW.md");
+        let args = serde_json::json!({
+            "path": path.to_string_lossy(),
+            "old_string": "",
+            "new_string": "# New\n\nfirst line\n",
+        });
+
+        // The proposal is a diff from nothing to the whole content, and
+        // proposing writes nothing.
+        match edit(&ctx, args.clone()).unwrap() {
+            ToolOutput::EditProposal {
+                old_string,
+                unified_diff,
+                ..
+            } => {
+                assert_eq!(old_string, "");
+                assert!(unified_diff.contains("+# New"), "{unified_diff}");
+                assert!(unified_diff.contains("+first line"), "{unified_diff}");
+                assert!(
+                    !unified_diff
+                        .lines()
+                        .any(|l| l.starts_with("-") && !l.starts_with("---"))
+                );
+            }
+            other => panic!("expected a proposal, got {other:?}"),
+        }
+        assert!(!path.exists(), "a proposal never touches the disk");
+
+        let msg = apply(&ctx, args).unwrap();
+        assert!(msg.contains("Created"), "{msg}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# New\n\nfirst line\n"
+        );
+    }
+
+    #[test]
+    fn a_created_file_counts_as_read_so_the_next_edit_needs_no_read_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("docs/NEW.md").to_string_lossy().to_string();
+        apply(
+            &ctx,
+            serde_json::json!({ "path": path, "old_string": "", "new_string": "alpha\nbeta\n" }),
+        )
+        .unwrap();
+        // The model wrote every byte of it; asking it to read them back is
+        // a wasted round.
+        let second =
+            serde_json::json!({ "path": path, "old_string": "beta", "new_string": "gamma" });
+        assert!(edit(&ctx, second.clone()).is_ok());
+        apply(&ctx, second).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
+    }
+
+    #[test]
+    fn an_empty_old_string_on_an_existing_file_is_refused_never_an_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "keep me\n").unwrap();
+        let p = path.to_string_lossy().to_string();
+        futures::executor::block_on(execute("read_file", serde_json::json!({ "path": p }), &ctx))
+            .unwrap();
+
+        let args = serde_json::json!({ "path": p, "old_string": "", "new_string": "gone\n" });
+        let err = edit(&ctx, args.clone()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(err.contains("read_file"), "{err}");
+        let err = apply(&ctx, args).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me\n");
+    }
+
+    #[test]
+    fn a_partial_read_still_refuses_an_empty_old_string() {
+        let p = write_20line_file("partial_empty_old");
+        let ctx = test_ctx();
+        let path = p.to_string_lossy().to_string();
+        futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": path, "start_line": 1, "end_line": 2 }),
+            &ctx,
+        ))
+        .unwrap();
+        let err = edit(
+            &ctx,
+            serde_json::json!({ "path": path, "old_string": "", "new_string": "x" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("old_string cannot be empty"), "{err}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn editing_text_in_a_missing_file_says_how_to_create_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("retry.py").to_string_lossy().to_string();
+        let err = edit(
+            &ctx,
+            serde_json::json!({ "path": path, "old_string": "def f", "new_string": "def g" }),
+        )
+        .unwrap_err();
+        // Not the read gate: read_file cannot read a file that is not there.
+        assert!(!err.contains("read_file must be called"), "{err}");
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(err.contains("old_string \"\""), "{err}");
+    }
+
+    #[test]
+    fn creating_a_file_keeps_the_workspace_and_spec_guards() {
+        let root = spec_workspace("create", "{}");
+        let ctx = ctx_at(&root);
+        let create = |path: String| serde_json::json!({ "path": path, "old_string": "", "new_string": "x\n" });
+
+        let outside = format!("{}/../escape-{}.txt", root.display(), std::process::id());
+        assert!(
+            edit(&ctx, create(outside.clone()))
+                .unwrap_err()
+                .contains("outside the workspace")
+        );
+        assert!(apply(&ctx, create(outside.clone())).is_err());
+        assert!(!std::path::Path::new(&outside).exists());
+
+        let spec = root
+            .join("features/new.feature")
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            edit(&ctx, create(spec.clone()))
+                .unwrap_err()
+                .contains("owned by the user")
+        );
+        assert!(apply(&ctx, create(spec.clone())).is_err());
+        assert!(!std::path::Path::new(&spec).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A relative path resolves against the workspace when it is checked but
+    /// against the process's own directory when it is written, so a file
+    /// created from one could land outside the workspace the check approved.
+    #[test]
+    fn a_new_file_needs_an_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let args = serde_json::json!({
+            "path": "phase3b-relative/NEW.md", "old_string": "", "new_string": "x\n",
+        });
+        let err = edit(&ctx, args.clone()).unwrap_err();
+        assert!(err.contains("absolute"), "{err}");
+        let suggested = dir.path().join("phase3b-relative/NEW.md");
+        assert!(err.contains(&*suggested.to_string_lossy()), "{err}");
+        assert!(apply(&ctx, args).is_err());
+        assert!(!std::path::Path::new("phase3b-relative").exists());
+    }
+
+    #[test]
+    fn reading_a_missing_file_points_at_creating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir
+            .path()
+            .join("validators.py")
+            .to_string_lossy()
+            .to_string();
+        let err = futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": path }),
+            &ctx,
+        ))
+        .unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(
+            err.contains("edit_file") && err.contains("old_string \"\""),
+            "{err}"
+        );
     }
 
     // Existing tests (unchanged)
