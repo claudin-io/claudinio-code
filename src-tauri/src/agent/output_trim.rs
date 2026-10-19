@@ -222,14 +222,50 @@ pub(crate) fn saved_dir() -> std::path::PathBuf {
 /// keeps the opening to this one folder: the temp folder is shared, and a link
 /// planted in it, or a `..` out of it, must not lead anywhere else.
 pub(crate) fn is_saved_output(path: &std::path::Path) -> bool {
-    let (Ok(file), Ok(tmp)) = (path.canonicalize(), std::env::temp_dir().canonicalize()) else {
+    is_saved_output_in(path, &saved_dir())
+}
+
+/// [`is_saved_output`] for outputs saved to `dir`.
+fn is_saved_output_in(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    let (Ok(file), Ok(ours)) = (path.canonicalize(), dir.canonicalize()) else {
         return false;
     };
-    let ours = tmp.join("claudinio-code").join("outputs");
     let named = file.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
         n.ends_with(".log") && (n.starts_with("bash-") || n.starts_with("result-"))
     });
-    file.parent() == Some(ours.as_path()) && named && file.is_file()
+    file.parent() == Some(ours.as_path()) && named && file.is_file() && is_ours(&ours)
+}
+
+/// Whether `dir` is a folder only this process's user can write: a real
+/// folder (not a link), owned by that user, not group- or world-writable. The
+/// saved-outputs folder is in the shared temp folder under a fixed name, its
+/// files have predictable names (the content's hash), and reads of them pass
+/// the workspace guard; on a host with other users, one of them could create
+/// the folder first, and the chmod to 0700 would fail in silence (Phase 6
+/// final review). Such a folder holds nothing the model is told to trust.
+#[cfg(unix)]
+fn is_ours(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(dir).is_ok_and(|meta| {
+        meta.is_dir() && Some(meta.uid()) == own_uid() && meta.mode() & 0o022 == 0
+    })
+}
+
+#[cfg(not(unix))]
+fn is_ours(_dir: &std::path::Path) -> bool {
+    true
+}
+
+/// This process's user id, read off a file it creates: `std` has no getuid,
+/// and a new file is owned by the user that made it.
+#[cfg(unix)]
+fn own_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    static UID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *UID.get_or_init(|| {
+        let probe = tempfile::NamedTempFile::new().ok()?;
+        probe.as_file().metadata().ok().map(|m| m.uid())
+    })
 }
 
 /// Write the full output where the model can read it back, in a file named
@@ -246,17 +282,30 @@ pub(crate) fn is_saved_output(path: &std::path::Path) -> bool {
 ///
 /// The folder is the user's alone (0700) and so is each file (0600): what is
 /// saved can be private code or a tool's answer, and the temp folder is
-/// shared. The first save of a process sweeps outputs past [`SAVED_MAX_AGE`].
+/// shared. A folder that is not the user's alone ([`is_ours`]: someone else
+/// made it first) gets nothing: `None`, and the marker names no copy. The
+/// first save of a process sweeps outputs past [`SAVED_MAX_AGE`].
 pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
     let dir = saved_dir();
-    std::fs::create_dir_all(&dir).ok()?;
+    let saved = save_full_in(&dir, kind, text);
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    if saved.is_some() {
+        SWEPT.call_once(|| sweep(&dir, SAVED_MAX_AGE));
+    }
+    saved
+}
+
+/// [`save_full`] into `dir`.
+fn save_full_in(dir: &std::path::Path, kind: &str, text: &str) -> Option<String> {
+    std::fs::create_dir_all(dir).ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).ok();
     }
-    static SWEPT: std::sync::Once = std::sync::Once::new();
-    SWEPT.call_once(|| sweep(&dir, SAVED_MAX_AGE));
+    if !is_ours(dir) {
+        return None;
+    }
     let hash = xxhash_rust::xxh3::xxh3_128(text.as_bytes());
     let path = dir.join(format!("{kind}-{hash:032x}.log"));
     if let Some(saved) = write_new(&path, text) {
@@ -359,6 +408,39 @@ mod tests {
         assert_eq!(mode(file), 0o600, "{path}");
         assert_eq!(mode(file.parent().unwrap()), 0o700);
         std::fs::remove_file(file).ok();
+    }
+
+    // The saved-outputs folder sits in the shared temp folder, and its files
+    // are readable outside the workspace guard. A folder that another user
+    // can write (or made first, so the chmod to 0700 fails) could hold their
+    // text under a predictable name: nothing is saved there and nothing in it
+    // counts as a saved output.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_outputs_folder_others_can_write_is_not_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("outputs");
+        let path = save_full_in(&dir, "result", "mine").expect("our own folder is used");
+        assert!(is_saved_output_in(std::path::Path::new(&path), &dir));
+
+        let shared = root.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let planted = shared.join("result-0.log");
+        std::fs::write(&planted, "planted").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!is_saved_output_in(&planted, &shared));
+
+        // A folder owned by someone else: the chmod fails for them, and as
+        // root (where it would not) the owner still is not us.
+        let theirs = root.path().join("theirs");
+        std::fs::create_dir(&theirs).unwrap();
+        if std::os::unix::fs::chown(&theirs, Some(65_534), None).is_ok() {
+            assert_eq!(save_full_in(&theirs, "result", "mine"), None);
+            let planted = theirs.join("result-1.log");
+            std::fs::write(&planted, "planted").unwrap();
+            assert!(!is_saved_output_in(&planted, &theirs));
+        }
     }
 
     // The path is in the result the model and the loop watch see: the same
