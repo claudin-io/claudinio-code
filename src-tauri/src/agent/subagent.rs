@@ -861,6 +861,9 @@ pub(crate) async fn run_subagent_recorded(
         }
 
         let tool_uses = &stream_output.tool_uses;
+        // Only what the subagent was offered runs: an explore subagent is
+        // read-only by its tool list, and Brain relies on that.
+        let offered = |name: &str| tools.iter().any(|t| t.name == name);
         // Read-only calls run ahead together, as in the parent's loop.
         let mut ready: Vec<Option<ContentBlock>> = vec![None; tool_uses.len()];
         for (ti, tool_use) in tool_uses.iter().enumerate() {
@@ -869,7 +872,10 @@ pub(crate) async fn run_subagent_recorded(
                     tool_uses,
                     ti,
                     &mut ready,
-                    |name, input| tool_batch::runs_in_parallel(name, input, config, ctx, false),
+                    |name, input| {
+                        offered(name)
+                            && tool_batch::runs_in_parallel(name, input, config, ctx, false)
+                    },
                     tool_batch::executor(event_tx, session_id, ctx),
                     interrupt,
                     event_tx,
@@ -939,6 +945,19 @@ pub(crate) async fn run_subagent_recorded(
             let perm = permissions::tool_permission(&tool_name);
             let block = if let Some(block) = ready[ti].take() {
                 block
+            } else if !offered(&tool_name) {
+                let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+                session::deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &hook_input,
+                    &format!(
+                        "{tool_name} is not available to this subagent. Your tools are: {}.",
+                        names.join(", ")
+                    ),
+                    event_tx,
+                    session_id,
+                )
             } else if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_pre.verdict {
                 session::deny_tool(
                     &tool_name,
@@ -1819,6 +1838,43 @@ mod context_budget_tests {
             &Arc::new(SteeringCtl::new()),
         )
         .await
+    }
+
+    /// An explore subagent is read-only by its tool list, and Brain spawns
+    /// only those; the loop ran whatever name the model sent, so an `echo >`
+    /// (allowlisted by prefix) wrote a file unasked and `finalize_plan` wrote
+    /// the plan log (final branch review). A tool it was not offered is refused.
+    #[tokio::test]
+    async fn an_explore_subagent_runs_no_tool_it_was_not_offered() {
+        let (root, _file) = workspace("unoffered");
+        let target = root.join("pwned.txt");
+        let (base, _, bodies) = super::scripted_model::spawn_recording(vec![
+            Reply::Tool {
+                name: "bash",
+                input: serde_json::json!({
+                    "command": format!("echo pwned > {}", target.display()),
+                }),
+            },
+            Reply::Tool {
+                name: "edit_file",
+                input: serde_json::json!({
+                    "path": target.to_string_lossy(), "old_string": "", "new_string": "x\n",
+                }),
+            },
+            Reply::Text("done"),
+        ])
+        .await;
+        let result = run(&config_for(&base, None), &root).await;
+        assert_eq!(result.status, "completed", "{}", result.report);
+        assert!(!target.exists(), "an unoffered tool wrote a file");
+        let bodies = bodies.lock().unwrap().clone();
+        assert!(bodies[1].contains("bash is not available"), "{}", bodies[1]);
+        assert!(
+            bodies[2].contains("edit_file is not available"),
+            "{}",
+            bodies[2]
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Reading the same lines twice: the second request carries the file, the
