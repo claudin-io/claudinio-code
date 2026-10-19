@@ -51,11 +51,12 @@ pub(super) fn effective_permission(
     let relaxed =
         if matches!(perm, PermissionLevel::RequiresApproval) && (yolo_relaxes || hook_allows) {
             if tool_name == "bash" {
-                let command = tool_input
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                match permissions::bash_permission(command, ctx.auto_approve_git) {
+                match permissions::bash_call_permission(
+                    tool_input,
+                    ctx.workspace_root.as_deref().map(std::path::Path::new),
+                    ctx.auto_approve_git,
+                    false,
+                ) {
                     PermissionLevel::Denied => PermissionLevel::Denied,
                     _ => PermissionLevel::Auto,
                 }
@@ -372,11 +373,12 @@ pub(crate) async fn run_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let resolved = if ctx.limits.writes_files() {
-                permissions::bash_permission_writing(command, ctx.auto_approve_git)
-            } else {
-                permissions::bash_permission(command, ctx.auto_approve_git)
-            };
+            let resolved = permissions::bash_call_permission(
+                &tool_input,
+                ctx.workspace_root.as_deref().map(std::path::Path::new),
+                ctx.auto_approve_git,
+                ctx.limits.writes_files(),
+            );
             // An unattended caller decides every command itself; see
             // `ToolContext::shell_gate`.
             let resolved = match resolved {
@@ -387,7 +389,7 @@ pub(crate) async fn run_tool(
             };
             match resolved {
                 permissions::PermissionLevel::Denied => {
-                    let msg = memory_refusal(tool_name, &tool_input).unwrap_or_else(|| {
+                    let msg = memory_refusal(tool_name, &tool_input, ctx).unwrap_or_else(|| {
                         format!("Command blocked by security policy: {command}")
                     });
                     let _ = event_tx.send(AgentEvent::ToolCall {
@@ -814,7 +816,7 @@ pub(crate) async fn run_tool(
             }
         }
         permissions::PermissionLevel::Denied => {
-            let msg = memory_refusal(tool_name, &tool_input)
+            let msg = memory_refusal(tool_name, &tool_input, ctx)
                 .unwrap_or_else(|| format!("Command '{tool_name}' is blocked by security policy"));
             let _ = event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
@@ -835,12 +837,13 @@ pub(crate) async fn run_tool(
     }
 }
 
-/// A `bash` command the deny list refused because it names the project
-/// memory gets the refusal that says how a lesson does get in (Phase 9),
-/// rather than the bare "blocked by security policy".
-fn memory_refusal(tool_name: &str, tool_input: &Value) -> Option<String> {
-    let command = tool_input.get("command").and_then(|v| v.as_str())?;
-    (tool_name == "bash" && crate::agent::project_memory::named_in(command))
+/// A `bash` call the deny list refused because it names the project memory
+/// (in its command, its workdir, its stdin or through a link) gets the
+/// refusal that says how a lesson does get in (Phase 9), rather than the
+/// bare "blocked by security policy".
+fn memory_refusal(tool_name: &str, tool_input: &Value, ctx: &ToolContext) -> Option<String> {
+    let root = ctx.workspace_root.as_deref().map(std::path::Path::new);
+    (tool_name == "bash" && crate::agent::project_memory::shell_call_names_memory(root, tool_input))
         .then(|| crate::agent::gate_text::PROJECT_MEMORY_WRITE.to_string())
 }
 
@@ -1492,6 +1495,62 @@ mod tests {
         }
     }
 
+    // The bash call's `workdir` and `stdin`, and a link an earlier call
+    // made, are part of what it writes: neither YOLO nor a hook's `allow`
+    // opens the memory through them (Phase 9 review).
+    #[cfg(unix)]
+    #[test]
+    fn neither_yolo_nor_a_hook_allow_opens_the_memory_through_workdir_stdin_or_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".claudinio")).unwrap();
+        std::os::unix::fs::symlink(root.join(".claudinio"), root.join("c")).unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().into_owned()),
+            ..dummy_ctx()
+        };
+        let yolo = AgentConfig {
+            yolo_mode: true,
+            ..AgentConfig::default()
+        };
+        let memory_dir = root.join(".claudinio").to_string_lossy().into_owned();
+        for input in [
+            json!({"command": "echo '- planted' >> MEMORY.md", "workdir": memory_dir}),
+            json!({"command": "sh", "stdin": "echo '- planted' >> .claudinio/MEMORY.md"}),
+            json!({"command": "echo '- planted' >> c/MEMORY.md"}),
+        ] {
+            for (cfg, verdict) in [
+                (&yolo, crate::agent::hooks::PreToolVerdict::default()),
+                (&AgentConfig::default(), verdict_allow()),
+            ] {
+                assert_eq!(
+                    effective_permission(
+                        PermissionLevel::RequiresApproval,
+                        "bash",
+                        &input,
+                        cfg,
+                        &ctx,
+                        &verdict,
+                    ),
+                    PermissionLevel::Denied,
+                    "{input}"
+                );
+            }
+        }
+        // A plain read in the memory's folder is still a read.
+        assert_eq!(
+            effective_permission(
+                PermissionLevel::RequiresApproval,
+                "bash",
+                &json!({"command": "cat MEMORY.md", "workdir": memory_dir}),
+                &yolo,
+                &ctx,
+                &crate::agent::hooks::PreToolVerdict::default(),
+            ),
+            PermissionLevel::Auto
+        );
+    }
+
     #[test]
     fn a_hook_allow_does_not_override_the_browser_scheme_check() {
         let ctx = dummy_ctx();
@@ -1831,6 +1890,47 @@ mod tests {
             ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
             other => panic!("a tool result, got {other:?}"),
         }
+    }
+
+    // Without YOLO the same call is refused outright with the memory's own
+    // refusal — not put to a person as an ordinary command — and the file
+    // is not written.
+    #[tokio::test]
+    async fn a_shell_write_to_the_memory_through_its_workdir_is_refused_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".claudinio")).unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().into_owned()),
+            ..dummy_ctx()
+        };
+        let approvals = ApprovalMap::default();
+        let asked = answer_first(&approvals, true);
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let block = run_tool(
+            "bash",
+            "t1",
+            json!({"command": "echo '- planted' >> MEMORY.md", "workdir": ".claudinio"}),
+            PermissionLevel::RequiresApproval,
+            &events,
+            &approvals,
+            &AnswerMap::default(),
+            "s",
+            &ctx,
+            &AgentConfig::default(),
+            &verdict_none(),
+        )
+        .await;
+        let text = match block {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            other => panic!("a tool result, got {other:?}"),
+        };
+        assert!(
+            text.contains(crate::agent::gate_text::PROJECT_MEMORY_WRITE),
+            "{text}"
+        );
+        assert!(!asked.await.unwrap(), "a person was asked");
+        assert!(!root.join(".claudinio/MEMORY.md").exists());
     }
 
     // An unattended caller cannot let the allowlist decide for it: `echo` and

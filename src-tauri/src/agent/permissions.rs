@@ -266,6 +266,33 @@ pub fn bash_writes_files(command: &str) -> bool {
     false
 }
 
+/// The permission of a whole `bash` call — `bash_permission`, or
+/// `bash_permission_writing` for a session that edits files itself, of its
+/// `command`, and refused when the call names the project memory through its
+/// `workdir`, its `stdin` or a link on disk under `root`
+/// (`project_memory::shell_call_names_memory`) and is not a plain read. The
+/// command text alone is not the call: `{"command": ">> MEMORY.md",
+/// "workdir": ".claudinio"}` writes the memory with a command that never
+/// names its folder (Phase 9 review).
+pub fn bash_call_permission(
+    input: &serde_json::Value,
+    root: Option<&std::path::Path>,
+    auto_approve_git: bool,
+    writing: bool,
+) -> PermissionLevel {
+    let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if crate::agent::project_memory::shell_call_names_memory(root, input)
+        && !reads_by_shape(command.trim())
+    {
+        return PermissionLevel::Denied;
+    }
+    if writing {
+        bash_permission_writing(command, auto_approve_git)
+    } else {
+        bash_permission(command, auto_approve_git)
+    }
+}
+
 pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel {
     let trimmed = command.trim();
 

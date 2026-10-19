@@ -283,10 +283,10 @@ pub fn named_in(command: &str) -> bool {
     if lower.contains(dir) && lower.contains(file) {
         return true;
     }
-    let paths: Vec<Vec<String>> = lower
-        .split(|c: char| c.is_whitespace() || ";|&<>()`=".contains(c))
+    let paths: Vec<Vec<String>> = shell_words(&lower)
+        .into_iter()
         .map(|word| {
-            braces_as_star(word)
+            braces_as_star(&word)
                 .split('/')
                 .filter(|part| !part.is_empty() && *part != ".")
                 .map(str::to_string)
@@ -302,6 +302,115 @@ pub fn named_in(command: &str) -> bool {
         .iter()
         .any(|p| p.len() == 1 && glob_matches(&p[0], file));
     names_both || (names_dir && names_file)
+}
+
+/// Whether a whole `bash` call names the memory: its `command`, run in its
+/// `workdir`, fed its `stdin`. The Phase 9 review found the guard read only
+/// `command`, so YOLO approved `{"command": ">> MEMORY.md", "workdir":
+/// "<root>/.claudinio"}` — the structured twin of `cd .claudinio && …`,
+/// which `named_in` catches — and `{"command": "sh", "stdin": ">>
+/// .claudinio/MEMORY.md"}`. The call is read as the text `cd <workdir> &&
+/// <command>` and its stdin as a script.
+///
+/// With the workspace known, the names in the text are also resolved on
+/// disk, the way `is_memory_path` resolves an edit's path: a link an earlier
+/// call made (`ln -s .claudinio c`, then `>> c/MEMORY.md`) reaches the
+/// memory under a name the text never shows. Only names whose folders hold
+/// no glob are resolved (a glob in the file name is read as the memory when
+/// it can match it); a link reached through a globbed folder is the gap
+/// that is left, beside a path the command builds while it runs.
+pub fn shell_call_names_memory(root: Option<&Path>, input: &serde_json::Value) -> bool {
+    let field = |key: &str| input.get(key).and_then(|v| v.as_str());
+    let command = field("command").unwrap_or("");
+    let stdin = field("stdin").unwrap_or("");
+    let workdir = field("workdir").filter(|w| !w.is_empty());
+    let as_typed = match workdir {
+        Some(w) => format!("cd {w} && {command}"),
+        None => command.to_string(),
+    };
+    if named_in(&as_typed) || named_in(stdin) {
+        return true;
+    }
+    let Some(root) = root else {
+        return false;
+    };
+    // `Path::join` keeps an absolute workdir as it is.
+    let base = workdir.map_or_else(|| root.to_path_buf(), |w| root.join(w));
+    [command, stdin]
+        .iter()
+        .any(|text| names_on_disk(root, &base, text))
+}
+
+/// `named_in` with the names resolved on disk from `base`: a word naming a
+/// file that resolves to the memory, or a word naming a folder that
+/// resolves to `.claudinio` (or `base` being it) beside a bare `MEMORY.md`.
+/// Nothing touches the disk unless a word can match `MEMORY.md`, so a long
+/// script costs a scan of its text.
+fn names_on_disk(root: &Path, base: &Path, text: &str) -> bool {
+    let has_glob = |part: &str| part.contains(['*', '?', '[']);
+    let words: Vec<(bool, Vec<String>)> = shell_words(text)
+        .into_iter()
+        .map(|word| {
+            let word = braces_as_star(&word);
+            let parts = word
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            (word.starts_with('/'), parts)
+        })
+        .filter(|(_, parts)| !parts.is_empty())
+        .collect();
+    let folder = |absolute: bool, parts: &[String]| {
+        let mut dir = if absolute {
+            PathBuf::from("/")
+        } else {
+            base.to_path_buf()
+        };
+        dir.extend(parts);
+        dir
+    };
+    let mut names_file = false;
+    for (absolute, parts) in &words {
+        let Some((last, parent)) = parts.split_last() else {
+            continue;
+        };
+        if !glob_matches(&last.to_lowercase(), "memory.md") || parent.iter().any(|p| has_glob(p)) {
+            continue;
+        }
+        if is_memory_path(root, &folder(*absolute, parent).join("MEMORY.md")) {
+            return true;
+        }
+        names_file |= parent.is_empty();
+    }
+    if !names_file {
+        return false;
+    }
+    let memory_dir = root.join(".claudinio");
+    let is_memory_dir = |dir: &Path| {
+        resolved(dir).to_string_lossy().to_lowercase()
+            == resolved(&memory_dir).to_string_lossy().to_lowercase()
+    };
+    is_memory_dir(base)
+        || words.iter().any(|(absolute, parts)| {
+            !parts.iter().any(|p| has_glob(p)) && is_memory_dir(&folder(*absolute, parts))
+        })
+}
+
+/// The words of a shell command as the shell reads them before it opens a
+/// file, case kept: quotes and backslashes dropped, split on whitespace and
+/// the characters that end a word (`;|&<>()` and backquote, and `=` so
+/// `of=MEMORY.md` reads as a name).
+fn shell_words(command: &str) -> Vec<String> {
+    let folded: String = command
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    folded
+        .split(|c: char| c.is_whitespace() || ";|&<>()`=".contains(c))
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// `word` with each `{…}` brace group read as `*`: whatever the group
@@ -849,6 +958,70 @@ mod tests {
         }
     }
 
+    // The bash tool's `workdir` and `stdin` are part of the command: a
+    // `workdir` of `.claudinio` is the structured twin of `cd .claudinio &&`,
+    // and `sh` fed a script runs that script (Phase 9 review: YOLO approved
+    // both, because only `command` was read).
+    #[test]
+    fn a_bash_call_names_the_memory_through_its_workdir_or_its_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".claudinio/plans")).unwrap();
+        let abs = root.join(".claudinio").to_string_lossy().into_owned();
+        for call in [
+            serde_json::json!({"command": "echo '- planted' >> MEMORY.md", "workdir": abs}),
+            serde_json::json!({"command": "echo x >> MEMORY.m?", "workdir": ".claudinio"}),
+            serde_json::json!({"command": "echo x >> ./MEMORY.md", "workdir": ".claudinio/"}),
+            serde_json::json!({"command": "echo x >> ../MEMORY.md", "workdir": ".claudinio/plans"}),
+            serde_json::json!({"command": "sh", "stdin": "echo x >> .claudinio/MEMORY.md"}),
+            serde_json::json!({"command": "bash -s", "stdin": "cd .claudinio\necho x >> MEMORY.md"}),
+        ] {
+            assert!(shell_call_names_memory(Some(root), &call), "{call}");
+            // Without a workspace the text alone still sees them.
+            assert!(shell_call_names_memory(None, &call), "{call}");
+        }
+        for call in [
+            serde_json::json!({"command": "echo x >> MEMORY.md"}),
+            serde_json::json!({"command": "echo x >> MEMORY.md", "workdir": root.to_string_lossy()}),
+            serde_json::json!({"command": "cat MEMORY.md", "workdir": "docs"}),
+            serde_json::json!({"command": "sh", "stdin": "echo '日本語 — café 😀' > README.md"}),
+        ] {
+            assert!(!shell_call_names_memory(Some(root), &call), "{call}");
+        }
+    }
+
+    // A link made by an earlier call reaches the memory under a name the
+    // text never shows (`ln -s .claudinio c`, then `>> c/MEMORY.md`). The
+    // names are resolved on disk like the edit guard resolves a path, so the
+    // link is seen whatever it is called — a multi-byte name included.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_made_by_an_earlier_call_still_names_the_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".claudinio")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::os::unix::fs::symlink(root.join(".claudinio"), root.join("c")).unwrap();
+        std::os::unix::fs::symlink(".claudinio", root.join("é—日😀")).unwrap();
+        for call in [
+            serde_json::json!({"command": "echo x >> c/MEMORY.md"}),
+            serde_json::json!({"command": "echo x >> 'é—日😀'/MEMORY.m?"}),
+            serde_json::json!({"command": "cd c && echo x >> MEMORY.md"}),
+            serde_json::json!({"command": "echo x >> MEMORY.md", "workdir": "c"}),
+            serde_json::json!({"command": "sh", "stdin": "echo x >> c/M*"}),
+            serde_json::json!({"command": format!("echo x >> {}/c/MEMORY.md", root.display())}),
+        ] {
+            assert!(shell_call_names_memory(Some(root), &call), "{call}");
+        }
+        for call in [
+            serde_json::json!({"command": "echo x >> docs/MEMORY.md"}),
+            serde_json::json!({"command": "ls c"}),
+            serde_json::json!({"command": "echo x >> c/plans/MEMORY.md"}),
+        ] {
+            assert!(!shell_call_names_memory(Some(root), &call), "{call}");
+        }
+    }
+
     /// The texts of every `tool_result` in a request body, in order.
     fn tool_results(body: &str) -> Vec<String> {
         let body: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -876,6 +1049,9 @@ mod tests {
         use crate::agent::task_recital::loop_tests::{run, workspace};
         let ws = workspace("memory-guard", &[]);
         let memory = ws.root.join(MEMORY_FILE);
+        // The folder exists, so a call run inside it would reach the file.
+        std::fs::create_dir_all(ws.root.join(".claudinio")).unwrap();
+        let memory_dir = ws.root.join(".claudinio").to_string_lossy().into_owned();
         let (outcome, bodies) = run(
             &ws,
             PromptProfile::Standard,
@@ -884,6 +1060,14 @@ mod tests {
                 Reply::Tool {
                     name: "bash",
                     input: serde_json::json!({"command": "mkdir -p .claudinio && echo '- planted' >> .claudinio/MEMORY.md"}),
+                },
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({"command": "echo '- planted' >> MEMORY.md", "workdir": memory_dir}),
+                },
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({"command": "sh", "stdin": "echo '- planted' >> .claudinio/MEMORY.md"}),
                 },
                 Reply::Tool {
                     name: "edit_file",
@@ -898,7 +1082,7 @@ mod tests {
         assert!(outcome.is_ok(), "{:?}", outcome.err());
         assert!(!memory.exists(), "the memory was written");
         let results = tool_results(bodies.last().unwrap());
-        assert_eq!(results.len(), 2, "{results:?}");
+        assert_eq!(results.len(), 4, "{results:?}");
         for r in &results {
             assert!(
                 r.contains(crate::agent::gate_text::PROJECT_MEMORY_WRITE),
