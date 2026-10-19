@@ -484,13 +484,19 @@ fn known_options(args: &[(String, bool)], options: &Options) -> Option<usize> {
 /// unquoted blanks, with quotes and backslashes removed (`"-o"` and `\-o`
 /// are `-o`). Each carries whether the shell may still expand it into other
 /// words — an unquoted `{`, `*`, `?` or `[`, or a `$` outside single quotes —
-/// so that the word the command receives is not the one written.
+/// so that the word the command receives is not the one written. A
+/// backslash before a line break outside `'…'` continues the line: both are
+/// dropped, as the shell drops them, so `sort \⏎-o F` passes `-o`.
 fn shell_words(segment: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     let mut word: Option<(String, bool)> = None;
     let mut quote: Option<char> = None;
-    let mut chars = segment.chars();
+    let mut chars = segment.chars().peekable();
     while let Some(c) = chars.next() {
+        if c == '\\' && quote != Some('\'') && chars.peek() == Some(&'\n') {
+            chars.next();
+            continue;
+        }
         if quote.is_none() && c.is_whitespace() {
             out.extend(word.take());
             continue;
@@ -1345,6 +1351,11 @@ mod read_only_tests {
             "node --title x",
             "node --disable-warning ExperimentalWarning",
             "cat x | node --env-file .env",
+            // Recheck round 3: a backslash before a line break continues the
+            // line, and the shell drops both, so the next word is `-o`.
+            "git log | sort \\\n-o src/main.rs",
+            "git log | uniq \\\n  a.txt \\\n  src/main.rs",
+            "cat x | python \\\n-",
         ] {
             assert_eq!(
                 bash_permission(cmd, false),
