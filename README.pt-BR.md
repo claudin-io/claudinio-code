@@ -107,21 +107,18 @@ gravação veja (redirecionamento, `tee`, `sed -i`, `patch`, script inline que
 grava). Todo o resto é perguntado no Builder e recusado no Brain — uma cadeia de
 comandos da allowlist, um `|` entre aspas, um `2> /dev/null` com espaço
 inclusive: é o preço de uma regra simples o bastante para se ter certeza, e ele
-nunca é recuperado com parsing. Uma deny-list curta (`rm -rf /`, `chmod 777`,
-`mkfs`, `dd`, `format`, `chown`, `fdisk` e afins, um redirecionamento para
-qualquer dispositivo que não seja `/dev/null` e os outros destinos de fluxo)
-é recusada de vez em todos os modos. Uma palavra que roda — o início de um
-comando, ou depois de `sudo`, `env`, `time`, `xargs` e afins — conta pelo
-nome do comando, então `/bin/dd`, `time dd`, `xargs chown`, `'mkfs.ext4'` e
-`d\d` contam; qualquer outra palavra só conta como nome solto (`which dd` é
-recusado, `cat docs/dd` não), e `format` só onde começa um comando, então
-`ruff format` não. Uma mensagem entre aspas é uma palavra só
-(`git commit -m "fix(dd): x"` não nomeia `dd`), mas as aspas só contam onde
-o shell as lê como aspas: um `$`, crase ou barra invertida que escapa fora
-de aspas simples, ou um `#` ou `<<` fora de qualquer aspa, faz o texto ser
-lido cru, onde só contam as palavras que rodam, então `echo "$(rm -rf /)"` e
-um comando num heredoc não escondem nada; no Windows `'` não é aspa e um
-`^`, `%` ou `!` faz ler cru. Um interpretador,
+nunca é recuperado com parsing. A deny-list é um alarme por substring: um comando cujo texto em
+minúsculas, ou esse texto sem nenhuma aspa, crase, barra invertida ou `^` e
+com os espaços colapsados, contém uma entrada (`rm -rf /`, `rm -fr ~`,
+`sudo rm`, `dd if=`, `mkfs.`, `fdisk`, `chmod 777`, `chown `, `mv /`, `cp /`,
+uma fork bomb e afins), redireciona para um dispositivo que não seja
+`/dev/null` e os outros destinos de fluxo, ou roda o `format X:` do cmd é
+recusado de vez em todos os modos, YOLO e o `allow` de um hook inclusive —
+então `/bin/rm -rf /`, `time dd if=…`, `r''m -rf /` e um comando num heredoc
+são pegos sem parsing. Os falsos positivos aceitos são texto comum que
+contém uma entrada, como `grep chown src`, `cp /tmp/x .` ou
+`git commit -m "fix: chown "`, recusados exatamente como a lista original
+os recusava. Um interpretador,
 runner de teste ou build da allowlist roda o que os seus argumentos e o projeto
 escolherem — inclusive um programa a rodar ou uma pasta a limpar
 (`pytest --basetemp=…`, `go test -exec …`, `cargo --config …`) —, então a

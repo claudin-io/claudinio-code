@@ -105,20 +105,17 @@ working folder first — and nothing the write check sees
 Everything else is asked about in Builder and refused in Brain — a chain of
 allowlisted commands, a quoted `|`, a `2> /dev/null` with a space included:
 that is the price of a rule simple enough to be sure of, and it is never won
-back with parsing. A short deny-list (`rm -rf /`, `chmod 777`, `mkfs`, `dd`,
-`format`, `chown`, `fdisk` and its kin, a redirect into any device but
-`/dev/null` and the other stream sinks) is refused outright in every mode. A
-word that runs — the start of a command, or after `sudo`, `env`, `time`,
-`xargs` and the like — counts by its command name, so `/bin/dd`, `time dd`,
-`xargs chown`, `'mkfs.ext4'` and `d\d` count; any other word counts only as
-a bare name (`which dd` is refused, `cat docs/dd` is not), and `format` only
-where it starts a command, so `ruff format` does not. A quoted message is
-one word (`git commit -m "fix(dd): x"` names no `dd`), but quotes count only
-where the shell reads them as quotes: a `$`, backquote or escaping backslash
-outside single quotes, or a `#` or `<<` outside any quote, makes it read
-the text raw, where only words that run count, so `echo "$(rm -rf /)"` and
-a command in a heredoc hide nothing; on Windows `'` is no quote at all and
-a `^`, `%` or `!` reads raw. An allowlisted interpreter, test runner or
+back with parsing. The deny-list is a substring tripwire: a command whose lowercased text, or
+that text with every quote, backquote, backslash and `^` removed and blanks
+collapsed, contains an entry (`rm -rf /`, `rm -fr ~`, `sudo rm`, `dd if=`,
+`mkfs.`, `fdisk`, `chmod 777`, `chown `, `mv /`, `cp /`, a fork bomb and
+their kin), redirects into a device other than `/dev/null` and the other
+stream sinks, or runs cmd's `format X:` is refused outright in every mode,
+YOLO and a hook's `allow` included — so `/bin/rm -rf /`, `time dd if=…`,
+`r''m -rf /` and a command in a heredoc are caught with no parsing. Its
+accepted false positives are ordinary text that contains an entry, such as
+`grep chown src`, `cp /tmp/x .` or `git commit -m "fix: chown "`, refused
+exactly as the original list refused them. An allowlisted interpreter, test runner or
 build runs whatever its arguments and the project choose — a program to run or
 a folder to clear included (`pytest --basetemp=…`, `go test -exec …`, `cargo
 --config …`) — so Builder's allowlist is a convenience, not a sandbox; an

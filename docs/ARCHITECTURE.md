@@ -265,27 +265,16 @@ one session with `auto_approve_git`) also runs `git add`, `git commit` and
 a parenthesis (`feat(ui): x`), `&`, `;`, `$`, `<`, `>` or a glob character
 asks — and a push with a word starting `--r` or `--e` asks too
 (`--receive-pack`, `--exec` and their abbreviations name a program git runs). The deny-list
-(`on_the_deny_list`: a word that runs — the start of a part, after `X=1`, or
-after a wrapper in `RUNS_WHAT_FOLLOWS` such as `sudo`, `env`, `time`,
-`xargs`, `find -exec`, `then` — compared by its command name: last path
-segment, quotes dropped, under sh every backslash dropped, under cmd a
-leading `@`, `mkfs.*` folded — so `/bin/dd`, `time dd`, `sudo -u root dd`,
-`xargs chown`, `'mkfs.ext4'`, `d\d` and `@format` are refused; any other word
-counts only as a bare name, so `which dd` is refused and `cat docs/dd` or
-`git checkout -b fix/chown` is not; `format` counts only where it starts a
-part, so `ruff format src` is not; a
-quoted span is part of one word, so `git log --format %H`, `cp /tmp/x .` or
-`git commit -m "fix(dd): x (#12)"` is not refused; `inert_text` reads the
-text raw wherever sh could read a quote differently — a `$`, backquote or
-escaping backslash outside single quotes, a `#` or `<<` outside any quote —
-and there only words that run count, so `echo "$(rm -rf /)"`,
-`echo don\'t; rm -rf /`, a quote in a `#` comment or a heredoc body hide
-nothing while a message read raw names no command; under `cmd /c` `'` is no
-quote and `^`, `%`, `!` or a line break read raw) and the memory guard run
-first and refuse outright; a redirection into `/dev/` that is not a stream
-sink (`null`, `stdout`, `stderr`, `tty`, `pts/`, `fd/`) or a file under
-`shm/` (`> /dev/sda`, `/dev//sda`, `/dev/root`, `>& /dev/mem`, quoted or not)
-is Denied — a tripwire for the obvious spelling, not a boundary. The rule replaced a chain
+(`on_the_deny_list`) and the memory guard run first and refuse outright. The
+deny-list is a substring tripwire, refused in every mode: a command is Denied
+when its lowercased text, or its normalized text (every `'`, `"`, backquote,
+backslash and `^` removed, blanks collapsed), contains a `BASH_BLACKLIST`
+entry, redirects into `/dev/` other than exactly `null`, `stdout`, `stderr`,
+`tty` or `fd/N`, or runs cmd's `format X:` — so a path (`/bin/rm -rf /`), a
+wrapper (`time dd if=…`), a quote (`r''m`), a backslash (`d\d`) or a heredoc
+hides nothing, with no parsing. Its accepted false positives, as on the
+original list, are ordinary text that contains an entry (`grep chown src`,
+`cp /tmp/x .`, `git commit -m "fix: chown "`). The rule replaced a chain
 splitter, per-option `sort`/`uniq` readers, a stdin detector and runner
 argument tables after three review rounds kept finding bypasses in them
 (lean-harness plan, "Shell policy simplified"). Builder's allowlisted
