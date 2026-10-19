@@ -114,9 +114,11 @@ pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
 //    print, and have no option that writes a file or runs a program;
 // 5. the write detector (`bash_writes_files`) sees no write.
 //
-// Before the rule, the deny-list (`on_the_deny_list`, by whole words; a
-// write to a disk device) and the memory guard (`project_memory::mentions_memory` on a command that
-// is not a plain read) refuse outright, in every mode and under YOLO.
+// Before the rule, the deny-list (`on_the_deny_list`: any word named like
+// a deny-listed command, quotes read as the shell reads them or not at all;
+// a write to a disk device) and the memory guard
+// (`project_memory::mentions_memory` on a command that is not a plain read)
+// refuse outright, in every mode and under YOLO.
 //
 // **Why that is enough.** With no backslash, `$` or backquote left, nothing
 // inside quotes is special, so a part that closes its own quotes ends outside
@@ -256,66 +258,126 @@ const MEMORY_READS: &[&str] = &[
     "git blame",
 ];
 
-/// Commands refused outright wherever they start a part of the command
-/// (split at `;`, `&`, `|`, a parenthesis or a line break outside inert
-/// quotes; a leading `sudo` skipped).
+/// Commands refused outright wherever they are a word of the command,
+/// compared by name (`command_name`) — `format` only where it starts a part
+/// (after a `sudo`), since `ruff format`, `pnpm format` and `dotnet format`
+/// are everyday subcommands and a wrapped `format` only asks.
 const BASH_BLACKLIST: &[&str] = &["chown", "dd", "fdisk", "format", "mkfs"];
+
+/// Where the deny-list splits a command into parts.
+const DENY_SEPARATORS: &str = ";&|()\n`";
 
 /// The deny-list (`BASH_BLACKLIST`), by whole words: a tripwire for the
 /// obvious spelling of a destructive command (`rm -rf /`, `chmod 777`, a
 /// fork bomb), not a boundary — `rm -fr /` only asks. Words, not
 /// substrings, so `git log --format %H`, `cp /tmp/x .` and `rm -rf
-/// /tmp/build` reach the rule instead of a refusal nothing can lift. Inert
-/// quoted text is blanked first: `git commit -m "fix(dd): x"` holds no
-/// command `dd`, and a quoted script (`sh -c 'dd …'`) asks, as a tripwire
-/// may. Quotes are inert only when the text has no `$`, backquote,
-/// backslash or `#` — `"$(rm -rf /)"` runs, `\'` and `$'…'` open no plain
-/// quote and a `'` in a comment opens nothing — so any of those is read raw,
-/// split at a backquote too.
-fn on_the_deny_list(command: &str) -> bool {
-    if command.contains(['$', '`', '\\', '#']) {
-        return command.contains(":(){") || deny_listed_part(command, &['`']);
-    }
-    let mut open = None;
-    let unquoted: String = command
-        .chars()
-        .map(|c| match open {
-            None if c == '\'' || c == '"' => {
-                open = Some(c);
-                ' '
-            }
-            None => c,
-            Some(q) => {
-                if c == q {
-                    open = None;
-                }
-                ' '
-            }
-        })
-        .collect();
-    command.contains(":(){") || deny_listed_part(&unquoted, &[])
+/// /tmp/build` reach the rule instead of a refusal nothing can lift. Each
+/// word is read as the shell reads it (`inert_text`): `git commit -m
+/// "fix(dd): x"` holds one word, not a command `dd`, while `'mkfs.ext4'`
+/// is `mkfs.ext4`; a quoted script (`sh -c 'dd …'`) asks, as a tripwire
+/// may. When the scan could misread a quote the text is read raw, split at
+/// every separator, quoted or not.
+fn on_the_deny_list(command: &str, windows: bool) -> bool {
+    let text = inert_text(command, windows).unwrap_or_else(|| command.to_string());
+    command.contains(":(){")
+        || text
+            .split(|c| DENY_SEPARATORS.contains(c))
+            .any(deny_listed_part)
 }
 
-/// Whether a part of `text` split at `;`, `&`, `|`, a parenthesis, a line
-/// break or one of `more` starts with a deny-listed command.
-fn deny_listed_part(text: &str, more: &[char]) -> bool {
-    text.split(|c| ";&|()\n".contains(c) || more.contains(&c))
-        .any(|part| {
-            let words: Vec<&str> = part.split_whitespace().collect();
-            let command = words.iter().find(|w| **w != "sudo").copied().unwrap_or("");
-            BASH_BLACKLIST.contains(&command.split('.').next().unwrap_or(""))
-                || words.windows(2).any(|w| {
-                    matches!(
-                        w,
-                        ["sudo", "rm"] | ["chmod", "777"] | ["mv" | "cp", "/" | "/*"]
-                    )
-                })
-                || words.windows(3).any(|w| {
-                    matches!(
-                        w,
-                        ["rm", "-rf", "/" | "/*" | "~" | "~/"] | ["chmod", "-R", "777"]
-                    )
-                })
+/// `command` with every quoted span turned into part of one word, as the
+/// shell reads it: the quote marks dropped and every blank, separator or
+/// quote inside turned to `_`. `None` wherever this left-to-right scan could
+/// read a quote differently from the shell, so the caller reads the text
+/// raw: under sh (the scan is exact up to the first of these), a `$`,
+/// backquote or backslash outside single quotes — a `$(…)` starts a new
+/// quoting context, `\'` and `$'…'` open no plain quote, and inside double
+/// quotes a backslash before `$`, backquote, `"`, `\` or a line break
+/// escapes it — or, outside any quote, a `#` (a quote in a comment opens
+/// nothing) or `<<` (a quote in a heredoc body opens nothing). Under cmd
+/// (`windows`), which has no single quotes and expands `%`, `!` and the
+/// escape `^` before it reads `"`: any of those, or a line break.
+fn inert_text(command: &str, windows: bool) -> Option<String> {
+    if windows && command.contains(['^', '%', '!', '\n', '\r']) {
+        return None;
+    }
+    let chars: Vec<char> = command.chars().collect();
+    let mut text = String::with_capacity(command.len());
+    let mut open: Option<char> = None;
+    for (i, &c) in chars.iter().enumerate() {
+        let next = chars.get(i + 1).copied();
+        match open {
+            Some(q) if c == q => open = None,
+            Some(q) => {
+                let escapes = c == '\\' && matches!(next, Some('$' | '`' | '"' | '\\' | '\n'));
+                if q == '"' && !windows && (c == '$' || c == '`' || escapes) {
+                    return None;
+                }
+                let blank = c.is_whitespace() || DENY_SEPARATORS.contains(c) || "'\"".contains(c);
+                text.push(if blank { '_' } else { c });
+            }
+            None if windows => match c {
+                '"' => open = Some(c),
+                _ => text.push(c),
+            },
+            None => match c {
+                '$' | '`' | '\\' | '#' => return None,
+                '<' if next == Some('<') => return None,
+                '\'' | '"' => open = Some(c),
+                _ => text.push(c),
+            },
+        }
+    }
+    Some(text)
+}
+
+/// The name a word runs as a command: quotes and cmd's `^` dropped, the
+/// last path segment (`/bin/dd`, `C:\…\format.com`), lowercase, without
+/// `.exe` or `.com`, and `mkfs.ext4` read as `mkfs`.
+fn command_name(word: &str) -> String {
+    let word = word.replace(['\'', '"', '^'], "").to_lowercase();
+    let base = word.rsplit(['/', '\\']).next().unwrap_or("");
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".com"))
+        .unwrap_or(base);
+    if base.starts_with("mkfs.") {
+        "mkfs".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Whether one part of the command names a deny-listed command anywhere in
+/// its words (so a path, `time`, `env`, `X=1`, `sudo -u root`, `xargs`, a
+/// brace group or `then` hides nothing), or spells `rm -rf /`, `sudo rm`,
+/// `chmod 777` or a move or copy of `/`.
+fn deny_listed_part(part: &str) -> bool {
+    let words: Vec<String> = part
+        .split_whitespace()
+        .map(|w| w.replace(['\'', '"', '^'], "").to_lowercase())
+        .collect();
+    let names: Vec<String> = words.iter().map(|w| command_name(w)).collect();
+    let command = names.iter().position(|n| n != "sudo");
+    let pair = |i: usize, name: &str, next: &[&str]| {
+        names[i] == name && words.get(i + 1).is_some_and(|w| next.contains(&w.as_str()))
+    };
+    names
+        .iter()
+        .enumerate()
+        .any(|(i, n)| BASH_BLACKLIST.contains(&n.as_str()) && (n != "format" || Some(i) == command))
+        || (0..names.len()).any(|i| {
+            names
+                .get(i + 1)
+                .is_some_and(|n| names[i] == "sudo" && n == "rm")
+                || pair(i, "chmod", &["777"])
+                || pair(i, "mv", &["/", "/*"])
+                || pair(i, "cp", &["/", "/*"])
+                || (pair(i, "rm", &["-rf"])
+                    && words
+                        .get(i + 2)
+                        .is_some_and(|w| ["/", "/*", "~", "~/", "~/*"].contains(&w.as_str())))
+                || (pair(i, "chmod", &["-r"]) && words.get(i + 2).is_some_and(|w| w == "777"))
         })
 }
 
@@ -436,7 +498,9 @@ fn decide(
     auto_approve_git: bool,
 ) -> PermissionLevel {
     let trimmed = command.trim();
-    if on_the_deny_list(trimmed) || redirects_into_a_disk(&trimmed.replace(['"', '\''], "")) {
+    if on_the_deny_list(trimmed, cfg!(windows))
+        || redirects_into_a_disk(&trimmed.replace(['"', '\''], ""))
+    {
         return PermissionLevel::Denied;
     }
     // The project memory is written by `finalize_plan` alone (Phase 9).
@@ -1663,6 +1727,15 @@ mod shell_rule_tests {
             "git commit -m \"style: tidy; format imports\"",
             "git commit -m \"never chmod 777 again\"",
             "git commit -m 'fix(mkfs): x'",
+            // A `$`, backquote or `#` that sh reads as text — inside single
+            // quotes, or a `#` or `\b` inside double quotes — does not make
+            // the rest of the command raw (review of f46ad72: a squash-merge
+            // suffix and a regex were refused with no override).
+            "git commit -m \"fix(format): keep trailing newline (#12)\"",
+            "git commit -m 'docs: explain `format` option'",
+            "git commit -m 'fix(dd): cost in $'",
+            "grep -E '(format|fmt)$' src/x.rs",
+            "grep -E \"\\b(chown|chmod)\\b\" src",
         ] {
             assert_ne!(builder(c, None), PermissionLevel::Denied, "{c:?}");
             assert_ne!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
@@ -1711,6 +1784,34 @@ mod shell_rule_tests {
             "echo don\\'t; rm -rf /",
             "echo $'it\\'s'; rm -rf /",
             "ls # don't\nrm -rf /",
+            // Inside a heredoc body a quote is a plain character: a `<<` is
+            // read raw, so a quote there hides nothing (review of f46ad72).
+            "cat <<EOF\ndon't\nEOF\nrm -rf /\ncat <<EOF\n'\nEOF",
+            "cat <<EOF\nsay \"hi\nEOF\ndd if=/dev/zero of=/dev/sda\ncat <<EOF\n\"\nEOF",
+            "cat <<<\"don't\"; rm -rf /; cat <<<\"'\"",
+            // A command after `$(` inside double quotes starts a new quoting
+            // context, so a `$` there is read raw.
+            "echo \"$(echo \"'\"; rm -rf /; echo \"'\")\"",
+            // Every word is compared by its name, quotes dropped: a path, a
+            // wrapper, an assignment, a brace group, a compound command or a
+            // quoted name is the same command (review of the simplified
+            // rule; the substring list refused each).
+            "/bin/rm -rf /",
+            "/bin/dd if=/dev/zero of=/dev/sda",
+            "/sbin/mkfs.ext4 /dev/sda1",
+            "/usr/sbin/fdisk /dev/sda",
+            "time dd if=/dev/zero of=/dev/sda",
+            "env dd if=/dev/zero of=/dev/sda",
+            "X=1 dd if=/dev/zero of=/dev/sda",
+            "sudo -u root dd if=/dev/zero of=/dev/sda",
+            "{ dd if=/dev/zero of=/dev/sda; }",
+            "if true; then mkfs.ext4 /dev/sda1; fi",
+            "find / | xargs chown nobody",
+            "'mkfs.ext4' /dev/sda1",
+            "\"fdisk\" /dev/sda",
+            "\\dd if=/dev/zero of=/dev/sda",
+            "rm -rf ~/*",
+            "sudo /bin/rm -rf /tmp",
         ] {
             assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
             assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
@@ -1736,5 +1837,36 @@ mod shell_rule_tests {
             assert!(has_odd_char(c, false), "{c:?}");
         }
         assert!(!has_odd_char("ls\t-la  src", false));
+    }
+
+    /// cmd has no single quotes, and `^"` is a literal quote, not one that
+    /// opens text: where cmd runs the command (`windows`) a `'` hides nothing
+    /// and a `^`, `%` or `!` makes the deny-list read the command raw. A
+    /// double-quoted span is text to cmd too, so a commit message stays a
+    /// message there (review of f46ad72).
+    #[test]
+    fn the_deny_list_reads_quotes_as_cmd_does_where_cmd_runs_the_command() {
+        for c in [
+            "echo 'x & format d: /q /y & '",
+            "echo ^\" & format d: /q /y & echo \"",
+            "echo %X% \" & format d: /q /y & echo \"",
+            "f^ormat d: /q /y",
+            "C:\\Windows\\System32\\format.com d: /q /y",
+        ] {
+            assert!(on_the_deny_list(c, true), "{c:?}");
+        }
+        for c in [
+            "echo 'x & format d: /q /y & '",
+            "echo ^\" & format d: /q /y & echo \"",
+        ] {
+            assert!(!on_the_deny_list(c, false), "{c:?}");
+        }
+        for c in [
+            "git commit -m \"fix(dd): handle sizes\"",
+            "git commit -m \"lint & format code\"",
+            "dotnet format",
+        ] {
+            assert!(!on_the_deny_list(c, true), "{c:?}");
+        }
     }
 }
