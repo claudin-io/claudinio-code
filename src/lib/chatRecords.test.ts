@@ -373,3 +373,172 @@ describe("the live run — when an answer closes its message", () => {
     expect(closingText("Same.", "Same.", "Same.")).toBe("Same.");
   });
 });
+
+// Lean-harness Phase 4: a run's user turn ends with the task list as a
+// `<tasks>` block, beside any `<hook-context>`, and a compaction restates it
+// after the round's tool results. The model reads those blocks; the person
+// must never see them as words they typed or the agent wrote. The bubble is
+// the raw `user` record, exactly as for hook context.
+describe("recordsToMessages — the harness's own blocks in a user turn", () => {
+  const TASKS = "<tasks>\nt1 · doing · wire the UI\n</tasks>";
+  const everyText = (messages: ChatMessage[]) =>
+    messages.flatMap((m) => [
+      m.text,
+      ...(m.steps ?? []).map((s) => (s.type === "text" ? s.text ?? "" : "")),
+      ...(m.steps ?? []).map((s) => (s.type === "linked" ? s.linked?.firstMessage ?? "" : "")),
+    ]);
+
+  it("shows the user's words, never the task list or hook context sent with them", () => {
+    const m = recordsToMessages([
+      { kind: "user", text: "go on", ts: 1 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: "go on" },
+          { type: "text", text: "<hook-context>\nproject memory\n</hook-context>" },
+          { type: "text", text: TASKS },
+        ],
+        ts: 1,
+      },
+      ...toolRound("r1", "read_file", "contents"),
+      answer("done"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: go on", "assistant: done"]);
+    expect(everyText(m).some((t) => t.includes("<tasks>"))).toBe(false);
+  });
+
+  it("keeps a successor's kickoff free of the list its first turn carries", () => {
+    const kickoff = "[system] This is a fresh session that continues previous work…";
+    const m = recordsToMessages([
+      { kind: "linked_from", prev_session_id: "a", reason: "context_handoff", ts: 1 },
+      { kind: "user", text: kickoff, ts: 2 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: kickoff },
+          { type: "text", text: TASKS },
+        ],
+        ts: 2,
+      },
+      answer("continuing"),
+      done(),
+    ]);
+    expect(everyText(m)).toContain(kickoff);
+    expect(everyText(m).some((t) => t.includes("<tasks>"))).toBe(false);
+  });
+
+  // The finish-line nudge (`nudges::still_doing`) is persisted as a user
+  // turn of its own after the model's answer. It is the harness talking to
+  // the model: the user must not see it as something they said, and the
+  // thread is still one question and its final answer.
+  it("does not show the still-doing nudge as the user's words", () => {
+    const nudge =
+      "[system] You ended your turn with 't1' (wire the UI) still marked 'doing'. " +
+      "If that work is finished and verified, mark it 'done' with `tasks_update`.";
+    const m = recordsToMessages([
+      ...user("do it"),
+      ...toolRound("r1", "read_file", "contents"),
+      { kind: "turn", role: "assistant", content: [{ type: "text", text: "wired" }], ts: 3 },
+      { kind: "turn", role: "user", content: [{ type: "text", text: nudge }], ts: 4 },
+      ...toolRound("r2", "tasks_update", "'t1': doing -> done"),
+      answer("wired and verified"),
+      done(),
+    ]);
+    expect(m.filter((x) => x.role === "user").map((x) => x.text)).toEqual(["do it"]);
+    expect(everyText(m).some((t) => t.includes("[system]"))).toBe(false);
+  });
+});
+
+// Lean-harness Phase 9: the first run of a new session carries the
+// project's instructions file and its memory in the user turn. The model
+// reads them; the person must never see them as words they typed.
+describe("recordsToMessages — the project memory blocks of a first run", () => {
+  const INSTRUCTIONS = '<project-instructions path="AGENTS.md">\nRun cargo with -j 2.\n</project-instructions>';
+  const MEMORY =
+    "<project-memory>\nLessons earlier sessions recorded.\n- 2026-10-19 — the index is rebuilt (plan: p.md)\n</project-memory>";
+  const everyText = (messages: ChatMessage[]) =>
+    messages.flatMap((m) => [m.text, ...(m.steps ?? []).map((s) => (s.type === "text" ? s.text ?? "" : ""))]);
+
+  it("shows the user's words, never the instructions or the memory sent with them", () => {
+    const m = recordsToMessages([
+      { kind: "user", text: "fix the build", ts: 1 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: "fix the build" },
+          { type: "text", text: INSTRUCTIONS },
+          { type: "text", text: MEMORY },
+        ],
+        ts: 1,
+      },
+      ...toolRound("r1", "read_file", "contents"),
+      answer("fixed"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: fix the build", "assistant: fixed"]);
+    expect(everyText(m).some((t) => t.includes("<project-memory>"))).toBe(false);
+    expect(everyText(m).some((t) => t.includes("<project-instructions"))).toBe(false);
+  });
+});
+
+// Lean-harness Phase 4b: a run of a session with a living document ends its
+// user turn with a `<document>` outline block, and a person's edit found
+// during a run joins the round's tool results as a `<doc-changed>` note.
+// Both are the harness talking to the model, never words the person typed
+// or the agent wrote.
+describe("recordsToMessages — the living document's blocks", () => {
+  const OUTLINE =
+    '<document path=".claudinio/docs/pudim.md">\n# Pudim\ns1 · todo · - · origem\n</document>';
+  const NOTE =
+    "<doc-changed>\nThe user changed the document: s1 (origem) edited. Their edits win.\n</doc-changed>";
+  const everyText = (messages: ChatMessage[]) =>
+    messages.flatMap((m) => [m.text, ...(m.steps ?? []).map((s) => (s.type === "text" ? s.text ?? "" : ""))]);
+
+  it("shows the user's words, never the outline sent with them", () => {
+    const m = recordsToMessages([
+      { kind: "user", text: "write it", ts: 1 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: "write it" },
+          { type: "text", text: OUTLINE },
+        ],
+        ts: 1,
+      },
+      answer("done"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: write it", "assistant: done"]);
+    expect(everyText(m).some((t) => t.includes("<document"))).toBe(false);
+  });
+
+  it("never shows the note that rides with a round's tool results", () => {
+    const m = recordsToMessages([
+      ...user("write it"),
+      {
+        kind: "turn",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "w1", name: "doc_write", input: { id: "s1", body: "x" } }],
+        ts: 2,
+      },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "w1", content: "Wrote s1 (done)." },
+          { type: "text", text: NOTE },
+        ],
+        ts: 2,
+      },
+      answer("merged your edit"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: write it", "assistant: merged your edit"]);
+    expect(everyText(m).some((t) => t.includes("<doc-changed>"))).toBe(false);
+  });
+});

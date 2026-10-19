@@ -177,9 +177,7 @@ pub const COMPACT_TOOLS: [&str; 10] = [
 /// `grep` calls itself a last resort behind the indexed searches — which here
 /// do not exist, while the prompt names `grep` as the way to find things.
 const COMPACT_REWRITES: [(&str, &str); 1] = [(
-    " LAST RESORT for search \u{2014} prefer the indexed tools first: semantic_search for \
-     behavior/concepts, code_search/symbol_lookup for known names. Reach for grep only when \
-     those come up empty or you need a literal regex over raw file text.",
+    " For a behavior or concept, semantic_search usually finds it faster.",
     "",
 )];
 
@@ -208,14 +206,15 @@ you read, search, edit files and run commands yourself.
 # TASKS
 - For anything beyond a one-step change, call `tasks_set` once to list the steps \
 (id, title, description, journal: [], status: 'todo'). One logical step = one task.
-- Move each task with `tasks_update`: 'doing' before you start it, 'done' once its work is verified. \
-Never resend the whole list just to change a status.
+- A `<tasks>` block in your user turn is the current list.
+- Move tasks with `tasks_update`: 'doing' in the same round as your first tool call for one, 'done' once \
+its work is verified; several in one call. Never resend the whole list just to change a status.
 - The user follows progress in the Task Panel. Never write the plan out as text.
 
 # WORK
 - Find things with `grep` and `list_dir`. Read with `read_file`, and on a large file pass \
 start_line/end_line for the part you need: your context is small, so never read more than you will use.
-- You MUST read a file before you change it. Change files with `edit_file`.
+- You MUST read a file before you change it. Create and change files with `edit_file`.
 - Run builds and tests with `bash`, and fix what they report before you call a task done.
 - When the work is finished, call `run_quality`: it runs the project's own checks and records the result.
 - Finish the work, or block with `ask_user`. Never end with a plain-text question or a TODO.
@@ -258,6 +257,18 @@ pub fn effective_profile(
 
 #[cfg(test)]
 mod tests {
+    /// A small model with no word on creating files reached for a shell
+    /// heredoc (an approval, no diff) or gave up — every failed run of the
+    /// lean-harness clean baseline eval was a new file (Phase 3b).
+    #[test]
+    fn the_compact_prompt_says_edit_file_creates_files_too() {
+        assert!(
+            super::COMPACT_PROMPT.contains("Create and change files with `edit_file`"),
+            "{}",
+            super::COMPACT_PROMPT
+        );
+    }
+
     use super::*;
     use crate::agent::provider::ProviderEntry;
 

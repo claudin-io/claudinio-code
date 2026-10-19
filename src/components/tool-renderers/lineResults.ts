@@ -18,15 +18,24 @@ export interface ListRow {
 /** What the live result event appends when it cuts an output short. */
 const TRUNCATED = /\.\.\.\(truncated, \d+ chars total\)$/;
 
+/** The line the history cap puts between the head and the tail it kept
+ * (`src-tauri/src/agent/result_cap.rs`); a reloaded session shows the
+ * history copy. */
+const CAP_MARKER = /^\[… \d+ of \d+ chars omitted.* …\]$/;
+
 /** How the history copy of a repeated `read_file` starts. */
 export const UNCHANGED_MARK = "[unchanged: ";
 
-/** The output's lines, without a last line the event cut in the middle. Only
- * trailing newlines are dropped: a trailing space can be part of the last row
- * (a match on an empty line is written `12: `). */
+/** What `wholeLines` puts where the cap marker was: a parser whose rows depend
+ * on an earlier line (grep's file header) must know a stretch is missing. */
+const CUT = "\u0000cut";
+
+/** The output's lines, without a last line the event cut in the middle, the
+ * cap marker as `CUT`. Only trailing newlines are dropped: a trailing space
+ * can be part of the last row (a match on an empty line is written `12: `). */
 function wholeLines(output: string): string[] {
   const text = output.replace(/\n+$/, "");
-  if (!TRUNCATED.test(text)) return text.split("\n");
+  if (!TRUNCATED.test(text)) return text.split("\n").map((l) => (CAP_MARKER.test(l) ? CUT : l));
   const lines = text.replace(TRUNCATED, "").split("\n");
   lines.pop();
   return lines;
@@ -48,6 +57,12 @@ function grep(lines: string[]): ListRow[] | null {
   let file: string | null = null;
   let expectFile = false;
   for (const line of lines.slice(1)) {
+    // The tail starts inside a file whose header was cut out with the middle.
+    if (line === CUT) {
+      file = null;
+      expectFile = false;
+      continue;
+    }
     if (line === "") {
       expectFile = true;
       continue;
@@ -130,6 +145,8 @@ export function parseLineList(toolName: string, output: string): ListRow[] | nul
   // A failed call is shown as what it says. On reload there is no error flag,
   // only the text — and "Error: not a directory: /ws/x/" ends like a listing.
   if (!parse || output.startsWith("Error")) return null;
-  const lines = wholeLines(output);
+  const all = wholeLines(output);
+  // Only grep reads anything from where the cut was.
+  const lines = parse === grep ? all : all.filter((l) => l !== CUT);
   return lines.length > 0 ? parse(lines) : null;
 }

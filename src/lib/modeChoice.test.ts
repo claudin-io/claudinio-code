@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { autoAvailable, modeToSend, routerOn } from "./modeChoice";
-import type { JevStatus } from "./ipc";
+import { autoAvailable, linkedModeOrigin, modeToSend, routerOn } from "./modeChoice";
+import type { JevStatus, SessionLinkedData } from "./ipc";
 
 const jev = (over: Partial<JevStatus>): JevStatus => ({
   enabled: true,
@@ -51,5 +51,31 @@ describe("modeToSend", () => {
     expect(modeToSend("brain", true, jev({ enabled: false }))).toBe("brain");
     expect(modeToSend("builder", true, undefined)).toBe("builder");
     expect(routerOn(jev({}))).toBe(true);
+  });
+});
+
+describe("linkedModeOrigin", () => {
+  const linked = (over: Partial<SessionLinkedData>): SessionLinkedData => ({
+    prevSessionId: "a",
+    sessionId: "b",
+    reason: "context_handoff",
+    mode: "brain",
+    firstMessage: "go",
+    ...over,
+  });
+
+  // The backend decides whose mode a successor is in: a new-document or a
+  // context handoff keeps the predecessor's origin. The UI shows what the
+  // backend built, so a person's Brain stays theirs to leave.
+  it("follows the origin the backend sends", () => {
+    expect(linkedModeOrigin(linked({ reason: "new_document", origin: "human" }))).toBe("human");
+    expect(linkedModeOrigin(linked({ reason: "context_handoff", origin: "human" }))).toBe("human");
+    expect(linkedModeOrigin(linked({ reason: "plan_execution", origin: "agent" }))).toBe("agent");
+  });
+
+  // An event from a backend that did not send it falls back to the old rule.
+  it("falls back to the reason when no origin is sent", () => {
+    expect(linkedModeOrigin(linked({ reason: "manual_builder" }))).toBe("human");
+    expect(linkedModeOrigin(linked({ reason: "plan_execution" }))).toBe("agent");
   });
 });

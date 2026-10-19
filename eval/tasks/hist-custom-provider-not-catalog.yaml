@@ -1,0 +1,67 @@
+id: hist-custom-provider-not-catalog
+title: A custom provider sharing a catalog id is not shown as that catalog entry (history, bad3aae)
+tags:
+- history
+- bugfix
+- frontend
+- typescript
+prompt: |
+  Providers can now be custom (`custom: true` on the provider entry, with its own
+  label and base URL). When a custom provider happens to use the same id as a
+  catalog provider — say a local proxy saved as "deepseek" — the provider catalog
+  modal (src/components/ProviderCatalogModal.tsx) shows the DeepSeek catalog entry
+  as "Connected", offers to "Disconnect" it, and pre-fills its base URL field with
+  the custom provider's URL.
+
+  A custom provider is never the catalog entry: in the catalog, an entry counts as
+  connected only when its provider is connected and not custom, and selecting it
+  starts the URL field from the catalog's own API URL. Add `custom?: boolean` to
+  the provider type if it is missing, and add a test to
+  src/components/ProviderCatalogModal.test.tsx.
+setup:
+  git:
+    repo: ../..
+    commit: 9f99805cc5135e37ca7e992f30bd6c2673162e31
+  symlinks:
+    node_modules: ../../node_modules
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+check: ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vitest run --config vitest.eval.config.ts
+oracle:
+  command: ./node_modules/.bin/vitest run --config vitest.eval.config.ts src/components/ProviderCatalogModal.test.tsx
+  timeout_s: 300
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+  reference_files:
+  - src/components/ProviderCatalogModal.test.tsx
+reference:
+  git_commit: bad3aae8389bed1f450d899587080a8ee0e2fb4a
+max_rounds: 60

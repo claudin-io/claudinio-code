@@ -1,12 +1,15 @@
 pub(crate) mod bash;
 mod browser;
+pub mod doc;
 mod edit_file;
 pub mod finalize_plan;
 mod grep;
 mod lines;
 mod list_dir;
 pub mod quality;
-mod read_file;
+pub(crate) mod read_file;
+pub(crate) mod skills_tool;
+mod syntax_check;
 pub mod tasks;
 mod web_search;
 pub(crate) mod write_plan;
@@ -58,6 +61,15 @@ pub struct ToolContext {
     /// Default false for normal chat sessions; set true for dedicated
     /// commit-and-push workflows.
     pub auto_approve_git: bool,
+    /// `Some` puts every `bash` command the denylist lets through to the
+    /// approval channel — even one the allowlist would run unasked — and
+    /// answers a refusal with the gate's own text. `None` in the app, where the
+    /// allowlist is a convenience for a person watching. The eval runner sets
+    /// it: its "person" is a policy that approves only read-only commands,
+    /// because it executes model-chosen commands on the host with nobody
+    /// watching (see `crate::eval`). Stricter only — it can add a prompt, never
+    /// remove one, and `Denied` stays denied.
+    pub shell_gate: Option<ShellGate>,
     /// Handle to connected MCP servers for this workspace, if any. Populated
     /// before the agent loop starts so `mcp__` tool calls can dispatch
     /// synchronously through `tools::execute`.
@@ -82,6 +94,20 @@ pub struct ToolContext {
     /// one-off workflows — so no firing site has to branch on a missing
     /// workspace itself. See `crate::agent::hooks`.
     pub hooks: Option<Arc<crate::agent::hooks::HookCtx>>,
+    /// What this context may do to the session's living document
+    /// (`agent::doc_session`): the main session writes any section; a
+    /// subagent spawned with a `section` writes only that one; any other
+    /// subagent none. `Main` by default — every context the app builds is a
+    /// session's own.
+    pub doc_access: crate::agent::doc_session::DocAccess,
+}
+
+/// See `ToolContext::shell_gate`.
+#[derive(Debug, Clone)]
+pub struct ShellGate {
+    /// The tool result a refused command gets, in place of "Command rejected
+    /// by user": tells the model what to do instead.
+    pub rejection: String,
 }
 
 /// A bare `ToolContext` for tests: no workspace, no index, no mode handle, so
@@ -92,6 +118,7 @@ pub(crate) mod tests_support {
 
     pub fn ctx() -> ToolContext {
         ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -106,6 +133,7 @@ pub(crate) mod tests_support {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -138,7 +166,22 @@ pub fn validate_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     crate::workspace_path::ensure_within_root(requested, std::path::Path::new(root))
 }
 
-/// Like `validate_path`, but also refuses to write the project's specs.
+/// A relative `path` joined onto the workspace root, so the file a tool opens
+/// is the one `validate_path` checked: the guard resolves a relative path
+/// against the workspace, and `std::fs` would resolve it against the process's
+/// directory (`$HOME`, or `/` from Finder). Absolute paths, and every path in a
+/// context with no workspace, come back unchanged.
+pub fn in_workspace(path: &str, ctx: &ToolContext) -> String {
+    match ctx.workspace_root.as_deref() {
+        Some(root) if Path::new(path).is_relative() => {
+            Path::new(root).join(path).to_string_lossy().into_owned()
+        }
+        _ => path.to_string(),
+    }
+}
+
+/// Like `validate_path`, but also refuses to write the project's specs and
+/// the project memory (`agent::project_memory::is_memory_path`).
 ///
 /// Specs are the one input to a project that did not come out of a model, which
 /// is the entire reason checking against them means anything. An agent that can
@@ -150,6 +193,13 @@ pub fn validate_editable_path(requested: &str, ctx: &ToolContext) -> Result<(), 
     let Some(root) = ctx.workspace_root.as_deref() else {
         return Ok(());
     };
+    // The project memory is written by `finalize_plan` alone (Phase 9).
+    if crate::agent::project_memory::is_memory_path(
+        std::path::Path::new(root),
+        std::path::Path::new(requested),
+    ) {
+        return Err(crate::agent::gate_text::PROJECT_MEMORY_WRITE.into());
+    }
     // Re-read from disk rather than caching: the user may move their specs
     // mid-session, and the guard must follow them immediately.
     let features_dir = crate::quality::QualityConfig::load(std::path::Path::new(root)).features_dir;
@@ -165,13 +215,18 @@ pub fn validate_editable_path(requested: &str, ctx: &ToolContext) -> Result<(), 
 
 /// Like `validate_path`, but additionally allows READ access to user-level
 /// skill directories (`~/{.agents,.claudinio,.claude}/skills`), which live
-/// outside the workspace yet are referenced by the skills system prompt.
+/// outside the workspace yet are referenced by the skills system prompt, and
+/// to the long outputs the harness saved (`output_trim::is_saved_output`),
+/// which the trimmed and capped results name for the model to read back.
 /// Never use this for tools that write or edit files.
 pub fn validate_read_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     let workspace_err = match validate_path(requested, ctx) {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
+    if crate::agent::output_trim::is_saved_output(std::path::Path::new(requested)) {
+        return Ok(());
+    }
 
     if let Some(home) = dirs::home_dir() {
         let req = std::path::Path::new(requested);
@@ -219,6 +274,11 @@ pub enum ToolOutput {
         old_string: String,
         new_string: String,
         unified_diff: String,
+        /// Carried so an edit applied from the proposal, not from the call's
+        /// own input (`tool_exec::execute_reported`), keeps it.
+        replace_all: bool,
+        /// See `edit_file::EditDiff::occurrences`.
+        occurrences: usize,
     },
     /// Text plus images the model should actually see (screenshots, images
     /// returned by an MCP server). Producers are responsible for compressing
@@ -229,53 +289,88 @@ pub enum ToolOutput {
     },
 }
 
+/// The tools whose calls may run side by side within one round.
+///
+/// Each of them only reads — the workspace, the code index, the language
+/// server, the web, the session's task list — so two of them can never change
+/// what the other sees, and the order their results are appended in is the
+/// only order that matters (the loop keeps the model's). Everything else runs
+/// one call at a time, as it always did: anything that writes (`edit_file`,
+/// the task and plan mutators), runs a command (`bash`, `run_quality`), drives
+/// the shared browser page, waits on the user (`ask_user`), starts agents or
+/// switches modes.
+///
+/// MCP tools are not here, whatever the server says about them: `connect_one`
+/// does not keep a tool's `readOnlyHint` annotation, an MCP call needs approval
+/// unless YOLO is on, and `McpManager::call` holds the connection list's lock
+/// for the whole call, so two of them would queue behind each other anyway.
+pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "grep",
+    "code_search",
+    "semantic_search",
+    "symbol_lookup",
+    "file_outline",
+    "go_to_definition",
+    "find_references",
+    "web_search",
+    "tasks_get",
+];
+
+/// Whether `name` is one of [`PARALLEL_SAFE_TOOLS`].
+pub fn is_parallel_safe(name: &str) -> bool {
+    PARALLEL_SAFE_TOOLS.contains(&name)
+}
+
 pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read_file".into(),
-            description: "Read a text file (project workspace only, max 2MB). Use the absolute path within the project. Optionally specify start_line and end_line (1-based, inclusive) to read only a subset of lines. Reading a file is REQUIRED before you can edit it with edit_file.".into(),
+            description: "Read a text file in the workspace (max 2MB), or only lines start_line..end_line (1-based, inclusive).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to the file within the project workspace" },
-                    "start_line": { "type": "integer", "description": "Optional starting line number (1-based, inclusive). If omitted, reads from the beginning." },
-                    "end_line": { "type": "integer", "description": "Optional ending line number (1-based, inclusive). If omitted, reads to the end." }
+                    "path": { "type": "string", "description": "Absolute path inside the workspace" },
+                    "start_line": { "type": "integer" },
+                    "end_line": { "type": "integer" }
                 },
                 "required": ["path"]
             }),
         },
         ToolDef {
             name: "list_dir".into(),
-            description: "List files and directories at a given path (one level, project workspace only, respects .gitignore). Start from the project root.".into(),
+            description: "List one level of a workspace directory (respects .gitignore).".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to a directory within the project workspace" }
+                    "path": { "type": "string", "description": "Absolute path inside the workspace" }
                 },
                 "required": ["path"]
             }),
         },
         ToolDef {
             name: "grep".into(),
-            description: "Search for a regex pattern across files in the project workspace using ripgrep. LAST RESORT for search — prefer the indexed tools first: semantic_search for behavior/concepts, code_search/symbol_lookup for known names. Reach for grep only when those come up empty or you need a literal regex over raw file text.".into(),
+            description: "Search for a regex pattern across workspace files (ripgrep). For a behavior or concept, semantic_search usually finds it faster.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Regex pattern" },
-                    "path": { "type": "string", "description": "Optional subdirectory within the project workspace to scope the search" }
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string", "description": "Optional directory to search in" }
                 },
                 "required": ["pattern"]
             }),
         },
         ToolDef {
             name: "edit_file".into(),
-            description: "Propose a change to a file in the project workspace. Replaces the FIRST occurrence of old_string with new_string, so old_string MUST uniquely identify the target — include enough surrounding lines that it matches exactly one place (a bare, repeated snippet will edit the wrong spot). NOT applied until you approve. IMPORTANT: You MUST call read_file on the file first (or at least the line range containing the edit) before using edit_file — otherwise the edit will be rejected with an error.".into(),
+            description: "Replace old_string with new_string in a workspace file; old_string must match one place (add surrounding lines) unless replace_all. old_string \"\" creates a new file. Read the lines being changed with read_file first. Shown as a diff, applied once approved.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path within the project workspace" },
-                    "old_string": { "type": "string", "description": "Text to replace" },
-                    "new_string": { "type": "string", "description": "Replacement text" }
+                    "path": { "type": "string", "description": "Absolute path inside the workspace" },
+                    "old_string": { "type": "string" },
+                    "new_string": { "type": "string" },
+                    "replace_all": { "type": "boolean" }
                 },
                 "required": ["path", "old_string", "new_string"]
             }),
@@ -354,35 +449,30 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "bash".into(),
-            description: "Run a shell command. It already runs with the project workspace root as its working directory — run commands directly (e.g. \"git status\") with relative paths; never cd into guessed paths. Requires approval for non-allowlisted commands. Danger-sensitive commands are blocked automatically.".into(),
+            description: "Run a shell command. The working directory is already the workspace root: use relative paths and never cd into guessed paths. Commands outside the allowlist need approval; dangerous ones are blocked.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The shell command to run" },
-                    "workdir": { "type": "string", "description": "Working directory (defaults to the project root)" },
-                    "stdin": { "type": "string", "description": "Optional stdin for the command" },
-                    "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default 30; override if the command needs more time)" }
+                    "command": { "type": "string" },
+                    "workdir": { "type": "string", "description": "Defaults to the workspace root" },
+                    "stdin": { "type": "string" },
+                    "timeout_seconds": { "type": "integer", "description": "Default 30" }
                 },
                 "required": ["command"]
             }),
         },
         ToolDef {
             name: "run_quality".into(),
-            description: "Run this project's own verification layers and record the result as \
-                          session evidence: 'tests' runs the test suite, 'coverage' measures how \
-                          much of what YOU changed is actually executed by a test. The commands \
-                          come from the project (detected, or set in .claudinio.json) — you \
-                          cannot pass a command. \
-                          A golden task CANNOT be marked done unless the most recent run is green \
-                          AND no file changed since it ran: the harness verifies this \
-                          mechanically, so saying the tests pass does not work — run them. \
-                          Call this after finishing the work, and again after any further edit.".into(),
+            description: "Run the project's own checks and record the result as session evidence: \
+                          'tests' runs its test suite, 'coverage' how much of what you changed a \
+                          test executes. A golden task can be closed only after a green run with no file changed \
+                          since, so call this when the work is done and again after any later edit.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "layers": {
                         "type": "array",
-                        "description": "Layers to run. Omit to run what this project enforces (tests, and coverage when configured).",
+                        "description": "Omit to run what the project enforces",
                         "items": { "type": "string", "enum": ["tests", "coverage", "mutation", "gherkin", "metrics"] }
                     }
                 },
@@ -403,7 +493,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "browser".into(),
-            description: "Drive a dedicated browser: open a URL, move around in it, and interact with it. The browser stays open between calls, so login, scroll position and SPA route persist across the session.\n\nThis tool never returns pixels — call browser_screenshot to SEE the page, and browser_inspect to read its console, network or text.\n\nOnly http:// and https:// are allowed. Navigating to a site outside this machine asks the user for approval; localhost and other local addresses do not.".into(),
+            description: "Drive a dedicated browser: open a URL and operate the page. It stays open between calls, so login, scroll position and SPA route persist. It never returns pixels: browser_screenshot shows the page, browser_inspect reads its console, network or text.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -412,7 +502,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                         "enum": ["navigate", "reload", "back", "url", "click", "type", "press", "scroll_to", "focus", "wait_for", "close"],
                         "description": "navigate: open `url`. reload: reload the current page. back: one step back in history. url: report the current URL. click: click the centre of the first element matching `selector`, scrolling it into view first. type: focus `selector` and enter `text`. press: send one special key to the focused element (or to `selector` if given). scroll_to: scroll `selector` into view without clicking. focus: focus `selector`. wait_for: block until `selector` exists in the DOM (presence, not visibility — an element hidden with display:none already counts). close: shut the browser down and free its memory."
                     },
-                    "url": { "type": "string", "description": "For navigate. Absolute http:// or https:// URL." },
+                    "url": { "type": "string", "description": "For navigate. Absolute http:// or https:// URL only; a site outside this machine asks the user first, localhost does not." },
                     "selector": { "type": "string", "description": "CSS selector; the first match wins. Used by click, type, press, scroll_to, focus and wait_for." },
                     "text": { "type": "string", "description": "For type: the text to enter." },
                     "key": {
@@ -449,14 +539,14 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "browser_screenshot".into(),
-            description: "Capture what the browser is showing, as an image you can actually see. Call the browser tool with action=navigate first.\n\nPrefer target=selector or target=rect over full_page: a whole-page capture of a long page costs several times more context and is usually harder to read. full_page is clamped to the top 8000 CSS pixels.".into(),
+            description: "Capture what the browser is showing, as an image you can see. Open a page with the browser tool first. Prefer target=selector or rect: a whole long page costs several times the context and is harder to read.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
                         "enum": ["viewport", "full_page", "selector", "rect"],
-                        "description": "viewport: what is on screen right now (default, cheapest). selector: just the element matching `selector`, scrolled into view first. rect: an arbitrary region. full_page: the entire scrollable page."
+                        "description": "viewport: what is on screen now (default, cheapest). selector: the element matching `selector`, scrolled into view. rect: a region. full_page: the whole page, clamped to the top 8000 CSS pixels."
                     },
                     "selector": { "type": "string", "description": "Required when target=selector. CSS selector; the first match wins." },
                     "rect": {
@@ -476,35 +566,34 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user one or more questions when you are missing information or need a decision only they can make. Questions to the user MUST go through this tool — a question written as plain assistant text (including pasting the questions JSON into your reply) ends the turn unanswered and stalls the task.\n\nSHAPE: each question is { \"question\": string, \"options\": Option[], \"multi_select\"?: bool }. Each option is EITHER a plain string, OR an object { \"label\": string, \"description\"?: string } where `label` is the concise choice shown on the button and `description` is an optional one-line explanation rendered under it. Mix the two freely. Right: \"options\": [\"Keep `chat` subcommand\", \"Make it the default\"]. Also right: \"options\": [{\"label\": \"Keep `chat`\", \"description\": \"Runs the interactive chat as a subcommand\"}, {\"label\": \"Make it default\", \"description\": \"`claudinio` with no args opens chat\"}].\n\nEach question can have:\n- `multi_select: false` (default): radio buttons, user picks exactly ONE option. Best for mutually exclusive decisions.\n- `multi_select: true`: checkboxes, user can pick SEVERAL options. The UI shows square indicators instead of circles.\n\nThe UI automatically appends an \"Other\" option with a free-text input field to EVERY question (single and multi). When the user types in \"Other\", their text is appended to the chosen options. So NEVER add an \"Other\" option manually to your options list — it's always there automatically.\n\nProvide 2-4 options; their labels must be non-empty and distinct (no blank or duplicated entries). Blocks until answered and returns the compiled question/answer pairs.".into(),
+            description: "Ask the user when you need information or a decision only they can make: a question written as plain text instead ends your turn unanswered. Give each question 2-4 options; the UI adds a free-text 'Other' to every question. Blocks until answered and returns the answers.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "questions": {
                         "type": "array",
-                        "description": "Questions to ask the user",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "question": { "type": "string", "description": "The full question, ending with a question mark" },
+                                "question": { "type": "string" },
                                 "options": {
                                     "type": "array",
-                                    "description": "2-4 distinct, non-empty choices. Each is EITHER a plain string, OR an object { \"label\": string, \"description\"?: string } — label is the concise choice, description an optional one-line detail shown under it. Do NOT include an 'Other' option — the UI adds it automatically.",
+                                    "description": "2-4 distinct choices: a string, or {label, description?} (description is one line shown under the label). Never an 'Other': the UI adds it.",
                                     "items": {
                                         "oneOf": [
                                             { "type": "string" },
                                             {
                                                 "type": "object",
                                                 "properties": {
-                                                    "label": { "type": "string", "description": "Concise choice shown on the button" },
-                                                    "description": { "type": "string", "description": "Optional one-line explanation shown under the label" }
+                                                    "label": { "type": "string" },
+                                                    "description": { "type": "string" }
                                                 },
                                                 "required": ["label"]
                                             }
                                         ]
                                     }
                                 },
-                                "multi_select": { "type": "boolean", "description": "false (default) = radio buttons, user picks one. true = checkboxes, user picks several plus the auto-added 'Other' free-text field." }
+                                "multi_select": { "type": "boolean", "description": "true: checkboxes, pick several. Default false: pick one." }
                             },
                             "required": ["question", "options"]
                         }
@@ -515,26 +604,25 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_get".into(),
-            description: "Return the current list of tasks. Each task has an id, title, description, journal (array of notes/findings), and status (todo | doing | done). Use this at the start of a session to understand what needs to be done.".into(),
+            description: "Return the current task list: each task's id, title, description, journal (notes and findings) and status (todo | doing | done).".into(),
             input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
         },
         ToolDef {
             name: "tasks_set".into(),
-            description: "Create or rewrite the task list. A full replacement: pass ALL tasks. Each task has: id (unique string), title, description, journal (array of findings/memory entries), status (todo | doing | done). Use it to create the list and to add, remove or reword tasks — to change one task's status or journal, use tasks_update instead of resending the list. Read current tasks first with tasks_get before modifying. In Brain mode this is rejected until the current plan file contains a non-empty '## Low-Level Design' section.".into(),
+            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. An existing task sent with an empty description or journal keeps its stored one.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "tasks": {
                         "type": "array",
-                        "description": "All tasks (full replace — include every task, not just the one you changed)",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": { "type": "string", "description": "Unique task identifier" },
-                                "title": { "type": "string", "description": "Short task title" },
-                                "description": { "type": "string", "description": "Task description/goal" },
-                                "journal": { "type": "array", "items": { "type": "string" }, "description": "Findings or relevant info, as memory entries" },
-                                "status": { "type": "string", "enum": ["todo", "doing", "done"], "description": "Task status" }
+                                "id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "description": { "type": "string" },
+                                "journal": { "type": "array", "items": { "type": "string" }, "description": "Findings and decisions" },
+                                "status": { "type": "string", "enum": ["todo", "doing", "done"] }
                             },
                             "required": ["id", "title", "description", "journal", "status"]
                         }
@@ -545,20 +633,32 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_update".into(),
-            description: "Change ONE task without resending the list: set its status and/or append journal entries. This is how a task moves todo -> doing -> done. Returns where the whole list stands.".into(),
+            description: "Change tasks without resending the list: status (todo -> doing -> done) and/or journal entries to append. One task: id, status, journal. Several at once: updates: [{id, status?, journal?}]; all are checked first, and if one fails none is applied.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "Id of the task to change" },
-                    "status": { "type": "string", "enum": ["todo", "doing", "done"], "description": "New status; omit to leave it as it is" },
-                    "journal": { "type": "array", "items": { "type": "string" }, "description": "Entries to APPEND to the task's journal: findings, decisions, the 'why'" }
-                },
-                "required": ["id"]
+                    "id": { "type": "string" },
+                    "status": { "type": "string", "enum": ["todo", "doing", "done"] },
+                    "journal": { "type": "array", "items": { "type": "string" }, "description": "Appended: findings, decisions, the 'why'" },
+                    "updates": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "status": { "type": "string", "enum": ["todo", "doing", "done"] },
+                                "journal": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["id"]
+                        }
+                    }
+                }
             }),
         },
         ToolDef {
             name: "spawn_agents".into(),
-            description: format!("ONE call spawns ALL agents: pass 'agents', an array of 1-{n} specs ({{name, goal, mode, expected_output}}); every spec in the call runs in parallel, each with a fresh context and its own goal. Returns each agent's final report. Use for broad multi-file investigation ('explore' mode) or independent atomic code changes ('code' mode). Goals must be self-contained: include file paths, symbols and constraints.", n = max_parallel),
+            description: format!("Run 1-{n} subagents in parallel, all in ONE call's 'agents' array. Each starts with an empty context and cannot ask the user, so its goal must be self-contained: paths, symbols, constraints, exact values. 'explore' reads; 'code' can also edit files and run bash.", n = max_parallel),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["agents"],
@@ -569,16 +669,18 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                             "type": "object",
                             "required": ["name", "goal", "mode"],
                             "properties": {
-                                "name": { "type": "string", "description": "Short label shown to the user, e.g. 'auth-flow-investigator'" },
-                                "goal": { "type": "string", "description": "Self-contained instructions: the task, known file paths/symbols, constraints (write the goal in English)" },
-                                "mode": { "type": "string", "enum": ["explore", "code"], "description": "explore = read-only tools; code = can edit files and run bash (requires user approval)" },
-                                "expected_output": { "type": "string", "description": "What the final report must contain" }
+                                "name": { "type": "string", "description": "Short label shown to the user" },
+                                "goal": { "type": "string", "description": "Self-contained instructions, in English" },
+                                "mode": { "type": "string", "enum": ["explore", "code"] },
+                                "expected_output": { "type": "string", "description": "What the report must contain" },
+                                "section": { "type": "string", "description": "Document section id it writes" }
                             }
                         }
                     }
                 }
             }),
         },
+        skills_tool::def(),
     ]
 }
 
@@ -606,13 +708,14 @@ pub fn write_plan_def() -> ToolDef {
 pub fn finalize_plan_def() -> ToolDef {
     ToolDef {
         name: "finalize_plan".into(),
-        description: "Append an Implementation Log to the plan file once its implementation is DONE and verified. Records the CHANGED FILES and COMMITS automatically (read from git), so your `journal` should focus on findings, decisions, and gotchas — not a file list. Call this as the LAST step of a Builder run, after all tasks are done. Defaults to the most recent plan in the plans directory.".into(),
+        description: "Append the Implementation Log to the plan once all tasks are verified. Files and commits come from git; `journal` holds findings, decisions and gotchas.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "journal": { "type": "string", "description": "Findings, decisions, and gotchas from the implementation (the 'why' and what was learned)." },
-                "plan_file": { "type": "string", "description": "Optional target plan file (basename like '2026-07-09_x.md' or a path). Defaults to the most recently modified plan." },
-                "summary": { "type": "string", "description": "Optional one-line summary of the implementation." }
+                "journal": { "type": "string" },
+                "plan_file": { "type": "string", "description": "Plan basename or path; default: the latest plan." },
+                "summary": { "type": "string" },
+                "memory": { "type": "array", "items": { "type": "string" }, "description": "Up to 5 lessons (200 chars each) a later session in this repo would otherwise re-learn; saved to .claudinio/MEMORY.md." }
             },
             "required": ["journal"]
         }),
@@ -654,8 +757,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
     }
     match name {
         "read_file" => {
-            let a: read_file::ReadFileArgs =
+            let mut a: read_file::ReadFileArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = in_workspace(&a.path, ctx);
             validate_read_path(&a.path, ctx)?;
             let path = a.path.clone();
             let start_line = a.start_line;
@@ -669,8 +773,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::Text { content })
         }
         "list_dir" => {
-            let a: list_dir::ListDirArgs =
+            let mut a: list_dir::ListDirArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = in_workspace(&a.path, ctx);
             validate_read_path(&a.path, ctx)?;
             let dir = a.path.clone();
             let entries = list_dir::execute(a)?;
@@ -679,8 +784,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             })
         }
         "grep" => {
-            let a: grep::GrepArgs =
+            let mut a: grep::GrepArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = a.path.map(|p| in_workspace(&p, ctx));
             if let Some(ref path) = a.path {
                 validate_read_path(path, ctx)?;
             } else if let Some(ref root) = ctx.workspace_root {
@@ -699,20 +805,27 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             })
         }
         "edit_file" => {
-            let a: edit_file::EditFileArgs =
+            let mut a: edit_file::EditFileArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
+            a.path = in_workspace(&a.path, ctx);
             validate_editable_path(&a.path, ctx)?;
-            // Enforce read-before-edit
-            {
-                let tracker = ctx.read_tracker.lock().await;
-                tracker.check_can_edit(&a.path, &a.old_string)?;
+            if crate::agent::doc_session::is_linked_document(ctx, &a.path) {
+                return Err(
+                    "this is the session's living document: write a section with \
+                            doc_write (doc_add adds one), so the user's edits and yours are \
+                            told apart"
+                        .into(),
+                );
             }
+            edit_gates(&a, ctx).await?;
             let diff = edit_file::preview(&a)?;
             Ok(ToolOutput::EditProposal {
                 path: diff.path,
                 old_string: diff.old_string,
                 new_string: diff.new_string,
                 unified_diff: diff.unified_diff,
+                replace_all: diff.replace_all,
+                occurrences: diff.occurrences,
             })
         }
         "code_search" => {
@@ -879,9 +992,12 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         "bash" => {
             let mut a: bash::BashArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            if a.workdir.is_none() {
-                a.workdir = ctx.workspace_root.clone();
-            }
+            // A relative workdir is a folder of the workspace, as the eval's
+            // policy and the memory guard read it, not of the process's directory.
+            a.workdir = match a.workdir {
+                None => ctx.workspace_root.clone(),
+                Some(dir) => Some(in_workspace(&dir, ctx)),
+            };
             let content = bash::execute(a, ctx).await?;
             Ok(ToolOutput::Text { content })
         }
@@ -902,9 +1018,8 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             Ok(ToolOutput::Text { content })
         }
         "tasks_update" => {
-            let a: tasks::UpdateTaskArgs =
-                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            let content = tasks::execute_update(a, ctx)?;
+            let items = tasks::parse_update_args(args)?;
+            let content = tasks::execute_updates(items, ctx)?;
             Ok(ToolOutput::Text { content })
         }
         "write_plan" => {
@@ -944,6 +1059,22 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
             browser::screenshot(a, ctx).await
         }
+        "skills" => {
+            // Scanned per call, like the run's catalog: a skill installed or
+            // edited mid-session is the one the model reads.
+            let prefs = ctx
+                .agent_config
+                .as_ref()
+                .map(|c| c.plugins.clone())
+                .unwrap_or_default();
+            let mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
+                ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
+                &prefs,
+            );
+            let content = skills_tool::execute(args, &mgr)?;
+            Ok(ToolOutput::Text { content })
+        }
+        "doc_create" | "doc_write" | "doc_read" | "doc_add" => doc::execute(name, &args, ctx),
         "spawn_agents" => Err("spawn_agents is handled by the session orchestrator".into()),
         "enter_plan_mode" | "exit_plan_mode" => {
             Err("mode switch tools are handled by the session orchestrator".into())
@@ -958,16 +1089,38 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
 }
 
 pub async fn apply_edit_with_ctx(args: Value, ctx: &ToolContext) -> Result<String, String> {
-    let a: edit_file::EditFileArgs =
+    let mut a: edit_file::EditFileArgs =
         serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-    validate_editable_path(&a.path, ctx)?;
-    // Enforce read-before-edit
-    {
-        let tracker = ctx.read_tracker.lock().await;
-        tracker.check_can_edit(&a.path, &a.old_string)?;
-    }
+    a.path = in_workspace(&a.path, ctx);
+    edit_gates(&a, ctx).await?;
     let diff = edit_file::preview(&a)?;
-    edit_file::apply(&diff)
+    let applied = edit_file::apply(&diff)?;
+    if diff.creates() {
+        // The model wrote every byte of the file, so its next edit needs no
+        // read_file first.
+        let mut tracker = ctx.read_tracker.lock().await;
+        tracker.record_read(&a.path, None, None, &a.new_string);
+    }
+    Ok(applied)
+}
+
+/// The checks an edit passes both when it is proposed and when it is applied
+/// after approval: the workspace and spec guards, then read-before-edit.
+///
+/// Read-before-edit has nothing to check on a path that does not exist:
+/// `read_file` cannot read it, and demanding it was the loop every failed run
+/// of the clean baseline eval (2026-10-18) was caught in. `edit_file::preview`
+/// then creates the file (an empty `old_string`) or says how to.
+async fn edit_gates(a: &edit_file::EditFileArgs, ctx: &ToolContext) -> Result<(), String> {
+    validate_editable_path(&a.path, ctx)?;
+    // `symlink_metadata`: a dangling link is something there, not a new file.
+    // The callers joined a relative path onto the workspace (`in_workspace`),
+    // so a missing file here is missing where it was checked.
+    if std::fs::symlink_metadata(&a.path).is_err() {
+        return Ok(());
+    }
+    let tracker = ctx.read_tracker.lock().await;
+    tracker.check_can_edit(&a.path, &a.old_string)
 }
 
 /// How many top semantic hits get a source snippet, and how large each can be.
@@ -1036,6 +1189,18 @@ fn check_index_ready(ctx: &ToolContext) -> Result<(), String> {
     Ok(())
 }
 
+/// `line` from byte `col`, the cursor column the model sent, stepped back to
+/// the start of the character it falls in: the model's number can land inside
+/// a character of `ação` or `变量`, and a slice there panicked the run
+/// (lean-harness Phase 6f audit).
+fn from_column(line: &str, col: usize) -> &str {
+    let mut at = col.min(line.len());
+    while !line.is_char_boundary(at) {
+        at -= 1;
+    }
+    &line[at..]
+}
+
 fn heuristically_find_definition(
     file_path: &str,
     _line: u64,
@@ -1060,7 +1225,7 @@ fn heuristically_find_definition(
         });
     }
 
-    let cursor_text = &line_text[col..];
+    let cursor_text = from_column(line_text, col);
     let word: String = cursor_text
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -1109,7 +1274,7 @@ fn heuristically_find_references(
         });
     }
 
-    let cursor_text = &line_text[col..];
+    let cursor_text = from_column(line_text, col);
     let word: String = cursor_text
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -1186,7 +1351,7 @@ impl ReadTracker {
         let entry = self
             .files
             .get(path)
-            .ok_or_else(|| format!("read_file must be called on {} before editing it", path))?;
+            .ok_or_else(|| crate::agent::gate_text::not_read(path))?;
 
         if entry.full_read {
             return Ok(());
@@ -1203,25 +1368,16 @@ impl ReadTracker {
 
         // Not yet read. Point at where the text really is so the model can read
         // the correct range instead of guessing (the source of the old loop).
-        let hint = match std::fs::read_to_string(path) {
+        Err(match std::fs::read_to_string(path) {
             Ok(content) => match content.find(old_string) {
                 Some(byte_idx) => {
-                    let line_num = content[..byte_idx].matches('\n').count() + 1;
-                    format!(
-                        " The text is at line {line_num}. Call read_file with start_line/end_line \
-                         covering it, then edit."
-                    )
+                    let line = content[..byte_idx].matches('\n').count() + 1;
+                    crate::agent::gate_text::partial_read_at_line(path, line)
                 }
-                None => " That exact text was not found in the current file — re-read the file \
-                         and copy old_string verbatim, including indentation."
-                    .to_string(),
+                None => crate::agent::gate_text::partial_read_not_found(path),
             },
-            Err(e) => format!(" (could not re-read file: {e})"),
-        };
-        Err(format!(
-            "read_file was called on {path}, but you have not read the exact text you're trying \
-             to edit.{hint}"
-        ))
+            Err(e) => crate::agent::gate_text::partial_read_unreadable(path, &e.to_string()),
+        })
     }
 }
 
@@ -1234,6 +1390,7 @@ mod tests {
     /// (so any path is valid).
     fn test_ctx() -> ToolContext {
         ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1248,6 +1405,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1257,12 +1415,286 @@ mod tests {
         }
     }
 
+    /// The description diet (lean-harness Phase 2): a core tool rides on
+    /// every request, so its description says what the tool is for in at most
+    /// 400 characters, and the shape rules live in the schema's property
+    /// descriptions and in the error a malformed call gets back — where they
+    /// cost nothing until they are needed. The browser tools are held to the
+    /// same line: loaded, they ride on every request too.
+    #[test]
+    fn every_core_tool_description_is_at_most_400_characters() {
+        let mut defs = get_defs(4);
+        defs.push(write_plan_def());
+        defs.push(exit_plan_mode_def());
+        defs.push(finalize_plan_def());
+        defs.push(crate::agent::deferred::load_tools_def());
+        let over: Vec<(String, usize)> = defs
+            .iter()
+            .filter(|t| {
+                !crate::agent::deferred::is_deferred(&t.name) || t.name.starts_with("browser")
+            })
+            .filter(|t| t.description.chars().count() > 400)
+            .map(|t| (t.name.clone(), t.description.chars().count()))
+            .collect();
+        assert!(over.is_empty(), "over 400 characters: {over:?}");
+    }
+
+    /// Phase 9: `finalize_plan` takes the lines the project memory gains, as
+    /// an optional list of strings whose description states the limits the
+    /// code enforces (`project_memory::proposed_lines`) and stays short —
+    /// `finalize_plan` is core in Builder, so it rides on every request.
+    #[test]
+    fn finalize_plan_offers_an_optional_memory_list_described_in_400_characters() {
+        let def = finalize_plan_def();
+        let memory = &def.input_schema["properties"]["memory"];
+        assert_eq!(memory["type"], "array", "{memory}");
+        assert_eq!(memory["items"]["type"], "string", "{memory}");
+        let description = memory["description"].as_str().unwrap_or_default();
+        assert!(description.chars().count() <= 400, "{description}");
+        for limit in ["5", "200", ".claudinio/MEMORY.md"] {
+            assert!(description.contains(limit), "{description}");
+        }
+        let required = def.input_schema["required"].as_array().unwrap();
+        assert!(!required.iter().any(|r| r == "memory"));
+    }
+
+    /// Phase 3b: models that could not tell edit_file creates files wrote
+    /// them with shell heredocs (an approval, no diff) or gave up, and the
+    /// description promised "the FIRST occurrence" while every occurrence was
+    /// replaced. It now says both rules, and the schema offers replace_all as
+    /// an optional flag.
+    #[test]
+    fn edit_file_says_it_creates_files_and_matches_one_place() {
+        let defs = get_defs(4);
+        let edit = defs.iter().find(|t| t.name == "edit_file").unwrap();
+        let text = edit.description.to_lowercase();
+        assert!(text.contains("old_string \"\" creates"), "{text}");
+        assert!(text.contains("match one place"), "{text}");
+        assert!(text.contains("replace_all"), "{text}");
+        assert!(!text.contains("first occurrence"), "{text}");
+        assert_eq!(
+            edit.input_schema["properties"]["replace_all"]["type"],
+            "boolean"
+        );
+        let required = edit.input_schema["required"].as_array().unwrap();
+        assert!(!required.iter().any(|r| r == "replace_all"));
+    }
+
+    /// `tasks_update` takes one task or a batch (lean-harness Phase 4): the
+    /// schema offers both, and a batch sent through the dispatcher moves
+    /// every task it names in one call.
+    #[tokio::test]
+    async fn tasks_update_takes_one_task_or_a_batch() {
+        let def = get_defs(4)
+            .into_iter()
+            .find(|t| t.name == "tasks_update")
+            .unwrap();
+        let props = &def.input_schema["properties"];
+        assert!(props["id"].is_object() && props["updates"].is_object());
+        assert_eq!(
+            props["updates"]["items"]["required"],
+            serde_json::json!(["id"])
+        );
+        let required = def.input_schema["required"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            required.is_empty(),
+            "neither form may be required: {required:?}"
+        );
+        assert!(def.description.contains("updates"), "{}", def.description);
+
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-tasks-batch-exec-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = root.join("session.jsonl");
+        std::fs::write(&store, "").unwrap();
+        let task = |id: &str| crate::agent::persist::TaskItem {
+            id: id.into(),
+            title: id.into(),
+            description: "d".into(),
+            journal: vec![],
+            status: "todo".into(),
+        };
+        crate::agent::persist::append_tasks(&store, &[task("a"), task("b")]).unwrap();
+        let ctx = ToolContext {
+            session_store_path: Some(store.to_string_lossy().to_string()),
+            ..tests_support::ctx()
+        };
+        let out = execute(
+            "tasks_update",
+            serde_json::json!({"updates": [
+                {"id": "a", "status": "done", "journal": ["why"]},
+                {"id": "b", "status": "doing"}
+            ]}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("text expected")
+        };
+        assert!(content.contains("'a': todo -> done") && content.contains("'b': todo -> doing"));
+        let out = execute(
+            "tasks_update",
+            serde_json::json!({"id": "b", "status": "done"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("text expected")
+        };
+        assert!(content.contains("All 2 tasks are done."), "{content}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A skill in the workspace is what `skills` answers with — the same scan
+    /// the run's catalog came from, so a name the prompt lists can be read.
+    #[tokio::test]
+    async fn the_skills_tool_reads_the_workspace_s_skills() {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-skills-exec-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        let dir = root.join(".agents/skills/release");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: release\ndescription: Cut a release\n---\n\nBump the version.",
+        )
+        .unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            ..test_ctx()
+        };
+        assert!(get_defs(4).iter().any(|t| t.name == "skills"));
+        let listed = execute("skills", serde_json::json!({"action": "list"}), &ctx)
+            .await
+            .unwrap();
+        let ToolOutput::Text { content } = listed else {
+            panic!("text")
+        };
+        assert!(content.contains("release [project]"), "{content}");
+        let read = execute(
+            "skills",
+            serde_json::json!({"action": "read", "name": "release"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = read else {
+            panic!("text")
+        };
+        assert!(content.contains("Bump the version."), "{content}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Write a temp file with 20 numbered lines, return its path.
     fn write_20line_file(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("claudinio_test_{name}"));
         let lines: Vec<String> = (1..=20).map(|i| format!("line{i}")).collect();
         std::fs::write(&p, lines.join("\n")).unwrap();
         p
+    }
+
+    // The read-only tools a round may run concurrently, exactly: adding one is
+    // a decision about shared state, not a typo fix.
+    #[test]
+    fn the_read_only_tools_are_the_ones_that_may_run_side_by_side() {
+        let mut listed: Vec<&str> = PARALLEL_SAFE_TOOLS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(
+            listed,
+            [
+                "code_search",
+                "file_outline",
+                "find_references",
+                "go_to_definition",
+                "grep",
+                "list_dir",
+                "read_file",
+                "semantic_search",
+                "symbol_lookup",
+                "tasks_get",
+                "web_search",
+            ]
+        );
+    }
+
+    // The reads of one round may finish in any order (`tool_batch` runs them
+    // together), so what a later edit may touch must not depend on which read
+    // was recorded first.
+    #[test]
+    fn what_an_edit_may_touch_does_not_depend_on_the_order_reads_finished() {
+        let path = "/nowhere/order.txt";
+        let reads: [(Option<usize>, Option<usize>, &str); 3] = [
+            (None, None, "alpha\nbeta\ngamma\n"),
+            (Some(2), Some(2), "beta\n"),
+            (Some(3), Some(3), "gamma\n"),
+        ];
+        let tracker = |order: &[usize]| {
+            let mut t = ReadTracker::default();
+            for &i in order {
+                let (start, end, text) = reads[i];
+                t.record_read(path, start, end, text);
+            }
+            t
+        };
+        for old in ["alpha", "beta", "gamma"] {
+            for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0], [1, 2, 0]] {
+                assert!(
+                    tracker(&order).check_can_edit(path, old).is_ok(),
+                    "{old} {order:?}"
+                );
+            }
+        }
+        // Ranged reads only: the same text is editable whichever came first.
+        for order in [[1, 2], [2, 1]] {
+            let t = tracker(&order);
+            assert!(t.check_can_edit(path, "beta").is_ok());
+            assert!(t.check_can_edit(path, "gamma").is_ok());
+            assert!(t.check_can_edit(path, "alpha").is_err());
+        }
+    }
+
+    // A name in the list that no tool answers to would be a rule about
+    // nothing; one that needs approval would run before the user said yes.
+    #[test]
+    fn every_parallel_safe_tool_exists_and_runs_without_a_prompt() {
+        let defined: Vec<String> = get_defs(4).into_iter().map(|d| d.name).collect();
+        for name in PARALLEL_SAFE_TOOLS {
+            assert!(defined.iter().any(|d| d == name), "{name} is not a tool");
+            assert_eq!(
+                crate::agent::permissions::tool_permission(name),
+                crate::agent::permissions::PermissionLevel::Auto,
+                "{name}"
+            );
+        }
+        for name in [
+            "edit_file",
+            "bash",
+            "run_quality",
+            "ask_user",
+            "spawn_agents",
+            "tasks_set",
+            "tasks_update",
+            "write_plan",
+            "finalize_plan",
+            "enter_plan_mode",
+            "exit_plan_mode",
+            "browser",
+            "browser_inspect",
+            "browser_screenshot",
+            "mcp__github__search",
+        ] {
+            assert!(!is_parallel_safe(name), "{name} must run on its own");
+        }
     }
 
     #[test]
@@ -1582,6 +2014,453 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    // ── edit_file creates files (lean-harness Phase 3b) ──
+    //
+    // The clean baseline eval (2026-10-18) failed only on new files: the read
+    // gate demanded a read_file of a path that did not exist, read_file could
+    // not read it, and the model looped or gave up. A path that does not
+    // exist has nothing to read, so `old_string: ""` creates it.
+
+    fn edit(ctx: &ToolContext, args: serde_json::Value) -> Result<ToolOutput, String> {
+        futures::executor::block_on(execute("edit_file", args, ctx))
+    }
+
+    fn apply(ctx: &ToolContext, args: serde_json::Value) -> Result<String, String> {
+        futures::executor::block_on(apply_edit_with_ctx(args, ctx))
+    }
+
+    #[test]
+    fn an_empty_old_string_creates_a_missing_file_and_its_missing_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("docs/notes/NEW.md");
+        let args = serde_json::json!({
+            "path": path.to_string_lossy(),
+            "old_string": "",
+            "new_string": "# New\n\nfirst line\n",
+        });
+
+        // The proposal is a diff from nothing to the whole content, and
+        // proposing writes nothing.
+        match edit(&ctx, args.clone()).unwrap() {
+            ToolOutput::EditProposal {
+                old_string,
+                unified_diff,
+                ..
+            } => {
+                assert_eq!(old_string, "");
+                assert!(unified_diff.contains("+# New"), "{unified_diff}");
+                assert!(unified_diff.contains("+first line"), "{unified_diff}");
+                assert!(
+                    !unified_diff
+                        .lines()
+                        .any(|l| l.starts_with("-") && !l.starts_with("---"))
+                );
+            }
+            other => panic!("expected a proposal, got {other:?}"),
+        }
+        assert!(!path.exists(), "a proposal never touches the disk");
+
+        let msg = apply(&ctx, args).unwrap();
+        assert!(msg.contains("Created"), "{msg}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# New\n\nfirst line\n"
+        );
+    }
+
+    #[test]
+    fn a_created_file_counts_as_read_so_the_next_edit_needs_no_read_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("docs/NEW.md").to_string_lossy().to_string();
+        apply(
+            &ctx,
+            serde_json::json!({ "path": path, "old_string": "", "new_string": "alpha\nbeta\n" }),
+        )
+        .unwrap();
+        // The model wrote every byte of it; asking it to read them back is
+        // a wasted round.
+        let second =
+            serde_json::json!({ "path": path, "old_string": "beta", "new_string": "gamma" });
+        assert!(edit(&ctx, second.clone()).is_ok());
+        apply(&ctx, second).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
+    }
+
+    #[test]
+    fn an_empty_old_string_on_an_existing_file_is_refused_never_an_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "keep me\n").unwrap();
+        let p = path.to_string_lossy().to_string();
+        futures::executor::block_on(execute("read_file", serde_json::json!({ "path": p }), &ctx))
+            .unwrap();
+
+        let args = serde_json::json!({ "path": p, "old_string": "", "new_string": "gone\n" });
+        let err = edit(&ctx, args.clone()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(err.contains("read_file"), "{err}");
+        let err = apply(&ctx, args).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me\n");
+    }
+
+    #[test]
+    fn a_partial_read_still_refuses_an_empty_old_string() {
+        let p = write_20line_file("partial_empty_old");
+        let ctx = test_ctx();
+        let path = p.to_string_lossy().to_string();
+        futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": path, "start_line": 1, "end_line": 2 }),
+            &ctx,
+        ))
+        .unwrap();
+        let err = edit(
+            &ctx,
+            serde_json::json!({ "path": path, "old_string": "", "new_string": "x" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("old_string cannot be empty"), "{err}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn editing_text_in_a_missing_file_says_how_to_create_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("retry.py").to_string_lossy().to_string();
+        let err = edit(
+            &ctx,
+            serde_json::json!({ "path": path, "old_string": "def f", "new_string": "def g" }),
+        )
+        .unwrap_err();
+        // Not the read gate: read_file cannot read a file that is not there.
+        assert!(!err.contains("read_file must be called"), "{err}");
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(err.contains("old_string \"\""), "{err}");
+    }
+
+    #[test]
+    fn creating_a_file_keeps_the_workspace_and_spec_guards() {
+        let root = spec_workspace("create", "{}");
+        let ctx = ctx_at(&root);
+        let create = |path: String| serde_json::json!({ "path": path, "old_string": "", "new_string": "x\n" });
+
+        let outside = format!("{}/../escape-{}.txt", root.display(), std::process::id());
+        assert!(
+            edit(&ctx, create(outside.clone()))
+                .unwrap_err()
+                .contains("outside the workspace")
+        );
+        assert!(apply(&ctx, create(outside.clone())).is_err());
+        assert!(!std::path::Path::new(&outside).exists());
+
+        let spec = root
+            .join("features/new.feature")
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            edit(&ctx, create(spec.clone()))
+                .unwrap_err()
+                .contains("owned by the user")
+        );
+        assert!(apply(&ctx, create(spec.clone())).is_err());
+        assert!(!std::path::Path::new(&spec).exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A relative path names a file in the workspace, where the guard checked
+    /// it. It used to be refused with "pass the absolute path", because the
+    /// write would have resolved it against the process's directory instead;
+    /// joining it onto the workspace closes that gap, so the create goes ahead
+    /// there (final review of the lean-harness branch).
+    #[test]
+    fn a_new_file_by_a_relative_path_is_created_in_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let args = serde_json::json!({
+            "path": "phase3b-relative/NEW.md", "old_string": "", "new_string": "x\n",
+        });
+        apply(&ctx, args).unwrap();
+        let created = dir.path().join("phase3b-relative/NEW.md");
+        assert_eq!(std::fs::read_to_string(created).unwrap(), "x\n");
+        assert!(!std::path::Path::new("phase3b-relative").exists());
+    }
+
+    /// The same on an edit: a relative path to a file in the workspace edits
+    /// that file, and is never called missing.
+    #[test]
+    fn editing_by_a_relative_path_edits_the_workspace_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("phase6f-edit.rs"), "fn main() {}\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        read_whole(&ctx, "phase6f-edit.rs");
+        apply(
+            &ctx,
+            serde_json::json!({
+                "path": "phase6f-edit.rs", "old_string": "main", "new_string": "start",
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("phase6f-edit.rs")).unwrap(),
+            "fn start() {}\n"
+        );
+    }
+
+    #[test]
+    fn reading_a_missing_file_points_at_creating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir
+            .path()
+            .join("validators.py")
+            .to_string_lossy()
+            .to_string();
+        let err = futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": path }),
+            &ctx,
+        ))
+        .unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(
+            err.contains("edit_file") && err.contains("old_string \"\""),
+            "{err}"
+        );
+        // read_file cannot tell whether the calling session may edit (an
+        // explore subagent or a Brain session may not), so the hint is
+        // conditional, never an order to create the file.
+        assert!(err.contains("If you meant to create it"), "{err}");
+        assert!(err.contains("where edit_file is available"), "{err}");
+    }
+
+    /// A relative read of a file the workspace holds returns it; it used to
+    /// miss and be told to pass the absolute path (Phase 6f).
+    #[test]
+    fn reading_a_relative_path_reads_the_workspace_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("phase6f-exists.rs"), "fn main() {}\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        let out = futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": "phase6f-exists.rs" }),
+            &ctx,
+        ))
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("read_file returns text")
+        };
+        assert!(content.contains("fn main()"), "{content}");
+    }
+
+    // ── A relative path means the workspace, where it is checked and opened ──
+    //
+    // The guard resolved a relative path against the workspace and the tools
+    // then opened it from the process's directory, so `.ssh/id_rsa` passed the
+    // guard and read `$HOME/.ssh/id_rsa` whenever the app ran from `$HOME`.
+    // `cargo test` runs from the crate root, which holds a `Cargo.toml` and a
+    // `src/` that a fresh workspace does not.
+
+    #[test]
+    fn a_relative_read_opens_the_workspace_file_not_the_apps() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "workspace copy\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        let out = futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": "Cargo.toml" }),
+            &ctx,
+        ))
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("read_file returns text")
+        };
+        assert!(content.contains("workspace copy"), "{content}");
+        assert!(!content.contains("[package]"), "{content}");
+    }
+
+    #[test]
+    fn a_relative_path_the_workspace_lacks_is_not_served_from_the_apps_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let run = |name: &str, args: serde_json::Value| {
+            futures::executor::block_on(execute(name, args, &ctx))
+        };
+        let text = |out: Result<ToolOutput, String>| match out {
+            Ok(ToolOutput::Text { content }) => content,
+            Ok(_) => String::new(),
+            Err(e) => e,
+        };
+        let read = text(run(
+            "read_file",
+            serde_json::json!({ "path": "Cargo.toml" }),
+        ));
+        assert!(!read.contains("[package]"), "{read}");
+        let listed = text(run("list_dir", serde_json::json!({ "path": "src" })));
+        assert!(!listed.contains("lib.rs"), "{listed}");
+        let grepped = text(run(
+            "grep",
+            serde_json::json!({ "pattern": "package", "path": "Cargo.toml" }),
+        ));
+        assert!(!grepped.contains("[package]"), "{grepped}");
+    }
+
+    /// The eval's policy and the memory guard read a relative `workdir` as a
+    /// folder of the workspace; the shell ran it from the process's directory,
+    /// so `{"command": "cat passwd", "workdir": "etc"}` was approved as a read
+    /// inside the workspace and read `/etc/passwd` under a unit run from `/`.
+    #[tokio::test]
+    async fn a_relative_workdir_is_a_folder_of_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/ws-marker.txt"), "").unwrap();
+        let ctx = ctx_at(dir.path());
+        let out = execute(
+            "bash",
+            serde_json::json!({ "command": "ls", "workdir": "src" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("bash returns text")
+        };
+        assert!(content.contains("ws-marker.txt"), "{content}");
+        assert!(!content.contains("lib.rs"), "{content}");
+    }
+
+    #[test]
+    fn a_relative_edit_proposes_a_change_to_the_workspace_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"ws\"\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        read_whole(&ctx, "Cargo.toml");
+        let out = edit(
+            &ctx,
+            serde_json::json!({
+                "path": "Cargo.toml", "old_string": "name = \"ws\"", "new_string": "name = \"x\"",
+            }),
+        )
+        .unwrap();
+        let ToolOutput::EditProposal { path, .. } = out else {
+            panic!("edit_file proposes")
+        };
+        assert_eq!(
+            std::path::Path::new(&path),
+            dir.path().join("Cargo.toml"),
+            "the proposal names the workspace file"
+        );
+    }
+
+    // ── edit_file edits exactly one place (lean-harness Phase 3b) ──
+    //
+    // The description promised one replacement while the code replaced every
+    // occurrence, so a short old_string silently changed places the model
+    // never looked at.
+
+    fn read_whole(ctx: &ToolContext, path: &str) {
+        futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": path }),
+            ctx,
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn an_old_string_that_matches_once_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "x = 1\ny = 2\n").unwrap();
+        read_whole(&ctx, &path);
+        let args =
+            serde_json::json!({ "path": path, "old_string": "y = 2", "new_string": "y = 3" });
+        assert!(edit(&ctx, args.clone()).is_ok());
+        apply(&ctx, args).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x = 1\ny = 3\n");
+    }
+
+    #[test]
+    fn an_old_string_that_matches_twice_is_refused_with_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "retry()\nwait()\nretry()\n").unwrap();
+        read_whole(&ctx, &path);
+        let args =
+            serde_json::json!({ "path": path, "old_string": "retry()", "new_string": "go()" });
+        let err = edit(&ctx, args.clone()).unwrap_err();
+        assert!(
+            err.contains(&format!("old_string occurs 2 times in {path}")),
+            "{err}"
+        );
+        assert!(err.contains("replace_all: true"), "{err}");
+        assert!(apply(&ctx, args).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "retry()\nwait()\nretry()\n"
+        );
+    }
+
+    #[test]
+    fn replace_all_replaces_every_occurrence() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path());
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "retry()\nwait()\nretry()\n").unwrap();
+        read_whole(&ctx, &path);
+        let args = serde_json::json!({
+            "path": path, "old_string": "retry()", "new_string": "go()", "replace_all": true,
+        });
+        match edit(&ctx, args.clone()).unwrap() {
+            ToolOutput::EditProposal {
+                unified_diff,
+                replace_all,
+                occurrences,
+                ..
+            } => {
+                assert_eq!(unified_diff.matches("+go()").count(), 2, "{unified_diff}");
+                // The approval card says how many places it rewrites.
+                assert!(replace_all);
+                assert_eq!(occurrences, 2);
+            }
+            other => panic!("expected a proposal, got {other:?}"),
+        }
+        apply(&ctx, args).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "go()\nwait()\ngo()\n"
+        );
+    }
+
+    /// The approval can come long after the proposal: the count is taken
+    /// again from the file on disk when the edit is applied.
+    #[test]
+    fn apply_counts_again_on_the_file_as_it_is_at_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.py").to_string_lossy().to_string();
+        std::fs::write(&path, "retry()\n").unwrap();
+        let diff = edit_file::preview(&edit_file::EditFileArgs {
+            path: path.clone(),
+            old_string: "retry()".into(),
+            new_string: "go()".into(),
+            replace_all: false,
+        })
+        .unwrap();
+        std::fs::write(&path, "retry()\nretry()\n").unwrap();
+        let err = edit_file::apply(&diff).unwrap_err();
+        assert!(err.contains("occurs 2 times"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "retry()\nretry()\n"
+        );
+    }
+
     // Existing tests (unchanged)
     /// A workspace with a spec directory and a source file.
     fn spec_workspace(name: &str, config: &str) -> std::path::PathBuf {
@@ -1644,6 +2523,41 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // Phase 9: the memory is written by `finalize_plan` alone. The guard is
+    // at the path level, so a model talked into it by a page it read gets
+    // the same refusal whether it edits or creates the file.
+    #[tokio::test]
+    async fn the_agent_cannot_edit_or_create_the_project_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ctx = ctx_at(root);
+        let memory = root.join(".claudinio/MEMORY.md");
+        let err = validate_editable_path(memory.to_str().unwrap(), &ctx).unwrap_err();
+        assert_eq!(err, crate::agent::gate_text::PROJECT_MEMORY_WRITE);
+        let created = execute(
+            "edit_file",
+            serde_json::json!({"path": memory.to_str().unwrap(), "old_string": "", "new_string": "- planted\n"}),
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            created.err().as_deref(),
+            Some(crate::agent::gate_text::PROJECT_MEMORY_WRITE)
+        );
+        std::fs::create_dir(root.join(".claudinio")).unwrap();
+        std::fs::write(&memory, "## Learned\n- real\n").unwrap();
+        assert!(validate_editable_path(memory.to_str().unwrap(), &ctx).is_err());
+        assert!(validate_editable_path(".claudinio/MEMORY.md", &ctx).is_err());
+        // Its neighbours stay ordinary files.
+        let plan = root.join(".claudinio/plans/p.md");
+        assert!(validate_editable_path(plan.to_str().unwrap(), &ctx).is_ok());
+        assert!(validate_editable_path(root.join("MEMORY.md").to_str().unwrap(), &ctx).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&memory).unwrap(),
+            "## Learned\n- real\n"
+        );
+    }
+
     #[test]
     fn the_guard_is_inert_without_a_workspace() {
         // Tests and one-off workflows must not be gated.
@@ -1654,6 +2568,7 @@ mod tests {
     #[test]
     fn test_validate_path_allows_within_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1668,6 +2583,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1684,6 +2600,7 @@ mod tests {
     #[test]
     fn test_validate_path_rejects_outside_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1698,6 +2615,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1714,6 +2632,7 @@ mod tests {
     #[test]
     fn test_validate_path_allows_when_no_workspace_set() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1728,6 +2647,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1739,9 +2659,99 @@ mod tests {
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
     }
 
+    /// The path a capped result's marker names for its full output.
+    fn saved_path_in(capped: &str) -> String {
+        let marker = crate::agent::result_cap::parse(capped).expect("a cap marker");
+        let path = marker
+            .hint
+            .strip_prefix("the full output is in ")
+            .and_then(|rest| rest.split(';').next())
+            .expect("the marker names the saved copy");
+        path.to_string()
+    }
+
+    // A capped grep, list_dir, MCP answer or subagent report sends the model to
+    // its saved copy with read_file or grep: both must reach it when a
+    // workspace is open, or the model is told the output exists and refused
+    // every time it asks (in a mode with no bash there is no other way).
+    #[tokio::test]
+    async fn the_saved_copy_a_capped_result_names_can_be_read_back_with_read_file_and_grep() {
+        let ws = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(ws.path().to_string_lossy().to_string()),
+            ..test_ctx()
+        };
+        // Its own text: the saved copy is named by its content, and removing
+        // it must not remove another test's.
+        let text: String = (0..400)
+            .map(|i| format!("src/file_{i}.rs:1: needle number {i} (read-back test)\n"))
+            .collect();
+        let capped = crate::agent::result_cap::cap(
+            crate::agent::result_cap::Call::tool("grep"),
+            &text,
+            2_000,
+        );
+        let path = saved_path_in(&capped);
+
+        let read = execute("read_file", serde_json::json!({ "path": path }), &ctx)
+            .await
+            .expect("read_file reaches the saved copy");
+        let ToolOutput::Text { content } = read else {
+            panic!("text")
+        };
+        assert!(content.contains("needle number 399"), "{content}");
+
+        let found = execute(
+            "grep",
+            serde_json::json!({ "pattern": "needle number 217", "path": path }),
+            &ctx,
+        )
+        .await
+        .expect("grep reaches the saved copy");
+        let ToolOutput::Text { content } = found else {
+            panic!("text")
+        };
+        assert!(content.contains("needle number 217"), "{content}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    // Reading the saved outputs is the one opening outside the workspace, and
+    // only for the harness's own files: not the folder's neighbours, not a
+    // link planted in it, not a `..` out of it, and never for writing.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_harness_saved_outputs_open_outside_the_workspace() {
+        let ctx = ToolContext {
+            workspace_root: Some("/home/user/project".into()),
+            ..test_ctx()
+        };
+        let saved = crate::agent::output_trim::save_full("result", "only-the-harness test output")
+            .expect("saved");
+        assert!(validate_read_path(&saved, &ctx).is_ok());
+        assert!(validate_path(&saved, &ctx).is_err(), "never writable");
+
+        let dir = std::path::Path::new(&saved).parent().unwrap();
+        let escape = dir.join("../../../etc/passwd");
+        assert!(validate_read_path(&escape.to_string_lossy(), &ctx).is_err());
+        let sibling = dir.parent().unwrap().join("elsewhere.log");
+        assert!(validate_read_path(&sibling.to_string_lossy(), &ctx).is_err());
+
+        let link = dir.join(format!("result-link-{}.log", std::process::id()));
+        std::fs::remove_file(&link).ok();
+        std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+        let linked = validate_read_path(&link.to_string_lossy(), &ctx);
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_file(&saved).ok();
+        assert!(
+            linked.is_err(),
+            "a link in the folder does not lead out of it"
+        );
+    }
+
     #[test]
     fn test_validate_read_path_allows_user_skill_dirs() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1756,6 +2766,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1793,6 +2804,7 @@ mod tests {
         std::fs::write(&file_path, "fn main() {}").unwrap();
 
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1807,6 +2819,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1831,6 +2844,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1845,6 +2859,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1873,6 +2888,7 @@ mod tests {
     #[test]
     fn test_execute_list_dir_rejects_outside_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1887,6 +2903,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1904,6 +2921,7 @@ mod tests {
     #[test]
     fn test_execute_read_file_rejects_outside_workspace() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1918,6 +2936,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1935,6 +2954,7 @@ mod tests {
     #[test]
     fn test_grep_defaults_to_workspace_root() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1949,6 +2969,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1965,6 +2986,7 @@ mod tests {
     fn test_bash_dispatch_echo() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -1979,6 +3001,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -1998,6 +3021,7 @@ mod tests {
     #[test]
     fn test_bash_dispatch_unknown_tool() {
         let ctx = ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             lsp_manager: None,
@@ -2012,6 +3036,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -2166,5 +3191,26 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    // Without a language server the cursor's symbol is read from the line at
+    // the `character` the model sent. That column is the model's number, so it
+    // can fall inside a character of an identifier like `ação`: the lookup
+    // must name the symbol there, never slice inside the character.
+    #[test]
+    fn a_heuristic_lookup_with_the_cursor_inside_a_multibyte_character_names_the_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "let ação = 1;\n").unwrap();
+        let file = path.to_str().unwrap();
+        // "let a" is bytes 0..5; 'ç' is bytes 5..7, so column 6 is inside it.
+        let text = |out: Result<ToolOutput, String>| match out.unwrap() {
+            ToolOutput::Text { content } => content,
+            other => panic!("text, got {other:?}"),
+        };
+        let def = text(heuristically_find_definition(file, 0, 6, &None));
+        assert!(def.ends_with("symbol at cursor: ção"), "{def}");
+        let refs = text(heuristically_find_references(file, 0, 6, &None));
+        assert!(refs.ends_with("references for ção"), "{refs}");
     }
 }

@@ -1,0 +1,64 @@
+id: hist-mtplx-engine-label
+title: The status bar names MTPLX instead of calling it llama.cpp (history, b13ade8)
+tags:
+- history
+- bugfix
+- frontend
+- typescript
+prompt: |
+  There are three local inference engines — llama.cpp, MLX and MTPLX — but the
+  local model indicator in the status bar (src/components/LocalModelIndicator.tsx)
+  branches two ways and shows "llama.cpp" when the engine is "mtplx".
+
+  Make it name each engine correctly. Put the engine type
+  (`"llamacpp" | "mlx" | "mtplx"`) and a shared label map `ENGINE_LABEL`
+  (llama.cpp / MLX / MTPLX) in a new module src/lib/localEngines.ts — not in
+  ipc.ts, because tests that mock the IPC module would blank the labels — and use
+  it in the indicator. Add a test to src/components/LocalModelIndicator.test.tsx.
+setup:
+  git:
+    repo: ../..
+    commit: 273db44305dbeda7f3de49168202f332a4d72170
+  symlinks:
+    node_modules: ../../node_modules
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+check: ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vitest run --config vitest.eval.config.ts
+oracle:
+  command: ./node_modules/.bin/vitest run --config vitest.eval.config.ts src/components/LocalModelIndicator.test.tsx
+  timeout_s: 300
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+  reference_files:
+  - src/components/LocalModelIndicator.test.tsx
+reference:
+  git_commit: b13ade8c5372242e44a777b7a1fe7d7fcc081c31
+max_rounds: 60

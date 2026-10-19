@@ -6,6 +6,8 @@ import { createVisibilityAwareInterval } from "../lib/visibility";
 
 export const TasksPanel: Component<{
   workspace: string;
+  /// Called with the task count each time the list is loaded or changed:
+  /// App collapses the column while there is nothing to show.
   onTasksChange?: (count: number) => void;
 }> = (props) => {
   const [tasks, setTasksState] = createSignal<TaskItem[]>([]);
@@ -113,6 +115,18 @@ export const TasksPanel: Component<{
     <div class="flex h-full w-10 flex-col items-center gap-1.5 border-l border-border-subtle bg-surface-1 py-2">
       {/* Task dots column */}
       <div class="flex flex-1 flex-col items-center gap-2 overflow-y-auto px-1">
+        {/* Single-step work gets no task list (lean-harness Phase 4): say so
+            rather than stand empty. */}
+        <Show when={tasks().length === 0}>
+          <div
+            data-tasks-empty
+            title={"No task list — single-step work"}
+            class="flex flex-col items-center gap-2 pt-1 text-ink-faint"
+          >
+            <Icon name="layers" class="h-3.5 w-3.5" />
+            <span class="text-[10px] tracking-wide [writing-mode:vertical-rl]">{"Single step"}</span>
+          </div>
+        </Show>
         <For each={tasks()}>
           {(task) => (
             <button

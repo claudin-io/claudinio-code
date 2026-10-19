@@ -133,6 +133,21 @@ impl HookCtx {
         self.set.hooks.iter().any(|h| h.event == event)
     }
 
+    /// Whether a `PreToolUse` or `PostToolUse` hook would fire for a call to
+    /// `native_tool`. Such a call is never run ahead of the loop: a hook's
+    /// deny or ask has to be heard before the call runs, and its feedback
+    /// after it, in the order the model asked.
+    pub fn watches_tool(&self, native_tool: &str) -> bool {
+        !self
+            .set
+            .select_tool(HookEvent::PreToolUse, native_tool)
+            .is_empty()
+            || !self
+                .set
+                .select_tool(HookEvent::PostToolUse, native_tool)
+                .is_empty()
+    }
+
     fn base(&self) -> payload::HookBase {
         payload::HookBase::new(&self.session_id, &self.transcript_path, &self.cwd)
     }

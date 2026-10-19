@@ -1,6 +1,7 @@
 use crate::agent::permissions;
 use crate::agent::provider::{self, AgentConfig, ContentBlock, Message, ToolDescription};
 use crate::agent::session::{self, AgentEvent, AnswerMap, ApprovalMap, SteeringCtl};
+use crate::agent::tool_batch;
 use crate::agent::tools::{self, ToolContext, ToolDef};
 use serde::Deserialize;
 use serde_json::Value;
@@ -39,6 +40,18 @@ pub struct SubagentSpec {
     pub goal: String,
     pub mode: SubagentMode,
     pub expected_output: Option<String>,
+    /// Set by `run_spawn_agents` for an explore subagent: its system prompt
+    /// asks for the three-section report the parent carries
+    /// (`delegation::EXPLORE_REPORT_FORMAT`). Never read from the model's
+    /// spec, and false for the compaction summarizer, which runs in explore
+    /// mode but has a report shape of its own.
+    #[serde(skip)]
+    pub reports_to_parent: bool,
+    /// A section of the session's living document this subagent writes
+    /// (lean-harness Phase 4b, decision D9). Claimed for it when it is
+    /// spawned; it gets `doc_write`/`doc_read` for that section only.
+    #[serde(default)]
+    pub section: Option<String>,
 }
 
 pub struct SubagentResult {
@@ -88,8 +101,11 @@ pub fn subagent_defs(
         .into_iter()
         .filter(|t| t.name != "spawn_agents" && t.name != "ask_user")
         .collect();
-    // A subagent runs on the builder model, so that model's surface is its own.
-    crate::agent::surface::retain_for(config.tool_surface_for(&config.builder_model), &mut tools);
+    // Never the three LSP tools (lean-harness Phase 2): a subagent defers
+    // nothing, so what it is given it carries on every round, and those three
+    // were called 12 times in 16,945. This is the Lean surface whatever the
+    // builder model's setting, which can only ever have asked for the same.
+    crate::agent::surface::retain_for(crate::agent::surface::ToolSurface::Lean, &mut tools);
     tools.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     match mode {
         // Explore subagents are read-only by design (no edit_file/bash);
@@ -159,6 +175,97 @@ pub(crate) fn normalize_spawn_input(tool_input: Value) -> Value {
     }
 }
 
+/// The stem prefix of a compaction summarizer's transcript in `<id>.sub/`
+/// (`compact-<n>.jsonl`), where a spawned subagent's is its parent tool-use
+/// id. Readers of the directory (`eval::metrics`, `scripts/session-stats.py`)
+/// tell the two apart by it.
+pub(crate) const COMPACTION: &str = "compact";
+
+/// A subagent's transcript file (`persist::subagent_transcript_path`): its
+/// turns and one `Usage` record per provider request.
+///
+/// Before this, a subagent kept nothing but a `subagent_run` summary in its
+/// parent's file, so the share of a task's tokens spent re-exploring in a
+/// fresh context — the cost the lean-harness plan's C3 is about — had never
+/// been measured. Best-effort like every other session write: a transcript
+/// that cannot be written never fails the subagent.
+pub(crate) struct Transcript {
+    store: crate::agent::persist::SessionStore,
+    /// `<parent_tool_use_id>-<index>`, stamped on each `Usage` record.
+    label: String,
+}
+
+impl Transcript {
+    /// Open the transcript of subagent `index` of the `spawn_agents` call
+    /// `parent_tool_use_id`, or `None` when the parent has no session file.
+    pub(crate) fn open(
+        ctx: &ToolContext,
+        parent_tool_use_id: &str,
+        index: usize,
+        subagent_id: &str,
+    ) -> Option<Self> {
+        let parent = std::path::Path::new(ctx.session_store_path.as_deref()?);
+        let path =
+            crate::agent::persist::subagent_transcript_path(parent, parent_tool_use_id, index);
+        Self::at(path, ctx, subagent_id)
+    }
+
+    /// Open a fresh transcript for a compaction's summarizer:
+    /// `<id>.sub/compact-<n>.jsonl`, `n` the first number not yet taken.
+    ///
+    /// The summarizer is a subagent like any other — fresh context, its own
+    /// provider requests, billed — and before it had a transcript its rounds
+    /// were written nowhere, so a run that compacted reported less than the
+    /// provider charged. A new file per attempt rather than one per
+    /// `Compacted` record, because a failed attempt writes no `Compacted` and
+    /// its requests were billed all the same.
+    pub(crate) fn open_compaction(ctx: &ToolContext, summarizer_id: &str) -> Option<Self> {
+        let parent = std::path::Path::new(ctx.session_store_path.as_deref()?);
+        let path = (0..)
+            .map(|n| crate::agent::persist::subagent_transcript_path(parent, COMPACTION, n))
+            .find(|p| !p.exists())?;
+        Self::at(path, ctx, summarizer_id)
+    }
+
+    fn at(path: std::path::PathBuf, ctx: &ToolContext, subagent_id: &str) -> Option<Self> {
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        let label = path.file_stem()?.to_str()?.to_string();
+        let store = crate::agent::persist::SessionStore { path };
+        store.try_append(&crate::agent::persist::SessionRecord::Meta {
+            session_id: subagent_id.to_string(),
+            created_at: crate::agent::persist::now_ms(),
+            workspace: ctx.workspace_root.clone(),
+        });
+        Some(Self { store, label })
+    }
+
+    fn turn(&self, message: &Message) {
+        self.store
+            .try_append(&crate::agent::persist::SessionRecord::Turn {
+                message: message.clone(),
+                ts: crate::agent::persist::now_ms(),
+            });
+    }
+
+    fn usage(&self, round: u32, model: &str, usage: Option<&provider::Usage>) {
+        self.store
+            .try_append(&crate::agent::persist::SessionRecord::usage(
+                round,
+                model,
+                usage,
+                Some(self.label.clone()),
+            ));
+    }
+}
+
+/// Record `message` in the transcript, if there is one, and push it.
+fn push_recorded(history: &mut Vec<Message>, transcript: Option<&Transcript>, message: Message) {
+    if let Some(t) = transcript {
+        t.turn(&message);
+    }
+    history.push(message);
+}
+
 /// Spawn 1-4 parallel subagents, each with their own fresh context.
 /// Returns a combined ContentBlock with each agent's report and aggregated
 /// token usage.
@@ -213,7 +320,13 @@ pub async fn run_spawn_agents(
         .collect();
 
     if specs.len() != agents.len() {
-        let msg = "failed to parse one or more agent specs".to_string();
+        let msg = format!(
+            "failed to parse one or more agent specs. Each spec needs a string 'name' (a short \
+             label) and 'goal' (self-contained instructions: paths, symbols, constraints, exact \
+             values), a 'mode' of 'explore' (read-only tools) or 'code' (can edit files and run \
+             bash, with approval), and optionally 'expected_output'. All of them go in ONE call: \
+             {{\"agents\": [{{\"name\", \"goal\", \"mode\", \"expected_output\"}}]}}, 1-{max} per call."
+        );
         let _ = event_tx.send(AgentEvent::ToolResult {
             tool_id: parent_tool_use_id.to_string(),
             tool_name: "spawn_agents".into(),
@@ -230,10 +343,18 @@ pub async fn run_spawn_agents(
 
     let parent_tx = event_tx.clone();
     let mut handles = Vec::new();
+    // Sections claimed for this call's subagents, by spec index: released
+    // when each one ends (`doc_session::release`).
+    let mut claimed: Vec<Option<(String, String)>> = vec![None; specs.len()];
+    // Every code subagent of the call starts from the same facts.
+    let brief = if specs.iter().any(|s| matches!(s.mode, SubagentMode::Code)) {
+        crate::agent::delegation::brief_for(ctx).await
+    } else {
+        None
+    };
 
     for (i, spec) in specs.iter().enumerate() {
         let subagent_id = format!("{session_id}:sub:{parent_tool_use_id}:{i}");
-        let spec = spec.clone();
         let cfg = config.clone();
         let ctx_clone = ctx.clone();
         let tx = wrap_channel(&parent_tx, &subagent_id);
@@ -252,9 +373,68 @@ pub async fn run_spawn_agents(
                 SubagentMode::Code => "code".into(),
             },
         });
+        // The timeline shows the goal the model wrote; the subagent gets it
+        // behind the brief (code) or with the report format (explore).
+        let mut spec = spec.clone();
+        match spec.mode {
+            SubagentMode::Explore => spec.reports_to_parent = true,
+            SubagentMode::Code => {
+                if let Some(brief) = &brief {
+                    spec.goal = format!("{brief}\n\n{}", spec.goal);
+                }
+            }
+        }
+        // A section is claimed before the subagent starts; one that cannot
+        // be (held by another agent, given twice in this call, no such id)
+        // means this subagent does not run.
+        if let Some(id) = spec.section.clone() {
+            let owner = crate::agent::doc_session::subagent_owner(&spec.name);
+            let twice = specs[..i].iter().any(|s| s.section.as_deref() == Some(&id));
+            let claim = if twice {
+                Err(format!("{id} is given to another agent in this call"))
+            } else {
+                crate::agent::doc_session::claim(ctx, &id, &owner)
+            };
+            match claim {
+                Ok(topic) => {
+                    crate::agent::doc_session::send_update(ctx, &parent_tx, session_id);
+                    spec.goal
+                        .push_str(&crate::agent::delegation::section_brief(&id, &topic));
+                    spec.reports_to_parent = false;
+                    claimed[i] = Some((id, owner));
+                }
+                Err(e) => {
+                    let report = format!("not started: {e}. Two agents cannot hold one section.");
+                    handles.push(tokio::spawn(async move {
+                        SubagentResult {
+                            status: "failed",
+                            report,
+                            rounds: 0,
+                            in_tok: 0,
+                            out_tok: 0,
+                            cost: 0.0,
+                            tools: Default::default(),
+                        }
+                    }));
+                    continue;
+                }
+            }
+        }
 
+        let transcript = Transcript::open(ctx, parent_tool_use_id, i, &subagent_id);
         handles.push(tokio::spawn(async move {
-            run_subagent(&cfg, &ctx_clone, &spec, &tx, &appr, &ans, &sid, &steer).await
+            run_subagent_recorded(
+                &cfg,
+                &ctx_clone,
+                &spec,
+                &tx,
+                &appr,
+                &ans,
+                &sid,
+                &steer,
+                transcript.as_ref(),
+            )
+            .await
         }));
     }
 
@@ -278,6 +458,10 @@ pub async fn run_spawn_agents(
         };
 
         let subagent_id = format!("{session_id}:sub:{parent_tool_use_id}:{i}");
+        if let Some((id, owner)) = &claimed[i] {
+            crate::agent::doc_session::release(ctx, id, owner);
+            crate::agent::doc_session::send_update(ctx, &parent_tx, session_id);
+        }
         let _ = parent_tx.send(AgentEvent::SubagentDone {
             subagent_id: subagent_id.clone(),
             status: result.status.into(),
@@ -311,12 +495,14 @@ pub async fn run_spawn_agents(
             crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
         }
 
+        // The timeline got the whole report above; the parent's context
+        // carries at most `REPORT_CHARS` of it.
         reports.push(format!(
             "## {} — {} ({} rounds)\n{}\n---",
             specs.get(i).map(|s| s.name.as_str()).unwrap_or("?"),
             result.status,
             result.rounds,
-            result.report
+            crate::agent::delegation::cap_report(&result.report)
         ));
     }
 
@@ -329,18 +515,37 @@ pub async fn run_spawn_agents(
     )
 }
 
-/// The system prompt every subagent runs with.
-fn subagent_system_prompt(workspace_root: Option<&str>, skills_hint: &str) -> String {
-    format!(
-        "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}\
-         \n\nLANGUAGE: any language is valid. Write your final report in the language of your goal.",
-        workspace_root.unwrap_or("(none)"),
-        skills_hint,
+/// The system prompt every subagent runs with; `report_format` adds the
+/// report shape a spawned explore subagent hands back.
+fn subagent_system_prompt(
+    workspace_root: Option<&str>,
+    skills_hint: &str,
+    report_format: bool,
+) -> String {
+    // Lean, like the tool list: the prompt must not send a subagent after an
+    // LSP tool it does not have (`subagent_defs`).
+    crate::agent::surface::prompt_for(
+        crate::agent::surface::ToolSurface::Lean,
+        format!(
+            "{SUBAGENT_SYSTEM_PROMPT}\n{TOOL_PREFERENCE}\n\nProject workspace root: {}.{}{}\
+             \n\nLANGUAGE: any language is valid. Write your final report in the language of your goal.",
+            workspace_root.unwrap_or("(none)"),
+            skills_hint,
+            if report_format {
+                crate::agent::delegation::EXPLORE_REPORT_FORMAT
+            } else {
+                ""
+            },
+        ),
     )
 }
 
 /// Run a single subagent: a simplified enxuto version of `run_workflow`.
-/// No steering injection, no persistence, no `AgentEvent::Done`.
+/// No steering injection, no `AgentEvent::Done`, and no transcript — see
+/// `run_subagent_recorded` for the one `spawn_agents` and the compaction
+/// summarizer keep. Test-only: every production subagent is a session's
+/// provider requests, and those are always recorded.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_subagent(
     config: &AgentConfig,
@@ -352,12 +557,36 @@ pub async fn run_subagent(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
 ) -> SubagentResult {
+    run_subagent_recorded(
+        config, ctx, spec, event_tx, approvals, answers, session_id, steering, None,
+    )
+    .await
+}
+
+/// `run_subagent`, writing its turns and per-request usage to `transcript`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_subagent_recorded(
+    config: &AgentConfig,
+    ctx: &ToolContext,
+    spec: &SubagentSpec,
+    event_tx: &Channel<AgentEvent>,
+    approvals: &ApprovalMap,
+    answers: &AnswerMap,
+    session_id: &str,
+    steering: &Arc<SteeringCtl>,
+    transcript: Option<&Transcript>,
+) -> SubagentResult {
     let mcp_defs = ctx
         .mcp
         .as_ref()
         .map(|m| m.cached_defs())
         .unwrap_or_default();
-    let tools = api_tools(spec.mode, &mcp_defs, config);
+    let mut tools = api_tools(spec.mode, &mcp_defs, config);
+    // The section grant (decision D9): the two tools for one section.
+    if spec.section.is_some() {
+        tools.push(tools::doc::doc_write_def().into());
+        tools.push(tools::doc::doc_read_def().into());
+    }
     let skill_mgr = crate::agent::skills::SkillManager::with_plugin_prefs(
         ctx.workspace_root.as_ref().map(std::path::PathBuf::from),
         &config.plugins,
@@ -369,7 +598,11 @@ pub async fn run_subagent(
     };
     let system = crate::agent::surface::prompt_for(
         config.tool_surface_for(&config.builder_model),
-        subagent_system_prompt(ctx.workspace_root.as_deref(), &skills_hint),
+        subagent_system_prompt(
+            ctx.workspace_root.as_deref(),
+            &skills_hint,
+            spec.reports_to_parent,
+        ),
     );
 
     // A subagent runs on the builder model whatever mode its parent is in, so
@@ -381,8 +614,18 @@ pub async fn run_subagent(
         &config.builder_model,
         prefix_tokens,
     );
+    let limits = crate::agent::budget::RunLimits::for_budget(&budget);
     let ctx = &ToolContext {
-        limits: Arc::new(crate::agent::budget::RunLimits::for_budget(&budget)),
+        limits: Arc::new(limits),
+        // Never the parent's `Main`: a subagent writes only a section it
+        // was given, and without one none.
+        doc_access: match &spec.section {
+            Some(id) => crate::agent::doc_session::DocAccess::Section {
+                id: id.clone(),
+                owner: crate::agent::doc_session::subagent_owner(&spec.name),
+            },
+            None => crate::agent::doc_session::DocAccess::None,
+        },
         ..ctx.clone()
     };
     if budget.prefix_overflows(prefix_tokens) {
@@ -397,17 +640,22 @@ pub async fn run_subagent(
         };
     }
 
-    let mut history = vec![Message {
-        role: "user".into(),
-        content: vec![ContentBlock::text(format!(
-            "Your goal:\n{goal}\n\nExpected output:\n{expected}",
-            goal = spec.goal,
-            expected = spec
-                .expected_output
-                .as_deref()
-                .unwrap_or("A concise report")
-        ))],
-    }];
+    let mut history = Vec::new();
+    push_recorded(
+        &mut history,
+        transcript,
+        Message {
+            role: "user".into(),
+            content: vec![ContentBlock::text(format!(
+                "Your goal:\n{goal}\n\nExpected output:\n{expected}",
+                goal = spec.goal,
+                expected = spec
+                    .expected_output
+                    .as_deref()
+                    .unwrap_or("A concise report")
+            ))],
+        },
+    );
 
     let mut total_in = 0u32;
     let mut total_out = 0u32;
@@ -497,8 +745,21 @@ pub async fn run_subagent(
             }
         }
         rounds += 1;
+        if let Some(t) = transcript {
+            t.usage(rounds, &config.builder_model, stream_output.usage.as_ref());
+        }
 
         if stream_output.interrupted {
+            // What the model said before the stop is part of the conversation
+            // the transcript records, as the main loop keeps it in its file.
+            if let Some(t) = transcript
+                && !assistant_text.is_empty()
+            {
+                t.turn(&Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::text(&assistant_text)],
+                });
+            }
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
                 let est =
                     session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
@@ -522,6 +783,19 @@ pub async fn run_subagent(
         }
 
         if stream_output.tool_uses.is_empty() {
+            // The terminal turn joins the history before SubagentStop fires,
+            // as it does in the main loop: a blocking hook's feedback answers
+            // this turn, and the model has to see the turn it is answering for.
+            if !assistant_text.is_empty() {
+                push_recorded(
+                    &mut history,
+                    transcript,
+                    Message {
+                        role: "assistant".into(),
+                        content: vec![ContentBlock::text(&assistant_text)],
+                    },
+                );
+            }
             // ── Hooks: SubagentStop ─────────────────────────────────────────
             //
             // Here rather than after `SubagentDone` in `run_spawn_agents`,
@@ -540,12 +814,16 @@ pub async fn run_subagent(
                 if let Some(reason) = out.blocking_message() {
                     stop_hook_active = true;
                     stop_hook_blocks += 1;
-                    history.push(Message {
-                        role: "user".into(),
-                        content: vec![ContentBlock::text(format!(
-                            "<hook-feedback>\n{reason}\n</hook-feedback>"
-                        ))],
-                    });
+                    push_recorded(
+                        &mut history,
+                        transcript,
+                        Message {
+                            role: "user".into(),
+                            content: vec![ContentBlock::text(format!(
+                                "<hook-feedback>\n{reason}\n</hook-feedback>"
+                            ))],
+                        },
+                    );
                     continue;
                 }
             }
@@ -583,23 +861,47 @@ pub async fn run_subagent(
             });
         }
 
-        for tool_use in &stream_output.tool_uses {
+        let tool_uses = &stream_output.tool_uses;
+        // Only what the subagent was offered runs: an explore subagent is
+        // read-only by its tool list, and Brain relies on that.
+        let offered = |name: &str| tools.iter().any(|t| t.name == name);
+        // Read-only calls run ahead together, as in the parent's loop.
+        let mut ready: Vec<Option<ContentBlock>> = vec![None; tool_uses.len()];
+        for (ti, tool_use) in tool_uses.iter().enumerate() {
+            if ready[ti].is_none() && !interrupt.load(Ordering::SeqCst) {
+                tool_batch::run_ahead(
+                    tool_uses,
+                    ti,
+                    &mut ready,
+                    |name, input| {
+                        offered(name)
+                            && tool_batch::runs_in_parallel(name, input, config, ctx, false)
+                    },
+                    tool_batch::executor(event_tx, session_id, ctx),
+                    interrupt,
+                    event_tx,
+                )
+                .await;
+            }
+            // Every call from here on is answered: a call a parallel run had
+            // already finished keeps its result, the rest are reported as not
+            // run.
             if interrupt.load(Ordering::SeqCst) {
-                let tid = tool_use.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let tname = tool_use.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                tool_assistant_blocks.push(ContentBlock::tool_use(
-                    tid,
-                    tname,
-                    tool_use.get("input").cloned().unwrap_or(Value::Null),
-                ));
-                let msg = "Interrupted by user — tool not executed.";
-                let _ = event_tx.send(AgentEvent::ToolResult {
-                    tool_id: tid.to_string(),
-                    tool_name: tname.to_string(),
-                    output: msg.into(),
-                    error: None,
-                });
-                tool_result_blocks.push(ContentBlock::tool_result(tid, msg));
+                tool_batch::answer_unrun(
+                    &tool_uses[ti..],
+                    &mut ready[ti..],
+                    "Interrupted by user — tool not executed.",
+                    event_tx,
+                    &mut tool_assistant_blocks,
+                    &mut tool_result_blocks,
+                    |name, input, block| {
+                        *tool_calls.entry(name.to_string()).or_default() += 1;
+                        if let ContentBlock::ToolResult { content, .. } = &block {
+                            loop_watch.record(name, input, &content.as_text());
+                        }
+                        crate::agent::prune::history_copy(&history, name, input, block)
+                    },
+                );
                 break;
             }
 
@@ -642,32 +944,46 @@ pub async fn run_subagent(
             };
 
             let perm = permissions::tool_permission(&tool_name);
-            let block =
-                if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_pre.verdict {
-                    session::deny_tool(
-                        &tool_name,
-                        &tool_use_id,
-                        &hook_input,
-                        reason,
-                        event_tx,
-                        session_id,
-                    )
-                } else {
-                    session::run_tool(
-                        &tool_name,
-                        &tool_use_id,
-                        tool_input,
-                        perm,
-                        event_tx,
-                        approvals,
-                        answers,
-                        session_id,
-                        ctx,
-                        config,
-                        &hook_pre.verdict,
-                    )
-                    .await
-                };
+            let block = if let Some(block) = ready[ti].take() {
+                block
+            } else if !offered(&tool_name) {
+                let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+                session::deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &hook_input,
+                    &format!(
+                        "{tool_name} is not available to this subagent. Your tools are: {}.",
+                        names.join(", ")
+                    ),
+                    event_tx,
+                    session_id,
+                )
+            } else if let crate::agent::hooks::PreToolVerdict::Deny { reason } = &hook_pre.verdict {
+                session::deny_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    &hook_input,
+                    reason,
+                    event_tx,
+                    session_id,
+                )
+            } else {
+                session::run_tool(
+                    &tool_name,
+                    &tool_use_id,
+                    tool_input,
+                    perm,
+                    event_tx,
+                    approvals,
+                    answers,
+                    session_id,
+                    ctx,
+                    config,
+                    &hook_pre.verdict,
+                )
+                .await
+            };
 
             if let Some(h) = &ctx.hooks
                 && !matches!(
@@ -704,33 +1020,45 @@ pub async fn run_subagent(
             ));
         }
 
-        history.push(Message {
-            role: "assistant".into(),
-            content: tool_assistant_blocks,
-        });
+        push_recorded(
+            &mut history,
+            transcript,
+            Message {
+                role: "assistant".into(),
+                content: tool_assistant_blocks,
+            },
+        );
         let calls = history.last().map_or(&[][..], |m| m.content.as_slice());
         session::fit_round(&mut tool_result_blocks, calls, budget.round_chars);
-        history.push(Message {
-            role: "user".into(),
-            content: tool_result_blocks,
-        });
+        push_recorded(
+            &mut history,
+            transcript,
+            Message {
+                role: "user".into(),
+                content: tool_result_blocks,
+            },
+        );
         if !hook_tool_feedback.is_empty() {
             let text = hook_tool_feedback.join("\n\n");
-            history.push(Message {
-                role: "user".into(),
-                content: vec![ContentBlock::text(format!(
-                    "<hook-feedback>\n{text}\n</hook-feedback>"
-                ))],
-            });
+            push_recorded(
+                &mut history,
+                transcript,
+                Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::text(format!(
+                        "<hook-feedback>\n{text}\n</hook-feedback>"
+                    ))],
+                },
+            );
         }
 
         // Subagents have no handoff and no summary: past the soft line their
         // old tool traffic is dropped verbatim-style (`agent::prune`), in
-        // memory — a subagent has no session file to record it in. Nothing
-        // gentler comes after this, so it runs as a last resort: by age even
-        // when Jev judged the history and that was not enough, and dropping
-        // the oldest calls outright when cutting their results is not enough
-        // either.
+        // memory — a subagent has no session file to record it in. The same
+        // ladder as the main session (lossless, then masking by age with Jev
+        // arbitrating the newest rounds' cuts), run as a last resort: nothing
+        // gentler comes after this, so the oldest calls are dropped outright
+        // when cutting their results is not enough.
         let limit = budget.soft;
         let estimate = session::estimate_tokens(&history, &system, &tools);
         if estimate >= limit {
@@ -819,40 +1147,77 @@ pub async fn run_subagent(
     }
 }
 
-/// The goal handed to the summarizer that writes a context handoff.
+/// The compaction summarizer's goal. Lean-harness Phase 6 made it a note
+/// written for recall: the old "under 600 words" summary in six loose sections
+/// dropped exactly what a successor then re-read files to recover — a path,
+/// the line, the error text, what the user said in their own words. Anthropic
+/// ("Effective context engineering for AI agents") tunes compaction prompts by
+/// maximizing recall first and only then trimming; Manus keeps the errors in,
+/// because a model that no longer sees a failure repeats it.
 fn summary_goal(jsonl_path: &str, tail_note: &str) -> String {
     format!(
-        "Read the conversation session file at `{}` and produce a structured handoff summary \
-         so the agent can seamlessly CONTINUE the work with your summary as its only memory \
-         of the earlier conversation. \
+        "Read the conversation session file at `{}` and write the note the agent will \
+         CONTINUE the work from: it becomes its only memory of the earlier conversation. \
          Use `read_file` to read it. The file is in JSONL format: one JSON object per line, each with a \
          `kind` field. Lines with kind=\"user\" contain the user's input in the `text` field. \
          Lines with kind=\"turn\" contain messages sent to/received from the AI — look for role=\"user\" \
-         and role=\"assistant\" messages in the `message.content` field. \
+         and role=\"assistant\" messages in the `message.content` field, and tool_result blocks for \
+         what each tool returned (errors included). \
          Lines with kind=\"steering\" contain mid-conversation guidance. \
-         Lines with kind=\"compacted\" contain previous compactions (summaries of older conversation) — \
+         Lines with kind=\"compacted\" contain previous compactions (notes on older conversation) — \
          fold their content into yours so nothing is lost. \
          Ignore kind=\"done\" and kind=\"status\" lines (token bookkeeping).\n{}\
          \n\
-         Structure the summary with exactly these sections:\n\
-         1. Task & intent — what the user is trying to achieve overall.\n\
-         2. Current state — what is done and what is in progress right now.\n\
-         3. Pending / next steps — an explicit TODO list to continue seamlessly.\n\
-         4. Files & symbols touched — file paths, key functions/structs, and what changed in each.\n\
-         5. Decisions & constraints — choices made, approaches rejected, user preferences.\n\
-         6. Learnings — errors hit, environment quirks, commands that work.\n\
+         Write the note in exactly these Markdown sections:\n\
+         ## Goal — what the user is trying to achieve, and what done looks like.\n\
+         ## Decisions (and why) — each choice made or approach rejected, with its reason.\n\
+         ## Files touched — one line per file as `path:lines`, with what was read or changed \
+         there and the key functions or types.\n\
+         ## What failed — every error, failing test or refused command that mattered, with the \
+         exact error text (quote it; do not paraphrase), and whether it is fixed.\n\
+         ## Left to do — the next steps, in order, specific enough to start on without re-reading.\n\
+         ## Constraints the user stated — quoted verbatim, one per line.\n\
          \n\
-         Weight recent messages most heavily — they describe the live state. \
-         Write in the language the conversation is in. Be specific and factual — exact file paths, function names, values. \
-         Keep it under 600 words. \
+         Recall first: put in everything the work still depends on — paths, line numbers, names, \
+         values, commands that worked, error messages — then cut only what is redundant or \
+         superseded. Keep the errors in. Target at most ~1,500 words; never drop a fact the next \
+         step needs to stay under it. Weight recent messages most heavily — they describe the \
+         live state. Write in the language the conversation is in. \
          Do NOT mention that you read a JSONL file or that you are a subagent — \
-         just write the handoff as a direct description of the work.",
+         just write the note as a direct description of the work.",
         jsonl_path, tail_note
     )
 }
 
-/// Spawn a summary subagent that reads the session JSONL file and produces a
-/// concise summary of the conversation. The subagent has a completely fresh
+/// The compaction summarizer: an explore subagent with [`summary_goal`],
+/// told how many turns stay verbatim after its note.
+fn summary_spec(jsonl_path: &str, tail_turns: usize) -> SubagentSpec {
+    let tail_note = if tail_turns > 0 {
+        format!(
+            "\nNote: the last {tail_turns} \"turn\" records of the file will be kept verbatim \
+             in the live context alongside your note, so do NOT waste words re-describing \
+             those final exchanges — cover everything BEFORE them.\n"
+        )
+    } else {
+        String::new()
+    };
+    SubagentSpec {
+        name: "summarizer".into(),
+        goal: summary_goal(jsonl_path, &tail_note),
+        mode: SubagentMode::Explore,
+        expected_output: Some(
+            "A Markdown note in six sections (## Goal, ## Decisions (and why), ## Files touched, \
+             ## What failed, ## Left to do, ## Constraints the user stated), recall first, at most \
+             ~1,500 words"
+                .into(),
+        ),
+        reports_to_parent: false,
+        section: None,
+    }
+}
+
+/// Spawn a summary subagent that reads the session JSONL file and writes the
+/// compaction note ([`summary_goal`]). The subagent has a completely fresh
 /// context — zero knowledge of the current conversation.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_summary_agent(
@@ -866,28 +1231,19 @@ pub async fn run_summary_agent(
     session_id: &str,
     steering: &Arc<SteeringCtl>,
 ) -> Result<String, String> {
-    let tail_note = if tail_turns > 0 {
-        format!(
-            "\nNote: the last {tail_turns} \"turn\" records of the file will be kept verbatim \
-             in the live context alongside your summary, so do NOT waste words re-describing \
-             those final exchanges — summarize everything BEFORE them.\n"
-        )
-    } else {
-        String::new()
-    };
-    let spec = SubagentSpec {
-        name: "summarizer".into(),
-        goal: summary_goal(jsonl_path, &tail_note),
-        mode: SubagentMode::Explore,
-        expected_output: Some(
-            "A structured handoff summary (sections: task & intent, current state, pending/next \
-             steps, files & symbols, decisions & constraints, learnings) under 600 words"
-                .into(),
-        ),
-    };
+    let spec = summary_spec(jsonl_path, tail_turns);
 
-    let result = run_subagent(
-        config, ctx, &spec, event_tx, approvals, answers, session_id, steering,
+    let transcript = Transcript::open_compaction(ctx, &format!("{session_id}-summarizer"));
+    let result = run_subagent_recorded(
+        config,
+        ctx,
+        &spec,
+        event_tx,
+        approvals,
+        answers,
+        session_id,
+        steering,
+        transcript.as_ref(),
     )
     .await;
 
@@ -910,7 +1266,7 @@ mod tests {
     // never be told to think, call tools or report in one language only.
     #[test]
     fn subagent_prompts_do_not_impose_a_language() {
-        let system = subagent_system_prompt(Some("/ws"), "");
+        let system = subagent_system_prompt(Some("/ws"), "", false);
         let goal = summary_goal("/ws/s.jsonl", "");
         for text in [&system, &goal] {
             assert!(!text.contains("English ONLY"), "got: {text}");
@@ -918,34 +1274,117 @@ mod tests {
         }
     }
 
-    // A subagent runs on the builder model: when that model is lean, so is it —
-    // in what it is offered and in what its prompt sends it after.
+    // Lean-harness Phase 6: the compaction note is written for recall first
+    // (Anthropic, "Effective context engineering": maximize recall, then trim
+    // redundancy), keeps the errors in (Manus), and is structured so the
+    // successor finds what it needs without re-reading files.
     #[test]
-    fn a_lean_builder_model_makes_its_subagents_lean() {
-        use crate::agent::surface::{LEAN_DROPPED, ToolSurface, prompt_for};
-        let mut config = AgentConfig::default();
-        let full = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &config);
-        config
-            .tool_surface
-            .insert(config.builder_model.clone(), "lean".into());
-        for mode in [SubagentMode::Explore, SubagentMode::Code] {
-            let defs = subagent_defs(mode, &[], MAX_PARALLEL_AGENTS, &config);
-            for tool in LEAN_DROPPED {
-                assert!(!defs.iter().any(|d| d.name == tool), "{tool}");
-            }
-            assert!(defs.iter().any(|d| d.name == "semantic_search"));
+    fn the_compaction_note_asks_for_recall_first_in_six_sections() {
+        let spec = summary_spec("/ws/s.jsonl", 0);
+        let goal = &spec.goal;
+        for section in [
+            "## Goal",
+            "## Decisions",
+            "## Files touched",
+            "## What failed",
+            "## Left to do",
+            "## Constraints the user stated",
+        ] {
+            assert!(goal.contains(section), "missing {section}: {goal}");
         }
-        // Setting it on the brain model alone changes nothing for a subagent.
-        let mut brain_only = AgentConfig::default();
-        brain_only
-            .tool_surface
-            .insert(brain_only.brain_model.clone(), "lean".into());
-        let defs = subagent_defs(SubagentMode::Code, &[], MAX_PARALLEL_AGENTS, &brain_only);
-        assert_eq!(defs.len(), full.len());
+        assert!(goal.contains("path:lines"), "{goal}");
+        assert!(goal.contains("exact error text"), "{goal}");
+        assert!(goal.contains("verbatim"), "{goal}");
+        assert!(goal.contains("1,500 words"), "{goal}");
+        assert!(
+            !goal.contains("600 words"),
+            "the old cap lost what recall needs"
+        );
+        let expected = spec.expected_output.as_deref().unwrap_or_default();
+        assert!(!expected.contains("600 words"), "{expected}");
+        assert!(expected.contains("## What failed"), "{expected}");
+        assert!(!spec.reports_to_parent);
+        assert!(!goal.contains("kept verbatim in the live context"));
+        let with_tail = summary_spec("/ws/s.jsonl", 3);
+        assert!(with_tail.goal.contains("the last 3 \"turn\" records"));
+    }
 
-        let prompt = subagent_system_prompt(Some("/ws"), "");
-        assert!(prompt.contains("symbol_lookup") && prompt.contains("LSP tools"));
-        let lean = prompt_for(ToolSurface::Lean, prompt);
+    // Phase 2 of the lean-harness plan: subagents defer nothing (a fresh
+    // context has no earlier load to build on, and a load round would be a
+    // second round trip in every one of them), but the three LSP tools —
+    // 12 calls in 16,945 measured — leave their list and their prompt. The
+    // index searches stay: they are what an explorer reads with.
+    #[test]
+    fn subagents_never_get_the_three_lsp_tools_but_keep_the_index_searches() {
+        use crate::agent::surface::LEAN_DROPPED;
+        let config = AgentConfig::default();
+        for (label, mode) in [
+            ("explore", SubagentMode::Explore),
+            ("code", SubagentMode::Code),
+        ] {
+            let defs = subagent_defs(mode, &[], MAX_PARALLEL_AGENTS, &config);
+            let has = |n: &str| defs.iter().any(|d| d.name == n);
+            for tool in LEAN_DROPPED {
+                assert!(!has(tool), "{label} has {tool}");
+                assert!(
+                    defs.iter().all(|d| !d.description.contains(tool)),
+                    "{label}: a description still points at {tool}"
+                );
+            }
+            for keep in ["file_outline", "code_search", "semantic_search", "skills"] {
+                assert!(has(keep), "{label} lacks {keep}");
+            }
+            assert!(!has("load_tools"), "{label} defers nothing");
+        }
+        let prompt = subagent_system_prompt(Some("/ws"), "", false);
+        for tool in LEAN_DROPPED {
+            assert!(!prompt.contains(tool), "the prompt still names {tool}");
+        }
+        assert!(prompt.contains("file_outline") && prompt.contains("semantic_search"));
+    }
+
+    // A subagent is lean whatever surface the user set for the builder model
+    // it runs on (Phase 2): the three LSP tools are never offered, and the
+    // index searches always are — a fresh context has nothing to load them on.
+    #[test]
+    fn a_subagent_is_lean_whatever_surface_its_builder_model_has() {
+        use crate::agent::surface::{LEAN_DROPPED, ToolSurface, prompt_for};
+        let names = |config: &AgentConfig, mode| -> Vec<String> {
+            subagent_defs(mode, &[], MAX_PARALLEL_AGENTS, config)
+                .into_iter()
+                .map(|d| d.name)
+                .collect()
+        };
+        let default = AgentConfig::default();
+        let mut configs = Vec::new();
+        for (on_brain, surface) in [(false, "full"), (false, "lean"), (true, "lean")] {
+            let mut config = AgentConfig::default();
+            let model = if on_brain {
+                config.brain_model.clone()
+            } else {
+                config.builder_model.clone()
+            };
+            config.tool_surface.insert(model, surface.into());
+            configs.push(config);
+        }
+        for mode in [SubagentMode::Explore, SubagentMode::Code] {
+            let expected = names(&default, mode);
+            for tool in LEAN_DROPPED {
+                assert!(!expected.iter().any(|n| n == tool), "{tool}");
+            }
+            for tool in ["semantic_search", "code_search", "file_outline"] {
+                assert!(expected.iter().any(|n| n == tool), "{tool}");
+            }
+            for config in &configs {
+                assert_eq!(names(config, mode), expected, "{:?}", config.tool_surface);
+            }
+        }
+
+        // The prompt is built lean since Phase 2; the rewrite is what does it.
+        assert!(TOOL_PREFERENCE.contains("symbol_lookup") && TOOL_PREFERENCE.contains("LSP tools"));
+        let prompt = subagent_system_prompt(Some("/ws"), "", false);
+        let lean = prompt_for(ToolSurface::Lean, prompt.clone());
+        assert_eq!(lean, prompt);
         for tool in LEAN_DROPPED {
             assert!(!lean.contains(tool), "the lean prompt still names {tool}");
         }
@@ -1111,6 +1550,33 @@ pub(crate) mod scripted_model {
         /// Several calls in one turn, as a model reading files in parallel makes.
         Tools(Vec<(&'static str, Value)>),
         Text(&'static str),
+        /// The inner reply, sent after this many milliseconds: a slow
+        /// provider, for tests about what happens while a request is in flight.
+        Delayed(u64, Box<Reply>),
+        /// This text, and then nothing: the response is never finished and the
+        /// connection stays open, as a provider mid-generation does when the
+        /// user presses stop.
+        Hang(&'static str),
+        /// `Hang`, with a thinking delta after the text: the client reports
+        /// it as a `Thinking` event, which can only come once the text before
+        /// it was read — a test's signal that the words are in.
+        HangSignalled(&'static str),
+        /// An HTTP error: this status and this JSON body, no stream. A
+        /// provider refusing the request outright.
+        Status(u16, &'static str),
+    }
+
+    /// Every model a scripted run can call — the builder, and the Brain the
+    /// completion judge and Brain-mode turns run on — is served by the stub at
+    /// `base`. A test that left one on its default would send its requests to
+    /// the real provider and pass only because that call fails open.
+    pub fn assert_only_the_stub_is_called(
+        config: &crate::agent::provider::AgentConfig,
+        base: &str,
+    ) {
+        for model in [&config.builder_model, &config.brain_model] {
+            assert_eq!(config.resolve_provider(model).base_url, base, "{model}");
+        }
     }
 
     fn sse(event: &str, data: Value) -> String {
@@ -1135,6 +1601,8 @@ pub(crate) mod scripted_model {
             json!({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 20}}),
         );
         match reply {
+            Reply::Delayed(_, inner) => return render(inner, n),
+            Reply::Status(_, body) => return body.to_string(),
             Reply::Tool { name, input } => {
                 out += &tool_use(0, name, input);
                 out += &stop;
@@ -1144,6 +1612,19 @@ pub(crate) mod scripted_model {
                     out += &tool_use(index, name, input);
                 }
                 out += &stop;
+            }
+            Reply::Hang(text) => {
+                out += &sse(
+                    "content_block_delta",
+                    json!({"index": 0, "delta": {"type": "text_delta", "text": text}}),
+                );
+            }
+            Reply::HangSignalled(text) => {
+                out += &render(&Reply::Hang(text), n);
+                out += &sse(
+                    "content_block_delta",
+                    json!({"index": 1, "delta": {"type": "thinking_delta", "thinking": "."}}),
+                );
             }
             Reply::Text(text) => {
                 out += &sse(
@@ -1161,7 +1642,8 @@ pub(crate) mod scripted_model {
 
     /// Serve `script` one reply per request (the last one repeats), speaking
     /// the Anthropic streaming protocol. Returns the base URL and the size in
-    /// bytes of every request body received, in order.
+    /// bytes of every conversation request body received, in order (the
+    /// completion judge's requests are answered, not recorded).
     pub async fn spawn(script: Vec<Reply>) -> (String, Arc<Mutex<Vec<usize>>>) {
         let (base, sizes, _) = spawn_recording(script).await;
         (base, sizes)
@@ -1171,6 +1653,17 @@ pub(crate) mod scripted_model {
     /// model was sent rather than how much of it.
     pub async fn spawn_recording(
         script: Vec<Reply>,
+    ) -> (String, Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<String>>>) {
+        spawn_with_usage(script, None).await
+    }
+
+    /// `spawn_recording`, with every reply opening on a `message_start` that
+    /// carries `usage` — the shape Anthropic reports input and cache tokens in.
+    /// Opt-in, because a reported input size feeds the context meter and would
+    /// move every test that measures it.
+    pub async fn spawn_with_usage(
+        script: Vec<Reply>,
+        usage: Option<Value>,
     ) -> (String, Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1209,16 +1702,73 @@ pub(crate) mod scripted_model {
                         break declared;
                     }
                 };
-                seen.lock().unwrap().push(body_len);
                 let body_start = raw.len().saturating_sub(body_len);
-                kept.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&raw[body_start..]).into_owned());
-                let n = next.fetch_add(1, Ordering::SeqCst);
-                let reply = script.get(n).or(script.last()).expect("a script");
-                let body = render(reply, n);
+                let request = String::from_utf8_lossy(&raw[body_start..]);
+                // A non-streaming request is the completion judge asking
+                // whether a terminal turn is finished. It gets a plain JSON
+                // "DONE", does not consume a scripted reply and is not
+                // recorded — the script is the conversation, and the judge is
+                // not part of it.
+                let judge = request.contains("\"stream\":false");
+                if !judge {
+                    seen.lock().unwrap().push(body_len);
+                    kept.lock().unwrap().push(request.clone().into_owned());
+                }
+                let (content_type, body) = if judge {
+                    let mut message = json!({"content": [{"type": "text", "text": "DONE"}]});
+                    if let Some(usage) = &usage {
+                        message["usage"] = usage.clone();
+                    }
+                    ("application/json", message.to_string())
+                } else {
+                    let n = next.fetch_add(1, Ordering::SeqCst);
+                    let reply = script.get(n).or(script.last()).expect("a script");
+                    // A delayed reply is the inner one, late: a delayed hang
+                    // still hangs.
+                    let reply = match reply {
+                        Reply::Delayed(ms, inner) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+                            &**inner
+                        }
+                        other => other,
+                    };
+                    let mut body = render(reply, n);
+                    if let Some(usage) = &usage {
+                        body = sse(
+                            "message_start",
+                            json!({"message": {"role": "assistant", "usage": usage}}),
+                        ) + &body;
+                    }
+                    if let Reply::Status(code, body) = reply {
+                        let resp = format!(
+                            "HTTP/1.1 {code} Error\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        let _ = socket.flush().await;
+                        continue;
+                    }
+                    if let Reply::Hang(_) | Reply::HangSignalled(_) = reply {
+                        // Promise more than is sent, then hold the line.
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                             Content-Length: {}\r\n\r\n",
+                            body.len() + 1_000_000
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        let _ = socket.write_all(body.as_bytes()).await;
+                        let _ = socket.flush().await;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            drop(socket);
+                        });
+                        continue;
+                    }
+                    ("text/event-stream", body)
+                };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
@@ -1246,6 +1796,7 @@ mod context_budget_tests {
     fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
             builder_model: "stub/m".into(),
+            brain_model: "stub/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -1265,6 +1816,12 @@ mod context_budget_tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn the_scripted_config_calls_no_model_but_the_stub() {
+        let base = "http://127.0.0.1:9";
+        super::scripted_model::assert_only_the_stub_is_called(&config_for(base, None), base);
     }
 
     /// A workspace holding one file far larger than a small window.
@@ -1307,6 +1864,8 @@ mod context_budget_tests {
             goal: "read the file".into(),
             mode: SubagentMode::Explore,
             expected_output: None,
+            reports_to_parent: false,
+            section: None,
         };
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
         run_subagent(
@@ -1320,6 +1879,43 @@ mod context_budget_tests {
             &Arc::new(SteeringCtl::new()),
         )
         .await
+    }
+
+    /// An explore subagent is read-only by its tool list, and Brain spawns
+    /// only those; the loop ran whatever name the model sent, so an `echo >`
+    /// (allowlisted by prefix) wrote a file unasked and `finalize_plan` wrote
+    /// the plan log (final branch review). A tool it was not offered is refused.
+    #[tokio::test]
+    async fn an_explore_subagent_runs_no_tool_it_was_not_offered() {
+        let (root, _file) = workspace("unoffered");
+        let target = root.join("pwned.txt");
+        let (base, _, bodies) = super::scripted_model::spawn_recording(vec![
+            Reply::Tool {
+                name: "bash",
+                input: serde_json::json!({
+                    "command": format!("echo pwned > {}", target.display()),
+                }),
+            },
+            Reply::Tool {
+                name: "edit_file",
+                input: serde_json::json!({
+                    "path": target.to_string_lossy(), "old_string": "", "new_string": "x\n",
+                }),
+            },
+            Reply::Text("done"),
+        ])
+        .await;
+        let result = run(&config_for(&base, None), &root).await;
+        assert_eq!(result.status, "completed", "{}", result.report);
+        assert!(!target.exists(), "an unoffered tool wrote a file");
+        let bodies = bodies.lock().unwrap().clone();
+        assert!(bodies[1].contains("bash is not available"), "{}", bodies[1]);
+        assert!(
+            bodies[2].contains("edit_file is not available"),
+            "{}",
+            bodies[2]
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Reading the same lines twice: the second request carries the file, the
@@ -1396,6 +1992,95 @@ mod context_budget_tests {
         }
     }
 
+    // An explore subagent is where reading happens; its reads in one turn
+    // are taken as one parallel run as the parent's are — all announced
+    // before any answers — and come back in the order asked. The overlap
+    // itself is measured in `tool_batch`'s tests.
+    #[tokio::test]
+    async fn a_subagents_reads_in_one_turn_are_announced_together_and_answered_in_order() {
+        let (root, file) = workspace("together");
+        let dir = root.to_string_lossy().to_string();
+        let (base, _, bodies) = super::scripted_model::spawn_recording(vec![
+            Reply::Tools(vec![
+                (
+                    "read_file",
+                    serde_json::json!({ "path": file, "start_line": 1, "end_line": 50 }),
+                ),
+                ("list_dir", serde_json::json!({ "path": dir })),
+                (
+                    "read_file",
+                    serde_json::json!({ "path": file, "start_line": 51, "end_line": 99 }),
+                ),
+            ]),
+            Reply::Text("read it"),
+        ])
+        .await;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let events: Channel<AgentEvent> = {
+            let seen = seen.clone();
+            Channel::new(
+                move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
+                    if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                        && let Ok(event) = serde_json::from_str::<AgentEvent>(json)
+                    {
+                        seen.lock().unwrap().push(event);
+                    }
+                    Ok(())
+                },
+            )
+        };
+        let ctx = ToolContext {
+            workspace_root: Some(dir.clone()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let spec = SubagentSpec {
+            name: "reader".into(),
+            goal: "read the file".into(),
+            mode: SubagentMode::Explore,
+            expected_output: None,
+            reports_to_parent: false,
+            section: None,
+        };
+        let result = run_subagent(
+            &config_for(&base, None),
+            &ctx,
+            &spec,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "test-session",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        assert_eq!(result.status, "completed", "{}", result.report);
+
+        let kinds: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCall { tool_id, .. } => Some(format!("call {tool_id}")),
+                AgentEvent::ToolResult { tool_id, .. } => Some(format!("result {tool_id}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds[..3],
+            ["call tu_0_0", "call tu_0_1", "call tu_0_2"],
+            "all three announced before any answered: {kinds:?}"
+        );
+        assert_eq!(kinds.len(), 6, "{kinds:?}");
+        let second: Value = serde_json::from_str(&bodies.lock().unwrap()[1]).unwrap();
+        let answered: Vec<&str> = second["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["tool_use_id"].as_str())
+            .collect();
+        assert_eq!(answered, ["tu_0_0", "tu_0_1", "tu_0_2"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Tokens of the largest request sent, by the session's own chars/3 rule.
     fn largest_request_tokens(sizes: &StdMutex<Vec<usize>>) -> usize {
         sizes.lock().unwrap().iter().copied().max().unwrap_or(0) / 3
@@ -1454,6 +2139,8 @@ mod context_budget_tests {
             goal: "x".repeat(120_000),
             mode: SubagentMode::Explore,
             expected_output: None,
+            reports_to_parent: false,
+            section: None,
         };
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
         let result = run_subagent(
@@ -1471,5 +2158,1084 @@ mod context_budget_tests {
         assert!(result.report.contains("32k"), "{}", result.report);
         assert!(sizes.lock().unwrap().is_empty(), "nothing was sent");
         std::fs::remove_dir_all(root).ok();
+    }
+}
+
+/// A subagent's own transcript: the turns and per-request usage that used to
+/// vanish when it returned, so the delegation tax can finally be measured.
+#[cfg(test)]
+mod transcript_tests {
+    use super::scripted_model::{Reply, spawn_with_usage};
+    use super::*;
+    use crate::agent::persist::{SessionRecord, SessionStore, load_records};
+    use crate::agent::provider::ProviderEntry;
+
+    fn config_for(base_url: &str) -> AgentConfig {
+        let mut config = AgentConfig {
+            builder_model: "stub/m".into(),
+            brain_model: "stub/m".into(),
+            ..AgentConfig::default()
+        };
+        config.providers.insert(
+            "stub".into(),
+            ProviderEntry {
+                api_key: "k".into(),
+                base_url: base_url.into(),
+                protocol: "anthropic".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("m".to_string(), 8_192u32)].into_iter().collect(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window: None,
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn the_scripted_config_calls_no_model_but_the_stub() {
+        let base = "http://127.0.0.1:9";
+        super::scripted_model::assert_only_the_stub_is_called(&config_for(base), base);
+    }
+
+    #[tokio::test]
+    async fn a_subagent_writes_its_turns_and_usage_beside_the_session() {
+        let ws = std::env::temp_dir().join(format!(
+            "claudinio-transcript-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let file = ws.join("notes.txt");
+        std::fs::write(&file, "the answer is 42\n").unwrap();
+        let ws_str = ws.to_string_lossy().to_string();
+        let store = SessionStore::create("parent", Some(&ws_str)).unwrap();
+
+        let (base, _, _) = spawn_with_usage(
+            vec![
+                Reply::Tool {
+                    name: "read_file",
+                    input: serde_json::json!({ "path": file.to_string_lossy() }),
+                },
+                Reply::Text("the answer is 42"),
+            ],
+            Some(serde_json::json!({"input_tokens": 50, "cache_read_input_tokens": 700})),
+        )
+        .await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str.clone()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let (_, _, _, _) = run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_parent",
+            serde_json::json!({"agents": [
+                {"name": "reader", "goal": "find the answer", "mode": "explore"}
+            ]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_parent", 0);
+        assert_eq!(
+            path,
+            store
+                .path
+                .parent()
+                .unwrap()
+                .join("parent.sub")
+                .join("tu_parent-0.jsonl")
+        );
+        let records = load_records(&path).expect("a transcript file");
+        let kinds: Vec<String> = records
+            .iter()
+            .map(|r| {
+                serde_json::to_value(r).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["meta", "turn", "usage", "turn", "turn", "usage", "turn"],
+            "goal, then per round: usage, the model's turn, the tool results"
+        );
+        let history = crate::agent::persist::history_from_records(&records);
+        assert_eq!(history.len(), 4);
+        assert!(format!("{:?}", history[0]).contains("find the answer"));
+        assert!(format!("{:?}", history[2]).contains("the answer is 42"));
+        assert!(format!("{:?}", history[3]).contains("the answer is 42"));
+        for r in &records {
+            if let SessionRecord::Usage {
+                subagent,
+                cache_read_tokens,
+                model,
+                ..
+            } = r
+            {
+                assert_eq!(subagent.as_deref(), Some("tu_parent-0"));
+                assert_eq!(*cache_read_tokens, 700);
+                assert_eq!(model, "stub/m");
+            }
+        }
+        // The parent file keeps its summary record and gains no subagent turns.
+        let parent = load_records(&store.path).unwrap();
+        assert!(
+            parent
+                .iter()
+                .any(|r| matches!(r, SessionRecord::SubagentRun { .. }))
+        );
+        assert!(
+            !parent
+                .iter()
+                .any(|r| matches!(r, SessionRecord::Turn { .. }))
+        );
+
+        // And the session list still shows one conversation, not the transcript.
+        let listed = crate::agent::persist::list_sessions(Some(&ws_str)).unwrap();
+        assert_eq!(listed.len(), 0, "the parent has no user turn of its own");
+        store
+            .append(&SessionRecord::User {
+                text: "go".into(),
+                ts: 1,
+            })
+            .unwrap();
+        let listed = crate::agent::persist::list_sessions(Some(&ws_str)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "parent");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    fn kinds_and_texts(path: &std::path::Path) -> Vec<String> {
+        load_records(path)
+            .expect("a transcript file")
+            .iter()
+            .map(|r| match r {
+                SessionRecord::Turn { message, .. } => {
+                    let text: String = message
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    // The goal message is wrapped in boilerplate; keep the goal.
+                    let text = text
+                        .strip_prefix("Your goal:\n")
+                        .and_then(|t| t.split("\n\n").next())
+                        .unwrap_or(&text);
+                    format!("{}:{}", message.role, text)
+                }
+                other => serde_json::to_value(other).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            })
+            .collect()
+    }
+
+    fn session_in(tag: &str) -> (std::path::PathBuf, String, SessionStore) {
+        let ws = std::env::temp_dir().join(format!(
+            "claudinio-transcript-{tag}-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws_str = ws.to_string_lossy().to_string();
+        let store = SessionStore::create("parent", Some(&ws_str)).unwrap();
+        (ws, ws_str, store)
+    }
+
+    // Stop pressed while a subagent's reads run together: the reads already
+    // under way finish, keep their results and count as calls made; the ones
+    // the pause kept from starting are answered as not run. Every call of the
+    // turn gets exactly one result, in the transcript and on the timeline.
+    #[tokio::test]
+    async fn a_pause_during_a_subagents_parallel_reads_answers_every_call_once() {
+        let (ws, ws_str, store) = session_in("parallel-pause");
+        let file = ws.join("notes.txt");
+        std::fs::write(&file, "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+        let path = file.to_string_lossy().to_string();
+        let reads: Vec<(&str, Value)> = (1..=6)
+            .map(|line| {
+                (
+                    "read_file",
+                    serde_json::json!({ "path": path, "start_line": line, "end_line": line }),
+                )
+            })
+            .collect();
+        let (base, _, _) =
+            spawn_with_usage(vec![Reply::Tools(reads), Reply::Text("unreachable")], None).await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let steering = Arc::new(SteeringCtl::new());
+        let results = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let events: Channel<AgentEvent> = {
+            let (results, stop) = (results.clone(), steering.interrupt.clone());
+            Channel::new(
+                move |body: tauri::ipc::InvokeResponseBody| -> tauri::Result<()> {
+                    if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                        && let Ok(AgentEvent::ToolResult {
+                            tool_id, output, ..
+                        }) = serde_json::from_str::<AgentEvent>(json)
+                    {
+                        // The first read to finish is when the user stops.
+                        stop.store(true, Ordering::SeqCst);
+                        results.lock().unwrap().push((tool_id, output));
+                    }
+                    Ok(())
+                },
+            )
+        };
+        let spec = SubagentSpec {
+            name: "reader".into(),
+            goal: "read the notes".into(),
+            mode: SubagentMode::Explore,
+            expected_output: None,
+            reports_to_parent: false,
+            section: None,
+        };
+        let transcript = Transcript::open(&ctx, "tu_par", 0, "sub");
+        let result = run_subagent_recorded(
+            &config,
+            &ctx,
+            &spec,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &steering,
+            transcript.as_ref(),
+        )
+        .await;
+        assert_eq!(result.status, "interrupted", "{}", result.report);
+
+        const NOT_RUN: &str = "Interrupted by user — tool not executed.";
+        let ids: Vec<String> = (0..6).map(|k| format!("tu_0_{k}")).collect();
+        let mut reported = results.lock().unwrap().clone();
+        reported.sort();
+        assert_eq!(
+            reported
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
+            ids,
+            "one ToolResult each: {reported:?}"
+        );
+        let not_run: Vec<&str> = reported
+            .iter()
+            .filter(|(_, out)| out == NOT_RUN)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(not_run, ["tu_0_4", "tu_0_5"], "the two kept from starting");
+        assert_eq!(
+            result.tools.get("read_file"),
+            Some(&4),
+            "the four reads that ran are counted"
+        );
+
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_par", 0);
+        let answered: Vec<String> = load_records(&path)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find_map(|r| match r {
+                SessionRecord::Turn { message, .. } if message.role == "user" => Some(message),
+                _ => None,
+            })
+            .expect("the answered turn")
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answered, ids,
+            "the turn is answered call for call, in order"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // The spawn_agents description no longer spells out a spec's fields
+    // (Phase 2 description diet); a spec that does not parse gets them back
+    // in the error, where they cost nothing until a call needs them.
+    #[tokio::test]
+    async fn a_spec_that_does_not_parse_is_answered_with_the_spec_shape() {
+        let (ws, ws_str, store) = session_in("badspec");
+        let config = config_for("http://127.0.0.1:1");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let (block, _, _, _) = run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_bad",
+            serde_json::json!({"agents": [{"name": "r", "goal": "explain", "mode": "write"}]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        let text = format!("{block:?}");
+        for part in ["'name'", "'goal'", "'explore'", "'code'", "expected_output"] {
+            assert!(text.contains(part), "{part} missing: {text}");
+        }
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // What the model said before the user stopped it is part of the
+    // subagent's conversation, and the transcript is that conversation.
+    #[tokio::test]
+    async fn an_interrupted_subagent_keeps_what_it_had_said_in_its_transcript() {
+        let (ws, ws_str, store) = session_in("interrupted");
+        // The first words arrive late, as from a slow or loaded provider: the
+        // stop must follow them, not a clock.
+        let (base, _, _) = spawn_with_usage(
+            vec![Reply::Delayed(
+                700,
+                Box::new(Reply::HangSignalled("halfway through the")),
+            )],
+            None,
+        )
+        .await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let steering = Arc::new(SteeringCtl::new());
+        // The person presses stop once the subagent's first words are in
+        // (`HangSignalled`).
+        let stop = steering.interrupt.clone();
+        let events: Channel<AgentEvent> =
+            Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+                if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                    && let Ok(AgentEvent::Subagent { event, .. }) =
+                        serde_json::from_str::<AgentEvent>(json)
+                    && matches!(*event, AgentEvent::Thinking(_))
+                {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            });
+        let (block, _, _, _) = run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_stop",
+            serde_json::json!({"agents": [{"name": "r", "goal": "explain", "mode": "explore"}]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &steering,
+        )
+        .await;
+        assert!(format!("{block:?}").contains("interrupted"), "{block:?}");
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_stop", 0);
+        assert_eq!(
+            kinds_and_texts(&path),
+            [
+                "meta",
+                "user:explain",
+                "usage",
+                "assistant:halfway through the"
+            ]
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // A blocking SubagentStop answers the turn the model just finished; the
+    // transcript holds that turn before the feedback, never two user turns
+    // in a row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_hook_block_follows_the_turn_it_answers_in_the_transcript() {
+        use std::os::unix::fs::PermissionsExt;
+        let (ws, ws_str, store) = session_in("stophook");
+        let mark = ws.join("blocked-once");
+        let script = ws.join("stop.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ -e '{m}' ]; then exit 0; fi\ntouch '{m}'\n\
+                 echo 'cite the file' >&2\nexit 2\n",
+                m = mark.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            ws.join(".claudinio.json"),
+            format!(
+                r#"{{"hooks":{{"SubagentStop":[{{"hooks":[{{"type":"command","command":"{}"}}]}}]}}}}"#,
+                script.display()
+            ),
+        )
+        .unwrap();
+        let hook_cfg = AgentConfig {
+            hooks_enabled: true,
+            ..Default::default()
+        };
+        let set = Arc::new(crate::agent::hooks::discovery::resolve_with_home(
+            Some(&ws),
+            &hook_cfg,
+            Some(&ws.join("_home")),
+        ));
+        let trust = Arc::new(crate::agent::hooks::TrustStore::with_path(
+            ws.join("trust.json"),
+        ));
+        trust
+            .approve(&ws.display().to_string(), &set.fingerprint, vec![], 1)
+            .unwrap();
+        let hooks = Arc::new(crate::agent::hooks::HookCtx::new(
+            set,
+            trust,
+            "parent",
+            store.path.clone(),
+            ws.clone(),
+        ));
+
+        let (base, _, _) = spawn_with_usage(
+            vec![Reply::Text("first answer"), Reply::Text("second answer")],
+            None,
+        )
+        .await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            doc_access: Default::default(),
+            hooks: Some(hooks),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_hook",
+            serde_json::json!({"agents": [{"name": "r", "goal": "explain", "mode": "explore"}]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        let path = crate::agent::persist::subagent_transcript_path(&store.path, "tu_hook", 0);
+        assert_eq!(
+            kinds_and_texts(&path),
+            [
+                "meta",
+                "user:explain",
+                "usage",
+                "assistant:first answer",
+                "user:<hook-feedback>\ncite the file\n</hook-feedback>",
+                "usage",
+                "assistant:second answer",
+            ]
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+}
+
+/// Lean-harness Phase 3: what a subagent is asked to hand back, what of it
+/// the parent carries, and the brief a code subagent starts from.
+#[cfg(test)]
+mod delegation_tests {
+    use super::scripted_model::{Reply, spawn_recording};
+    use super::*;
+    use crate::agent::persist::{SessionStore, TaskItem};
+    use crate::agent::provider::ProviderEntry;
+
+    fn config_for(base_url: &str) -> AgentConfig {
+        let mut config = AgentConfig {
+            builder_model: "stub/m".into(),
+            brain_model: "stub/m".into(),
+            ..AgentConfig::default()
+        };
+        config.providers.insert(
+            "stub".into(),
+            ProviderEntry {
+                api_key: "k".into(),
+                base_url: base_url.into(),
+                protocol: "anthropic".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: [("m".to_string(), 8_192u32)].into_iter().collect(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window: None,
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn the_scripted_config_calls_no_model_but_the_stub() {
+        let base = "http://127.0.0.1:9";
+        super::scripted_model::assert_only_the_stub_is_called(&config_for(base), base);
+    }
+
+    fn workspace(tag: &str) -> (std::path::PathBuf, String, SessionStore) {
+        let ws = std::env::temp_dir().join(format!(
+            "claudinio-delegation-{tag}-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws_str = ws.to_string_lossy().to_string();
+        let store = SessionStore::create("parent", Some(&ws_str)).unwrap();
+        (ws, ws_str, store)
+    }
+
+    /// Spawn `agents` against a model that answers every request with
+    /// `reply`; the tool result, every event and every request body.
+    async fn spawn(
+        ctx: &ToolContext,
+        reply: &'static str,
+        agents: Value,
+    ) -> (String, Vec<AgentEvent>, Vec<String>) {
+        spawn_script(ctx, vec![Reply::Text(reply)], agents).await
+    }
+
+    /// `spawn`, against a model that follows `script`.
+    async fn spawn_script(
+        ctx: &ToolContext,
+        script: Vec<Reply>,
+        agents: Value,
+    ) -> (String, Vec<AgentEvent>, Vec<String>) {
+        let (base, _, bodies) = spawn_recording(script).await;
+        let config = config_for(&base);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events: Channel<AgentEvent> = {
+            let seen = seen.clone();
+            Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+                if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                    && let Ok(event) = serde_json::from_str::<AgentEvent>(json)
+                {
+                    seen.lock().unwrap().push(event);
+                }
+                Ok(())
+            })
+        };
+        let (block, _, _, _) = run_spawn_agents(
+            &config,
+            ctx,
+            "tu_parent",
+            serde_json::json!({ "agents": agents }),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        let text = match block {
+            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
+            other => panic!("not a tool result: {other:?}"),
+        };
+        let events = seen.lock().unwrap().clone();
+        let bodies = bodies.lock().unwrap().clone();
+        (text, events, bodies)
+    }
+
+    #[tokio::test]
+    async fn an_explore_subagent_is_asked_for_a_short_report_in_three_sections() {
+        let (ws, ws_str, store) = workspace("format");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let (_, _, bodies) = spawn(
+            &ctx,
+            "done",
+            serde_json::json!([{"name": "r", "goal": "look around", "mode": "explore"}]),
+        )
+        .await;
+        let first: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let system = first["system"].to_string();
+        for part in [
+            "1,500 tokens",
+            "## Findings",
+            "## Files",
+            "path:line",
+            "## Open questions",
+        ] {
+            assert!(system.contains(part), "{part} missing from {system}");
+        }
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // The compaction summarizer runs in explore mode but writes a handoff of
+    // its own shape; the explore report format must not compete with it.
+    #[tokio::test]
+    async fn the_compaction_summarizer_is_not_asked_for_the_explore_report() {
+        let (ws, ws_str, store) = workspace("summary");
+        let (base, _, bodies) = spawn_recording(vec![Reply::Text("summary")]).await;
+        let config = config_for(&base);
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        let summary = run_summary_agent(
+            &config,
+            &ctx,
+            &store.path.to_string_lossy(),
+            0,
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        assert_eq!(summary.as_deref(), Ok("summary"));
+        let first: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+        assert!(!first["system"].to_string().contains("## Findings"));
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn the_parent_carries_a_long_report_cut_in_the_middle_and_the_timeline_all_of_it() {
+        let (ws, ws_str, store) = workspace("cap");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let long: &'static str = Box::leak(
+            format!(
+                "## Findings\n{}## Files\nsrc/lib.rs:1 the end\n",
+                "a finding worth a line of its own\n".repeat(600)
+            )
+            .into_boxed_str(),
+        );
+        let (text, events, _) = spawn(
+            &ctx,
+            long,
+            serde_json::json!([{"name": "r", "goal": "look around", "mode": "explore"}]),
+        )
+        .await;
+        assert!(
+            text.contains("characters of this report omitted"),
+            "{}",
+            &text[..200]
+        );
+        assert!(text.contains("## Findings") && text.contains("src/lib.rs:1 the end"));
+        assert!(
+            text.chars().count() <= crate::agent::delegation::REPORT_CHARS + 200,
+            "{} chars carried",
+            text.chars().count()
+        );
+        let shown = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::SubagentDone { report, .. } => Some(report.clone()),
+                _ => None,
+            })
+            .expect("the subagent finished");
+        assert_eq!(shown, long, "the person still sees the whole report");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// A code subagent creates a file the same way the main session does
+    /// (lean-harness Phase 3b): the baseline eval's subagents reported
+    /// "BLOCKED — could not be created" for every new file they were given.
+    #[tokio::test]
+    async fn a_code_subagent_creates_a_file_in_a_missing_folder_and_edits_it() {
+        let (ws, ws_str, store) = workspace("create");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let path = ws.join("src/lib/path.ts").to_string_lossy().to_string();
+        let (base, _, _) = spawn_recording(vec![
+            Reply::Tool {
+                name: "edit_file",
+                input: serde_json::json!({
+                    "path": path, "old_string": "", "new_string": "export const a = 1;\n",
+                }),
+            },
+            Reply::Tool {
+                name: "edit_file",
+                input: serde_json::json!({
+                    "path": path, "old_string": "= 1", "new_string": "= 2",
+                }),
+            },
+            Reply::Text("created src/lib/path.ts"),
+        ])
+        .await;
+        let mut config = config_for(&base);
+        config.yolo_mode = true;
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_parent",
+            serde_json::json!({ "agents": [
+                {"name": "writer", "goal": "create src/lib/path.ts", "mode": "code"}
+            ]}),
+            &events,
+            &ApprovalMap::default(),
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&path).ok().as_deref(),
+            Some("export const a = 2;\n")
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// A code subagent edits files, so a shell command that writes one is
+    /// asked about like an edit even when its prefix is allowlisted — as it is
+    /// in the Builder that delegated to it. Delegating must not be a way
+    /// around the approval card.
+    #[tokio::test]
+    async fn a_code_subagents_allowlisted_shell_write_is_asked_about() {
+        let (ws, ws_str, store) = workspace("shell-write");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str.clone()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let target = ws.join("out.txt");
+        let (base, _, _) = spawn_recording(vec![
+            Reply::Tool {
+                name: "bash",
+                input: serde_json::json!({ "command": "echo x > out.txt", "workdir": ws_str }),
+            },
+            Reply::Text("done"),
+        ])
+        .await;
+        let config = config_for(&base);
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let events: Channel<AgentEvent> = {
+            let asked = asked.clone();
+            Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+                if let tauri::ipc::InvokeResponseBody::Json(json) = &body
+                    && let Ok(AgentEvent::Subagent { event, .. }) =
+                        serde_json::from_str::<AgentEvent>(json)
+                    && let AgentEvent::ToolCall {
+                        tool_name,
+                        permission,
+                        ..
+                    } = *event
+                {
+                    asked
+                        .lock()
+                        .unwrap()
+                        .push(format!("{tool_name}:{permission}"));
+                }
+                Ok(())
+            })
+        };
+        // The person turns the card down as soon as it appears.
+        let approvals = ApprovalMap::default();
+        let refuser = {
+            let approvals = approvals.clone();
+            tokio::spawn(async move {
+                loop {
+                    let pending: Vec<_> = approvals.lock().await.drain().collect();
+                    for (_, tx) in pending {
+                        let _ = tx.send(false);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+        };
+        run_spawn_agents(
+            &config,
+            &ctx,
+            "tu_parent",
+            serde_json::json!({ "agents": [
+                {"name": "writer", "goal": "write out.txt", "mode": "code"}
+            ]}),
+            &events,
+            &approvals,
+            &AnswerMap::default(),
+            "parent",
+            &Arc::new(SteeringCtl::new()),
+        )
+        .await;
+        refuser.abort();
+        assert_eq!(
+            asked.lock().unwrap().clone(),
+            vec!["bash:requires_approval".to_string()]
+        );
+        assert!(!target.exists(), "a refused write must not run");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn a_code_subagent_starts_from_the_shared_brief_and_an_explore_one_does_not() {
+        let (ws, ws_str, store) = workspace("brief");
+        crate::agent::persist::append_tasks(
+            &store.path,
+            &[TaskItem {
+                id: "t1".into(),
+                title: "Rename the greeting".into(),
+                description: "Say goodbye instead of hello.".into(),
+                journal: vec![],
+                status: "doing".into(),
+            }],
+        )
+        .unwrap();
+        let plans = ws.join(".claudinio").join("plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        std::fs::write(plans.join("greeting.md"), "# Plan\n").unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str.clone()),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        {
+            let mut tracker = ctx.read_tracker.lock().await;
+            tracker.record_read(&format!("{ws_str}/src/b.rs"), None, None, "fn b() {}");
+            tracker.record_read(&format!("{ws_str}/src/a.rs"), Some(1), Some(2), "fn a() {}");
+        }
+        let (_, events, bodies) = spawn(
+            &ctx,
+            "done",
+            serde_json::json!([
+                {"name": "writer", "goal": "change the greeting", "mode": "code"},
+                {"name": "reader", "goal": "look around", "mode": "explore"}
+            ]),
+        )
+        .await;
+        let first_user = |body: &String| -> String {
+            let body: Value = serde_json::from_str(body).unwrap();
+            body["messages"][0].to_string()
+        };
+        let code = bodies
+            .iter()
+            .map(first_user)
+            .find(|m| m.contains("change the greeting"))
+            .expect("the code subagent asked");
+        let explore = bodies
+            .iter()
+            .map(first_user)
+            .find(|m| m.contains("look around"))
+            .expect("the explore subagent asked");
+        assert!(!explore.contains("<brief>"), "{explore}");
+        assert!(code.contains("<brief>"), "{code}");
+        assert!(code.contains("Rename the greeting"), "{code}");
+        assert!(code.contains(".claudinio/plans/greeting.md"), "{code}");
+        let (a, b) = (
+            code.find("- src/a.rs").expect("a read path"),
+            code.find("- src/b.rs").expect("a read path"),
+        );
+        assert!(a < b, "sorted");
+        assert!(!code.contains("fn a()"), "paths only");
+        assert!(
+            code.find("</brief>").unwrap() < code.find("change the greeting").unwrap(),
+            "the brief comes before the goal"
+        );
+        // The timeline shows the goal the model wrote.
+        let started: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::SubagentStarted { goal, .. } => Some(goal.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            started.contains(&"change the greeting".to_string()),
+            "{started:?}"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// A workspace whose session has a living document with these topics.
+    fn doc_workspace(tag: &str, topics: &[&str]) -> (std::path::PathBuf, ToolContext) {
+        let (ws, ws_str, store) = workspace(tag);
+        let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
+        let (rel, _) =
+            crate::agent::doc_session::create(&ws, Some(&store.path), "Pudim de leite", &topics)
+                .unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        crate::agent::doc_session::link(&store, &ctx.records_cache, &rel);
+        (ws, ctx)
+    }
+
+    fn doc_text(ws: &std::path::Path) -> String {
+        std::fs::read_to_string(ws.join(".claudinio/docs/pudim-de-leite.md")).unwrap()
+    }
+
+    fn tool_names(body: &str) -> Vec<String> {
+        let body: Value = serde_json::from_str(body).unwrap();
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Decision D9: an explore subagent given a section writes it itself —
+    /// with `doc_write`/`doc_read` and nothing else of the document — so the
+    /// parent reads the section, not a report about it.
+    #[tokio::test]
+    async fn a_subagent_given_a_section_writes_it_under_its_own_name() {
+        let (ws, ctx) = doc_workspace("section", &["origem", "ingredientes"]);
+        let (text, events, bodies) = spawn_script(
+            &ctx,
+            vec![
+                Reply::Tool {
+                    name: "doc_write",
+                    input: serde_json::json!({"id": "s2", "body": "leite condensado, ovos"}),
+                },
+                Reply::Text("Wrote s2."),
+            ],
+            serde_json::json!([{"name": "ingredientes", "goal": "list the ingredients", "mode": "explore", "section": "s2"}]),
+        )
+        .await;
+        let names = tool_names(&bodies[0]);
+        assert!(
+            names.contains(&"doc_write".to_string()) && names.contains(&"doc_read".to_string())
+        );
+        assert!(
+            !names.iter().any(|n| n == "doc_create" || n == "doc_add"),
+            "{names:?}"
+        );
+        let goal: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let goal = goal["messages"][0].to_string();
+        assert!(
+            goal.contains("s2") && goal.contains("ingredientes"),
+            "{goal}"
+        );
+        assert!(
+            doc_text(&ws).contains(
+                "## ingredientes\n<!-- claudinio: id=s2 status=done by=sub:ingredientes -->\nleite condensado, ovos"
+            ),
+            "{}",
+            doc_text(&ws)
+        );
+        assert!(text.contains("Wrote s2."), "{text}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::DocumentUpdated { .. })),
+            "the panel hears of the claim"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn a_subagent_cannot_write_a_section_it_was_not_given() {
+        let (ws, ctx) = doc_workspace("other-section", &["origem", "ingredientes"]);
+        let (_, _, bodies) = spawn_script(
+            &ctx,
+            vec![
+                Reply::Tool {
+                    name: "doc_write",
+                    input: serde_json::json!({"id": "s1", "body": "not mine"}),
+                },
+                Reply::Text("tried"),
+            ],
+            serde_json::json!([{"name": "ingredientes", "goal": "list them", "mode": "explore", "section": "s2"}]),
+        )
+        .await;
+        assert!(!doc_text(&ws).contains("not mine"));
+        assert!(
+            bodies[1].contains("you were given section s2 only"),
+            "{}",
+            bodies[1]
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn two_agents_cannot_claim_the_same_section() {
+        let (ws, ctx) = doc_workspace("same-section", &["origem"]);
+        let (text, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("done")],
+            serde_json::json!([
+                {"name": "a", "goal": "write it", "mode": "explore", "section": "s1"},
+                {"name": "b", "goal": "write it too", "mode": "explore", "section": "s1"}
+            ]),
+        )
+        .await;
+        assert_eq!(bodies.len(), 1, "only one of them ran");
+        assert!(
+            text.contains("not started") && text.contains("s1"),
+            "{text}"
+        );
+        // A section the main session holds is not given away either.
+        crate::agent::doc_session::write(&ctx, "s1", None, crate::agent::document::Status::Doing)
+            .unwrap();
+        let (text, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("done")],
+            serde_json::json!([{"name": "c", "goal": "write it", "mode": "explore", "section": "s1"}]),
+        )
+        .await;
+        assert!(bodies.is_empty(), "{bodies:?}");
+        assert!(text.contains("main"), "{text}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[tokio::test]
+    async fn a_section_left_unwritten_is_released_and_one_without_a_section_gets_no_document_tools()
+    {
+        let (ws, ctx) = doc_workspace("release", &["origem"]);
+        let (_, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("gave up")],
+            serde_json::json!([{"name": "a", "goal": "write it", "mode": "explore", "section": "s1"}]),
+        )
+        .await;
+        assert_eq!(bodies.len(), 1);
+        assert!(
+            doc_text(&ws).contains("[origem] <!-- claudinio: id=s1 status=todo -->"),
+            "{}",
+            doc_text(&ws)
+        );
+        let (_, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("looked")],
+            serde_json::json!([{"name": "r", "goal": "look around", "mode": "explore"}]),
+        )
+        .await;
+        assert!(!tool_names(&bodies[0]).iter().any(|n| n.starts_with("doc_")));
+        std::fs::remove_dir_all(&ws).ok();
     }
 }

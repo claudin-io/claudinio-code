@@ -112,6 +112,12 @@ pub enum SessionRecord {
         summary: String,
         #[serde(default)]
         tail_turns: usize,
+        /// The session's `<document>` outline block as the file stood at the
+        /// compaction, restated after the summary like the task list
+        /// (`history_from_records`). None without a document, and on every
+        /// record written before lean-harness Phase 4f.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        document: Option<String>,
         ts: u64,
     },
     /// A verbatim compaction (`agent::prune`): tool calls dropped with their
@@ -352,6 +358,121 @@ pub enum SessionRecord {
         tools: std::collections::BTreeMap<String, u32>,
         ts: u64,
     },
+    /// One provider request, as the provider billed it. Written once per
+    /// request — every round of the main loop, the handoff document, every
+    /// round of a subagent (into the subagent's own transcript, see
+    /// `subagent_transcript_path`) — so cost per solved task, rounds per task
+    /// and the cache share are read back from the file instead of estimated
+    /// from per-run totals (lean-harness plan, Phase 0: M1/M2).
+    ///
+    /// Token fields are what the provider reported for that request, on one
+    /// scale: `input_tokens` is always *uncached* input. Anthropic-protocol
+    /// providers (and claudin.io, which reports cache misses only) report it
+    /// that way; for OpenAI-protocol providers it is `prompt_tokens` minus
+    /// `cached_tokens`, since `prompt_tokens` already includes them. So
+    /// uncached + cache reads + cache writes is all input, on either protocol.
+    /// A request whose response carried no usage is still written, with
+    /// zeros, because it was still a round.
+    Usage {
+        /// 1-based request number within its run (main loop) or subagent;
+        /// 0 for the handoff document, which is asked for outside the loop.
+        round: u32,
+        model: String,
+        input_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+        output_tokens: u32,
+        /// Provider-reported cost in USD; `None` when the provider reports
+        /// none (no local estimate is substituted — that is the reader's call).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
+        /// `<parent_tool_use_id>-<index>` for a subagent's request; absent in
+        /// the main session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<String>,
+        ts: u64,
+    },
+    /// The harness rewrote the history a provider had cached, so the next
+    /// request re-reads the context from the first changed byte on, at the
+    /// full input price (lean-harness Phase 1). `reason` is a
+    /// `CacheBreakReason`, written as text so a reader never needs this
+    /// build's enum. Bookkeeping only; never part of the conversation.
+    CacheBreak { reason: String, ts: u64 },
+    /// Deferred tools whose definitions joined the tool list, in the order
+    /// they were loaded (lean-harness Phase 2): by `load_tools`, or because
+    /// the model called one directly. A later run of the session and a
+    /// resumed session append them in the same order, so the tool array — the
+    /// head of the cached prefix — comes out identical. Bookkeeping only.
+    ToolsLoaded { names: Vec<String>, ts: u64 },
+    /// The session's living document (lean-harness Phase 4b), relative to
+    /// the workspace: `doc_create` writes it, and a successor session gets
+    /// its predecessor's (or, for a new top-level topic, the new one). The
+    /// latest record wins. Bookkeeping only; never part of the conversation.
+    DocumentLinked { path: String, ts: u64 },
+}
+
+/// Why the history a provider had cached was rewritten. Counted per session by
+/// `scripts/session-stats.py --cost`, so a change that adds a rewrite — a
+/// deferred tool load growing the tool list, say — can be held to a budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheBreakReason {
+    /// A verbatim prune was accepted (`handoff::try_verbatim_compaction`).
+    Prune,
+    /// Earlier turns were replaced by a summary (`handoff::compact_history`).
+    Compaction,
+    /// The context crossed the soft line and the session hands off to a
+    /// successor that starts from a document (`handoff::maybe_context_handoff`).
+    Handoff,
+    /// Deferred tool definitions were appended to the tool list
+    /// (`deferred`): the tools precede everything else in the cache order, so
+    /// the next request is read cold from the first appended byte on.
+    ToolsLoaded,
+}
+
+impl CacheBreakReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheBreakReason::Prune => "prune",
+            CacheBreakReason::Compaction => "compaction",
+            CacheBreakReason::Handoff => "handoff",
+            CacheBreakReason::ToolsLoaded => "tools_loaded",
+        }
+    }
+}
+
+impl SessionRecord {
+    /// The `CacheBreak` record for a rewrite made now.
+    pub fn cache_break(reason: CacheBreakReason) -> Self {
+        SessionRecord::CacheBreak {
+            reason: reason.as_str().to_string(),
+            ts: now_ms(),
+        }
+    }
+
+    /// The `Usage` record for one provider request.
+    pub fn usage(
+        round: u32,
+        model: &str,
+        usage: Option<&crate::agent::provider::Usage>,
+        subagent: Option<String>,
+    ) -> Self {
+        let u = usage.cloned().unwrap_or_default();
+        SessionRecord::Usage {
+            round,
+            model: model.to_string(),
+            input_tokens: if u.input_includes_cache_reads {
+                u.input_tokens.saturating_sub(u.cache_read_input_tokens)
+            } else {
+                u.input_tokens
+            },
+            cache_read_tokens: u.cache_read_input_tokens,
+            cache_creation_tokens: u.cache_creation_input_tokens,
+            output_tokens: u.output_tokens,
+            cost: u.cost,
+            subagent,
+            ts: now_ms(),
+        }
+    }
 }
 
 /// A `QualityRun` record, flattened for the callers that only need the verdict.
@@ -480,6 +601,32 @@ pub fn earliest_base_commit_at(records: &[SessionRecord]) -> Option<(String, u64
     })
 }
 
+/// The session's living document, relative to the workspace: the path of
+/// the latest `DocumentLinked` record, or `None` when it has none.
+pub fn linked_document(records: &[SessionRecord]) -> Option<String> {
+    records.iter().rev().find_map(|r| match r {
+        SessionRecord::DocumentLinked { path, .. } => Some(path.clone()),
+        _ => None,
+    })
+}
+
+/// [`linked_document`] for the session file at `path`, read without
+/// loading every record: only a line that names the record's kind is
+/// parsed, latest first. The document panel asks every few seconds, and
+/// `load_records` parses the whole conversation and rehydrates its images —
+/// a cost the records cache (800 ms) does not absorb at that interval, paid
+/// mostly by sessions that have no document at all.
+pub fn linked_document_at(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("\"document_linked\""))
+        .find_map(|l| match serde_json::from_str::<SessionRecord>(l).ok()? {
+            SessionRecord::DocumentLinked { path, .. } => Some(path),
+            _ => None,
+        })
+}
+
 /// Whether the session already has a `BaseCommit` record (used to write it
 /// only once, anchoring the diff window to the true start of the plan's work).
 pub fn has_base_commit(records: &[SessionRecord]) -> bool {
@@ -506,6 +653,41 @@ pub fn sessions_dir(workspace: Option<&str>) -> Result<PathBuf, String> {
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("create sessions dir: {e}"))?;
     Ok(dir)
+}
+
+/// Where a subagent's transcript lives: `<sessions_dir>/<session_id>.sub/
+/// <parent_tool_use_id>-<index>.jsonl`, beside the session that spawned it.
+///
+/// A directory rather than more lines in the parent file, because the parent
+/// file is the model's history — re-read on every message and replayed into
+/// the next request — and a subagent's turns are not part of it. The `.sub`
+/// suffix keeps it out of `list_sessions`, which only reads `*.jsonl` files at
+/// the top of the directory. The tool-use id comes from the provider, so
+/// anything outside `[A-Za-z0-9_-]` is replaced before it becomes a file name.
+pub fn subagent_transcript_path(
+    session_file: &Path,
+    parent_tool_use_id: &str,
+    index: usize,
+) -> PathBuf {
+    let stem = session_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session");
+    let id: String = parent_tool_use_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    session_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.sub"))
+        .join(format!("{id}-{index}.jsonl"))
 }
 
 /// Append-only handle to one session's JSONL file. Cheap to clone (holds a path);
@@ -733,7 +915,8 @@ fn replace_dangling_media(value: &mut serde_json::Value) {
 ///
 /// When the session has been compacted, only records AFTER the last
 /// `Compacted` marker are included, with the summary injected as the
-/// opening user message so the model retains context of earlier work.
+/// opening user message so the model retains context of earlier work, and
+/// the task list restated after the kept tail.
 pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
     // Find the last compaction point
     let compact_idx = records
@@ -743,13 +926,14 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     match compact_idx {
         Some(idx) => {
-            let (summary, tail_turns) = match &records[idx] {
+            let (summary, tail_turns, document) = match &records[idx] {
                 SessionRecord::Compacted {
                     summary,
                     tail_turns,
+                    document,
                     ..
-                } => (summary.clone(), *tail_turns),
-                _ => (String::new(), 0),
+                } => (summary.clone(), *tail_turns, document.clone()),
+                _ => (String::new(), 0, None),
             };
             if !summary.is_empty() {
                 out.push(Message {
@@ -760,14 +944,36 @@ pub fn history_from_records(records: &[SessionRecord]) -> Vec<Message> {
                     ))],
                 });
             }
-            // Kept-verbatim tail before the marker, then everything after it.
+            // Kept-verbatim tail before the marker, the task list as it stood
+            // at the compaction (`agent::task_recital`) and the document's
+            // outline as the compaction recorded it, then everything after.
             let tail_start = tail_start_index(records, idx, tail_turns);
             fold_into_history(&mut out, records[tail_start..idx].iter());
+            crate::agent::task_recital::recite_after_compaction(
+                &mut out,
+                &last_tasks_in(&records[..idx]),
+                document.as_deref(),
+            );
             fold_into_history(&mut out, records.iter().skip(idx + 1));
         }
         None => fold_into_history(&mut out, records.iter()),
     }
     apply_prunes(out, records)
+}
+
+/// The task list of the last `tasks` record in `records`, or none (also when
+/// it does not parse: a replay never fails over the list).
+fn last_tasks_in(records: &[SessionRecord]) -> Vec<TaskItem> {
+    records
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            SessionRecord::Tasks { tasks_json, .. } => {
+                Some(serde_json::from_str(tasks_json).unwrap_or_default())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Re-apply every verbatim compaction the session recorded. Ids that are no
@@ -1126,6 +1332,10 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
                 | SessionRecord::RunConfig { ts, .. }
                 | SessionRecord::ModeRoute { ts, .. }
                 | SessionRecord::SubagentRun { ts, .. }
+                | SessionRecord::Usage { ts, .. }
+                | SessionRecord::CacheBreak { ts, .. }
+                | SessionRecord::ToolsLoaded { ts, .. }
+                | SessionRecord::DocumentLinked { ts, .. }
                 | SessionRecord::Rejected { ts, .. } => {
                     updated_at = updated_at.max(*ts);
                 }
@@ -1219,7 +1429,7 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
 }
 
 /// A single task item managed by the agent.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskItem {
     pub id: String,
@@ -1638,6 +1848,7 @@ mod tests {
         let rec = SessionRecord::Compacted {
             summary: "User asked to implement feature X. Files changed: src/foo.rs.".into(),
             tail_turns: 0,
+            document: None,
             ts: 100,
         };
         let json = serde_json::to_string(&rec).unwrap();
@@ -1651,6 +1862,7 @@ mod tests {
                 summary,
                 tail_turns,
                 ts,
+                ..
             } => {
                 assert_eq!(
                     summary,
@@ -1661,6 +1873,23 @@ mod tests {
             }
             _ => panic!("expected Compacted, got {:?}", back),
         }
+    }
+    // A compaction written before the outline field existed still parses,
+    // with no outline to restate.
+    #[test]
+    fn a_compacted_record_without_a_document_still_parses() {
+        let old = r#"{"kind":"compacted","summary":"S","tail_turns":2,"ts":5}"#;
+        let rec: SessionRecord = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            rec,
+            SessionRecord::Compacted {
+                tail_turns: 2,
+                document: None,
+                ..
+            }
+        ));
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(!json.contains("document"), "{json}");
     }
 
     #[test]
@@ -1844,6 +2073,7 @@ mod tests {
         compacted.push(SessionRecord::Compacted {
             summary: "…".into(),
             tail_turns: 0,
+            document: None,
             ts: 3,
         });
         assert_eq!(last_context_tokens(&compacted), None);
@@ -1902,6 +2132,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "S".into(),
                 tail_turns: 2,
+                document: None,
                 ts: 5,
             },
             user_turn("post-compact", 6),
@@ -1932,6 +2163,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "S".into(),
                 tail_turns: 2,
+                document: None,
                 ts: 5,
             },
         ];
@@ -1949,6 +2181,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "S".into(),
                 tail_turns: 1,
+                document: None,
                 ts: 2,
             },
         ];
@@ -1981,6 +2214,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "User greeted the agent.".into(),
                 tail_turns: 0,
+                document: None,
                 ts: 3,
             },
             SessionRecord::Turn {
@@ -2053,6 +2287,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "First compact".into(),
                 tail_turns: 0,
+                document: None,
                 ts: 2,
             },
             // Between compacts
@@ -2066,6 +2301,7 @@ mod tests {
             SessionRecord::Compacted {
                 summary: "Second compact".into(),
                 tail_turns: 0,
+                document: None,
                 ts: 4,
             },
             // After last compact
@@ -2466,6 +2702,48 @@ mod tests {
         }
     }
 
+    /// Subagent transcripts sit in `<id>.sub/` beside the session files. They
+    /// are not sessions: the sidebar must list the parent once, with its own
+    /// turns only, and never a subagent's transcript as a conversation.
+    #[test]
+    fn list_sessions_ignores_subagent_transcript_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_string_lossy().to_string();
+        let parent = SessionStore::create("parent", Some(&ws)).unwrap();
+        parent
+            .append(&SessionRecord::User {
+                text: "fix the pager".into(),
+                ts: 10,
+            })
+            .unwrap();
+        let sub = subagent_transcript_path(&parent.path, "tu_1", 0);
+        std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
+        let sub_store = SessionStore { path: sub.clone() };
+        for (i, text) in ["read pager.py", "edit pager.py"].iter().enumerate() {
+            sub_store
+                .append(&SessionRecord::User {
+                    text: (*text).into(),
+                    ts: 20 + i as u64,
+                })
+                .unwrap();
+        }
+        assert!(sub.exists());
+
+        let sessions = list_sessions(Some(&ws)).unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["parent"]
+        );
+        assert_eq!(sessions[0].title, "fix the pager");
+        assert_eq!(
+            sessions[0].turn_count, 1,
+            "the subagent's turns are not the parent's"
+        );
+    }
+
     #[test]
     fn list_sessions_includes_new_records_without_panic() {
         // Verify the match arms also handle LinkedFrom, HandoffTo, Handoff
@@ -2752,10 +3030,14 @@ mod pruned_tests {
         });
         let h = history_from_records(&recs);
         let text = serde_json::to_string(&h).unwrap();
+        // The dropped call keeps its tool_use block (see `prune::apply`): its
+        // input and its result are gone, a stub stands in for the result.
+        assert!(text.contains("toolu_a"));
         assert!(
-            !text.contains("toolu_a"),
-            "the dropped call and its result are gone"
+            !text.contains("\"path\":\"a\"") && !text.contains("AAAA"),
+            "the dropped call's input and result are gone"
         );
+        assert!(text.contains(crate::agent::prune::DROPPED_RESULT_NOTE));
         assert!(text.contains("toolu_b"));
         assert!(
             !text.contains(&"B".repeat(400)),
@@ -2778,5 +3060,228 @@ mod pruned_tests {
         recs.push(turn("user", vec![ContentBlock::text("and now?")]));
         let h = history_from_records(&recs);
         assert_eq!(h.last().unwrap().content[0].get_text(), Some("and now?"));
+    }
+}
+
+/// Per-request usage records (`SessionRecord::Usage`) and the promise that
+/// session files keep loading across the format change in both directions.
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    fn tmp_file(name: &str, lines: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "claudinio_usage_{name}_{}_{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    const OLD_SESSION: [&str; 4] = [
+        r#"{"kind":"meta","session_id":"old","created_at":1,"workspace":null}"#,
+        r#"{"kind":"user","text":"fix it","ts":2}"#,
+        r#"{"kind":"turn","role":"assistant","content":[{"type":"text","text":"done"}],"ts":3}"#,
+        r#"{"kind":"done","input_tokens":10,"output_tokens":5,"ts":4}"#,
+    ];
+
+    /// A file written before per-request usage existed loads exactly as it did.
+    #[test]
+    fn a_session_written_before_usage_records_still_loads() {
+        let path = tmp_file("old", &OLD_SESSION);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(history_from_records(&records).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The current code reads the record it writes: one line per provider
+    /// request, with the cache split that cost-per-task needs.
+    #[test]
+    fn a_usage_line_loads_as_a_usage_record() {
+        let usage = r#"{"kind":"usage","round":3,"model":"stub/m","input_tokens":120,"cache_read_tokens":4000,"cache_creation_tokens":800,"output_tokens":64,"cost":0.0123,"subagent":"tu_1-0","ts":5}"#;
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(usage);
+        let path = tmp_file("new", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 5, "the usage line must not be skipped");
+        let value = serde_json::to_value(&records[4]).unwrap();
+        assert_eq!(value["kind"], "usage");
+        assert_eq!(value["round"], 3);
+        assert_eq!(value["cache_read_tokens"], 4000);
+        assert_eq!(value["cache_creation_tokens"], 800);
+        assert_eq!(value["subagent"], "tu_1-0");
+        // Usage is bookkeeping, never conversation.
+        assert_eq!(history_from_records(&records).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// A cache break (the harness rewrote the history the provider had cached)
+    /// is bookkeeping: it loads, it is never part of the conversation, and a
+    /// file written before the record existed loads as it always did (that is
+    /// `a_session_written_before_usage_records_still_loads`, above).
+    #[test]
+    fn a_cache_break_line_loads_and_stays_out_of_the_history() {
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"cache_break","reason":"prune","ts":6}"#);
+        let path = tmp_file("cache_break", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 5, "the cache_break line must not be skipped");
+        let value = serde_json::to_value(&records[4]).unwrap();
+        assert_eq!(value["kind"], "cache_break");
+        assert_eq!(value["reason"], "prune");
+        assert_eq!(history_from_records(&records).len(), 1);
+        for (reason, text) in [
+            (CacheBreakReason::Prune, "prune"),
+            (CacheBreakReason::Compaction, "compaction"),
+            (CacheBreakReason::Handoff, "handoff"),
+        ] {
+            let v = serde_json::to_value(SessionRecord::cache_break(reason)).unwrap();
+            assert_eq!(
+                (v["kind"].as_str(), v["reason"].as_str()),
+                (Some("cache_break"), Some(text))
+            );
+        }
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The deferred-tool loads of a session (lean-harness Phase 2) are a
+    /// record of their own: a later run and a resumed session rebuild the
+    /// tool list from them, and they never enter the conversation. A file
+    /// written before them loads unchanged (`OLD_SESSION` has none).
+    #[test]
+    fn a_tools_loaded_line_loads_and_stays_out_of_the_history() {
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"tools_loaded","names":["code_search","mcp__gh__issue"],"ts":7}"#);
+        let path = tmp_file("tools_loaded", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(
+            records.len(),
+            5,
+            "the tools_loaded line must not be skipped"
+        );
+        assert!(matches!(
+            &records[4],
+            SessionRecord::ToolsLoaded { names, .. } if names == &["code_search", "mcp__gh__issue"]
+        ));
+        assert_eq!(history_from_records(&records).len(), 1);
+        let v = serde_json::to_value(SessionRecord::cache_break(CacheBreakReason::ToolsLoaded))
+            .unwrap();
+        assert_eq!(v["reason"], "tools_loaded");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The session's living document (lean-harness Phase 4b) is linked by a
+    /// record of its own, the latest one winning; it never enters the
+    /// conversation, and a file written before it loads unchanged
+    /// (`OLD_SESSION` has none, and links no document). An older build skips
+    /// the line like any kind it does not know (the next test).
+    #[test]
+    fn a_document_linked_line_loads_links_the_latest_path_and_stays_out_of_the_history() {
+        let none = tmp_file("no_doc", &OLD_SESSION);
+        assert_eq!(linked_document(&load_records(&none).unwrap()), None);
+        std::fs::remove_dir_all(none.parent().unwrap()).ok();
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/a.md","ts":7}"#);
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/b.md","ts":8}"#);
+        let path = tmp_file("document_linked", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(
+            records.len(),
+            6,
+            "the document_linked lines must not be skipped"
+        );
+        assert_eq!(
+            linked_document(&records).as_deref(),
+            Some(".claudinio/docs/b.md")
+        );
+        assert_eq!(history_from_records(&records).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The document panel asks every few seconds, for sessions that mostly
+    /// have no document: the link must come out as `linked_document` over
+    /// every record would give it — the latest one, never a message that
+    /// merely mentions the record's kind — from the file alone.
+    #[test]
+    fn the_document_link_read_from_the_file_is_the_latest_document_linked_record() {
+        let none = tmp_file("no_doc_at", &OLD_SESSION);
+        assert_eq!(linked_document_at(&none), None);
+        assert_eq!(linked_document_at(&none.with_extension("missing")), None);
+        let mut lines = OLD_SESSION.to_vec();
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/a.md","ts":7}"#);
+        lines.push(r#"{"kind":"document_linked","path":".claudinio/docs/b.md","ts":8}"#);
+        lines.push(r#"{"kind":"document_linked","path":"#);
+        lines.push(
+            r#"{"kind":"user","text":"{\"kind\":\"document_linked\",\"path\":\"x.md\"}","ts":9}"#,
+        );
+        let path = tmp_file("document_linked_at", &lines);
+        assert_eq!(
+            linked_document_at(&path),
+            linked_document(&load_records(&path).unwrap())
+        );
+        assert_eq!(
+            linked_document_at(&path).as_deref(),
+            Some(".claudinio/docs/b.md")
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(none.parent().unwrap()).ok();
+    }
+
+    /// A record kind this build does not know (one a later version adds) is
+    /// skipped, and everything around it still loads — the same guarantee an
+    /// older build gives a file that holds `usage` lines.
+    #[test]
+    fn an_unknown_record_kind_is_skipped_and_the_rest_loads() {
+        let mut lines = OLD_SESSION.to_vec();
+        lines.insert(2, r#"{"kind":"from_the_future","x":1,"ts":9}"#);
+        let path = tmp_file("future", &lines);
+        assert_eq!(load_records(&path).unwrap().len(), 4);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+}
+
+/// The frontend's `SessionRecord` type (`src/lib/ipc.ts`) names every `kind`
+/// `load_session` can hand it. Nothing in TypeScript fails when a variant is
+/// added here and not there, so the list is checked from this side: every
+/// variant of the enum, snake-cased as serde tags it, must be in the union.
+#[cfg(test)]
+mod frontend_kind_tests {
+    #[test]
+    fn every_record_kind_is_in_the_frontend_union() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rust = std::fs::read_to_string(manifest.join("src/agent/persist.rs")).unwrap();
+        let ts = std::fs::read_to_string(manifest.join("../src/lib/ipc.ts")).unwrap();
+        let body = rust
+            .split("pub enum SessionRecord {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the enum");
+        let snake = |name: &str| {
+            let mut out = String::new();
+            for (i, c) in name.chars().enumerate() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_lowercase());
+            }
+            out
+        };
+        let kinds: Vec<String> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+            .filter_map(|rest| rest.split([' ', '{', '(', ',']).next())
+            .map(snake)
+            .collect();
+        assert!(kinds.len() > 20, "{kinds:?}");
+        let missing: Vec<&String> = kinds
+            .iter()
+            .filter(|k| !ts.contains(&format!("\"{k}\"")))
+            .collect();
+        assert!(missing.is_empty(), "missing from ipc.ts: {missing:?}");
     }
 }

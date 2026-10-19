@@ -2,7 +2,7 @@
 //! OpenAI-compatible provider from the models.dev catalog. The session keeps
 //! its history in the internal Anthropic-shaped format (`Message` /
 //! `ContentBlock`); this module translates at the wire boundary in both
-//! directions so `StreamOutput` stays byte-compatible with what session.rs
+//! directions so `StreamOutput` stays byte-compatible with what run_loop.rs
 //! expects from the Anthropic client.
 
 use super::{
@@ -127,6 +127,12 @@ fn build_messages(messages: &[Message], system: Option<&str>) -> Vec<Value> {
                         ContentBlock::Text { text, .. } => {
                             parts.push(json!({"type": "text", "text": text}));
                             if let Some(acc) = only_text.as_mut() {
+                                // One string for several blocks: a blank line
+                                // keeps the message, `<hook-context>` and the
+                                // `<tasks>` block apart.
+                                if !acc.is_empty() && !text.is_empty() {
+                                    acc.push_str("\n\n");
+                                }
                                 acc.push_str(text);
                             }
                         }
@@ -257,6 +263,8 @@ fn parse_usage(v: &Value, pricing: Option<(f64, f64)>) -> Usage {
         input_tokens: input,
         output_tokens: output,
         cache_read_input_tokens: cached,
+        cache_creation_input_tokens: 0,
+        input_includes_cache_reads: true,
         cost,
         cost_input: None,
         cost_output: None,
@@ -302,7 +310,7 @@ fn accumulate_tool_calls(
 }
 
 /// Convert accumulated tool calls into Anthropic-shaped `tool_use` Values —
-/// the exact shape session.rs consumes from `StreamOutput.tool_uses`. Empty
+/// the exact shape run_loop.rs consumes from `StreamOutput.tool_uses`. Empty
 /// arguments mean a no-arg tool ({}); non-empty-but-unparseable arguments
 /// mean the stream was cut mid-call (max_tokens) and the call is dropped so
 /// a half-written tool never executes (mirrors the Anthropic client).
@@ -342,16 +350,11 @@ fn error_message(v: &Value) -> Option<String> {
     Some(msg.to_string())
 }
 
-fn shape_http_error(status: reqwest::StatusCode, body: &str) -> String {
+fn shape_http_error(status: reqwest::StatusCode, body: &str, api_key: &str) -> String {
     if status.as_u16() == 401 {
         return "Unauthorized — check your API key".into();
     }
-    if let Ok(v) = serde_json::from_str::<Value>(body)
-        && let Some(msg) = error_message(&v)
-    {
-        return format!("API error: HTTP {status} — {msg}");
-    }
-    format!("API error: HTTP {status}")
+    super::http_error::api_error(status, body, api_key)
 }
 
 /// `Authorization` for an OpenAI-protocol request. A keyless endpoint — a
@@ -407,7 +410,7 @@ pub async fn stream_message(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(shape_http_error(status, &body));
+        return Err(shape_http_error(status, &body, &rp.api_key));
     }
 
     let net_guard =
@@ -709,6 +712,19 @@ pub async fn complete(
     max_tokens: u32,
     net_source: crate::net_activity::NetSource,
 ) -> Result<String, String> {
+    complete_metered(rp, system, user, max_tokens, net_source)
+        .await
+        .map(|(reply, _)| reply)
+}
+
+/// `complete`, with the usage the response reported.
+pub async fn complete_metered(
+    rp: &ResolvedProvider,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    net_source: crate::net_activity::NetSource,
+) -> Result<(String, Option<Usage>), String> {
     let _net_guard = crate::net_activity::NetGuard::begin(net_source, rp.model.as_str());
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -741,7 +757,7 @@ pub async fn complete(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(shape_http_error(status, &body));
+        return Err(shape_http_error(status, &body, &rp.api_key));
     }
     let json: Value = response
         .json()
@@ -752,7 +768,8 @@ pub async fn complete(
         .and_then(|c| c.as_str())
         .unwrap_or_default()
         .to_string();
-    Ok(reply)
+    let usage = json.get("usage").map(|u| parse_usage(u, rp.pricing));
+    Ok((reply, usage))
 }
 
 #[cfg(test)]
@@ -856,6 +873,27 @@ mod tests {
         assert_eq!(parts[0]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
         assert_eq!(parts[1]["type"], "text");
         assert_eq!(out.len(), 3);
+    }
+
+    /// A run's user turn is the message plus whatever the harness added after
+    /// it (`<hook-context>`, the `<tasks>` block). Sent as one string, the
+    /// blocks must stay apart: glued together the model reads
+    /// "go on<tasks>" as one word, and a summary runs into the list that
+    /// follows it.
+    #[test]
+    fn text_blocks_of_a_text_only_user_message_are_separated_by_a_blank_line() {
+        let messages = vec![Message {
+            role: "user".into(),
+            content: vec![
+                ContentBlock::text("go on"),
+                ContentBlock::text("<tasks>\nt1 \u{b7} todo \u{b7} Write it\n</tasks>"),
+            ],
+        }];
+        let out = build_messages(&messages, None);
+        assert_eq!(
+            out[0]["content"],
+            "go on\n\n<tasks>\nt1 \u{b7} todo \u{b7} Write it\n</tasks>"
+        );
     }
 
     #[test]
@@ -1002,6 +1040,33 @@ mod tests {
         assert_eq!(u.cache_read_input_tokens, 100);
         // 1M in × $1/M + 0.5M out × $2/M = $2.00 local estimate
         assert!((u.cost.unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    /// OpenAI's `prompt_tokens` already includes `cached_tokens`. The usage
+    /// record stores uncached input next to cache reads — what Anthropic
+    /// reports — so the cache share and the cost read back from a session
+    /// count every cached token once, on either protocol.
+    #[test]
+    fn an_openai_request_is_recorded_with_its_cached_tokens_counted_once() {
+        let u = parse_usage(
+            &serde_json::json!({
+                "prompt_tokens": 1_000, "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 900},
+            }),
+            None,
+        );
+        match crate::agent::persist::SessionRecord::usage(1, "m", Some(&u), None) {
+            crate::agent::persist::SessionRecord::Usage {
+                input_tokens,
+                cache_read_tokens,
+                output_tokens,
+                ..
+            } => assert_eq!(
+                (input_tokens, cache_read_tokens, output_tokens),
+                (100, 900, 10)
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

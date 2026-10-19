@@ -1,0 +1,72 @@
+id: hist-jev-settings
+title: A Settings section for Jev (history, b7631e2)
+tags:
+- history
+- feature
+- frontend
+- typescript
+prompt: |
+  Add a Settings section for Jev, the cheap helper model the harness asks for
+  small decisions. New component `SettingsJev` (named export) in
+  src/components/settings/SettingsJev.tsx, shown in the Settings panel. It loads
+  the config with `getConfig()` from src/lib/ipc.ts and reads `config.jev`,
+  shaped `{ enabled: boolean, hasApiKey: boolean, backend: "typesafe" |
+  "openrouter" | "claudinio" | null }` (add that to AgentConfig if missing).
+
+  It shows:
+  - a status line saying where Jev runs: "Inactive" when backend is null; that it
+    runs through "OpenRouter" when backend is "openrouter"; that it is "included
+    in your Claudinio plan" when backend is "claudinio"; that it runs on your
+    "TypeSafe key" when backend is "typesafe";
+  - an enable checkbox (`input[type="checkbox"]`); unchecking it calls
+    `setConfig({ jevEnabled: false })` (checking it, `{ jevEnabled: true }`);
+  - a password input for a TypeSafe API key and a save button carrying the
+    attribute `data-jev-save`, which calls `setConfig({ jevApiKey: <the value> })`.
+  Add vitest tests in src/components/settings/SettingsJev.test.tsx.
+setup:
+  git:
+    repo: ../..
+    commit: 5f4c1093c3298388d36d4bd8769062455c482751
+  symlinks:
+    node_modules: ../../node_modules
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+check: ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vitest run --config vitest.eval.config.ts
+oracle:
+  command: ./node_modules/.bin/vitest run --config vitest.eval.config.ts src/components/settings/SettingsJev.test.tsx
+  timeout_s: 300
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+  reference_files:
+  - src/components/settings/SettingsJev.test.tsx
+reference:
+  git_commit: b7631e28fec9a6943e69c89070405c2718da3823
+max_rounds: 60

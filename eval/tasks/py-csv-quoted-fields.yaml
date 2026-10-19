@@ -1,0 +1,82 @@
+id: py-csv-quoted-fields
+title: Contact import splits quoted fields on commas
+tags:
+- bugfix
+- python
+prompt: |
+  Importing contacts breaks when a field has a comma inside quotes, like
+  "Smith, John". Those fields should be read whole, the way any CSV reader does,
+  including doubled quotes ("") inside a quoted field meaning a literal quote.
+  Fix load() in records.py so the tests pass.
+setup:
+  files:
+    records.py: |
+      def parse_line(line):
+          return [field.strip() for field in line.rstrip("\n").split(",")]
+
+
+      def load(text):
+          """Rows of a CSV document as dicts keyed by the header line."""
+          lines = [line for line in text.splitlines() if line.strip()]
+          if not lines:
+              return []
+          header = parse_line(lines[0])
+          return [dict(zip(header, parse_line(line))) for line in lines[1:]]
+    test_records.py: |
+      from records import load
+
+
+      def test_plain_rows():
+          assert load("name,city\nAna,Porto\n") == [{"name": "Ana", "city": "Porto"}]
+
+
+      def test_empty_document():
+          assert load("") == []
+
+
+      def test_quoted_comma_stays_in_the_field():
+          text = 'name,city\n"Smith, John",Lisbon\n'
+          assert load(text) == [{"name": "Smith, John", "city": "Lisbon"}]
+
+
+      def test_doubled_quotes_are_a_literal_quote():
+          text = 'name,nick\nAna,"the ""fast"" one"\n'
+          assert load(text) == [{"name": "Ana", "nick": 'the "fast" one'}]
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider
+  timeout_s: 60
+  files:
+    test_records.py: |
+      from records import load
+
+
+      def test_plain_rows():
+          assert load("name,city\nAna,Porto\n") == [{"name": "Ana", "city": "Porto"}]
+
+
+      def test_empty_document():
+          assert load("") == []
+
+
+      def test_quoted_comma_stays_in_the_field():
+          text = 'name,city\n"Smith, John",Lisbon\n'
+          assert load(text) == [{"name": "Smith, John", "city": "Lisbon"}]
+
+
+      def test_doubled_quotes_are_a_literal_quote():
+          text = 'name,nick\nAna,"the ""fast"" one"\n'
+          assert load(text) == [{"name": "Ana", "nick": 'the "fast" one'}]
+reference:
+  files:
+    records.py: |
+      import csv
+      import io
+
+
+      def load(text):
+          """Rows of a CSV document as dicts keyed by the header line."""
+          lines = [line for line in text.splitlines() if line.strip()]
+          if not lines:
+              return []
+          return [dict(row) for row in csv.DictReader(io.StringIO("\n".join(lines)))]
+max_rounds: 30

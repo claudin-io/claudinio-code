@@ -1,0 +1,72 @@
+id: js-slugify-accents
+title: Slugs mangle accented letters
+tags:
+- bugfix
+- javascript
+prompt: |
+  Post URLs come out wrong for titles with accents: "Café Crème" becomes
+  "caf-cr-me" instead of "cafe-creme". Accented letters should keep their base
+  letter. Fix slugify in slug.js; `node --test` runs the tests.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "fixture",
+        "private": true,
+        "type": "module"
+      }
+    slug.js: |
+      // URL slug for a post title: lowercase ASCII words joined by "-".
+      export function slugify(title) {
+        return title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "");
+      }
+    slug.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { slugify } from "./slug.js";
+
+      test("plain titles", () => {
+        assert.equal(slugify("  Hello, World!  "), "hello-world");
+        assert.equal(slugify("a--b"), "a-b");
+      });
+
+      test("accents keep their base letter", () => {
+        assert.equal(slugify("Café Crème Brûlée"), "cafe-creme-brulee");
+        assert.equal(slugify("Ünïcödé"), "unicode");
+        assert.equal(slugify("São Paulo 2026"), "sao-paulo-2026");
+      });
+oracle:
+  command: node --test
+  timeout_s: 60
+  files:
+    slug.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { slugify } from "./slug.js";
+
+      test("plain titles", () => {
+        assert.equal(slugify("  Hello, World!  "), "hello-world");
+        assert.equal(slugify("a--b"), "a-b");
+      });
+
+      test("accents keep their base letter", () => {
+        assert.equal(slugify("Café Crème Brûlée"), "cafe-creme-brulee");
+        assert.equal(slugify("Ünïcödé"), "unicode");
+        assert.equal(slugify("São Paulo 2026"), "sao-paulo-2026");
+      });
+reference:
+  files:
+    slug.js: |
+      // URL slug for a post title: lowercase ASCII words joined by "-".
+      export function slugify(title) {
+        return title
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "");
+      }
+max_rounds: 30

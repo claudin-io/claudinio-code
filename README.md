@@ -79,11 +79,52 @@ Building from source is covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Brain and Builder
 
-Two modes with different tool surfaces. **Brain** explores read-only, interviews
-you about requirements and writes a plan. **Builder** executes it — writing code,
-running commands, verifying. The handoff between them starts a fresh session
-seeded with the plan, so execution never inherits a context window full of
-exploration.
+Two modes with different tool surfaces. **Brain** explores, interviews you about
+requirements and writes a plan. It has no edit tool, and its shell runs only
+read-only commands (`git status`/`diff`/`log`, `ls`, `cat`, `head`, `tail`,
+`wc`, …) under the rule below — no build, test runner, package manager or
+interpreter; anything else is refused. **Builder**
+executes it — writing code, running commands, verifying. The handoff between
+them starts a fresh session seeded with the plan, so execution never inherits a
+context window full of exploration.
+
+Builder edits files itself: each `edit_file` is shown to you as a diff to
+approve — a new file too, as a diff from nothing (an empty `old_string` creates
+it, missing folders included), and an `old_string` must match one place unless
+the call says `replace_all`, which the approval card shows with its count. A
+shell command runs unasked under one rule, and nothing else does: a single
+allowlisted command (git inspection, `ls`/`cat`/`head`/`tail`/`wc`, the test
+runners and builds, `node`/`python`/`pnpm run`, `which`/`echo`/`pwd`, a bare
+`date` or `date +FORMAT` except on Windows), optionally piped into `head`, `tail`, `wc`, `grep`,
+`cut`, `tr` or `nl`, with no `;`, `&`, `||`, `$`, backquote, backslash, brace,
+parenthesis, glob, line break, blank other than space and tab, or redirection
+(beyond `2>&1` and `>/dev/null`) — on Windows, where the command runs under
+`cmd /c`, no `%`, `^` or `!` either, and the name is never looked up in the
+working folder first — and nothing the write check sees
+(redirection, `tee`, `sed -i`, `patch`, an inline script that writes).
+Everything else is asked about in Builder and refused in Brain — a chain of
+allowlisted commands, a quoted `|`, a `2> /dev/null` with a space included:
+that is the price of a rule simple enough to be sure of, and it is never won
+back with parsing. The deny-list is a substring tripwire: a command whose lowercased text, or
+that text with every quote, backquote, backslash and `^` removed and blanks
+collapsed, contains an entry (`rm -rf /`, `rm -fr ~`, `sudo rm`, `dd if=`,
+`mkfs.`, `fdisk`, `chmod 777`, `chown `, `mv /`, `cp /`, a fork bomb and
+their kin), redirects into a device other than `/dev/null` and the other
+stream sinks, or runs cmd's `format X:` is refused outright in every mode,
+YOLO and a hook's `allow` included — so `/bin/rm -rf /`, `time dd if=…`,
+`r''m -rf /` and a command in a heredoc are caught with no parsing. Its
+accepted false positives are ordinary text that contains an entry, such as
+`grep chown src`, `cp /tmp/x .` or `git commit -m "fix: chown "`, refused
+exactly as the original list refused them. An allowlisted interpreter, test runner or
+build runs whatever its arguments and the project choose — a program to run or
+a folder to clear included (`pytest --basetemp=…`, `go test -exec …`, `cargo
+--config …`) — so Builder's allowlist is a convenience, not a sandbox; an
+interpreter fed a script on the call's stdin is asked about, and so is a `date`
+fed stdin (under `cmd /c` it reads a new date from it; there every `date` asks). It hands work to subagents only when that
+pays — an explore subagent for a broad read-only investigation or parallel
+research, code subagents for two or more changes to disjoint files — because a
+delegated edit costs a second prompt, a second exploration and the spec written
+out twice.
 
 You pick the mode, or let the harness pick. A new session starts on **Auto**
 wherever the decision model behind it (Jev) is available: its first message is
@@ -91,6 +132,18 @@ routed — a request that needs decisions and a design starts in Brain,
 everything else in Builder — and you can still pick either by hand. Auto sends
 that first message to Jev; Settings › Agent switches it off, or to *Shadow*,
 which only records what Auto would have chosen next to what you chose.
+
+Brain asks only about the decisions whose answer changes the plan —
+independent questions together in one form, none at all for a request that is
+already fully specified — and confirms the design in one question before
+writing it. The longer checklist (what consensus must cover, UI sizing and
+assets, what the Low-Level Design holds, diagrams) is the built-in `plan`
+skill, read when a request needs it. The prompt explains how the tools fit
+together rather than listing rules: what the harness enforces — reading a file
+before editing it, no writes in Brain, tasks only after the Low-Level Design, a
+goal closed only on a passing check — is enforced by the tool, whose refusal
+says what to do next. **Settings › Agent › System prompt** switches back to the
+previous, longer prompt (*v1*) for this release.
 
 ### It fits the model you chose
 
@@ -102,14 +155,46 @@ requests several times its size.
 
 - **Context is shed before it is summarized.** First what is a copy of
   something newer (an older read of the same file, an older task list), then
-  what a small decision model judges no longer needed, then simply the oldest
-  tool results. In that step your words and the model's are never cut; only
-  when it is not enough does the session hand off or compact.
+  the oldest tool results, cut to their first lines — with a small decision
+  model, when there is one, keeping the recent ones it judges still needed. In
+  that step your words and the model's are never cut; only when it is not
+  enough does the session hand off or compact. A compaction writes a note —
+  goal, decisions, files touched, what failed with the exact error, what is
+  left, your constraints word for word — and also appends it to
+  `.claudinio/notes/<session>.md`, where you can read it.
+- **A long tool output keeps its end.** A result over the size limit keeps its
+  beginning and its end — where a test run or a build puts the verdict — and
+  says how much was left out and where the whole output is. An edit that
+  breaks a file's syntax gets a warning with the line, in the same result.
 - **A small window gets a small prompt.** Under 64k tokens a Builder session
-  runs a compact profile — one short prompt, ten tools, and it edits files
-  itself instead of delegating — about 3.6k tokens before the conversation
-  starts, where the full prompt and tools take 10k before a single skill or MCP
-  server.
+  runs a compact profile — one short prompt and ten tools, no subagents and no
+  plans — about 2.4k tokens before the conversation starts, where the
+  Standard prompt and tools take about 5k.
+- **Tools and skills arrive when they are needed.** A Standard Builder
+  session sends fourteen core tools; the rest — the index and LSP searches, the web and browser
+  tools, the switch to plan mode, the full task reader and every MCP tool — are listed in the prompt
+  one line each, and the model loads the ones a task needs (`load_tools`, or
+  simply by calling one). A loaded tool is appended and stays for the session,
+  so the cached prefix only ever grows at its end. Skills are listed the same
+  way, one line each, and read with the `skills` tool. With ten skills and a
+  twenty-tool MCP server the prefix is about 6.5k tokens, where it used to be
+  17k.
+- **The task list comes to the agent, not the other way round.** Each run's
+  message ends with the session's task list, one line per task
+  (`id · status · title`), so no request is spent reading it back; the agent
+  marks a task in progress in the same request as the task's first tool call,
+  and moves several tasks in one `tasks_update`. One-step work needs no list at
+  all, and the Task Panel says *Single step*. A compaction restates the list
+  after its summary, and a turn that ends with a task still in progress gets one
+  reminder before it may finish.
+- **The context is cached where the provider has to be told.** On a provider
+  configured with the Anthropic protocol (Anthropic itself, a company proxy in
+  front of it) a prefix is cached only up to an explicit
+  breakpoint, so each request marks the system prompt and the end of the
+  conversation; the next round reads all of it from the cache instead of
+  paying full price again. claudin.io and OpenAI-protocol servers — the
+  built-in OpenRouter sign-in among them — are sent no markers; a server that refuses them gets one
+  retry without, and none after that.
 - **Tools per model.** Settings › Models can set a model to *Lean*, which
   leaves out the three LSP navigation tools and the prompt lines about them.
   Nothing is Lean by default: whether fewer tools help is a property of the
@@ -168,9 +253,116 @@ leave the prompt entirely.
 
 ### Parallel subagents
 
-The main agent delegates to parallel subagents (4 by default, configurable),
+The main agent can delegate to parallel subagents (4 by default, configurable),
 each with a fresh context and its own timeline you can open and read. Modes are
-`explore` (read-only) or `code`.
+`explore` (read-only) or `code`. An explore subagent is asked for a short
+report — findings, `path:line` references, open questions — and the main
+agent's context carries at most 6,000 characters of any report (the middle of a
+longer one is cut; the timeline keeps all of it). Every code subagent of a call
+starts from the same brief: the task in progress, the plan's path and the files
+the session has read, as paths.
+
+### A living document per session
+
+Work with several distinct parts — a piece of research, a write-up, a
+multi-part feature — gets a Markdown file the session owns, under
+`.claudinio/docs/`. The agent writes the scaffold first, a title and one
+placeholder per part:
+
+```md
+# Pudim de leite
+
+[origem do pudim de leite]
+[ingredientes originais]
+[Modo de preparo clássico]
+[Como servir o pudim]
+[Como armazenar o pudim]
+```
+
+and then fills each placeholder with `doc_write`, in order or in parallel: an
+explore subagent spawned with `"section": "s2"` writes that section itself,
+and only that one, so its report back can be two lines. The harness tags each
+section with an HTML comment it owns (`<!-- claudinio: id=s2 status=doing
+by=sub:ingredientes -->`), invisible when the file is rendered, and closes a
+section it wrote with `<!-- claudinio: end -->`, so a note you type between two
+sections stays yours however often the agent rewrites the one above it;
+everything else in the file is yours and is kept byte for byte.
+
+- **You can edit it at any time, in the app or any editor, and your edit
+  wins.** A section whose text you changed is marked *Edited by you*; an agent
+  that tries to write it before reading your version is refused and handed
+  your text to merge. A placeholder line you add (`[caramelo]`) becomes a
+  section. The agent hears what changed as one short note in its next message
+  — section ids and topics, never your text.
+- **The panel shows who is on what.** Where the Task Panel sits, a session
+  with a document lists its sections with their status and owner (`main`, or
+  the subagent, whose name opens its timeline). Click a row to edit the
+  document at that section. A section handed to a subagent that writes
+  nothing goes back to how it was — finished, or edited by you.
+- **Each run starts with the outline** (`id · status · owner · topic`), not the
+  bodies: the agent reads a section when it needs it (`doc_read`). A
+  compaction restates the outline after its summary, as it does the task list.
+- **A new top-level topic is a new document, and a new session.** Asking for
+  one while the session already has a document opens a linked session that
+  owns the new file; the old one keeps its own (and its memory of who edited
+  what). Your golden goals go along: a new topic is not a way out of them. The
+  new session fills its document before it may open another (a further topic
+  waits for your next message, even when that session's context fills and
+  hands off first). A context handoff carries the document along.
+- **The file stays inside `.claudinio/docs/`.** A link planted where the file
+  would go is never followed, and a `.claudinio` or `.claudinio/docs` that is a
+  link is refused, so a cloned repo cannot steer the write elsewhere.
+
+### It remembers what earlier sessions learned
+
+A new session in a repository does not start from nothing:
+
+- **Your project's own instructions.** The first message of every session —
+  including the Builder session that executes a plan and a session that takes
+  over after a handoff — also sends the workspace's `AGENTS.md` — or
+  `CLAUDE.md` when there is no `AGENTS.md` — up to its first 6,000 characters,
+  with a note saying from which line the agent can read the rest. The file is
+  yours: the harness never writes it, but the agent can edit it like any other
+  file (an `edit_file` you approve, or a shell command), so it is no more
+  protected than the rest of the workspace.
+- **A project memory the harness keeps.** When a build finishes, `finalize_plan`
+  can take up to five one-line lessons (200 characters each) that a later
+  session would otherwise have to rediscover. They go to the `## Learned` list
+  of `.claudinio/MEMORY.md` as `- 2026-10-19 — <lesson> (plan: <plan file>)`:
+  each points at the plan that holds the detail. No lessons, no entry — nothing
+  is copied there on its own. The file is append-only and kept under about
+  4,000 characters by dropping its oldest entries whole (they are still in
+  their plans); nothing in it is ever summarized or reworded. The first message
+  of each new session carries its entries.
+- **Only the harness writes the memory.** `edit_file` refuses
+  `.claudinio/MEMORY.md` however the path is spelled — that path check is the
+  real guard. `finalize_plan` will not take it as a plan file. The shell guard
+  is best-effort defence in depth on top, not a boundary: a shell call whose
+  text mentions `MEMORY.md`, or the `.claudinio` folder itself — written out,
+  not continued into another name or a plain path inside it, with a brace list
+  around it, Windows backslashes and cmd's `^` escape included
+  (`rm -rf .claudinio`, `cp -r q/. .claudinio/`, `.claudinio/M*`,
+  `{.claudinio,}`, `.claudinio\*`, `.claudi^nio`),
+  in its command, its working folder or its stdin — or a name
+  that resolves to the file through a link on disk — is refused unless it is a
+  plain read (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `file`, `grep`,
+  `git log`/`diff`/`show`/`status`/`blame`, with no pipe); YOLO mode and hooks
+  do not open it. It scans text, so it does not see a path the command builds
+  while it runs (a variable, a script), a glob or brace list that spells the
+  folder's own name (`.c*`, `.claudi{n,}io`), a name relative to a folder the
+  command first moves into (`cd .claudinio/plans && cp x ../M*`), a parent
+  folder (`rm -rf .`) or a hard link. Those ask in Builder, so YOLO or a hook's
+  `allow` runs them, and Builder's allowlisted interpreters run a script
+  unasked. It also errs the other way: a command that only names the folder in
+  text — `echo '.claudinio/' >> .gitignore`, `git commit -m "ignore
+  .claudinio"`, `git add .claudinio/plans/*.md` — is refused, so you run it
+  yourself (or the agent edits `.gitignore` with `edit_file`). You can edit
+  the memory file yourself.
+- **Neither ever goes into the system prompt**, which stays the same bytes from
+  one request to the next so the provider can cache it, and neither is sent
+  again later in the session; a session that continues another gets the
+  instructions file but not the memory (its plan carries the lessons).
+  Settings › Agent › *Project memory* turns both off.
 
 ### Nothing is a black box
 
@@ -286,28 +478,49 @@ resident, context used against context served, and the current token rate.
 
 ## The tools the model can call
 
-| Tool | Approval | What it does |
-|---|---|---|
-| `read_file` | auto | Read a text file inside the workspace |
-| `list_dir` | auto | List a directory, honouring `.gitignore` |
-| `grep` | auto | Regex search (ripgrep) |
-| `code_search` | auto | Full-text symbol search (SQLite FTS5) |
-| `semantic_search` | auto | Hybrid BM25 + embedding search |
-| `symbol_lookup` | auto | Exact symbol lookup |
-| `file_outline` | auto | Symbols defined in a file |
-| `go_to_definition` | auto | LSP definition |
-| `find_references` | auto | LSP references |
-| `web_search` | auto | Search the web |
-| `browser_inspect` | auto | Read the open page's console, network, text or HTML |
-| `browser_screenshot` | auto | Capture the viewport, full page, an element or a region |
-| `ask_user` | auto | Ask you a question, with options |
-| `tasks_get` / `tasks_set` / `tasks_update` | auto | Read the task list, rewrite it, or change one task |
-| `write_plan` / `finalize_plan` | auto | Author and close out a plan document |
-| `enter_plan_mode` / `exit_plan_mode` | auto | Switch between Brain and Builder |
-| `spawn_agents` | auto | Launch parallel subagents |
-| **`browser`** | **origin-gated** | Navigate and interact with a page (local addresses are automatic; other origins ask) |
-| **`edit_file`** | **requires approval** | Propose an edit, shown as a diff |
-| **`bash`** | **requires approval** | Run a shell command (read-only commands are allowlisted) |
+| Tool | Approval | Sent | What it does |
+|---|---|---|---|
+| `read_file` | auto | always | Read a text file inside the workspace |
+| `list_dir` | auto | always | List a directory, honouring `.gitignore` |
+| `grep` | auto | always | Regex search (ripgrep) |
+| `code_search` | auto | deferred | Full-text symbol search (SQLite FTS5) |
+| `semantic_search` | auto | deferred | Hybrid BM25 + embedding search |
+| `symbol_lookup` | auto | deferred | Exact symbol lookup |
+| `file_outline` | auto | deferred | Symbols defined in a file |
+| `go_to_definition` | auto | deferred | LSP definition |
+| `find_references` | auto | deferred | LSP references |
+| `web_search` | auto | deferred | Search the web |
+| `browser_inspect` | auto | deferred | Read the open page's console, network, text or HTML |
+| `browser_screenshot` | auto | deferred | Capture the viewport, full page, an element or a region |
+| `ask_user` | auto | always | Ask you a question, with options |
+| `tasks_get` | auto | deferred | Every task's description and journal (each run already carries the list) |
+| `tasks_set` / `tasks_update` | auto | always | Rewrite the task list, or change one or several tasks in one call |
+| `run_quality` | auto | always | Run the project's tests (and coverage) and record the result |
+| `write_plan` / `exit_plan_mode` | auto | always (Brain) | Author the plan; return to Builder |
+| `finalize_plan` | auto | always (Builder) | Close out the plan; add lessons to the project memory |
+| `enter_plan_mode` | auto | deferred (Builder) | Switch to Brain |
+| `spawn_agents` | auto | always | Launch parallel subagents |
+| `skills` | auto | always | List the installed skills, or read one |
+| `load_tools` | auto | always | Add deferred tools to the list for the rest of the session |
+| `doc_create` | auto | always | Start the session's living document (a new topic opens a new session) |
+| `doc_write` / `doc_read` / `doc_add` | auto | with a document | Write, read or add a section of the document |
+| MCP tools | **requires approval** | deferred | Whatever the connected servers offer |
+| **`browser`** | **origin-gated** | deferred | Navigate and interact with a page (local addresses are automatic; other origins ask) |
+| **`edit_file`** | **requires approval** | always (Builder, code subagents) | Propose an edit or a new file, shown as a diff |
+| **`bash`** | **requires approval** | always | Run a shell command (read-only commands are allowlisted) |
+
+*Sent* is what a Standard session puts in every request. A *deferred* tool is
+named in the system prompt in one line and its definition joins the request
+once the model loads it with `load_tools` — or calls it, which loads it too.
+The three document tools are not listed: they join with the document
+(`doc_create` loads them, and a session that has one starts with them).
+Subagents defer nothing; they leave out only the three LSP tools, and get
+`doc_write` / `doc_read` only when spawned with a section.
+
+Calls to the read-only tools (`read_file`, `list_dir`, `grep`, the index and
+LSP searches, `web_search` and `tasks_get`) that the model makes side by side
+run at the same time, four at most; everything else runs one call at a time,
+in the order the model asked.
 
 File tools are confined to the opened workspace by a path guard that rejects
 traversal. A denylist blocks known-destructive commands outright. Anything the
@@ -315,6 +528,32 @@ browser reads off a page is wrapped and labelled as untrusted data, because a
 page can contain text written to manipulate the model. See
 [SECURITY.md](SECURITY.md) for the full threat model, including what the
 project explicitly does *not* defend against.
+
+## Measuring the harness
+
+Changes to the harness are judged on three numbers, in this order: **billed
+cost per solved task** (cache-aware), **provider rounds per task**, and the
+**pass rate** that must not drop. `eval/` holds a fixed set of 25 tasks —
+self-contained Python and JavaScript fixtures plus real commits from this
+repository's frontend — each with an oracle and a known solution, and a
+headless runner that drives the real agent loop through them:
+
+```bash
+cd src-tauri
+cargo run --example claudinio-eval -- validate ../eval/tasks     # no model: every oracle fails, then passes
+cargo run --example claudinio-eval -- run ../eval/tasks \
+  --model <id> --base-url <url> --api-key-env <ENV>               # one fresh session per task
+```
+
+The runner approves file edits and read-only shell commands only, never
+arbitrary shell. That keeps a wrong model from doing damage by accident; it is
+not a sandbox — the task's tests run code the model wrote — so run `run` in a
+disposable container or VM. Every
+provider request is recorded as a `usage` record in the session (cache reads
+and cache writes included), subagent transcripts are kept beside their session,
+and `scripts/session-stats.py --cost` reports cost, rounds and cache share from
+your own sessions. Details, the task format and the approval policy:
+[eval/README.md](eval/README.md).
 
 ## Architecture
 

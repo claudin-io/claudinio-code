@@ -81,6 +81,9 @@ src/                        SolidJS frontend
   lib/ipc.ts                the only place that calls Tauri `invoke`
 src-tauri/src/
   agent/                    agent loop, providers, tools, subagents, skills, MCP
+    run_loop.rs             the provider → tool loop for one message
+    tool_exec.rs            one tool call: permission, approval, result
+    prompt.rs               the system prompt and the tool list beside it
     tools/                  the tool implementations the model calls
     permissions.rs          allowlist / denylist / approval policy
     persist.rs              session JSONL store

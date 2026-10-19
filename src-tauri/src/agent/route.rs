@@ -36,8 +36,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+use crate::agent::events::AgentEvent;
 use crate::agent::jev::{JevBackend, noul};
-use crate::agent::session::SessionMode;
+use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
+use crate::agent::provider::AgentConfig;
+use crate::agent::session::{ModeCtl, ModeOrigin, PromptProfile, SessionMode};
+use crate::agent::tools::ToolContext;
+use std::sync::Arc;
+use tauri::ipc::Channel;
 
 /// How much say the router has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -228,6 +234,123 @@ pub async fn route(prompt: &str, backend: Option<&JevBackend>) -> Verdict {
         p_design: Some(p_design),
         cost: answer.cost,
     }
+}
+
+/// Route the first prompt of a fresh session (`agent::route`): record what the
+/// router would start it as, and — when the router is on and the user left the
+/// choice to it — start it that way. Returns what an awaited verdict cost.
+///
+/// Called before the user's message becomes a turn, which is what makes
+/// "fresh" checkable: no history, and no record that this session continues
+/// another one or already has work lined up.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn route_first_prompt(
+    config: &AgentConfig,
+    profile: PromptProfile,
+    fresh: bool,
+    prompt: &str,
+    store: &SessionStore,
+    ctx: &ToolContext,
+    mode_ctl: &Arc<ModeCtl>,
+    event_tx: &Channel<AgentEvent>,
+) -> f64 {
+    // Read unconditionally: an Auto request is for this prompt and must not
+    // survive to route a later one.
+    let auto = mode_ctl.take_auto();
+    let route_mode = config.jev.route;
+    if profile != PromptProfile::Standard || route_mode == RouteMode::Off || !fresh {
+        return 0.0;
+    }
+    // Brain always runs the Standard profile. On a window that small it has
+    // nowhere to go but the refusal, and routing would trade a Builder session
+    // that works (the Compact profile) for one that cannot start.
+    if config.context_window_for(&config.brain_model) < crate::agent::surface::COMPACT_BELOW {
+        return 0.0;
+    }
+    let records = crate::agent::persist::load_records_cached(&store.path, &ctx.records_cache)
+        .unwrap_or_default();
+    // A successor session carries a plan; a session with tasks (golden goals
+    // create them before the run) already has a loop that flips its mode.
+    let has_work = records.iter().any(|r| {
+        matches!(
+            r,
+            SessionRecord::LinkedFrom { .. } | SessionRecord::Tasks { .. }
+        )
+    });
+    if has_work {
+        return 0.0;
+    }
+    let chosen = mode_ctl.get();
+    let (ran_as, _) = chosen;
+    let backend = crate::agent::jev::backend(config);
+    let record = move |v: &Verdict, shadow: bool| SessionRecord::ModeRoute {
+        verdict: v.mode.as_str().into(),
+        ran_as: ran_as.as_str().into(),
+        source: v.source.into(),
+        shadow,
+        p_decisions: v.p_decisions,
+        p_design: v.p_design,
+        cost: v.cost,
+        ts: now_ms(),
+    };
+
+    if route_mode == RouteMode::On && auto {
+        let verdict = route(prompt, backend.as_ref()).await;
+        // The verdict was awaited, and the mode toggle works meanwhile. A
+        // choice the user made in that time is theirs: writing over it would
+        // also hand the agent the right to leave a Brain the user turned on.
+        let untouched = mode_ctl.get() == chosen;
+        store.try_append(&record(&verdict, !untouched));
+        // Auto was the last thing chosen, so the verdict is the mode, wherever
+        // the control stood before: a user can try Brain, go back to Auto, and
+        // be sent to Builder. And a Brain reached through Auto is the
+        // harness's choice even when the user had clicked Brain earlier —
+        // agent origin, like `enter_plan_mode`: the flow then runs interview →
+        // plan → tasks → build without a manual flip, and the interview's
+        // final confirmation is the user's approval point.
+        let reorigin = verdict.mode == SessionMode::Brain && chosen.1 != ModeOrigin::Agent;
+        if untouched && (verdict.mode != ran_as || reorigin) {
+            mode_ctl.set(verdict.mode, ModeOrigin::Agent);
+            store.try_append(&SessionRecord::Mode {
+                mode: verdict.mode.as_str().into(),
+                origin: ModeOrigin::Agent.as_str().into(),
+                ts: now_ms(),
+            });
+            let _ = event_tx.send(AgentEvent::ModeChanged {
+                mode: verdict.mode.as_str().into(),
+                origin: ModeOrigin::Agent.as_str().into(),
+                reason: Some(verdict.reason()),
+            });
+        }
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        return verdict.cost;
+    }
+
+    // Shadow, or the user chose a mode themselves: the verdict is only worth
+    // having next to that choice, and must not cost the first request a wait.
+    // What the rules decide costs none, so it is written here, in order with
+    // everything else this run writes.
+    if rules(prompt).is_some() {
+        let verdict = route(prompt, None).await;
+        store.try_append(&record(&verdict, true));
+        crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
+        return 0.0;
+    }
+    let prompt = prompt.to_string();
+    let path = store.path.clone();
+    let cache = ctx.records_cache.clone();
+    tokio::spawn(async move {
+        let verdict = route(&prompt, backend.as_ref()).await;
+        // Nobody answered: there is nothing to compare with the user's choice.
+        // And a session deleted while Jev was thinking is not brought back as
+        // a file holding one verdict.
+        if verdict.source == SOURCE_UNAVAILABLE || !path.exists() {
+            return;
+        }
+        SessionStore { path: path.clone() }.try_append(&record(&verdict, true));
+        crate::agent::persist::invalidate_cache(&path, &cache);
+    });
+    0.0
 }
 
 #[cfg(test)]
@@ -499,5 +622,387 @@ mod tests {
             !scored.is_empty(),
             "no session in {dir} had a prompt to judge"
         );
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::agent::jev::test_support::spawn_stub;
+
+    const FEATURE: &str = "I want users to be able to share a session with a teammate. \
+                           Not sure yet whether it should be a link or an invite.";
+
+    fn store(tag: &str) -> SessionStore {
+        let path = std::env::temp_dir().join(format!(
+            "claudinio_route_{tag}_{}_{}.jsonl",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::write(&path, "").unwrap();
+        SessionStore { path }
+    }
+
+    /// A Claudinio account whose plan endpoint is the stub: the one Jev backend
+    /// whose address comes from the config rather than from a constant.
+    fn config(route: RouteMode, jev_url: Option<&str>) -> AgentConfig {
+        let mut cfg = AgentConfig::default();
+        cfg.jev.route = route;
+        if let Some(url) = jev_url {
+            // Unique per test: a refused key is remembered process-wide.
+            cfg.api_key = format!("sk-route-{}", now_ms());
+            cfg.services_url = url.trim_end_matches("/v1/systemone").to_string();
+        }
+        cfg
+    }
+
+    fn jev_says(decisions: f64, design: f64) -> &'static str {
+        Box::leak(
+            serde_json::json!({
+                "answers": {
+                    "decisions": {"type": "noul", "noul": decisions},
+                    "design": {"type": "noul", "noul": design},
+                },
+                "usage": {"input_tokens": 200, "cost": 2e-6},
+            })
+            .to_string()
+            .into_boxed_str(),
+        )
+    }
+
+    async fn run(
+        cfg: &AgentConfig,
+        store: &SessionStore,
+        mode_ctl: &Arc<ModeCtl>,
+        fresh: bool,
+    ) -> f64 {
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        route_first_prompt(
+            cfg,
+            PromptProfile::Standard,
+            fresh,
+            FEATURE,
+            store,
+            &ctx,
+            mode_ctl,
+            &events,
+        )
+        .await
+    }
+
+    fn routes(store: &SessionStore) -> Vec<(String, String, String, bool)> {
+        crate::agent::persist::load_records(&store.path)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                SessionRecord::ModeRoute {
+                    verdict,
+                    ran_as,
+                    source,
+                    shadow,
+                    ..
+                } => Some((verdict, ran_as, source, shadow)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The shadow verdict is written by a background task.
+    async fn wait_for_route(store: &SessionStore) -> Vec<(String, String, String, bool)> {
+        for _ in 0..100 {
+            let found = routes(store);
+            if !found.is_empty() {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        Vec::new()
+    }
+
+    fn builder() -> Arc<ModeCtl> {
+        Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human))
+    }
+
+    #[tokio::test]
+    async fn in_shadow_the_verdict_is_recorded_and_nothing_changes() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (store, mode) = (store("shadow"), builder());
+        // Even with Auto requested: shadow never acts.
+        mode.request_auto(true);
+        let cost = run(&config(RouteMode::Shadow, Some(&url)), &store, &mode, true).await;
+        assert_eq!(cost, 0.0, "nothing was awaited");
+        assert_eq!(
+            wait_for_route(&store).await,
+            vec![("brain".into(), "builder".into(), "jev".into(), true)]
+        );
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn on_auto_a_planning_request_starts_in_brain_as_the_agents_own_choice() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (store, mode) = (store("on"), builder());
+        mode.request_auto(true);
+        let cost = run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        stub.join().unwrap();
+        assert!(cost > 0.0, "an awaited verdict is charged to the run");
+        // Agent origin: it may exit Brain itself once the plan and tasks exist.
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Agent));
+        assert_eq!(
+            routes(&store),
+            vec![("brain".into(), "builder".into(), "jev".into(), false)]
+        );
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            Some(("brain".into(), "agent".into())),
+            "a reloaded session is in the mode the router chose"
+        );
+        assert!(!mode.take_auto(), "Auto is for one prompt");
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // The verdict is awaited for up to two seconds, and the mode toggle works
+    // in the meantime. What the user picks then is their choice — and a Brain
+    // they turned on must stay one the agent cannot leave by itself.
+    #[tokio::test]
+    async fn a_mode_the_user_picks_while_auto_is_deciding_is_kept_as_theirs() {
+        let (url, stub) = crate::agent::jev::test_support::spawn_stub_after(
+            std::time::Duration::from_millis(400),
+            200,
+            jev_says(0.95, 0.9),
+        );
+        let (store, mode) = (store("race"), builder());
+        mode.request_auto(true);
+        let toggle = mode.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            toggle.set(SessionMode::Brain, ModeOrigin::Human);
+        });
+        run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        stub.join().unwrap();
+
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Human));
+        // Recorded as a verdict that decided nothing.
+        assert_eq!(
+            routes(&store),
+            vec![("brain".into(), "builder".into(), "jev".into(), true)]
+        );
+        let records = crate::agent::persist::load_records(&store.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            None,
+            "no mode record of ours"
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // Brain always runs the Standard profile. Where the Brain model's window
+    // is too small for that, Auto would turn a Builder session that works —
+    // on the Compact profile — into one that is refused on its first message.
+    #[tokio::test]
+    async fn auto_does_not_send_a_session_to_a_brain_that_cannot_run() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let mut cfg = config(RouteMode::On, Some(&url));
+        cfg.brain_model = "tiny/m".into();
+        cfg.providers.insert(
+            "tiny".into(),
+            crate::agent::provider::ProviderEntry {
+                api_key: "k".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                protocol: "openai".into(),
+                enabled_models: vec![],
+                label: None,
+                model_pricing: Default::default(),
+                model_output_limits: Default::default(),
+                custom: true,
+                custom_models: vec!["m".into()],
+                model_context_limits: Default::default(),
+                context_window: Some(32_768),
+            },
+        );
+        let (store, mode) = (store("tinybrain"), builder());
+        mode.request_auto(true);
+        let cost = run(&cfg, &store, &mode, true).await;
+        // Nobody was asked: the stub is left waiting and gives up.
+        drop(stub);
+
+        assert_eq!(cost, 0.0);
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        assert!(routes(&store).is_empty());
+        assert!(!mode.take_auto(), "Auto is still for one prompt only");
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // What the rules decide needs no wait, so it is written in line — not by a
+    // background task racing the run for the same file.
+    #[tokio::test]
+    async fn in_shadow_a_verdict_the_rules_reach_is_recorded_before_the_run_goes_on() {
+        let (store, mode) = (store("inline"), builder());
+        let ctx = crate::agent::tools::tests_support::ctx();
+        let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
+        route_first_prompt(
+            &config(RouteMode::Shadow, None),
+            PromptProfile::Standard,
+            true,
+            "fix the typo",
+            &store,
+            &ctx,
+            &mode,
+            &events,
+        )
+        .await;
+        // No waiting: it is there by the time the call returns.
+        assert_eq!(
+            routes(&store),
+            vec![("builder".into(), "builder".into(), "rules".into(), true)]
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    // The control can be moved to Brain and back to Auto before the first
+    // message. Auto is then what was chosen: its verdict is the mode, in
+    // either direction, and a Brain it confirms is its own.
+    #[tokio::test]
+    async fn auto_chosen_after_brain_was_tried_decides_like_auto_always_does() {
+        let picked_brain = || Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human));
+
+        let (url, stub) = spawn_stub(200, jev_says(0.2, 0.3));
+        let (file, mode) = (store("back-to-auto"), picked_brain());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &file, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Agent));
+        assert_eq!(
+            routes(&file),
+            vec![("builder".into(), "brain".into(), "jev".into(), false)]
+        );
+        let records = crate::agent::persist::load_records(&file.path).unwrap();
+        assert_eq!(
+            crate::agent::persist::last_mode(&records),
+            Some(("builder".into(), "agent".into())),
+            "a reloaded session is in the mode Auto chose"
+        );
+        std::fs::remove_file(&file.path).ok();
+
+        // Auto agrees with the earlier click: still Brain, but now a Brain the
+        // agent may leave by itself once the plan and tasks exist.
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (file, mode) = (store("auto-agrees"), picked_brain());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &file, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Agent));
+        std::fs::remove_file(&file.path).ok();
+
+        // Without Auto, a Brain the user picked is left exactly as it is.
+        let (file, mode) = (store("stays-brain"), picked_brain());
+        run(&config(RouteMode::On, None), &file, &mode, true).await;
+        assert_eq!(mode.get(), (SessionMode::Brain, ModeOrigin::Human));
+        std::fs::remove_file(&file.path).ok();
+    }
+
+    #[tokio::test]
+    async fn on_auto_an_ordinary_request_stays_in_builder() {
+        let (url, stub) = spawn_stub(200, jev_says(0.3, 0.9));
+        let (store, mode) = (store("stay"), builder());
+        mode.request_auto(true);
+        run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        assert_eq!(
+            routes(&store),
+            vec![("builder".into(), "builder".into(), "jev".into(), false)]
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn on_without_jev_auto_is_builder_and_says_nobody_decided() {
+        let (store, mode) = (store("nojev"), builder());
+        mode.request_auto(true);
+        let cost = run(&config(RouteMode::On, None), &store, &mode, true).await;
+        assert_eq!(cost, 0.0);
+        assert_eq!(mode.get().0, SessionMode::Builder);
+        assert_eq!(
+            routes(&store),
+            vec![(
+                "builder".into(),
+                "builder".into(),
+                "unavailable".into(),
+                false
+            )]
+        );
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn a_mode_the_user_picked_is_never_overridden() {
+        let (url, stub) = spawn_stub(200, jev_says(0.95, 0.9));
+        let (store, mode) = (store("explicit"), builder());
+        // Router on, but the user chose Builder by hand: no Auto request.
+        run(&config(RouteMode::On, Some(&url)), &store, &mode, true).await;
+        assert_eq!(
+            wait_for_route(&store).await,
+            vec![("brain".into(), "builder".into(), "jev".into(), true)],
+            "recorded next to the user's choice, as in shadow"
+        );
+        stub.join().unwrap();
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Human));
+        std::fs::remove_file(&store.path).ok();
+    }
+
+    #[tokio::test]
+    async fn only_the_first_prompt_of_a_fresh_session_is_routed() {
+        // The backend points nowhere: asking it would be the failure.
+        let cfg = config(RouteMode::On, Some("http://127.0.0.1:9/v1/systemone"));
+
+        // Not fresh: the session already has history.
+        let (s1, mode) = (store("history"), builder());
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &s1, &mode, false).await, 0.0);
+        assert!(
+            !mode.take_auto(),
+            "the request does not survive to a later prompt"
+        );
+
+        // A successor session: it carries a plan to execute.
+        let s2 = store("successor");
+        s2.try_append(&SessionRecord::LinkedFrom {
+            prev_session_id: "p".into(),
+            reason: "plan_execution".into(),
+            golden_cycle: 0,
+            golden_stalls: 0,
+            golden_last_pending: vec![],
+            ts: 1,
+        });
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &s2, &mode, true).await, 0.0);
+
+        // Golden goals created tasks before the run: their loop owns the mode.
+        let s3 = store("goals");
+        crate::agent::persist::append_tasks(&s3.path, &[]).unwrap();
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &s3, &mode, true).await, 0.0);
+
+        for s in [&s1, &s2, &s3] {
+            assert!(routes(s).is_empty());
+            std::fs::remove_file(&s.path).ok();
+        }
+        assert_eq!(mode.get().0, SessionMode::Builder);
+    }
+
+    #[tokio::test]
+    async fn off_asks_nothing_and_records_nothing() {
+        let cfg = config(RouteMode::Off, Some("http://127.0.0.1:9/v1/systemone"));
+        let (store, mode) = (store("off"), builder());
+        mode.request_auto(true);
+        assert_eq!(run(&cfg, &store, &mode, true).await, 0.0);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(routes(&store).is_empty());
+        std::fs::remove_file(&store.path).ok();
     }
 }

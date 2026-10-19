@@ -101,6 +101,27 @@ describe("toolPresentation", () => {
     expect(toolHeader(makeCall("bash", { command: "/usr/bin/grep pattern file" })).title).toBe("Searched files");
   });
 
+  it("titles an edit_file with an empty old_string as a created file", () => {
+    expect(toolHeader(makeCall("edit_file", { path: "a.md", old_string: "", new_string: "x" })).title).toBe(
+      "Created file",
+    );
+    expect(toolHeader(makeCall("edit_file", { path: "a.md", old_string: "x", new_string: "y" })).title).toBe(
+      "Edited file",
+    );
+  });
+
+  // "Created" claims a file now exists on disk: a creation the person
+  // rejected, or one the harness refused (the file exists, the path is
+  // relative), did not happen and must not be titled as if it had.
+  it("titles a creation that did not happen as not created", () => {
+    const call = makeCall("edit_file", { path: "a.md", old_string: "", new_string: "x" });
+    expect(toolHeader(call, makeResult("edit_file", "Created a.md")).title).toBe("Created file");
+    expect(toolHeader(call, makeResult("edit_file", "Edit rejected by user")).title).toBe("File not created");
+    expect(toolHeader(call, makeResult("edit_file", "", "a.md already exists, ...")).title).toBe("File not created");
+    // A reloaded session carries the refusal as plain output, no error flag.
+    expect(toolHeader(call, makeResult("edit_file", "Error: a.md is relative; ...")).title).toBe("File not created");
+  });
+
   it("keeps Ran command for bash that merely mentions grep", () => {
     expect(toolHeader(makeCall("bash", { command: "cat file | grep foo" })).title).toBe("Ran command");
     expect(toolHeader(makeCall("bash", { command: "git status" })).title).toBe("Ran command");
@@ -169,6 +190,23 @@ describe("ToolBody", () => {
     const diff = document.querySelector('[data-testid="diff-viewer"]');
     expect(diff).not.toBeNull();
     expect(diff?.getAttribute("data-language")).toBe("typescript");
+    dispose();
+  });
+
+  // An empty old_string creates the file (lean-harness Phase 3b): the
+  // timeline says so, and the diff runs from nothing.
+  it("labels an edit_file that creates a file as a new file, every line added", () => {
+    const call = makeCall("edit_file", { path: "docs/NEW.md", old_string: "", new_string: "# New\n" });
+    const dispose = render(() => <ToolBody call={call} />, document.body);
+    expect(document.body.textContent).toContain("New file");
+    expect(document.querySelector('[data-testid="diff-viewer"]')?.textContent).toBe("|# New\n");
+    dispose();
+  });
+
+  it("does not label an ordinary edit as a new file", () => {
+    const call = makeCall("edit_file", { path: "src/foo.ts", old_string: "a", new_string: "b" });
+    const dispose = render(() => <ToolBody call={call} />, document.body);
+    expect(document.body.textContent).not.toContain("New file");
     dispose();
   });
 
@@ -405,6 +443,223 @@ describe("ToolBody", () => {
     const result = makeResult("mcp__github__list_issues", "none");
     const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
     expect(document.body.querySelector("img")).toBeNull();
+    dispose();
+  });
+});
+
+// Phase 4 of the lean-harness plan: one `tasks_update` call may close a task
+// and start the next. The row says how many tasks moved and the body lists
+// each change, whichever form the call took.
+describe("batched tasks_update", () => {
+  const batch = makeCall("tasks_update", {
+    updates: [
+      { id: "t1", status: "done", journal: ["it was the cache"] },
+      { id: "t2", status: "doing" },
+      { id: "t3", journal: ["a", "b"] },
+    ],
+  });
+
+  it("titles a batch in the plural and summarizes each change", () => {
+    expect(toolHeader(batch).title).toBe("Updated tasks");
+    expect(toolSummary(batch)).toBe("t1 → done, t2 → doing, t3 · 2 notes");
+    // The single form keeps its own title and summary.
+    const one = makeCall("tasks_update", { id: "t3", status: "done" });
+    expect(toolHeader(one).title).toBe("Updated task");
+    expect(toolSummary(one)).toBe("t3 → done");
+  });
+
+  it("renders one row per change with the new status", () => {
+    const dispose = render(
+      () => <ToolBody call={batch} result={makeResult("tasks_update", "Tasks updated — …")} />,
+      document.body,
+    );
+    const rows = document.body.querySelectorAll("[data-task-update]");
+    expect(rows.length).toBe(3);
+    expect(rows[0].textContent).toContain("t1");
+    expect(rows[0].textContent).toContain("done");
+    expect(rows[0].textContent).toContain("it was the cache");
+    expect(rows[0].querySelector('[data-testid="icon-check-circle"]')).not.toBeNull();
+    expect(rows[1].querySelector('[data-testid="icon-loader"]')).not.toBeNull();
+    expect(rows[2].textContent).toContain("2 notes");
+    dispose();
+  });
+
+  it("renders the single form as one row too", () => {
+    const one = makeCall("tasks_update", { id: "t9", status: "doing" });
+    const dispose = render(() => <ToolBody call={one} />, document.body);
+    const rows = document.body.querySelectorAll("[data-task-update]");
+    expect(rows.length).toBe(1);
+    expect(rows[0].textContent).toContain("t9");
+    dispose();
+  });
+
+  it("shows why a batch was refused", () => {
+    const result = makeResult(
+      "tasks_update",
+      "",
+      "tasks_update: there is no task 't9'. The batch was refused: nothing was applied.",
+    );
+    const dispose = render(() => <ToolBody call={batch} result={result} />, document.body);
+    expect(document.body.textContent).toContain("nothing was applied");
+    dispose();
+  });
+});
+
+// The two tools Phase 2 of the lean-harness plan added: a deferred-tool load
+// and a skill read are bookkeeping, so each renders as compact rows rather
+// than a key-value dump of its arguments.
+describe("load_tools and skills", () => {
+  it("titles and summarizes a load by the tools it asked for", () => {
+    const call = makeCall("load_tools", { names: ["semantic_search", "mcp__github__list_issues"] });
+    expect(toolHeader(call).title).toBe("Loaded tools");
+    expect(toolSummary(call)).toBe("semantic_search, mcp__github__list_issues");
+  });
+
+  it("titles a skill read and a skill listing apart", () => {
+    const read = makeCall("skills", { action: "read", name: "deploy" });
+    expect(toolHeader(read).title).toBe("Read a skill");
+    expect(toolSummary(read)).toBe("deploy");
+    const list = makeCall("skills", { action: "list" });
+    expect(toolHeader(list).title).toBe("Listed skills");
+    expect(toolSummary(list)).toBe("");
+  });
+
+  it("renders one row per loaded tool, by its human name", () => {
+    const call = makeCall("load_tools", { names: ["semantic_search", "mcp__github__list_issues"] });
+    const result = makeResult("load_tools", "Loaded: semantic_search, mcp__github__list_issues.");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    const rows = document.body.querySelectorAll("[data-loaded-tool]");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("Searched code");
+    expect(rows[0].textContent).toContain("semantic_search");
+    expect(rows[1].textContent).toContain("list issues");
+    dispose();
+  });
+
+  it("shows why a load failed", () => {
+    const call = makeCall("load_tools", { names: ["nope"] });
+    const result = makeResult("load_tools", "", "Not a deferred tool here: nope.");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.textContent).toContain("Not a deferred tool here: nope.");
+    dispose();
+  });
+
+  it("renders a skill listing as rows with their scope", () => {
+    const call = makeCall("skills", { action: "list" });
+    const result = makeResult(
+      "skills",
+      "2 skills, the user's own first:\n" +
+        "- deploy [project] /ws/.agents/skills/deploy/SKILL.md\n  Ship the app\n" +
+        "- find-skills [builtin] <built-in>\n  Helps users discover skills\n",
+    );
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    const rows = document.body.querySelectorAll("[data-skill-row]");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("deploy");
+    expect(rows[0].textContent).toContain("project");
+    expect(rows[0].textContent).toContain("Ship the app");
+    expect(rows[1].textContent).toContain("builtin");
+    dispose();
+  });
+
+  it("renders a skill read as its instructions", () => {
+    const call = makeCall("skills", { action: "read", name: "deploy" });
+    const result = makeResult("skills", "# Skill: deploy\nDirectory: /ws/x\n\nRun **the script**.");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.querySelector("strong")?.textContent).toBe("the script");
+    dispose();
+  });
+});
+
+// Model-supplied args are not checked against the schema before they reach
+// the UI (the backend answers a malformed call with an error), so a summary
+// that assumed an array threw, and the error boundary replaced the whole live
+// run with its fallback (final branch review).
+describe("malformed tool args", () => {
+  it("summarises a load_tools call whose names is a string", () => {
+    expect(toolSummary(makeCall("load_tools", { names: "semantic_search" }))).toBe("semantic_search");
+    expect(toolSummary(makeCall("load_tools", { names: 3 }))).toBe("");
+  });
+
+  it("renders one row for a load_tools call whose names is a string", () => {
+    const call = makeCall("load_tools", { names: "semantic_search" });
+    const result = makeResult("load_tools", "", "load_tools needs the names to load");
+    const dispose = render(() => <ToolBody call={call} result={result} />, document.body);
+    expect(document.body.querySelectorAll("[data-loaded-tool]").length).toBe(1);
+    dispose();
+  });
+
+  it("skips entries of a tasks_update batch that are not objects", () => {
+    expect(toolSummary(makeCall("tasks_update", { updates: [null, { id: "t1", status: "done" }, "x"] }))).toBe(
+      "t1 → done",
+    );
+  });
+
+  it("summarises a tasks_set call whose tasks is not an array", () => {
+    expect(toolSummary(makeCall("tasks_set", { tasks: "t1" }))).toBe("0/0 done");
+  });
+});
+
+// Lean-harness Phase 4b: the living document's tools. Each reads as what it
+// did to the document — started it, wrote or claimed a section, read one,
+// added one — and the outline the backend answers with renders as rows.
+describe("living document tools", () => {
+  const OUTLINE =
+    "Wrote s1 (done).\n# Pudim de leite\ns1 · done · main · origem do pudim\ns2 · doing · sub:ingredientes · ingredientes originais";
+
+  it("titles each call by what it did to the document", () => {
+    expect(toolHeader(makeCall("doc_create", { title: "Pudim", sections: ["a"] })).title).toBe(
+      "Started a document",
+    );
+    expect(toolHeader(makeCall("doc_write", { id: "s1", body: "x" })).title).toBe("Wrote a section");
+    expect(toolHeader(makeCall("doc_write", { id: "s1", status: "doing" })).title).toBe("Claimed a section");
+    expect(toolHeader(makeCall("doc_read", { id: "s1" })).title).toBe("Read a section");
+    expect(toolHeader(makeCall("doc_read", {})).title).toBe("Read the document");
+    expect(toolHeader(makeCall("doc_add", { topic: "caramelo" })).title).toBe("Added a section");
+  });
+
+  it("summarizes the document, section or topic", () => {
+    expect(toolSummary(makeCall("doc_create", { title: "Pudim", sections: ["a", "b"] }))).toBe(
+      "Pudim · 2 sections",
+    );
+    expect(toolSummary(makeCall("doc_write", { id: "s2", body: "x" }))).toBe("s2");
+    expect(toolSummary(makeCall("doc_read", {}))).toBe("outline");
+    expect(toolSummary(makeCall("doc_add", { topic: "caramelo", after: "s1" }))).toBe("caramelo");
+  });
+
+  it("renders the outline a doc tool answers with as one row per section", () => {
+    const call = makeCall("doc_add", { topic: "x" });
+    const dispose = render(
+      () => <ToolBody call={call} result={makeResult("doc_add", OUTLINE)} />,
+      document.body,
+    );
+    const rows = document.body.querySelectorAll("[data-doc-section]");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("origem do pudim");
+    expect(rows[0].textContent).toContain("done");
+    expect(rows[1].textContent).toContain("sub:ingredientes");
+    dispose();
+  });
+
+  it("shows what a doc_write wrote, and why a write was refused", () => {
+    const call = makeCall("doc_write", { id: "s1", body: "Veio de **Portugal**." });
+    let dispose = render(
+      () => <ToolBody call={call} result={makeResult("doc_write", OUTLINE)} />,
+      document.body,
+    );
+    expect(document.body.querySelector("strong")?.textContent).toBe("Portugal");
+    dispose();
+    document.body.innerHTML = "";
+    dispose = render(
+      () => (
+        <ToolBody
+          call={call}
+          result={makeResult("doc_write", "", "s1 was edited by the user since you last read it")}
+        />
+      ),
+      document.body,
+    );
+    expect(document.body.textContent).toContain("edited by the user");
     dispose();
   });
 });

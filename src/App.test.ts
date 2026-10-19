@@ -28,6 +28,8 @@ import {
   loadOpenWorkspaces,
   saveOpenWorkspaces,
   addRecent,
+  taskColumnOpen,
+  taskColumnWidth,
 } from "./App";
 
 beforeEach(() => {
@@ -142,5 +144,39 @@ describe("addRecent", () => {
     // The oldest (last in the original list, /path-9) should be discarded
     expect(projects).not.toContain("/path-9");
     expect(projects).toContain("/path-0");
+  });
+});
+
+// ── taskColumnOpen ──────────────────────────────────────────────────
+
+// The task column takes no width until it has something to say: a list, or
+// a conversation whose work needed none ("single step"). A fresh workspace
+// keeps the layout it had before the lean-harness Phase 4 empty state.
+describe("taskColumnOpen", () => {
+  it("stays collapsed for a workspace with no tasks and no conversation", () => {
+    expect(taskColumnOpen(0, false)).toBe(false);
+  });
+
+  it("opens for a task list, and for a conversation without one", () => {
+    expect(taskColumnOpen(3, false)).toBe(true);
+    expect(taskColumnOpen(0, true)).toBe(true);
+  });
+});
+
+// ── taskColumnWidth ─────────────────────────────────────────────────
+
+// Lean-harness Phase 4b: a session with a living document shows the
+// document's sections in the task column, which needs room for a topic per
+// row; without one the column is the Task Panel's dots, or nothing.
+describe("taskColumnWidth", () => {
+  it("widens for a document whatever the task list says", () => {
+    expect(taskColumnWidth(true, 0, false)).toBe("w-64");
+    expect(taskColumnWidth(true, 5, true)).toBe("w-64");
+  });
+
+  it("is the task dots' column otherwise, collapsed when there is nothing to show", () => {
+    expect(taskColumnWidth(false, 3, false)).toBe("w-10");
+    expect(taskColumnWidth(false, 0, true)).toBe("w-10");
+    expect(taskColumnWidth(false, 0, false)).toBe("w-0");
   });
 });

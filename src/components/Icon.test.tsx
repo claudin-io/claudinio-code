@@ -61,6 +61,13 @@ describe("Icon", () => {
   });
 });
 
+describe("toolIcon for the Phase 2 tools", () => {
+  it("gives load_tools and skills icons of their own", () => {
+    expect(toolIcon("load_tools")).toBe("package");
+    expect(toolIcon("skills")).toBe("book-open");
+  });
+});
+
 describe("toolIcon", () => {
   it('maps "read_file" -> "file"', () => {
     expect(toolIcon("read_file")).toBe("file");

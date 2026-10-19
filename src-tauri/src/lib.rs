@@ -4,6 +4,7 @@ pub mod browser;
 pub mod code_intel;
 mod commands;
 pub mod download;
+pub mod eval;
 pub(crate) mod http;
 pub(crate) mod imageutil;
 pub mod llama;
@@ -103,6 +104,8 @@ pub fn run() {
             commands::tasks::get_tasks,
             commands::tasks::set_tasks,
             commands::tasks::dismiss_golden_tasks,
+            commands::document::get_document,
+            commands::document::save_document,
             commands::network_log::get_network_log,
             commands::plugins::plugins_list,
             commands::plugins::plugins_inspect,
@@ -198,7 +201,7 @@ mod architecture_tests {
             "src/lsp",
             "src/quality",
         ] {
-            visit(Path::new(dir), &mut |path, body| {
+            visit_src(dir, &mut |path, body| {
                 if body.contains("crate::commands") {
                     offenders.push(path.display().to_string());
                 }
@@ -217,7 +220,7 @@ mod architecture_tests {
     #[test]
     fn code_intel_is_the_shared_crate_not_a_copy() {
         let mut copies = Vec::new();
-        visit(Path::new("src/code_intel"), &mut |path, _| {
+        visit_src("src/code_intel", &mut |path, _| {
             if path.file_name().is_none_or(|n| n != "mod.rs") {
                 copies.push(path.display().to_string());
             }
@@ -226,6 +229,102 @@ mod architecture_tests {
             copies.is_empty(),
             "src/code_intel must only re-export claudinio-code-intel, found {copies:?}"
         );
+    }
+
+    /// The most production lines one file under `agent/` may carry.
+    ///
+    /// `session.rs` grew to 8,446 lines — 5,326 of them production — by owning
+    /// the prompt text, the run loop, both judges, handoff and compaction, the
+    /// event type, tool dispatch and the retries at once, so a change to any one
+    /// of them meant reading past the other six (lean-harness plan, Phase 8).
+    /// Tests are not counted: they live beside the code they test by convention
+    /// (CONTRIBUTING.md), and a thorough suite is not the weight this guards
+    /// against.
+    const MAX_AGENT_FILE_PRODUCTION_LINES: usize = 2_000;
+
+    #[test]
+    fn no_agent_file_carries_more_than_two_thousand_production_lines() {
+        let mut oversized = Vec::new();
+        visit_src("src/agent", &mut |path, body| {
+            let lines = production_lines(body);
+            if lines > MAX_AGENT_FILE_PRODUCTION_LINES {
+                oversized.push(format!("{} ({lines})", path.display()));
+            }
+        });
+        assert!(
+            oversized.is_empty(),
+            "split these by responsibility, they exceed \
+             {MAX_AGENT_FILE_PRODUCTION_LINES} production lines: {oversized:?}"
+        );
+    }
+
+    #[test]
+    fn production_lines_leave_out_only_the_test_modules() {
+        // A gated module in the middle of a file (`tools/mod.rs` opens its
+        // `tests_support` near the top) must not take the code after it along.
+        let body = "fn a() {}\n\
+                    #[cfg(test)]\n\
+                    pub(crate) mod support {\n    fn s() {}\n}\n\
+                    fn b() {}\n\
+                    #[cfg(test)]\n\
+                    fn gated_fn_is_production_code() {}\n\
+                    #[cfg(test)]\n\
+                    #[allow(dead_code)]\n\
+                    mod tests {\n    #[test]\n    fn t() {}\n}\n";
+        assert_eq!(production_lines(body), 4);
+    }
+
+    /// Lines of `body` outside its `#[cfg(test)]` modules.
+    ///
+    /// rustfmt puts a top-level module's closing brace alone at column 0, so a
+    /// gated `mod name {` ends at the first line that is exactly `}`. Test
+    /// modules are not always at the end of a file, so "everything after the
+    /// first `#[cfg(test)]`" would count most of `tools/mod.rs` as tests.
+    fn production_lines(body: &str) -> usize {
+        let lines: Vec<&str> = body.lines().collect();
+        let mut count = 0;
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i] == "#[cfg(test)]" {
+                let mut j = i + 1;
+                while j < lines.len() && lines[j].starts_with("#[") {
+                    j += 1;
+                }
+                let opens_module = lines.get(j).is_some_and(|l| {
+                    l.ends_with('{') && l.split_whitespace().take(2).any(|w| w == "mod")
+                });
+                if opens_module {
+                    while j < lines.len() && lines[j] != "}" {
+                        j += 1;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            count += 1;
+            i += 1;
+        }
+        count
+    }
+
+    /// Every `.rs` file under `rel` (a path from the crate root), however the
+    /// tests are started. A scan that finds nothing fails: a rule checked over
+    /// zero files passes no matter what the code does, which is what happened
+    /// whenever these tests ran from a directory other than `src-tauri/`.
+    fn visit_src(rel: &str, f: &mut impl FnMut(&Path, &str)) {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let mut files = 0;
+        visit(&dir, &mut |path, body| {
+            files += 1;
+            f(path, body);
+        });
+        assert!(files > 0, "no .rs file under {}", dir.display());
+    }
+
+    #[test]
+    fn a_scan_over_a_missing_directory_fails_instead_of_passing_vacuously() {
+        let scan = std::panic::catch_unwind(|| visit_src("src/no_such_module", &mut |_, _| {}));
+        assert!(scan.is_err());
     }
 
     fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {

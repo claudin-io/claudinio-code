@@ -117,7 +117,9 @@ pub struct BashArgs {
     pub timeout_seconds: Option<u64>,
 }
 
-pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String> {
+/// The child process for `args`: the platform shell running the command in
+/// its working folder, with the login PATH and the askpass bridge.
+fn shell_command(args: &BashArgs) -> Command {
     let shell = if cfg!(target_os = "windows") {
         "cmd"
     } else {
@@ -128,8 +130,6 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
     } else {
         "-c"
     };
-
-    let timeout_secs = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
     // Resolve and inject the login PATH (cached in OnceLock after first call).
     // This avoids the LLM needing to prepend `export PATH=...` to every command,
@@ -145,13 +145,23 @@ pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String
         // instead of a TTY the child doesn't have — a bare `git push` over
         // SSH used to hang until the timeout killed it.
         .envs(crate::askpass::env_for_child())
+        // cmd.exe looks for a bare command name in the working folder before
+        // PATH: a repository shipping `git.cmd` or `ls.bat` would run on an
+        // auto-run `git status` or `ls`. This turns that lookup off (cmd's
+        // documented switch; nothing on Unix reads it).
+        .env("NoDefaultCurrentDirectoryInExePath", "1")
         .current_dir(args.workdir.as_deref().unwrap_or("."))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     no_window_tokio(&mut child);
-    let mut child = child
+    child
+}
+
+pub async fn execute(args: BashArgs, ctx: &ToolContext) -> Result<String, String> {
+    let timeout_secs = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let mut child = shell_command(&args)
         .spawn()
         .map_err(|e| format!("failed to spawn command: {e}"))?;
 
@@ -296,6 +306,7 @@ mod tests {
                 timeout_seconds: None,
             },
             &ToolContext {
+                doc_access: Default::default(),
                 hooks: None,
                 db_path: None,
                 browser: None,
@@ -312,6 +323,7 @@ mod tests {
                 plan_save_path: None,
                 base_commit: None,
                 auto_approve_git: false,
+                shell_gate: None,
                 mcp: None,
                 mode_ctl: None,
                 index_progress: None,
@@ -341,6 +353,29 @@ mod tests {
         assert!(out.contains("saved to"), "the full output must be findable");
     }
 
+    /// cmd.exe looks for a bare command name in the working folder before
+    /// PATH, so a repository shipping `git.cmd` or `ls.bat` would run on an
+    /// Auto `git status`. The child gets the variable that turns that off
+    /// (harmless where nothing reads it, so it is set everywhere).
+    #[test]
+    fn the_child_does_not_look_for_programs_in_the_working_folder() {
+        let args = BashArgs {
+            command: "git status".into(),
+            workdir: None,
+            stdin: None,
+            timeout_seconds: None,
+        };
+        let child = shell_command(&args);
+        let set: Vec<_> = child.as_std().get_envs().collect();
+        assert!(
+            set.contains(&(
+                std::ffi::OsStr::new("NoDefaultCurrentDirectoryInExePath"),
+                Some(std::ffi::OsStr::new("1"))
+            )),
+            "{set:?}"
+        );
+    }
+
     #[test]
     fn echo_hello() {
         let out = run("echo hello").unwrap();
@@ -351,6 +386,7 @@ mod tests {
     fn echo_with_stdin() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = crate::agent::tools::ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             browser: None,
@@ -367,6 +403,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -399,6 +436,7 @@ mod tests {
         let tmp = std::env::temp_dir();
         let canonical_tmp = std::fs::canonicalize(&tmp).unwrap_or(tmp.clone());
         let ctx = crate::agent::tools::ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             browser: None,
@@ -415,6 +453,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -441,11 +480,16 @@ mod tests {
         );
     }
 
+    /// A call with no `stdin` gives the command an empty one: a command
+    /// that reads stdin (`cat`, cmd's bare `date` prompt) must get end of
+    /// file at once, not wait on an open pipe until the timeout. (tokio's
+    /// `Child::wait` closes the stdin handle before waiting; this pins it.)
     #[test]
-    fn timeout_kills_command() {
+    fn a_call_with_no_stdin_reads_end_of_file() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let start = Instant::now();
         let ctx = crate::agent::tools::ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             browser: None,
@@ -462,6 +506,50 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
+        let result = rt.block_on(execute(
+            BashArgs {
+                command: "cat".to_string(),
+                workdir: None,
+                stdin: None,
+                timeout_seconds: Some(3),
+            },
+            &ctx,
+        ));
+        assert!(result.is_ok(), "expected end of file, got: {result:?}");
+        assert!(start.elapsed().as_secs() < 3, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn timeout_kills_command() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let start = Instant::now();
+        let ctx = crate::agent::tools::ToolContext {
+            doc_access: Default::default(),
+            hooks: None,
+            db_path: None,
+            browser: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            session_store_path: None,
+            limits: Default::default(),
+            read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::agent::tools::ReadTracker::default(),
+            )),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,

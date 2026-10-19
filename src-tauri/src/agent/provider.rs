@@ -7,14 +7,16 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
+pub mod cache;
 pub mod catalog;
+pub mod http_error;
 pub mod openai;
 
 pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Sentinel prefix for budget-exhausted errors. The frontend keys off it to
 /// swap the retry error bar for an upgrade banner, and the retry loop
-/// (`is_retryable_error` in session.rs) treats it as non-retryable.
+/// (`is_retryable_error` in retry.rs) treats it as non-retryable.
 pub const BUDGET_EXCEEDED_MARKER: &str = "BUDGET_EXCEEDED::";
 
 /// Extract `error.message` from an Anthropic/LiteLLM-style error body; if
@@ -180,7 +182,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub max_parallel_agents: Option<usize>,
     /// Override base URL for LLM inference calls only (stream_message,
-    /// classify_turn_completion, one_shot). When set, `/v1/messages` is sent
+    /// classify_turn_completion_metered, one_shot). When set, `/v1/messages` is sent
     /// here instead of `base_url`. Does NOT affect login, websearch, or
     /// list_models.
     #[serde(default)]
@@ -258,6 +260,14 @@ pub struct AgentConfig {
     /// full catalog — see `crate::agent::surface`.
     #[serde(default)]
     pub tool_surface: std::collections::HashMap<String, String>,
+    /// Which Standard prompt sessions are sent: v2 (default) or v1, the
+    /// pre-Phase-5 prompt kept for one release — see `agent::prompt`.
+    #[serde(default)]
+    pub prompt_version: crate::agent::prompt::PromptVersion,
+    /// The first run of a new session reads the workspace's AGENTS.md or
+    /// CLAUDE.md and `.claudinio/MEMORY.md` — see `agent::project_memory`.
+    #[serde(default = "default_true")]
+    pub project_memory: bool,
 }
 
 /// A connected external provider. Credentials follow the existing plaintext
@@ -570,6 +580,8 @@ impl Default for AgentConfig {
             jev: crate::agent::jev::JevPrefs::default(),
             local: crate::llama::LocalPrefs::default(),
             tool_surface: std::collections::HashMap::new(),
+            prompt_version: Default::default(),
+            project_memory: true,
         }
     }
 }
@@ -1033,6 +1045,21 @@ pub struct Usage {
     pub output_tokens: u32,
     #[serde(default)]
     pub cache_read_input_tokens: u32,
+    /// Input tokens the provider wrote to its prompt cache on this request
+    /// (Anthropic's `cache_creation_input_tokens`; OpenAI-protocol providers do
+    /// not report writes, so it stays 0 there). Billed above the plain input
+    /// price, so a cost-per-task number that leaves it out flatters a run that
+    /// keeps re-warming its cache.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    /// True when `input_tokens` already includes `cache_read_input_tokens`:
+    /// OpenAI-protocol providers report `prompt_tokens` as all input, cached
+    /// or not, where Anthropic reports uncached input only. The live context
+    /// and cost accounting read the fields as reported; the per-request usage
+    /// record (`SessionRecord::usage`) subtracts, so the cache share and the
+    /// cost per task read back from a session count each cached token once.
+    #[serde(skip)]
+    pub input_includes_cache_reads: bool,
     /// Cost in USD as returned by the provider (if supported), otherwise None.
     /// We calculate an estimate when the provider does not supply it.
     #[serde(default)]
@@ -1070,6 +1097,13 @@ fn merge_usage(usage: &mut Option<Usage>, value: &Value) {
         && v > 0
     {
         u.cache_read_input_tokens = v as u32;
+    }
+    if let Some(v) = obj
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        && v > 0
+    {
+        u.cache_creation_input_tokens = v as u32;
     }
     if let Some(v) = obj.get("cost").and_then(|v| v.as_f64()) {
         u.cost = Some(v);
@@ -1131,14 +1165,18 @@ The message may be in any language; your one-word answer must still be CONTINUE 
 /// Returns the model's raw reply (expected to contain CONTINUE or DONE); the
 /// caller maps it to a verdict. Kept small (tiny max_tokens, no tools) so it is
 /// cheap enough to run on every terminal turn.
-pub async fn classify_turn_completion(
+///
+/// The usage the response reported comes back with the reply: the judge is a
+/// billed request, and a cost-per-task number that leaves it out undercounts
+/// every run whose turns end without Jev.
+pub async fn classify_turn_completion_metered(
     config: &AgentConfig,
     model: &str,
     assistant_text: &str,
-) -> Result<String, String> {
+) -> Result<(String, Option<Usage>), String> {
     let rp = resolve_provider_live(config, model).await?;
     if rp.protocol == Protocol::OpenAiChat {
-        return openai::complete(
+        return openai::complete_metered(
             &rp,
             COMPLETION_JUDGE_SYSTEM,
             &format!("Assistant's final message of the turn:\n\n{assistant_text}"),
@@ -1185,18 +1223,15 @@ pub async fn classify_turn_completion(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     _net_guard.set_status(response.status().as_u16());
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
-            Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
-            None => Err(format!("API error: HTTP {status}")),
-        };
-    }
+    let response = http_error::one_shot_checked(response, &rp).await?;
     let json: Value = response
         .json()
         .await
         .map_err(|e| format!("failed to parse judge response: {e}"))?;
+    let mut usage = None;
+    if let Some(u) = json.get("usage") {
+        merge_usage(&mut usage, u);
+    }
     // Anthropic-shaped response: { "content": [ { "type": "text", "text": "..." } ] }
     let reply = json
         .get("content")
@@ -1209,7 +1244,7 @@ pub async fn classify_turn_completion(
                 .join("")
         })
         .unwrap_or_default();
-    Ok(reply)
+    Ok((reply, usage))
 }
 
 /// Single-shot, non-streaming completion: send one `system` + one `user`
@@ -1265,14 +1300,7 @@ pub async fn one_shot(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     _net_guard.set_status(response.status().as_u16());
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return match budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
-            Some(m) => Err(format!("{BUDGET_EXCEEDED_MARKER}{m}")),
-            None => Err(format!("API error: HTTP {status}")),
-        };
-    }
+    let response = http_error::one_shot_checked(response, &rp).await?;
     let json: Value = response
         .json()
         .await
@@ -1360,6 +1388,43 @@ pub async fn stream_message(
         )
         .await;
     }
+    let cache_markers = cache::should_mark(&rp);
+    stream_anthropic(
+        &rp,
+        cache_markers,
+        config,
+        messages,
+        tools,
+        system,
+        event_tx,
+        session_id,
+        assistant_text,
+        interrupt,
+        emit_text_deltas,
+        net_detail,
+    )
+    .await
+}
+
+/// The Anthropic-protocol half of `stream_message`, once the provider is
+/// resolved. `cache_markers` is decided by the caller (`cache::should_mark`)
+/// so a test can drive the marked path against a stub on loopback, which the
+/// predicate itself never marks.
+#[allow(clippy::too_many_arguments)]
+async fn stream_anthropic(
+    rp: &ResolvedProvider,
+    cache_markers: bool,
+    config: &AgentConfig,
+    messages: &[Message],
+    tools: &[ToolDescription],
+    system: Option<&str>,
+    event_tx: &Channel<AgentEvent>,
+    session_id: &str,
+    assistant_text: &mut String,
+    interrupt: &AtomicBool,
+    emit_text_deltas: bool,
+    net_detail: &str,
+) -> Result<StreamOutput, String> {
     let client = crate::http::default_client_builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
@@ -1397,18 +1462,21 @@ pub async fn stream_message(
     };
 
     let url = format!("{}/v1/messages", rp.base_url.trim_end_matches('/'));
-
-    let request = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("x-api-key", &rp.api_key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .json(&body)
-        .send();
-    let Some(response) = until_stopped(request, interrupt).await else {
+    let body = serde_json::to_value(&body).map_err(|e| format!("request body: {e}"))?;
+    let post = |body: Value| {
+        let request = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("x-api-key", &rp.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&body)
+            .send();
+        until_stopped(request, interrupt)
+    };
+    let Some(response) = cache::post_with_cache_fallback(rp, cache_markers, body, post).await?
+    else {
         return Ok(StreamOutput::stopped());
     };
-    let response = response.map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1418,7 +1486,7 @@ pub async fn stream_message(
         } else if let Some(m) = budget_exceeded_message(&body).filter(|_| rp.is_claudinio()) {
             format!("{BUDGET_EXCEEDED_MARKER}{m}")
         } else {
-            format!("API error: HTTP {status}")
+            http_error::api_error(status, &body, &rp.api_key)
         };
         return Err(err_msg);
     }
@@ -2400,6 +2468,24 @@ mod tests {
     }
 
     #[test]
+    fn cache_creation_tokens_are_read_next_to_cache_reads() {
+        // Anthropic bills a cache write at 1.25x the input price and reports it
+        // in its own field. Without it a run that pays to warm the cache looks
+        // cheaper than one that reads it, which is the opposite of the truth.
+        let mut usage: Option<Usage> = None;
+        merge_usage(
+            &mut usage,
+            &json!({"input_tokens": 12, "output_tokens": 0,
+                    "cache_read_input_tokens": 300, "cache_creation_input_tokens": 4_000}),
+        );
+        merge_usage(&mut usage, &json!({"output_tokens": 64}));
+        let u = usage.unwrap();
+        assert_eq!(u.cache_creation_input_tokens, 4_000);
+        assert_eq!(u.cache_read_input_tokens, 300);
+        assert_eq!(u.input_tokens, 12);
+    }
+
+    #[test]
     fn test_usage_merged_claudinio_style_delta_only() {
         // claudin.io: zeros in message_start, full usage in message_delta
         let mut usage: Option<Usage> = None;
@@ -2669,7 +2755,7 @@ mod tests {
         )
         .unwrap();
 
-        // Now simulate what session.rs does: deserialize the input
+        // Now simulate what run_loop.rs does: deserialize the input
         let input = tool_uses[0].get("input").unwrap();
         let path = input.get("path").and_then(|v| v.as_str()).unwrap();
         assert_eq!(path, "src/main.ts");

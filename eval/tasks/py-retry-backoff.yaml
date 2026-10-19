@@ -1,0 +1,101 @@
+id: py-retry-backoff
+title: A retry helper with exponential backoff
+tags:
+- feature
+- python
+prompt: |
+  Add a retry helper in a new module retry.py:
+
+      retry(fn, attempts=3, base_delay=0.1, sleep=time.sleep, retry_on=(Exception,))
+
+  - It calls fn() with no arguments and returns its result as soon as a call succeeds.
+  - After each failed call except the last it calls sleep(base_delay * 2**i), where i
+    is the 0-based number of the failed attempt (so 0.1, 0.2, 0.4, ...).
+  - If every attempt fails it re-raises the last exception.
+  - An exception that is not an instance of retry_on propagates immediately, with no
+    retry and no sleep.
+  - attempts < 1 raises ValueError before fn is ever called.
+
+  test_retry_basic.py has a first test; add your own for the rest.
+setup:
+  files:
+    test_retry_basic.py: |
+      from retry import retry
+
+
+      def test_returns_the_first_success():
+          assert retry(lambda: 42, sleep=lambda s: None) == 42
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider
+  timeout_s: 60
+  files:
+    test_retry_basic.py: |
+      from retry import retry
+
+
+      def test_returns_the_first_success():
+          assert retry(lambda: 42, sleep=lambda s: None) == 42
+    test_retry_hidden.py: |
+      import pytest
+      from retry import retry
+
+
+      class Flaky:
+          def __init__(self, failures, exc=OSError):
+              self.failures, self.exc, self.calls = failures, exc, 0
+
+          def __call__(self):
+              self.calls += 1
+              if self.calls <= self.failures:
+                  raise self.exc("boom")
+              return "ok"
+
+
+      def test_backoff_doubles_between_attempts():
+          slept = []
+          fn = Flaky(2)
+          assert retry(fn, attempts=3, base_delay=0.5, sleep=slept.append) == "ok"
+          assert slept == [0.5, 1.0]
+          assert fn.calls == 3
+
+
+      def test_last_exception_is_reraised_after_all_attempts():
+          slept = []
+          fn = Flaky(10)
+          with pytest.raises(OSError):
+              retry(fn, attempts=4, base_delay=0.1, sleep=slept.append)
+          assert fn.calls == 4
+          assert slept == pytest.approx([0.1, 0.2, 0.4])
+
+
+      def test_other_exceptions_are_not_retried():
+          slept = []
+          fn = Flaky(1, exc=KeyError)
+          with pytest.raises(KeyError):
+              retry(fn, retry_on=(OSError,), sleep=slept.append)
+          assert fn.calls == 1 and slept == []
+
+
+      def test_attempts_must_be_positive():
+          fn = Flaky(0)
+          with pytest.raises(ValueError):
+              retry(fn, attempts=0, sleep=lambda s: None)
+          assert fn.calls == 0
+reference:
+  files:
+    retry.py: |
+      import time
+
+
+      def retry(fn, attempts=3, base_delay=0.1, sleep=time.sleep, retry_on=(Exception,)):
+          """Call fn() until it succeeds, sleeping base_delay * 2**i between tries."""
+          if attempts < 1:
+              raise ValueError("attempts must be at least 1")
+          for i in range(attempts):
+              try:
+                  return fn()
+              except retry_on:
+                  if i == attempts - 1:
+                      raise
+                  sleep(base_delay * 2 ** i)
+max_rounds: 40

@@ -461,4 +461,71 @@ mod tests {
             json.len()
         );
     }
+
+    /// Lean-harness Phase 6: the mean `file_outline` size over this repo's
+    /// own Rust sources, rendered from what the indexer stores
+    /// (`parser::parse_file`, ordered by start line as `symbols_in_file`
+    /// returns them). Run when the outline format or the grammars change:
+    ///
+    ///   cargo test --lib -- --ignored measure_file_outline_sizes --nocapture
+    #[test]
+    #[ignore]
+    fn measure_file_outline_sizes() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        files.sort();
+        let mut sizes: Vec<(usize, String)> = files
+            .iter()
+            .map(|f| {
+                let path = f.to_string_lossy().to_string();
+                let content = std::fs::read_to_string(f).unwrap();
+                let mut symbols: Vec<SymbolRecord> =
+                    crate::code_intel::parser::parse_file(&path, &content)
+                        .symbols
+                        .into_iter()
+                        .map(|s| SymbolRecord {
+                            id: 0,
+                            file_id: 0,
+                            name: s.name,
+                            kind: s.kind,
+                            signature: s.signature,
+                            start_line: s.start_line,
+                            start_col: s.start_col,
+                            end_line: s.end_line,
+                            end_col: s.end_col,
+                            file_path: Some(path.clone()),
+                        })
+                        .collect();
+                symbols.sort_by_key(|s| s.start_line);
+                (outline(&path, &symbols).len(), path)
+            })
+            .collect();
+        sizes.sort();
+        let n = sizes.len();
+        let total: usize = sizes.iter().map(|(c, _)| c).sum();
+        let at = |q: f64| sizes[((n as f64 * q) as usize).min(n - 1)].0;
+        println!(
+            "files {n} | mean {} | median {} | p90 {} | max {} ({})",
+            total / n,
+            at(0.5),
+            at(0.9),
+            sizes[n - 1].0,
+            sizes[n - 1].1
+        );
+        let over = sizes.iter().filter(|(c, _)| *c > 5_000).count();
+        println!("over 5,000 chars: {over}");
+    }
 }

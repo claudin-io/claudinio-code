@@ -10,6 +10,7 @@ decides to plan.
     python3 scripts/session-stats.py                       # ./.claudinio/sessions
     python3 scripts/session-stats.py path/to/sessions
     python3 scripts/session-stats.py --since 2026-10-01    # sessions created on or after
+    python3 scripts/session-stats.py --cost                # cost, rounds and cache per run
 
 Stdlib only. Read-only. It prints aggregates, never message contents.
 
@@ -18,12 +19,30 @@ session that re-read them: a 10k-char result read at round 3 of a 40-round
 session weighs far more than the same result at round 39. It approximates where
 input tokens go, cached or not. Compactions reset it; prunes are not modelled.
 
+`--cost` reads the per-request `usage` records (one per provider request,
+written since the lean-harness Phase 0) and the subagent transcripts beside
+each session (`<id>.sub/<tool_use_id>-<n>.jsonl`): cost per run and per
+session, rounds per run, the share of input served from the cache and written
+to it, and the share of all tokens spent by subagents. A run is the requests
+between a `user` record and the `done` (or `error`) that ends it; a subagent's
+requests count toward the run whose `spawn_agents` call started it. Costs are
+what the provider reported — a request that reported none is counted as
+unpriced, never estimated. It also counts `cache_break` records per session
+(written since the lean-harness Phase 1, one each time the harness rewrites a
+history the provider had cached: an accepted prune, a compaction, a context
+handoff, a deferred-tool load); sessions from earlier builds count zero.
+
 Limits worth knowing before quoting a number:
 - Thinking is not persisted, and before `subagent_run` records existed nothing
   about subagents was either, so "generated" covers the main session's visible
   output only.
 - `done.input_tokens` is what the provider billed as uncached input. Cached
   input is only known for runs that carry `cache_read_tokens`.
+- A `usage` record's `input_tokens` is uncached input on every protocol (the
+  app subtracts OpenAI's `cached_tokens` from `prompt_tokens` before writing
+  it), so uncached + cache reads + cache writes is all input processed.
+  Records written by builds before 2026-10-18 on an OpenAI-protocol provider
+  count cached tokens twice.
 """
 
 import argparse
@@ -405,15 +424,195 @@ class Stats:
               f"{quantile(shares, .5):.0%} of the run")
 
 
+def read_records(path):
+    """Every JSON object line of a session file; anything else is skipped."""
+    records = []
+    with open(path, errors="replace") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
+def usage_tokens(rec):
+    return (rec.get("input_tokens") or 0, rec.get("cache_read_tokens") or 0,
+            rec.get("cache_creation_tokens") or 0, rec.get("output_tokens") or 0)
+
+
+def transcript_id(tool_use_id):
+    """A tool-use id as `persist::subagent_transcript_path` writes it into a
+    file name: every character outside [A-Za-z0-9_-] becomes '_'."""
+    return "".join(c if (c.isascii() and c.isalnum()) or c in "_-" else "_"
+                   for c in str(tool_use_id))
+
+
+# The stem prefix of a compaction summarizer's transcript (`compact-<n>.jsonl`,
+# `subagent::COMPACTION` in the Rust code), where a spawned subagent's is the
+# id of the `spawn_agents` call that started it.
+COMPACTION = "compact"
+
+
+def cost_stats(sessions_dir, since_ms=0):
+    """Per-run and per-session cost, rounds and cache split from `usage` records."""
+    runs, session_costs, cache_breaks = [], [], []
+    break_reasons = Counter()
+    totals = Counter()
+    sessions = without_usage = 0
+    for path in sorted(glob.glob(os.path.join(sessions_dir, "*.jsonl"))):
+        records = read_records(path)
+        created = next((r.get("created_at") for r in records if r.get("kind") == "meta"), None)
+        if since_ms and (created or 0) < since_ms:
+            continue
+        if not any(r.get("kind") == "usage" for r in records):
+            without_usage += 1
+            continue
+        sessions += 1
+        breaks = [r.get("reason") or "unknown" for r in records if r.get("kind") == "cache_break"]
+        cache_breaks.append(len(breaks))
+        break_reasons.update(breaks)
+        session_runs = []
+        current = None
+        run_of_spawn = {}   # spawn_agents tool_use id -> run
+
+        def new_run(start=None):
+            return {"cost": 0.0, "unpriced": 0, "rounds": 0, "subagent_rounds": 0,
+                    "start": start}
+
+        def add(run, rec, sub):
+            inp, read, created_, out = usage_tokens(rec)
+            totals["input"] += inp
+            totals["cache_read"] += read
+            totals["cache_creation"] += created_
+            totals["output"] += out
+            if sub:
+                totals["subagent"] += inp + read + created_ + out
+                run["subagent_rounds"] += 1
+            else:
+                run["rounds"] += 1
+            if isinstance(rec.get("cost"), (int, float)):
+                run["cost"] += rec["cost"]
+            else:
+                run["unpriced"] += 1
+
+        for rec in records:
+            kind = rec.get("kind")
+            if kind == "user" and (current is None or current["rounds"]):
+                current = new_run(rec.get("ts"))
+                session_runs.append(current)
+            elif kind == "usage":
+                if current is None:
+                    current = new_run(rec.get("ts"))
+                    session_runs.append(current)
+                add(current, rec, False)
+            elif kind == "turn" and rec.get("role") == "assistant":
+                for block in rec.get("content") or []:
+                    if block.get("type") == "tool_use" and block.get("name") == "spawn_agents":
+                        # Keyed as the transcript's file name spells the id.
+                        run_of_spawn[transcript_id(block.get("id"))] = current
+            elif kind in ("done", "error"):
+                current = None
+
+        sub_dir = path[:-len(".jsonl")] + ".sub"
+        for sub_path in sorted(glob.glob(os.path.join(sub_dir, "*.jsonl"))):
+            sub_records = read_records(sub_path)
+            tool_use_id = os.path.basename(sub_path)[:-len(".jsonl")].rsplit("-", 1)[0]
+            if tool_use_id == COMPACTION:
+                # A summary has no call to point at: it belongs to the run that
+                # was under way when it started (for a manual compaction, the
+                # run whose history it summarized).
+                started = next((r.get("created_at") for r in sub_records
+                                if r.get("kind") == "meta"), None)
+                run = next((r for r in reversed(session_runs)
+                            if started is not None and r["start"] is not None
+                            and r["start"] <= started), None)
+            else:
+                run = run_of_spawn.get(tool_use_id)
+            if run is None:
+                # A spawn whose call is not in this file (summarized away):
+                # still this session's cost, booked to a run of its own.
+                run = new_run()
+                session_runs.append(run)
+            for rec in sub_records:
+                if rec.get("kind") == "usage":
+                    add(run, rec, True)
+
+        session_runs = [r for r in session_runs if r["rounds"] or r["subagent_rounds"]]
+        runs.extend(session_runs)
+        session_costs.append(sum(r["cost"] for r in session_runs))
+
+    processed = totals["input"] + totals["cache_read"] + totals["cache_creation"]
+    everything = processed + totals["output"]
+    return {
+        "sessions": sessions,
+        "sessions_without_usage": without_usage,
+        "runs": runs,
+        "session_costs": session_costs,
+        "input": totals["input"],
+        "cache_read": totals["cache_read"],
+        "cache_creation": totals["cache_creation"],
+        "output": totals["output"],
+        "cache_read_share": totals["cache_read"] / processed if processed else None,
+        "cache_creation_share": totals["cache_creation"] / processed if processed else None,
+        "subagent_share": totals["subagent"] / everything if everything else None,
+        "cache_breaks": cache_breaks,
+        "cache_break_reasons": dict(break_reasons),
+    }
+
+
+def cost_report(s):
+    share = lambda v: "n/a" if v is None else f"{100.0 * v:.1f}%"
+    money = lambda v: f"${v:.4f}"
+    runs = s["runs"]
+    lines = [f"COST {s['sessions']} session(s) with usage records | {len(runs)} run(s)"]
+    if s["sessions_without_usage"]:
+        lines.append(f"  {s['sessions_without_usage']} session(s) predate per-request usage and are "
+                     "left out")
+    if not runs:
+        lines.append("  nothing to report")
+        return "\n".join(lines) + "\n"
+    costs = [r["cost"] for r in runs]
+    total = sum(costs)
+    lines.append(f"  total {money(total)} | per run median {money(quantile(costs, .5))} "
+                 f"mean {money(total / len(runs))} p90 {money(quantile(costs, .9))}")
+    lines.append(f"  per session median {money(quantile(s['session_costs'], .5))} "
+                 f"max {money(max(s['session_costs']))}")
+    unpriced = sum(r["unpriced"] for r in runs)
+    if unpriced:
+        lines.append(f"  {unpriced} request(s) reported no cost; the totals above leave them out")
+    main = [r["rounds"] for r in runs]
+    with_subs = [r["rounds"] + r["subagent_rounds"] for r in runs]
+    lines.append(f"  rounds per run (main session) median {quantile(main, .5)} p90 {quantile(main, .9)} | "
+                 f"with subagents median {quantile(with_subs, .5)} p90 {quantile(with_subs, .9)}")
+    lines.append(f"  input {s['input']:,} uncached | {s['cache_read']:,} cache reads | "
+                 f"{s['cache_creation']:,} cache writes | output {s['output']:,}")
+    lines.append(f"  cache-read share {share(s['cache_read_share'])} | cache-creation share "
+                 f"{share(s['cache_creation_share'])} (of input processed)")
+    lines.append(f"  subagent share {share(s['subagent_share'])} (of all tokens)")
+    breaks = s["cache_breaks"]
+    reasons = ", ".join(f"{k} {v}" for k, v in sorted(s["cache_break_reasons"].items())) or "none"
+    lines.append(f"  cache breaks per session median {quantile(breaks, .5)} max {max(breaks)} "
+                 f"| by reason: {reasons}")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("sessions_dir", nargs="?", default=os.path.join(".claudinio", "sessions"))
     parser.add_argument("--since", help="only sessions created on or after YYYY-MM-DD (UTC)")
+    parser.add_argument("--cost", action="store_true",
+                        help="cost, rounds and cache share per run, from per-request usage records")
     args = parser.parse_args()
     since_ms = 0
     if args.since:
         since = datetime.datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
         since_ms = int(since.timestamp() * 1000)
+    if args.cost:
+        print(cost_report(cost_stats(args.sessions_dir, since_ms)), end="")
+        return
     files = sorted(glob.glob(os.path.join(args.sessions_dir, "*.jsonl")))
     if not files:
         sys.exit(f"no .jsonl files in {args.sessions_dir}")

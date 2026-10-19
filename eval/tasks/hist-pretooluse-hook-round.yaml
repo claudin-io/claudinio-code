@@ -1,0 +1,70 @@
+id: hist-pretooluse-hook-round
+title: A tool hook keeps the id of its call, and PreToolUse opens a round (history, 906e89e)
+tags:
+- history
+- feature
+- search
+- typescript
+prompt: |
+  Hook records now carry the id of the tool call they fired around: a
+  PreToolUse/PostToolUse `hook` session record has a `tool_id` field, and the live
+  `HookStarted` event data has `toolId`. The chat does not use it yet, so it
+  cannot tell which hook belongs to which call. Two changes in src/lib/chatRecords.ts:
+
+  1. When a reopened session is rebuilt (`recordsToMessages`), a hook timeline
+     item keeps that id as `hook.toolId`. When the record has no `tool_id`, the
+     `toolId` key must be absent from the item (not present with undefined).
+     Add `toolId?: string` to the hook shape of `TimelineItem`.
+  2. In the live run, `startsNewRound` must return true for a `HookStarted` event
+     whose `event` is "PreToolUse": it fires before its call is announced, so it
+     belongs to the next round, not under the previous answer. Other hooks
+     (e.g. Stop) still stay with the answer they follow.
+  Add `toolId?: string | null` to `HookStartedData` in src/lib/ipc.ts, and cover
+  both in src/lib/chatRecords.test.ts.
+setup:
+  git:
+    repo: ../..
+    commit: 9374045be14ba1544093cdac079dbb2c2cc2e088
+  symlinks:
+    node_modules: ../../node_modules
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+check: ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vitest run --config vitest.eval.config.ts
+oracle:
+  command: ./node_modules/.bin/vitest run --config vitest.eval.config.ts src/lib/chatRecords.test.ts
+  timeout_s: 300
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+  reference_files:
+  - src/lib/chatRecords.test.ts
+reference:
+  git_commit: 906e89edc078c220f7697f33e1d1c356d8521e79
+max_rounds: 60

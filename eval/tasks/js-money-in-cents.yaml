@@ -1,0 +1,137 @@
+id: js-money-in-cents
+title: Move money handling to integer cents
+tags:
+- multi-edit
+- javascript
+prompt: |
+  Totals are off by a cent now and then because cart.js, tax.js and format.js pass
+  dollars around as floats. Switch all three to integer cents:
+
+  - items carry `priceCents` (an integer) instead of `price`;
+  - subtotal(items) in cart.js returns integer cents (sum of priceCents * qty);
+  - total(items, taxRate) in tax.js returns integer cents: the subtotal plus tax,
+    where the tax is computed once on the subtotal and rounded half-up to the
+    nearest cent (taxRate is a fraction, e.g. 0.0825);
+  - formatMoney(cents) in format.js renders "$1,234.56" — thousands separators,
+    always two decimals, "$0.05" for 5.
+
+  Update the existing tests to the new shapes. `node --test` runs them.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "fixture",
+        "private": true,
+        "type": "module"
+      }
+    cart.js: |
+      // Sum of price * qty, in dollars.
+      export function subtotal(items) {
+        return items.reduce((sum, item) => sum + item.price * item.qty, 0);
+      }
+    tax.js: |
+      import { subtotal } from "./cart.js";
+
+      // Subtotal plus tax, in dollars.
+      export function total(items, taxRate) {
+        const sub = subtotal(items);
+        return sub + sub * taxRate;
+      }
+    format.js: |
+      export function formatMoney(dollars) {
+        return `$${dollars.toFixed(2)}`;
+      }
+    money.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { subtotal } from "./cart.js";
+      import { total } from "./tax.js";
+      import { formatMoney } from "./format.js";
+
+      test("subtotal", () => {
+        assert.equal(subtotal([{ price: 2, qty: 3 }]), 6);
+      });
+
+      test("total with tax", () => {
+        assert.equal(total([{ price: 10, qty: 1 }], 0.1), 11);
+      });
+
+      test("format", () => {
+        assert.equal(formatMoney(6), "$6.00");
+      });
+oracle:
+  command: node --test
+  timeout_s: 60
+  files:
+    money.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { subtotal } from "./cart.js";
+      import { total } from "./tax.js";
+      import { formatMoney } from "./format.js";
+
+      const items = [
+        { priceCents: 1999, qty: 3 },
+        { priceCents: 1, qty: 10 },
+      ];
+
+      test("subtotal is integer cents", () => {
+        assert.equal(subtotal(items), 6007);
+        assert.equal(subtotal([]), 0);
+      });
+
+      test("tax is rounded half-up once, on the subtotal", () => {
+        // 6007 * 0.0825 = 495.5775 -> 496
+        assert.equal(total(items, 0.0825), 6503);
+        // 1000 * 0.0125 = 12.5 -> 13
+        assert.equal(total([{ priceCents: 1000, qty: 1 }], 0.0125), 1013);
+        assert.ok(Number.isInteger(total(items, 0.07)));
+      });
+
+      test("formatting cents", () => {
+        assert.equal(formatMoney(123456), "$1,234.56");
+        assert.equal(formatMoney(5), "$0.05");
+        assert.equal(formatMoney(0), "$0.00");
+        assert.equal(formatMoney(100000000), "$1,000,000.00");
+      });
+reference:
+  files:
+    cart.js: |
+      // Sum of priceCents * qty, in integer cents.
+      export function subtotal(items) {
+        return items.reduce((sum, item) => sum + item.priceCents * item.qty, 0);
+      }
+    tax.js: |
+      import { subtotal } from "./cart.js";
+
+      // Subtotal plus tax, in integer cents; the tax is rounded half-up once.
+      export function total(items, taxRate) {
+        const sub = subtotal(items);
+        return sub + Math.floor(sub * taxRate + 0.5);
+      }
+    format.js: |
+      export function formatMoney(cents) {
+        const whole = Math.floor(cents / 100);
+        const rest = String(cents % 100).padStart(2, "0");
+        const grouped = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        return `$${grouped}.${rest}`;
+      }
+    money.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { subtotal } from "./cart.js";
+      import { total } from "./tax.js";
+      import { formatMoney } from "./format.js";
+
+      test("subtotal", () => {
+        assert.equal(subtotal([{ priceCents: 200, qty: 3 }]), 600);
+      });
+
+      test("total with tax", () => {
+        assert.equal(total([{ priceCents: 1000, qty: 1 }], 0.1), 1100);
+      });
+
+      test("format", () => {
+        assert.equal(formatMoney(600), "$6.00");
+      });
+max_rounds: 50

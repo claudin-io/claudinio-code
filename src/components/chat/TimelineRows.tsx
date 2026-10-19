@@ -901,6 +901,7 @@ export const LinkedRow: Component<{
       case "golden_flip": return "Golden loop — continuing in a fresh session";
       case "context_handoff": return "Context limit reached — continued in a fresh session";
       case "manual_builder": return "Continuing with Builder in a new session";
+      case "new_document": return "New topic — continued in a new session with its own document";
       default: return "Context limit reached — continued in a fresh session";
     }
   };
@@ -1315,7 +1316,7 @@ export const ToolRow: Component<{
   isExpanded: boolean;
   onToggle: () => void;
 }> = (props) => {
-  const header = () => toolHeader(props.tool.call);
+  const header = () => toolHeader(props.tool.call, props.tool.result);
   const icon = () => header().icon;
   const title = () => header().title;
   const summary = () => toolSummary(props.tool.call);
@@ -1447,11 +1448,22 @@ export const ApprovalCard: Component<{
             fallback={
               <>
                 <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-                  {"Proposed edit"}
+                  {/* An empty old_string creates the file (the harness refuses it on one that exists). */}
+                  {proposal()?.oldString === "" ? "New file" : "Proposed edit"}
                 </span>
                 <span class="truncate font-mono text-[12px] text-ink-muted">
                   {proposal()?.path ?? (props.toolCall.args.path as string)}
                 </span>
+                {/* The diff below is one snippet; replace_all rewrites every place it occurs. */}
+                <Show when={proposal()?.replaceAll}>
+                  <span class="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-500">
+                    {proposal()?.occurrences === 1
+                      ? "Replaces 1 occurrence"
+                      : proposal()?.occurrences
+                        ? `Replaces all ${proposal()?.occurrences} occurrences`
+                        : "Replaces every occurrence"}
+                  </span>
+                </Show>
               </>
             }
           >

@@ -8,6 +8,8 @@ import { render } from "solid-js/web";
 const mockEditor = vi.hoisted(() => ({
   getValue: vi.fn(),
   setValue: vi.fn(),
+  revealLineInCenter: vi.fn(),
+  setPosition: vi.fn(),
   focus: vi.fn(),
   dispose: vi.fn(),
   onDidChangeModelContent: vi.fn(),
@@ -77,6 +79,8 @@ function flush(): Promise<void> {
 async function renderModal(props: {
   filePath?: string;
   rootPath?: string;
+  initialLine?: number;
+  onSave?: (base: string, content: string) => Promise<string | void>;
 } = {}) {
   const onClose = vi.fn();
   const dispose = render(
@@ -85,6 +89,8 @@ async function renderModal(props: {
         filePath={props.filePath ?? "/test/file.ts"}
         rootPath={props.rootPath ?? "/test"}
         onClose={onClose}
+        initialLine={props.initialLine}
+        onSave={props.onSave}
       />
     ),
     document.body,
@@ -590,5 +596,26 @@ describe("FileEditorModal component", () => {
     // Event listener should be removed — Escape should not trigger onClose again
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  // ────── The living document (lean-harness Phase 4b) ────────
+
+  it("opens at the line it was given, so a section row lands on its section", async () => {
+    const { dispose } = await renderModal({ filePath: "/test/doc.md", initialLine: 7 });
+    expect(mockEditor.revealLineInCenter).toHaveBeenCalledWith(7);
+    expect(mockEditor.setPosition).toHaveBeenCalledWith({ lineNumber: 7, column: 1 });
+    dispose();
+  });
+
+  it("hands a save to its owner with the text it loaded, and shows what the file became", async () => {
+    const onSave = vi.fn().mockResolvedValue("merged content");
+    const { dispose } = await renderModal({ filePath: "/test/doc.md", onSave });
+    mockEditor.getValue.mockReturnValue("my edit");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true }));
+    await flush();
+    expect(onSave).toHaveBeenCalledWith("original content", "my edit");
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(mockEditor.setValue).toHaveBeenCalledWith("merged content");
+    dispose();
   });
 });

@@ -9,11 +9,13 @@ import { ChatPanel } from "./components/ChatPanel";
 import { EmptyState } from "./components/EmptyState";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { TasksPanel } from "./components/TasksPanel";
+import { DocumentPanel } from "./components/DocumentPanel";
+import { isLinkedDocument } from "./lib/documentStore";
 import { Icon } from "./components/Icon";
 import { resolvedTheme } from "./lib/theme";
 import FileEditorModal from "./components/FileEditorModal";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { openInTerminal, copyPath, gitBranch, checkGitAvailable } from "./lib/ipc";
+import { openInTerminal, copyPath, gitBranch, checkGitAvailable, readFile, saveDocument, type DocView } from "./lib/ipc";
 import { checkForUpdate, type UpdateInfo } from "./lib/ipc";
 import { platform } from "./lib/platform";
 import { baseName } from "./lib/path";
@@ -97,6 +99,27 @@ export function addRecent(projects: () => string[], setter: (v: string[]) => voi
   saveRecent(updated);
 }
 
+/// Whether the task column takes its 40px. Single-step work gets no task
+/// list since lean-harness Phase 4, and the panel then says "Single step";
+/// that note is worth the width once there is a conversation it describes.
+/// A workspace with neither a list nor a conversation keeps the column
+/// collapsed, as it always was.
+export function taskColumnOpen(taskCount: number, hasConversation: boolean): boolean {
+  return taskCount > 0 || hasConversation;
+}
+
+/// The task column's width class: a session with a living document (lean-
+/// harness Phase 4b) shows its sections there, a row per topic, and needs
+/// the room; otherwise the Task Panel's dots, or nothing (`taskColumnOpen`).
+export function taskColumnWidth(
+  hasDocument: boolean,
+  taskCount: number,
+  hasConversation: boolean,
+): "w-64" | "w-10" | "w-0" {
+  if (hasDocument) return "w-64";
+  return taskColumnOpen(taskCount, hasConversation) ? "w-10" : "w-0";
+}
+
 function App() {
   const [openWorkspaces, setOpenWorkspaces] = createSignal<string[]>([]);
   const [activeWorkspace, setActiveWorkspace] = createSignal<string | null>(null);
@@ -144,6 +167,22 @@ function App() {
   const [showTree, setShowTree] = createSignal(false);
   const [contextPos, setContextPos] = createSignal<{ x: number; y: number; path: string } | null>(null);
   const [taskCounts, setTaskCounts] = createSignal<Record<string, number>>({});
+  const [conversations, setConversations] = createSignal<Record<string, boolean>>({});
+  // Each workspace's living document, null without one (DocumentPanel
+  // reports it). Any save of that file — opened from the panel, the file
+  // tree or a chat link — goes through `saveDocument`, so a person's edit
+  // merges with what agents wrote meanwhile and is marked as theirs; a plain
+  // write would roll the agents' writes back as the person's. The editor's
+  // document, set by the panel, only positions it at a section.
+  const [documents, setDocuments] = createSignal<Record<string, DocView | null>>({});
+  const [editorDocument, setEditorDocument] = createSignal<{ workspace: string; path: string } | null>(null);
+  const [editorLine, setEditorLine] = createSignal<number | undefined>(undefined);
+  const openDocument = (workspace: string, doc: DocView, line: number) => {
+    const path = `${workspace.replace(/[\\/]$/, "")}/${doc.path}`;
+    setEditorDocument({ workspace, path });
+    setEditorLine(line);
+    setEditorFilePath(path);
+  };
   const [recentProjects, setRecentProjects] = createSignal<string[]>(loadRecent());
   const [onboardingSignInError, setOnboardingSignInError] = createSignal<string | null>(null);
   // Easter egg "iddqd" — override de URL e API Key para LLM
@@ -213,9 +252,11 @@ function App() {
     const v = indexStatusMap()[ws];
     return v ?? null;
   };
-  const taskCount = () => {
+  const taskColumn = () => {
     const ws = activeWorkspace();
-    return ws ? taskCounts()[ws] ?? 0 : 0;
+    return ws
+      ? taskColumnWidth(!!documents()[ws], taskCounts()[ws] ?? 0, conversations()[ws] ?? false)
+      : "w-0";
   };
   const setWsProgress = (ws: string, p: IndexProgress | null) =>
     setProgressMap((m) => ({ ...m, [ws]: p }));
@@ -1249,7 +1290,7 @@ function App() {
             <For each={openWorkspaces()}>
               {(ws) => (
                 <div class="h-full" style={{ display: activeWorkspace() === ws ? "block" : "none" }}>
-                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} thinkingEffort={configThinkingEffort} onThinkingEffortChange={changeThinkingEffort} />
+                  <ChatPanel workspace={ws} isActive={() => activeWorkspace() === ws} fileList={fileIndexMap[ws] ?? []} thinkingEffort={configThinkingEffort} onThinkingEffortChange={changeThinkingEffort} onConversationChange={(has) => setConversations((m) => ({ ...m, [ws]: has }))} />
                 </div>
               )}
             </For>
@@ -1259,16 +1300,25 @@ function App() {
         <Show when={activeWorkspace()}>
           <aside
             class="shrink-0 border-l border-border-subtle bg-surface-1 overflow-hidden transition-[width] duration-100"
-            classList={{ "w-10": taskCount() > 0, "w-0": taskCount() === 0 }}
+            classList={{ "w-64": taskColumn() === "w-64", "w-10": taskColumn() === "w-10", "w-0": taskColumn() === "w-0" }}
           >
             <For each={openWorkspaces()}>
               {(ws) => (
                 <Show when={activeWorkspace() === ws}>
                   <div class="h-full">
-                    <TasksPanel
+                    {/* A session with a living document shows its sections
+                        here instead of the task list (decision D8). */}
+                    <DocumentPanel
                       workspace={ws}
-                      onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
+                      onOpen={(doc, line) => openDocument(ws, doc, line)}
+                      onDocumentChange={(doc) => setDocuments((m) => ({ ...m, [ws]: doc }))}
                     />
+                    <Show when={!documents()[ws]}>
+                      <TasksPanel
+                        workspace={ws}
+                        onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
+                      />
+                    </Show>
                   </div>
                 </Show>
               )}
@@ -1280,8 +1330,21 @@ function App() {
         <FileEditorModal
           filePath={editorFilePath()!}
           rootPath={activeWorkspace()!}
-          onClose={() => setEditorFilePath(null)}
+          onClose={() => {
+            setEditorFilePath(null);
+            setEditorDocument(null);
+            setEditorLine(undefined);
+          }}
           onCursorLineChange={(line) => setActiveEditorCursor({ path: editorFilePath()!, line })}
+          initialLine={editorDocument()?.path === editorFilePath() ? editorLine() : undefined}
+          onSave={
+            isLinkedDocument(editorFilePath()!, activeWorkspace()!, documents()[activeWorkspace()!] ?? null)
+              ? async (base, content) => {
+                  await saveDocument(activeWorkspace()!, base, content);
+                  return readFile(editorFilePath()!);
+                }
+              : undefined
+          }
         />
       </Show>
       <Show when={contextPos()}>

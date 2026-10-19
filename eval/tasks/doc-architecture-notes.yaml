@@ -1,0 +1,211 @@
+id: doc-architecture-notes
+title: Write architecture notes for a new contributor
+tags:
+- document
+prompt: |
+  A new contributor starts on this URL shortener next week. Write docs/ARCHITECTURE.md
+  for them. It must have exactly these level-2 sections: "## Overview", "## Modules",
+  "## Data flow" and "## Failure modes". Under Modules, describe each Python module of
+  the shortener package by its file name (codes.py, store.py, service.py,
+  http_api.py). Under Failure modes, cover what happens when the store's JSON file
+  cannot be written and when codes collide. Don't change any code.
+setup:
+  files:
+    shortener/__init__.py: ''
+    shortener/codes.py: |
+      import secrets
+      import string
+
+      ALPHABET = string.ascii_letters + string.digits
+
+
+      def new_code(length=7):
+          """A random code; collisions are the store's problem."""
+          return "".join(secrets.choice(ALPHABET) for _ in range(length))
+    shortener/store.py: |
+      import json
+      import os
+
+
+      class Store:
+          """code -> url, persisted as one JSON file, rewritten on every put."""
+
+          def __init__(self, path):
+              self.path = path
+              self.data = json.load(open(path)) if os.path.exists(path) else {}
+
+          def get(self, code):
+              return self.data.get(code)
+
+          def put(self, code, url):
+              if code in self.data:
+                  raise KeyError(code)
+              self.data[code] = url
+              with open(self.path, "w") as handle:
+                  json.dump(self.data, handle)
+    shortener/service.py: |
+      from shortener.codes import new_code
+
+
+      class Shortener:
+          def __init__(self, store, attempts=5):
+              self.store, self.attempts = store, attempts
+
+          def shorten(self, url):
+              if not url.startswith(("http://", "https://")):
+                  raise ValueError("only http(s) urls")
+              for _ in range(self.attempts):
+                  code = new_code()
+                  try:
+                      self.store.put(code, url)
+                      return code
+                  except KeyError:
+                      continue
+              raise RuntimeError("could not find a free code")
+
+          def resolve(self, code):
+              return self.store.get(code)
+    shortener/http_api.py: |
+      from http.server import BaseHTTPRequestHandler
+
+
+      def make_handler(service):
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  url = service.resolve(self.path.lstrip("/"))
+                  if url is None:
+                      self.send_response(404)
+                  else:
+                      self.send_response(301)
+                      self.send_header("Location", url)
+                  self.end_headers()
+
+              def do_POST(self):
+                  length = int(self.headers.get("Content-Length", 0))
+                  url = self.rfile.read(length).decode()
+                  try:
+                      code = service.shorten(url)
+                  except ValueError:
+                      self.send_response(400)
+                      self.end_headers()
+                      return
+                  self.send_response(201)
+                  self.end_headers()
+                  self.wfile.write(code.encode())
+
+          return Handler
+    tests/__init__.py: ''
+    tests/test_service.py: |
+      import pytest
+
+      from shortener.service import Shortener
+      from shortener.store import Store
+
+
+      def test_round_trip(tmp_path):
+          s = Shortener(Store(str(tmp_path / "db.json")))
+          code = s.shorten("https://example.com")
+          assert s.resolve(code) == "https://example.com"
+
+
+      def test_rejects_other_schemes(tmp_path):
+          with pytest.raises(ValueError):
+              Shortener(Store(str(tmp_path / "db.json"))).shorten("ftp://x")
+check: python3 -m pytest -q -p no:cacheprovider tests
+oracle:
+  command: python3 .oracle/check_doc.py && python3 -m pytest -q -p no:cacheprovider tests
+  timeout_s: 60
+  files:
+    .oracle/check_doc.py: |
+      """Oracle for a document task: required level-2 sections, each with content."""
+      import re
+      import sys
+
+
+      def sections(text):
+          found, current = {}, None
+          for line in text.splitlines():
+              m = re.match(r"^##\s+(.+?)\s*$", line)
+              if m:
+                  current = m.group(1).strip().lower()
+                  found[current] = []
+              elif current is not None:
+                  found[current].append(line)
+          return {k: "\n".join(v).strip() for k, v in found.items()}
+
+
+      def main(path, required, must_mention):
+          try:
+              text = open(path).read()
+          except OSError:
+              sys.exit(f"{path} is missing")
+          got = sections(text)
+          for name in required:
+              body = got.get(name.lower())
+              if body is None:
+                  sys.exit(f"missing section: ## {name}")
+              if len(body) < 40:
+                  sys.exit(f"section '{name}' is too short ({len(body)} chars)")
+          for section, words in must_mention.items():
+              body = got.get(section.lower(), "")
+              for word in words:
+                  # "a|b": any of the alternatives, in any case — the check
+                  # grades content, not the exact word the write-up chose.
+                  if not any(alt.lower() in body.lower() for alt in word.split("|")):
+                      sys.exit(f"section '{section}' does not mention {word}")
+          print("ok")
+      if __name__ == "__main__":
+          main(
+              "docs/ARCHITECTURE.md",
+              ["Overview", "Modules", "Data flow", "Failure modes"],
+              {
+                  "Modules": ["codes.py", "store.py", "service.py", "http_api.py"],
+                  "Failure modes": ["collision|collide|clash|same code"],
+              },
+          )
+    tests/test_service.py: |
+      import pytest
+
+      from shortener.service import Shortener
+      from shortener.store import Store
+
+
+      def test_round_trip(tmp_path):
+          s = Shortener(Store(str(tmp_path / "db.json")))
+          code = s.shorten("https://example.com")
+          assert s.resolve(code) == "https://example.com"
+
+
+      def test_rejects_other_schemes(tmp_path):
+          with pytest.raises(ValueError):
+              Shortener(Store(str(tmp_path / "db.json"))).shorten("ftp://x")
+reference:
+  files:
+    docs/ARCHITECTURE.md: |
+      # Architecture
+
+      ## Overview
+
+      A small URL shortener: POST a URL, get a seven-character code back; GET the code and
+      be redirected. Everything runs in one process with the standard library only.
+
+      ## Modules
+
+      - `codes.py` generates random codes from letters and digits with `secrets`.
+      - `store.py` maps code to URL and persists the whole map as one JSON file.
+      - `service.py` validates URLs, retries on code collisions and resolves codes.
+      - `http_api.py` adapts the service to `http.server`: 201/400 on POST, 301/404 on GET.
+
+      ## Data flow
+
+      A POST body goes from the HTTP handler to `Shortener.shorten`, which draws a code,
+      asks the store to `put` it and returns it. A GET path is stripped of its slash and
+      resolved through the store; a hit becomes a 301 with a Location header.
+
+      ## Failure modes
+
+      A collision on a code raises KeyError in the store and the service retries up to five
+      times before giving up with RuntimeError. If the JSON file cannot be written the
+      error propagates to the handler and the request fails, while the in-memory map
+      already holds the new code, so memory and disk disagree until the next restart.
+max_rounds: 40

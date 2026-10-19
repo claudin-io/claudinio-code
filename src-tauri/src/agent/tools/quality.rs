@@ -234,25 +234,13 @@ pub async fn execute(args: RunQualityArgs, ctx: &ToolContext) -> Result<String, 
 pub fn rejection_message(ctx: &ToolContext, evidence: &Evidence, task_ids: &[String]) -> String {
     let goals = task_ids.join(", ");
     match evidence {
-        Evidence::Missing => format!(
-            "Task update rejected: golden task(s) {goals} cannot be marked done without verified \
-             quality evidence. Call run_quality first — the harness checks the result \
-             mechanically, so claiming the tests pass is not enough."
-        ),
-        Evidence::Stale => format!(
-            "Task update rejected: golden task(s) {goals} cannot be marked done — the last \
-             run_quality result is stale because files changed after it ran. Call run_quality \
-             again so the evidence matches the code as it is now."
-        ),
+        Evidence::Missing => crate::agent::gate_text::quality_missing(&goals),
+        Evidence::Stale => crate::agent::gate_text::quality_stale(&goals),
         Evidence::Current { summary, .. } => {
             let detail = last_report(ctx)
                 .map(|r| r.failure_detail(MAX_GATE_DETAIL_CHARS))
                 .unwrap_or_default();
-            format!(
-                "Task update rejected: golden task(s) {goals} cannot be marked done — the last \
-                 quality run FAILED.\n\n{summary}\n{detail}\nFix the failures, then call \
-                 run_quality again before marking the goal done."
-            )
+            crate::agent::gate_text::quality_failed(&goals, summary, &detail)
         }
         Evidence::NotRequired => String::new(),
     }

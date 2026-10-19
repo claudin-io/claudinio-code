@@ -53,6 +53,7 @@ import {
 } from "../lib/ipc";
 import { createAutoMode } from "../lib/autoMode";
 import type { ModeChoice } from "../lib/modeChoice";
+import { linkedModeOrigin } from "../lib/modeChoice";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
 import { renderMarkdown, renderLiveMarkdown } from "../lib/markdown";
@@ -79,6 +80,14 @@ import ContentViewerModal from "./ContentViewerModal";
 import { Popover } from "./Popover";
 import { NewSessionPopover } from "./NewSessionPopover";
 import QuestionCard from "./QuestionCard";
+import {
+  clearSubagentRequest,
+  documentFromEvent,
+  invalidateDocument,
+  pendingSubagentRequest,
+  publishDocument,
+  subagentForOwner,
+} from "../lib/documentStore";
 
 import {
   askUserAnswerMessages,
@@ -121,6 +130,9 @@ export const ChatPanel: Component<{
   /// Global thinking-effort setting shown/edited by the toolbar slider.
   thinkingEffort: () => ThinkingEffort;
   onThinkingEffortChange: (v: ThinkingEffort) => void;
+  /// Told whether the panel shows a conversation: App opens the task column
+  /// for one even without a task list, to show the "single step" note.
+  onConversationChange?: (has: boolean) => void;
 }> = (props) => {
   const [input, setInput] = createSignal("");
   // Another panel (Settings) can hand this workspace a prepared prompt. It
@@ -136,6 +148,8 @@ export const ChatPanel: Component<{
     });
   });
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
+  const hasConversation = createMemo(() => messages().length > 0);
+  createEffect(() => props.onConversationChange?.(hasConversation()));
   const [status, setStatus] = createSignal<Status>("idle");
   const [pendingApprovals, setPendingApprovals] = createSignal<(ToolCallData & { subagentName?: string })[]>([]);
   const [currentAskUser, setCurrentAskUser] = createSignal<AskUserData | null>(null);
@@ -188,6 +202,21 @@ export const ChatPanel: Component<{
     const findIn = (steps: TimelineItem[] | undefined) =>
       steps?.find((s) => s.type === "subagent" && s.subagent?.id === id)?.subagent;
     return findIn(currentSteps()) ?? messages().map((m) => findIn(m.steps)).find((s) => s);
+  });
+  // The document panel's owner chip opens that subagent's timeline: the
+  // latest subagent of that name, live or in the conversation so far.
+  createEffect(() => {
+    const req = pendingSubagentRequest();
+    if (!req || req.workspace !== props.workspace) return;
+    clearSubagentRequest();
+    const subs = [
+      ...messages().flatMap((m) => m.steps ?? []),
+      ...currentSteps(),
+    ]
+      .filter((s) => s.type === "subagent" && s.subagent)
+      .map((s) => ({ id: s.subagent!.id, name: s.subagent!.name }));
+    const id = subagentForOwner(req.owner, subs);
+    if (id) setOpenSubagentId(id);
   });
   const [thinkingStart, setThinkingStart] = createSignal(0);
   const [liveExpandedStep, setLiveExpandedStep] = createSignal<number | null>(null);
@@ -843,6 +872,11 @@ export const ChatPanel: Component<{
   };
 
   const handleEvent = (event: AgentEvent) => {
+    // The living document's outline goes to the panel beside the chat
+    // (lean-harness Phase 4b), also when a subagent wrote its section.
+    const doc = documentFromEvent(event);
+    if (doc) publishDocument(props.workspace, doc);
+    if (event.event === "SessionLinked") invalidateDocument(props.workspace);
     // Any event other than Retrying means the connection is alive again —
     // drop the reconnecting banner.
     if (event.event !== "Retrying" && retryingInfo() !== null) {
@@ -1052,7 +1086,7 @@ export const ChatPanel: Component<{
       ]);
       setActiveSessionId(data.sessionId);
       setMode(data.mode);
-      setModeOrigin(data.reason === "manual_builder" ? "human" : "agent");
+      setModeOrigin(linkedModeOrigin(data));
       setStatus("thinking");
       scrollToBottom();
     } else if (event.event === "SteeringInjected") {

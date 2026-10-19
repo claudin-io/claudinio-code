@@ -327,6 +327,9 @@ export function toolIcon(name: string): IconName {
   if (name === "spawn_agents") return "spawn-swarm";
   if (name === "enter_plan_mode" || name === "exit_plan_mode") return "goal";
   if (name.startsWith("browser")) return "globe";
+  if (name === "load_tools") return "package";
+  if (name === "skills") return "book-open";
+  if (name.startsWith("doc_")) return "file-text";
   if (name.startsWith("mcp__")) return "package";
   return "terminal";
 }

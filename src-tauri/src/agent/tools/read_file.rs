@@ -73,9 +73,46 @@ fn truncation_warning(
     )
 }
 
+/// The lines [`truncation_warning`] put before the file's own, blank line
+/// included, or 0 when `text` does not open with it: the cap names the lines
+/// it leaves out of a read in the file's numbering (`agent::result_cap`), and
+/// the file's line 1 is the first line after the warning.
+pub(crate) fn header_lines(text: &str) -> usize {
+    let Some(end) = text.find("\n\n") else {
+        return 0;
+    };
+    let header = &text[..end + 2];
+    if header.starts_with('⚠') && header.contains("FILE SIZE WARNING") {
+        header.matches('\n').count()
+    } else {
+        0
+    }
+}
+
 pub fn execute(args: ReadFileArgs) -> Result<String, String> {
     let p = std::path::Path::new(&args.path);
-    let meta = p.metadata().map_err(|e| format!("cannot access: {e}"))?;
+    let meta = p.metadata().map_err(|e| match e.kind() {
+        // The model may have asked for a file it is about to write: say how,
+        // since the read it was told to make first cannot succeed
+        // (lean-harness Phase 3b; the baseline eval's agents looped here).
+        // Conditionally: read_file does not know whether the caller may edit
+        // (an explore subagent or a Brain session may not). A relative path
+        // is read from the app's directory while the workspace guard resolves
+        // it against the workspace, so a relative miss may be a file that
+        // exists: it gets the absolute path, not a create (Phase 6f).
+        std::io::ErrorKind::NotFound if p.is_relative() => format!(
+            "cannot access: {e}. {} does not exist relative to the app's directory; \
+             pass the absolute path inside the workspace.",
+            args.path
+        ),
+        std::io::ErrorKind::NotFound => format!(
+            "cannot access: {e}. {} does not exist. If you meant to create it, edit_file \
+             with old_string \"\" and the whole file as new_string creates it, where \
+             edit_file is available.",
+            args.path
+        ),
+        _ => format!("cannot access: {e}"),
+    })?;
     if !meta.is_file() {
         return Err(format!("not a file: {}", args.path));
     }

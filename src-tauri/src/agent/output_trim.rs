@@ -182,19 +182,166 @@ fn block_state(command: &str, b: &Block, total_lines: usize) -> String {
     )
 }
 
-/// Write the full output where the model can read it back. Best effort.
-fn save_full(text: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join("claudinio-code").join("outputs");
-    std::fs::create_dir_all(&dir).ok()?;
+/// How long a saved output is kept: long enough for any run, and a resumed
+/// session older than this re-runs the command instead.
+const SAVED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Remove the files in `dir` last written more than `max_age` ago. Since
+/// lean-harness Phase 6 every capped result that is not a read is saved here
+/// (a grep, an MCP answer, a subagent report), not just `bash` output, so the
+/// folder no longer stays small on its own. Best effort.
+fn sweep(dir: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if meta.is_file() && old {
+            std::fs::remove_file(entry.path()).ok();
+        }
+    }
+}
+
+/// The folder long outputs are saved to.
+pub(crate) fn saved_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("claudinio-code").join("outputs")
+}
+
+/// Whether `path` is one of the outputs [`save_full`] wrote: a file directly in
+/// [`saved_dir`] under one of its names, once every link is resolved. The
+/// markers that name these files tell the model to `read_file` or `grep` them,
+/// and the folder is outside any workspace, so `tools::validate_read_path`
+/// lets reads (never writes) through here. Resolving links before comparing
+/// keeps the opening to this one folder: the temp folder is shared, and a link
+/// planted in it, or a `..` out of it, must not lead anywhere else.
+pub(crate) fn is_saved_output(path: &std::path::Path) -> bool {
+    is_saved_output_in(path, &saved_dir())
+}
+
+/// [`is_saved_output`] for outputs saved to `dir`.
+fn is_saved_output_in(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    let (Ok(file), Ok(ours)) = (path.canonicalize(), dir.canonicalize()) else {
+        return false;
+    };
+    let named = file.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        n.ends_with(".log") && (n.starts_with("bash-") || n.starts_with("result-"))
+    });
+    // `is_ours` on `dir` as named, as `save_full_in` checks it: on the
+    // canonical path it would see a link's target, never the link.
+    file.parent() == Some(ours.as_path()) && named && file.is_file() && is_ours(dir)
+}
+
+/// Whether `dir` is a folder only this process's user can write: a real
+/// folder (not a link), owned by that user, not group- or world-writable. The
+/// saved-outputs folder is in the shared temp folder under a fixed name, its
+/// files have predictable names (the content's hash), and reads of them pass
+/// the workspace guard; on a host with other users, one of them could create
+/// the folder first, and the chmod to 0700 would fail in silence (Phase 6
+/// final review). Such a folder holds nothing the model is told to trust.
+#[cfg(unix)]
+fn is_ours(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(dir).is_ok_and(|meta| {
+        meta.is_dir() && Some(meta.uid()) == own_uid() && meta.mode() & 0o022 == 0
+    })
+}
+
+#[cfg(not(unix))]
+fn is_ours(_dir: &std::path::Path) -> bool {
+    true
+}
+
+/// This process's user id, read off a file it creates: `std` has no getuid,
+/// and a new file is owned by the user that made it.
+#[cfg(unix)]
+fn own_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    static UID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *UID.get_or_init(|| {
+        let probe = tempfile::NamedTempFile::new().ok()?;
+        probe.as_file().metadata().ok().map(|m| m.uid())
+    })
+}
+
+/// Write the full output where the model can read it back, in a file named
+/// after `kind` (`bash`, or `result` for a capped tool result). Best effort.
+///
+/// The name is the content's hash, so the same output is one file under one
+/// name however often it is saved. The path goes into the result the model
+/// and `loop_watch` see: with a fresh name per save, five identical greps over
+/// the cap read as five different answers and never reached the loop watch's
+/// judge-free gate (`CERTAIN_EXACT`), and each repeat left another copy on
+/// disk. A file already under that name with other bytes in it (a hash
+/// collision, a half-written save of another thread) is left alone and the
+/// output goes to a name of its own.
+///
+/// The folder is the user's alone (0700) and so is each file (0600): what is
+/// saved can be private code or a tool's answer, and the temp folder is
+/// shared. A folder that is not the user's alone ([`is_ours`]: someone else
+/// made it first) gets nothing: `None`, and the marker names no copy. The
+/// first save of a process sweeps outputs past [`SAVED_MAX_AGE`].
+pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
+    let dir = saved_dir();
+    let saved = save_full_in(&dir, kind, text);
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    if saved.is_some() {
+        SWEPT.call_once(|| sweep(&dir, SAVED_MAX_AGE));
+    }
+    saved
+}
+
+/// [`save_full`] into `dir`.
+fn save_full_in(dir: &std::path::Path, kind: &str, text: &str) -> Option<String> {
+    std::fs::create_dir_all(dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).ok();
+    }
+    if !is_ours(dir) {
+        return None;
+    }
+    let hash = xxhash_rust::xxh3::xxh3_128(text.as_bytes());
+    let path = dir.join(format!("{kind}-{hash:032x}.log"));
+    if let Some(saved) = write_new(&path, text) {
+        return Some(saved);
+    }
+    if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) {
+        // Saved before: keep it from the sweep for as long as it is named.
+        if let Ok(file) = std::fs::File::options().append(true).open(&path) {
+            file.set_modified(std::time::SystemTime::now()).ok();
+        }
+        return Some(path.to_string_lossy().to_string());
+    }
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = format!(
-        "bash-{}-{}-{seq}.log",
+    let unique = format!(
+        "{kind}-{hash:032x}-{}-{}-{seq}.log",
         crate::agent::persist::now_ms(),
         std::process::id()
     );
-    let path = dir.join(name);
-    std::fs::write(&path, text).ok()?;
+    write_new(&dir.join(unique), text)
+}
+
+/// `text` in a file created at `path`, readable by its owner only; `None`
+/// when something is already there or the write fails.
+fn write_new(path: &std::path::Path, text: &str) -> Option<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).ok()?;
+    std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
     Some(path.to_string_lossy().to_string())
 }
 
@@ -243,13 +390,114 @@ pub async fn fit(
         _ => None,
     };
     let kept = select(&blocks, scores.as_deref(), budget);
-    let path = save_full(&text);
+    let path = save_full("bash", &text);
     (render(&blocks, &kept, text.len(), path.as_deref()), cost)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What a capped result saves can be a grep of private code or an MCP
+    // answer: only the user may read it.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_output_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = save_full("result", "secret").expect("saved");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let file = std::path::Path::new(&path);
+        assert_eq!(mode(file), 0o600, "{path}");
+        assert_eq!(mode(file.parent().unwrap()), 0o700);
+        std::fs::remove_file(file).ok();
+    }
+
+    // The saved-outputs folder sits in the shared temp folder, and its files
+    // are readable outside the workspace guard. A folder that another user
+    // can write (or made first, so the chmod to 0700 fails) could hold their
+    // text under a predictable name: nothing is saved there and nothing in it
+    // counts as a saved output.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_outputs_folder_others_can_write_is_not_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("outputs");
+        let path = save_full_in(&dir, "result", "mine").expect("our own folder is used");
+        assert!(is_saved_output_in(std::path::Path::new(&path), &dir));
+
+        let shared = root.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let planted = shared.join("result-0.log");
+        std::fs::write(&planted, "planted").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!is_saved_output_in(&planted, &shared));
+
+        // A folder owned by someone else: the chmod fails for them, and as
+        // root (where it would not) the owner still is not us.
+        let theirs = root.path().join("theirs");
+        std::fs::create_dir(&theirs).unwrap();
+        if std::os::unix::fs::chown(&theirs, Some(65_534), None).is_ok() {
+            assert_eq!(save_full_in(&theirs, "result", "mine"), None);
+            let planted = theirs.join("result-1.log");
+            std::fs::write(&planted, "planted").unwrap();
+            assert!(!is_saved_output_in(&planted, &theirs));
+        }
+    }
+
+    // A saved-outputs folder that is a link gets no save, and none of its
+    // files is trusted on the read side either: the read side used to check
+    // the link's target, which `is_ours` then found to be a real folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_outputs_folder_that_is_a_link_is_not_trusted() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("real");
+        std::fs::create_dir(&target).unwrap();
+        let planted = target.join("result-2.log");
+        std::fs::write(&planted, "planted").unwrap();
+        let link = root.path().join("outputs");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(save_full_in(&link, "result", "mine"), None);
+        assert!(!is_saved_output_in(&link.join("result-2.log"), &link));
+        assert!(!is_saved_output_in(&planted, &link));
+    }
+
+    // The path is in the result the model and the loop watch see: the same
+    // output saved twice is one file under one name, a different output
+    // another.
+    #[test]
+    fn the_same_output_saved_twice_is_one_file_under_one_name() {
+        let text = format!("same output {}", std::process::id());
+        let first = save_full("result", &text).expect("saved");
+        let again = save_full("result", &text).expect("saved");
+        let other = save_full("result", &format!("{text}!")).expect("saved");
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), text);
+        std::fs::remove_file(&first).ok();
+        std::fs::remove_file(&other).ok();
+    }
+
+    #[test]
+    fn the_sweep_removes_saved_outputs_older_than_their_age_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("result-1.log");
+        let fresh = dir.path().join("bash-2.log");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&fresh, "fresh").unwrap();
+        let week_ago =
+            std::time::SystemTime::now() - SAVED_MAX_AGE - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(week_ago)
+            .unwrap();
+        sweep(dir.path(), SAVED_MAX_AGE);
+        assert!(!old.exists(), "an output past its age is removed");
+        assert!(fresh.exists(), "a recent output stays");
+    }
 
     fn cargo_log(passing: usize) -> String {
         let mut s = String::from(
@@ -382,7 +630,10 @@ mod tests {
     /// to it — still verdict-last, still with the full text on disk.
     #[tokio::test]
     async fn a_smaller_budget_trims_harder_and_keeps_the_verdict() {
-        let text = cargo_log(3000);
+        // Not `cargo_log(3000)`: saves are named by their content, and the
+        // test above saves and removes that text, so in parallel one test
+        // could delete the other's file between its save and its read.
+        let text = cargo_log(3001);
         let (wide, _) = fit("cargo test", text.clone(), None, BUDGET_CHARS).await;
         let (narrow, _) = fit("cargo test", text.clone(), None, 8_000).await;
         assert!(narrow.len() < wide.len());
@@ -400,6 +651,20 @@ mod tests {
             if let Some(p) = l.split("saved to ").nth(1) {
                 let p = p.split_whitespace().next().unwrap();
                 let _ = std::fs::remove_file(p.trim_end_matches(['.', ';', ')']));
+            }
+        }
+    }
+
+    // A giant line is cut at the block size in bytes, which can fall inside a
+    // character of a minified bundle in any language or of an emoji log.
+    #[test]
+    fn a_giant_multibyte_line_is_cut_on_a_character_boundary() {
+        for unit in ["é", "—", "😀", "日"] {
+            for pad in 0..4 {
+                let text = "x".repeat(pad) + &unit.repeat(BLOCK_CHARS * 2);
+                let blocks = split_blocks(&text);
+                assert_eq!(blocks.len(), 1);
+                assert!(blocks[0].text.contains("(line cut"), "{unit}");
             }
         }
     }

@@ -1,4 +1,4 @@
-import type { ToolCallData } from "../../lib/ipc";
+import type { ToolCallData, ToolResultData } from "../../lib/ipc";
 import type { IconName } from "../Icon";
 import { toolIcon } from "../Icon";
 
@@ -42,7 +42,63 @@ const TITLES: Record<string, string> = {
   finalize_plan: "Finalized plan",
   enter_plan_mode: "Entered plan mode",
   exit_plan_mode: "Exited plan mode",
+  load_tools: "Loaded tools",
+  skills: "Listed skills",
+  doc_create: "Started a document",
+  doc_write: "Wrote a section",
+  doc_read: "Read a section",
+  doc_add: "Added a section",
 };
+
+/** One line of a document outline (`agent::document::Document::outline`). */
+export interface OutlineRow {
+  id: string;
+  status: string;
+  owner: string;
+  topic: string;
+}
+
+/** The `id · status · owner · topic` lines of a doc tool's answer. */
+export function parseOutline(text: string): OutlineRow[] {
+  const rows: OutlineRow[] = [];
+  for (const line of text.split("\n")) {
+    const m = /^(s\d+) · (\w+) · (\S+) · (.*)$/.exec(line);
+    if (m) rows.push({ id: m[1], status: m[2], owner: m[3], topic: m[4] });
+  }
+  return rows;
+}
+
+/** One change in a `tasks_update` call, in either of its two forms. */
+export interface TaskUpdateArg {
+  id?: string;
+  status?: string;
+  journal?: string[];
+}
+
+/** The task's id and its new status, or how many notes it got. */
+export function describeTaskUpdate(u: TaskUpdateArg): string {
+  const id = String(u.id ?? "");
+  const notes = u.journal?.length ?? 0;
+  if (u.status) return `${id} → ${String(u.status)}`;
+  return notes > 0 ? `${id} · ${notes} note${notes === 1 ? "" : "s"}` : id;
+}
+
+/** The changes a `tasks_update` call asked for: its `updates`, or itself.
+ * Entries that are not objects are skipped: the args are the model's, as sent. */
+export function taskUpdates(args: Record<string, unknown>): TaskUpdateArg[] {
+  if (!Array.isArray(args.updates)) return [args as TaskUpdateArg];
+  return args.updates.filter((u): u is TaskUpdateArg => typeof u === "object" && u !== null);
+}
+
+/** A list argument as sent by the model: an array kept, a lone string as a
+ * one-item list, anything else empty. Nothing checks the args against the
+ * schema before they reach the UI, and a summary that throws takes the whole
+ * run down with it through the error boundary. */
+export function listArg<T = unknown>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value === "string") return [value as T];
+  return [];
+}
 
 export function toolTitle(name: string): string {
   if (TITLES[name]) return TITLES[name];
@@ -75,7 +131,7 @@ function splitBashCommand(command: string): { lead: string; args: string } {
  * but reclassifies bash invocations that are really searches (grep/rg/…) so
  * the timeline reads "Searched files" instead of "Ran command".
  */
-export function toolHeader(call: ToolCallData): { icon: IconName; title: string } {
+export function toolHeader(call: ToolCallData, result?: ToolResultData): { icon: IconName; title: string } {
   if (call.toolName === "bash" && SEARCH_COMMANDS.has(splitBashCommand(String(call.args.command ?? "")).lead)) {
     return { icon: "search", title: TITLES.grep };
   }
@@ -102,7 +158,44 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
     const title = byAction[String(call.args.action ?? "")];
     if (title) return { icon: "globe", title };
   }
+  if (createsFile(call)) {
+    return { icon: toolIcon("edit_file"), title: createdFile(result) ? "Created file" : "File not created" };
+  }
+  // A batched update moves several tasks; the title says so.
+  if (call.toolName === "tasks_update" && Array.isArray(call.args.updates)) {
+    return { icon: toolIcon("tasks_update"), title: TITLES.tasks_set };
+  }
+  if (call.toolName === "skills" && call.args.action === "read") {
+    return { icon: toolIcon("skills"), title: "Read a skill" };
+  }
+  if (call.toolName === "doc_write" && call.args.status === "doing") {
+    return { icon: toolIcon("doc_write"), title: "Claimed a section" };
+  }
+  if (call.toolName === "doc_read" && !call.args.id) {
+    return { icon: toolIcon("doc_read"), title: "Read the document" };
+  }
   return { icon: toolIcon(call.toolName), title: toolTitle(call.toolName) };
+}
+
+/**
+ * An `edit_file` with an empty `old_string` creates its file: the harness
+ * refuses one on a file that exists, so the empty string always means a new
+ * file (lean-harness Phase 3b).
+ */
+export function createsFile(call: Pick<ToolCallData, "toolName" | "args">): boolean {
+  return call.toolName === "edit_file" && call.args.old_string === "";
+}
+
+/**
+ * Whether a creating `edit_file` created its file, as far as its result says:
+ * "Created" claims the file is on disk, so a creation the person rejected or
+ * the harness refused (the file exists, the path is relative) is not titled
+ * that way. The success text is edit_file's own ("Created <path>"); a
+ * reloaded session's result carries no error flag, so the text is what tells.
+ * Before a result arrives the call is still in flight and keeps the title.
+ */
+function createdFile(result: ToolResultData | undefined): boolean {
+  return !result || (!result.error && result.output.startsWith("Created "));
 }
 
 /** Tools whose body is always shown — small enough to skip the click-to-expand step. */
@@ -171,17 +264,17 @@ export function toolSummary(call: ToolCallData): string {
       return `${qs.length} question${qs.length === 1 ? "" : "s"}`;
     }
     case "tasks_set": {
-      const tasks = (args.tasks as { status: string }[] | undefined) ?? [];
+      const tasks = listArg<{ status?: string } | null>(args.tasks).filter(
+        (t): t is { status?: string } => typeof t === "object" && t !== null,
+      );
       const done = tasks.filter((task) => task.status === "done").length;
       return `${done}/${tasks.length} done`;
     }
     case "tasks_update": {
-      // One task changed: say which, and to what. A journal-only update has no
-      // status to show, so it says how much was noted instead.
-      const id = String(args.id ?? "");
-      const notes = (args.journal as string[] | undefined)?.length ?? 0;
-      if (args.status) return `${id} → ${String(args.status)}`;
-      return notes > 0 ? `${id} · ${notes} note${notes === 1 ? "" : "s"}` : id;
+      // Each task changed: say which, and to what. A journal-only update has
+      // no status to show, so it says how much was noted instead. A batch
+      // (`updates`) lists its changes in order.
+      return truncate(taskUpdates(args).map(describeTaskUpdate).join(", "), 80);
     }
     case "spawn_agents": {
       const agents = (args.agents as { name: string }[] | undefined) ?? [];
@@ -193,6 +286,20 @@ export function toolSummary(call: ToolCallData): string {
       return truncate(String(args.summary ?? ""), 80);
     case "enter_plan_mode":
       return truncate(String(args.reason ?? ""), 80);
+    case "load_tools":
+      return truncate(listArg(args.names).map(String).join(", "), 80);
+    case "skills":
+      return args.action === "read" ? String(args.name ?? "") : "";
+    case "doc_create": {
+      const n = ((args.sections as unknown[] | undefined) ?? []).length;
+      return `${truncate(String(args.title ?? ""), 60)} · ${n} section${n === 1 ? "" : "s"}`;
+    }
+    case "doc_write":
+      return String(args.id ?? "");
+    case "doc_read":
+      return args.id ? String(args.id) : "outline";
+    case "doc_add":
+      return truncate(String(args.topic ?? ""), 80);
     default: {
       const path = args.path as string | undefined;
       if (path) return path;

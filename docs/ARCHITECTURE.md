@@ -48,17 +48,54 @@ the shapes that tempt you back:
 
 ```
 send_message (commands/agent.rs)
-   └─ agent/session.rs :: run_workflow
-        ├─ route_first_prompt          (Auto: Brain or Builder, fresh sessions only)
-        ├─ run_prefix                  (profile for the model's window → prompt + tools)
+   └─ agent/run_loop.rs :: run_workflow
+        ├─ route::route_first_prompt   (Auto: Brain or Builder, fresh sessions only)
+        ├─ prompt::run_prefix          (profile for the model's window → prompt + tools)
         ├─ ContextBudget::for_model    (the lines this run is held to)
-        ├─ shed / handoff / compaction if the context is over a line
+        ├─ handoff::*                  shed / handoff / compaction if the context is over a line
         └─ loop, per round:
-             ├─ provider::stream_message   (SSE → AgentEvent over a Channel)
-             ├─ no tool calls? → judge_terminal_turn, then done
-             └─ tool calls  → permissions → [approval gate] → tools::execute
-                                └─ results appended, next round
+             ├─ retry::stream_message_with_retry → provider::stream_message
+             │                              (SSE → AgentEvent over a Channel)
+             ├─ no tool calls? → judge::judge_terminal_turn, then done
+             └─ tool calls  → tool_exec::run_tool: permissions → [approval gate]
+                                → tools::execute → results appended, next round
+                              (tool_batch::run_ahead: a contiguous run of read-only
+                               calls runs concurrently, at most 4, results kept
+                               in the model's order)
 ```
+
+**Concurrency within a round.** A run of two or more consecutive calls that are
+all `tools::PARALLEL_SAFE_TOOLS` (the file, index, LSP and web readers and
+`tasks_get`), need no prompt and are watched by no `PreToolUse`/`PostToolUse`
+hook is run ahead at once, at most four at a time, each body on tokio's
+blocking pool so a synchronous read or `rg` never holds an async worker
+(`agent/tool_batch.rs`). Any
+other call (an approval, `edit_file`, `bash`, `spawn_agents`, `ask_user`, the
+browser, the task and plan mutators, every MCP tool) ends the run and runs on
+its own, in order, so a read after an edit sees the edit. Each result lands in
+its call's slot and the loop then walks the round in the model's order as
+before: the transcript, the loop watch, the repeated-read pointer and the hooks
+see the same sequence they did when calls ran one by one, a kept result
+included. A pause starts nothing new and waits for the calls already under way
+(as it always waited for the one running call: a tool body cannot be stopped
+mid-read), keeps their results and answers the calls it kept from starting as
+not run, one result per call. Subagents use the same run-ahead.
+
+The loop is split by responsibility, one file each under `agent/`: `prompt.rs`
+(the prompt text and the tool list beside it), `run_loop.rs` (the loop above),
+`tool_exec.rs` (one tool call, from permission to `tool_result`), `judge.rs`
+(is a terminal turn finished, is the loop stuck), `handoff.rs` (what happens at
+a context line), `retry.rs`, `nudges.rs` (every text the harness itself puts in
+front of the model), `gate_text.rs` (what each gate says when it refuses) and
+`events.rs` (`AgentEvent`). A refused request becomes
+`API error: HTTP <status> — <the provider's message>`
+(`provider/http_error.rs`: the error object's `message`, or the start of the
+body, one line, the API key redacted); `retry.rs` classifies by the status
+alone, so the message never changes whether a request is retried. `session.rs` keeps
+the controls a session shares with the UI — mode, steering, approvals, answers —
+and re-exports the loop's public names, so `agent::session::run_workflow` still
+resolves. `architecture_tests` fails the build when any file under `agent/`
+passes 2,000 production lines: `session.rs` was 8,446 before the split.
 
 Every step is persisted as a line of JSONL under `.claudinio/sessions/`. That
 file is the source of truth, not memory: it is re-read on each message, so a
@@ -76,6 +113,35 @@ Brain is read-only and must produce a plan; Builder executes. The handoff
 (`agent/transition.rs`) starts a *new* session seeded with the plan rather than
 continuing the old one, so execution never inherits a context window full of
 exploration. The same machinery handles the token-threshold handoff.
+
+**Two versions of the Standard prompt** (`AgentConfig::prompt_version`,
+Settings › Agent › System prompt; `prompt/v1.rs`, `prompt/v2.rs`). *v2*, the
+default since lean-harness Phase 5, is the prompt "at the right altitude":
+a base of identity, environment, how the tools relate (and why indexed search
+beats shell search), when to ask and when to stop, untrusted content, hook
+output, the living document and the language policy, about 1.4k tokens; mode
+blocks of about 450 each. It describes no gate the code enforces — the Low-
+Level Design gate on `tasks_set` in Brain, the quality gate on closing a golden
+execution goal, golden-task protection, read-before-edit, the write gates, the
+spec guard, the finish-line check — beyond one line saying a refusal says what
+to do next, and every refusal in `agent/gate_text.rs` does (`gate_text::tests`
+pins each one's next step and that none names a deferred tool). The Brain
+interview is adaptive: only decisions that change the plan, independent
+questions in one `ask_user` call, none for a fully specified request, one
+confirming question before `write_plan`; the consensus checklist, UI sizing and
+asset rules, Low-Level Design guidance and Mermaid catalog are the built-in
+`plan` skill (`agent/skills/plan.md`), listed in the catalog and read by
+reference. Because the prompt points at it by name, `plan` is reserved
+(`RESERVED_BUILTIN_SKILLS`): a project, user or plugin skill of that name is
+ignored rather than allowed to shadow it, and installing a remote skill under
+that name is refused before anything is written. Under v1 the Brain-exploring nudge is
+the pre-phase text too (`nudges::brain_exploring`), so it does not contradict
+v1's interview. The eval selects either prompt with `--prompt-version`.
+Capitals survive only where `v2::KEPT_IMPERATIVES` cites the failure
+they prevent (at most three; today one, VERBATIM). *v1* is the pre-Phase-5
+prompt, kept selectable for one release and pinned byte for byte against
+fixtures (`v1_pin_tests`). Compact and the git operator have one prompt each.
+The config file reads an unknown value as v2; the setter ignores one.
 
 ### Context
 
@@ -97,40 +163,462 @@ just read is the one thing no prune cuts, so it has to fit by itself. And a
 prefix that does not fit the window at all is refused before anything is tried:
 no handoff or summary makes a system prompt smaller.
 
-Crossing a line sheds weight in three stages (`agent/prune.rs`), cheapest
-first: copies a newer result supersedes; what Jev judges disposable; then the
-oldest tool results by age. Text is never touched, nor are the user's answers
-to `ask_user` or the current task list. A stage is accepted only if
+Crossing a line sheds weight masking first (`agent/prune.rs`, lean-harness
+Phase 6): copies a newer result supersedes (lossless); then the oldest tool
+results cut to their head, the call kept (masking by age). Jev, when a backend
+exists, no longer judges the whole history first: it is asked one question —
+must this output stay verbatim — about each cut masking would make in the
+eight newest rounds (`ARBITRATION_ROUNDS`), and what it keeps comes out of the
+cut; older cuts stand unasked, and when Jev's version does not free enough the
+cuts of masking alone are offered last, since a handoff or a summary loses
+more than outputs that can be read again. Subagents run the same ladder as a
+last resort (they may also drop the oldest calls outright). Text is never
+touched, nor are the user's answers to `ask_user` or the current task list. A dropped call is stubbed, never
+removed: its `tool_use` block stays with input `{}` and its result becomes a
+one-line note, because DeepSeek's thinking mode re-attaches its reasoning by the
+tool_use blocks of earlier assistant messages and refuses a history that lost
+one (HTTP 400, first live eval, 2026-10-18). A stage is accepted only if
 it frees enough to be worth the cache it invalidates — which is also why
 nothing is pruned early: on a caching provider the history is cheap to resend
 and expensive to rewrite.
+
+When shedding is not enough a chat session hands off to a successor;
+summarizing (`handoff::compact_history`) is the last resort, and what a manual
+compaction runs. The summarizer
+(`subagent::summary_goal`) writes a note for recall, not brevity — `## Goal`,
+`## Decisions (and why)`, `## Files touched` (`path:lines`), `## What failed`
+(the exact error text), `## Left to do`, `## Constraints the user stated`
+(verbatim) — recall first, then trimmed, to about 1,500 words (it was a
+600-word summary). The note, after any `PreCompact` hook output, is appended to
+`.claudinio/notes/<session>.md` under a timestamp header (`agent/notes.rs`;
+never through a link, and a failed write never fails the compaction), and the
+compacted context ends with a line naming that file, so a successor can read
+what an earlier compaction carried.
+
+A tool result over its cap (`budget::RunLimits::tool_result_chars`) keeps its
+head and its tail, about 70/30 and on line boundaries when one is close,
+around one marker line: `[… N of T chars omitted; <how to get them> …]`
+(`agent/result_cap.rs`). For `read_file` it names the file lines it left out
+and the read that gets them (`lines 412-1880 of 1-2400; read_file with
+start_line=412, end_line=1880`), counted from a ranged read's `start_line` and
+past `read_file`'s own size warning; for anything else the whole output is first
+written to a temp file, as `output_trim` does for `bash`, and the marker names
+it (the file is the user's alone, 0600 in a 0700 folder — a folder that is a
+link, another user's or writable by others gets no save and none of its files
+is trusted — named by the hash of
+its content so a repeated output is the same file and `loop_watch` still sees
+the repeat, and saved outputs older than a week are swept on the first save of
+the app's process (so an app left open for days does not sweep again until
+it restarts); `read_file`, `grep` and the other read tools may open these files, and
+only these, outside the workspace). `fit_round`, which holds one round's results to a share together, re-cuts
+a capped result from what it kept and keeps its true size and hint; `prune`
+reads the same marker (or the head-only note older sessions carry) to know a
+capped read is not the whole file. Every cut lands on a character boundary,
+and the lines a read cut left out are counted on bytes, so text in Portuguese,
+CJK or emoji never splits a character (a slice inside one panicked the run
+until Phase 6f). A marker counts only when its numbers add
+up to the text around it.
+
+An `edit_file` that leaves a file the tree-sitter grammars cover no longer
+parsing, when it parsed before, answers with the edit applied and one warning
+line naming the first error's line and its text (`agent/tools/syntax_check.rs`);
+the edit is never reverted. `file_outline` is not capped: measured on this
+repository's own sources (Phase 6), its mean output is 3,587 characters.
 
 What is sent ahead of the conversation is chosen once per run
 (`agent/surface.rs`): the profile the window calls for (`Standard`, or
 `Compact` under 64k in Builder), then the tool surface the user set for that
 model. Prompt, tool list and the write gates are derived together and never
-change between turns of the same mode, because they are the cached prefix.
-A Compact session edits files itself, so two things hold there that hold
-nowhere else: a shell command that writes a file is asked about like an
-`edit_file` even when its prefix is allowlisted, and a call to any tool outside
-the profile's ten is refused rather than run.
+change between turns of the same mode, because they are the cached prefix —
+with one exception, below: a deferred tool the model loads is appended to the
+end of the list.
+A Builder session edits files itself under both chat profiles
+(`PromptProfile::edits_files`; Standard since decision D1, lean-harness Phase
+3): it is offered `edit_file`, which shows a diff and waits for approval.
+Brain refuses edits, approval or not, and so does the git operator, which
+also refuse a shell command `permissions::bash_writes_files` sees writing
+(redirection, `tee`, in-place `sed`/`perl`, `patch`, git's `--output`, inline
+scripts that call a write). What bounds the shell is one rule, whose whole
+correctness argument is the comment at the top of the shell policy in
+`agent/permissions.rs`: a command runs unasked (`bash_call_permission` in
+Builder, `bash_permission_brain` in Brain) only when, after the tokens
+`2>&1`, `2>/dev/null`, `>/dev/null` and `1>/dev/null` are dropped, it has no
+blank but space and tab (a form feed or NBSP splits a word for Rust and not
+for sh), no backquote, `$`, `<`, `>`, `&`, `;`, backslash, brace,
+parenthesis or glob — on Windows, where it runs under `cmd /c`, which
+expands `%NAME%` before it finds `&` and `|`, no `%`, `^` or `!` either, and
+the child runs with `NoDefaultCurrentDirectoryInExePath` so an allowlisted
+name is not a `git.cmd` or `ls.bat` in the working folder — and
+no `||`; every `|`-part closes its own quotes; the
+first part starts with an allowlist entry (Builder's `BASH_ALLOWLIST`:
+git inspection, reads, builds, test runners, `node`/`python`/`pnpm run`;
+Brain's `BRAIN_ALLOWLIST`: reads only; `git branch`/`git remote` only bare or
+listing, `date` only bare or `+FORMAT` and never under `cmd /c`, whose `DATE`
+reads any argument as a new date) and is not an interpreter or a `date` (which reads a new date from stdin under `cmd /c`) fed the call's `stdin`; every later part is
+one of `PIPE_FILTERS` (`head`, `tail`, `wc`, `grep`, `cut`, `tr`, `nl`); and
+the write check sees nothing. With no backslash, `$` or backquote, quotes do
+not escape, so each `|` the split sees is a pipe the shell sees, and no word
+expands into another (only `~` becomes the home folder). Everything else asks in Builder (YOLO or a
+hook's `allow` may approve it) and is refused in Brain. The git operator (the
+one session with `auto_approve_git`) also runs `git add`, `git commit` and
+`git push` past the allowlist, still under rule 1 — so a commit message with
+a parenthesis (`feat(ui): x`), `&`, `;`, `$`, `<`, `>` or a glob character
+asks — and a push with a word starting `--r` or `--e` asks too
+(`--receive-pack`, `--exec` and their abbreviations name a program git runs). The deny-list
+(`on_the_deny_list`) and the memory guard run first and refuse outright. The
+deny-list is a substring tripwire, refused in every mode: a command is Denied
+when its lowercased text, or its normalized text (every `'`, `"`, backquote,
+backslash and `^` removed, blanks collapsed), contains a `BASH_BLACKLIST`
+entry, redirects into `/dev/` other than exactly `null`, `stdout`, `stderr`,
+`tty` or `fd/N`, or runs cmd's `format X:` — so a path (`/bin/rm -rf /`), a
+wrapper (`time dd if=…`), a quote (`r''m`), a backslash (`d\d`) or a heredoc
+is caught with no parsing; a spelling no entry names once those characters
+are gone, such as bash's ANSI-C quote (`rm -rf $'\x2f'`), is not, as on the
+original list. Its accepted false positives, as on the original list, are
+ordinary text that contains an entry (`grep chown src`, `cp /tmp/x .`,
+`git commit -m "fix: chown "`), plus text holding one of the entries the
+original lacked (`git commit -m "departed from x"`). The rule replaced a chain
+splitter, per-option `sort`/`uniq` readers, a stdin detector and runner
+argument tables after three review rounds kept finding bypasses in them
+(lean-harness plan, "Shell policy simplified"). Builder's allowlisted
+interpreters, runners and builds still run whatever their arguments and the
+project choose, a program to run (`go test -exec`, `cargo --config`) or a
+folder to clear (`pytest --basetemp`) included. Compact adds one rule of its
+own: a call to any tool outside the profile's ten is refused rather than
+run.
+
+**Subagents** (`agent/subagent.rs`, `agent/delegation.rs`) are the exception
+now, not the route every edit takes: the Builder prompt sends broad read-only
+investigation to `explore` subagents and keeps `code` subagents for two or more
+changes to disjoint files. A spawned explore subagent's system prompt asks for a
+report of at most ~1,500 tokens in `## Findings` / `## Files` (`path:line`) /
+`## Open questions`; the compaction summarizer, also explore mode, is not asked
+for it (`SubagentSpec::reports_to_parent`). The parent's `tool_result` carries
+at most 6,000 characters of any report — head and tail, cut on line boundaries,
+around a marker counting what was omitted — while `SubagentDone` gives the
+timeline all of it. Each code subagent's goal is prefixed with one `<brief>`
+composed per `spawn_agents` call: the `doing` task, the latest plan path, and
+the paths in the run's read tracker (shared with subagents, so earlier
+subagents' reads count), relative, sorted, at most 40. The brief sits in the
+first user message, never in a prefix.
+
+**Deferred tools and skills by reference** (`agent/deferred.rs`,
+`agent/skills.rs`). A Standard main session sends a core set — `read_file`,
+`list_dir`, `grep`, `bash`, `run_quality`, `ask_user`,
+`tasks_set`, `tasks_update`, `spawn_agents`, `skills`, `load_tools`,
+`edit_file` and `finalize_plan` in Builder and `write_plan` / `exit_plan_mode`
+in Brain, and `doc_create` in both — and
+names everything else in a `DEFERRED TOOLS` section of the system prompt, one
+line each: the index and LSP searches, `web_search`, the browser tools,
+`enter_plan_mode`, `tasks_get`, and every MCP tool (its own description cut to 100
+characters, at most 60 lines, the rest counted by server). `load_tools`
+appends definitions to the end of the tool list in load order, and a call to a
+deferred tool the model did not load loads it on the spot and runs; either way
+the session file gets one `tools_loaded` record and one `cache_break` per round
+that loaded anything (the prefix is rewritten once, however many joined), and every
+later run starts from those records, so a resumed session sends the identical
+array. The catalog never depends on what is loaded, so the system prompt stays
+the same bytes and only the list grows (never a swap — that would rewrite the
+cached prefix each time). Feature-gated tools leave the catalog with their
+feature. Hooks select by the name of the tool called, through the alias table,
+so a `WebSearch` matcher still selects `web_search` loaded or not. The skills
+section is likewise one line per skill (`- name — description`, cut at 160
+characters, scope priority then name, 25 lines and a count); a skill's
+instructions come from the `skills` tool (`list` / `read`), which is also what
+the catalog tells the model to do with a `<skill>name</skill>` mention.
+Subagents defer nothing — a fresh context has no earlier load to build on —
+and leave out only the three LSP tools. Compact and GitSync defer nothing
+either. No Standard prompt line makes a deferred tool a first, last or
+mandatory call, and no text the harness injects (`agent/nudges.rs`, the handoff
+kickoffs in `agent/transition.rs`) names one — both pinned by tests, because the
+model loads a tool to obey, and a load late in a session rewrites the cached
+prefix in front of the whole conversation. That is why `finalize_plan`, the
+Builder's last call, stays core; `tasks_get` was core for the same reason (the
+first call) until the task protocol stopped asking for it (below). The default
+Builder prefix measures 4,984 tokens on the harness's meter (12,337 before),
+and 6,460 with ten skills and a twenty-tool MCP server
+(17,223 before); `prompt.rs`'s `prefix_budget_tests` hold it to 5,000 and
+10,000. In `run_config.prefix` the catalog counts as `system`, and `mcp` is
+the definitions actually sent.
+
+**Tasks as recitation, not RPC** (`agent/task_recital.rs`). The prompt used
+to make `tasks_get` the first call of every run, a standalone `doing` update
+before any work, a final update before the answer, and forbade batching — three
+to five rounds per task spent on state the harness already holds. Now a
+Standard-profile run (both modes, also when the window makes it Compact) ends
+its user turn with a `<tasks>` block, one line per task (`id · status ·
+title`, golden tasks marked), added beside `<hook-context>` and persisted in the
+same `Turn`, so a reload replays it; the chat bubble is the `user` record and
+never shows it. A successor session gets it after its kickoff, because
+`link_session` copies the tasks before that run starts. After a summarizing
+compaction `persist::history_from_records` restates the list as it stood at the
+compaction point as the last block of the rebuilt context, when that context
+ends on a user message (a compaction inside a run, or one between runs that kept
+no tail; one that ends on the model's answer leaves it to the next run's turn,
+and an identical last block is never repeated — a run whose turn merges into a
+tailless summary drops the recital and appends its own, so the list is said once
+and last). Successor kickoffs say that a list follows as a `<tasks>` block and
+that no block means no list: the run appends one only when the session has
+tasks. The prompts
+say: a list only beyond a one-step change; `doing` in the same round as the
+task's first tool call; batch status changes — `tasks_update` takes
+`updates: [{id, status?, journal?}]`, checks every item (LLD gate, id, status)
+and then the quality gate on the list as the whole batch leaves it, and applies
+nothing if any check fails, naming the task and the reason. Because the block
+carries no descriptions or journals, a `tasks_set` that resends an existing task
+with an empty description or journal keeps the stored one
+(`tasks::keep_stored_details`): a list rewritten from the block alone does not
+erase what Brain wrote or the findings recorded since. "Existing" means the
+same task, not only the same id: a stored task that is done and sent under
+another title is a new task reusing the id (models number their lists `t1`,
+`t2`, ...), and starts with what it was sent. A Builder kickoff with
+no plan file to inline carries each task's description and journal itself
+(`transition::compose_task_details`), since the block names the tasks and the
+plan is not there to describe them. A turn that ends
+with a task still `doing` that this run set `doing` or wrote to (the loop keeps
+the list it read at run start and compares) gets one `nudges::still_doing`
+reminder per run, then finishes; a task an earlier run left `doing` is not
+named (work is a status or journal change against the run-start snapshot;
+a reworded title is not). `prompt.rs` pins the absence of mandated round-trips
+(`no_prompt_mandates_a_task_round_trip`) across the Standard prompts, Compact,
+the kickoffs and the nudges.
+
+**The living document** (`agent/document.rs`, `agent/doc_session.rs`,
+`agent/tools/doc.rs`; lean-harness Phase 4b). A session may own one Markdown
+file under `.claudinio/docs/`, linked by a `document_linked` record (the latest
+wins). `document.rs` is the format and nothing else: a placeholder is a line
+whose trimmed content is `[topic]`; the harness tags each section with an HTML
+comment it owns (`<!-- claudinio: id=s2 status=doing by=sub:x -->`, status
+`todo | doing | done | human`); a written section is `## topic`, the comment,
+its body and the end marker `<!-- claudinio: end -->` the harness writes after
+it, so prose a person typed under a placeholder stays prose once that
+placeholder is written (a file without the marker — older, or a person removed
+it — reads the body up to the next section or level-1/2 heading, and the next
+write adds it); a body cannot open or end a section (such lines are demoted or
+escaped on write); everything else is carried
+byte for byte, so `parse` then `render` is the file. Ids are never reused, not
+even a deleted section's. `doc_session.rs` owns the file — only a relative, plain-component `.md` path
+under `.claudinio/docs/` that does not resolve outside it through a link: the
+session JSONL is workspace data, and any other linked path leaves the session
+with no document rather than letting the harness rewrite, say, `Cargo.toml` at
+a run start. `doc_create` (no approval; the name is the model's title) makes
+the folder one component at a time and refuses a `.claudinio` or `docs` that is
+a link or a file, treats any entry at a candidate name — a dangling link
+included — as taken, and opens the file with `create_new`. One process-wide
+lock around every read-modify-write (parallel subagents and the app's save
+share the file), and a memory beside the session (`<session>.doc.json`: the
+text last seen, the sections a person changed that no agent has read since,
+and the changes not yet told to the model). It is not in the JSONL because
+that file is replayed into every request. Every read first compares the file
+with that memory: a section whose text changed is marked `human`, and an
+agent's `doc_write` to it is refused with the current text until the agent has
+read it (`doc_read`, or that refusal) — the human wins. The model carries the
+outline, never the bodies: a run's user turn ends with a `<document path>`
+block (`id · status · owner · topic`, beside `<tasks>`), every `doc_*` write
+answers with it, and a person's edit found after a round joins that round's
+persisted tool-results message as one `<doc-changed>` note (ids and topics)
+— never a per-request injection, which would rewrite the cached prefix. A
+summarizing compaction records the outline as the file stands then
+(`Compacted.document`, `doc_session::outline_block`) and
+`history_from_records` restates it after the `<tasks>` block, under the same
+rules as the list.
+`doc_create` is core in a Standard main session and answered by the loop; the
+other three tools are deferred but never listed, loaded by a `doc_create` that
+leaves the session with a document, in the same round (one cache break; a
+failed one loads nothing), or seeded as loaded when a session starts with a
+document (a successor's `tools_loaded` record). `doc_create` in a session that
+already has a document hands off (`HandoffReason::NewDocument`,
+`HandoffSpec.document`): the successor owns the new file and starts its memory
+at its first read (the old session's `<session>.doc.json` is left alone; its
+first run — the one the handoff starts, and the first run of a session a
+context handoff opened from it — may not hand off again, since the app
+follows every handoff and the successor's first message repeats the request;
+`doc_session::new_document_turn` walks `context_handoff` links back while each
+session is in its first run),
+and
+of the old task list it keeps only the golden tasks, with the golden loop's
+counters (`transition::tasks_for_successor`); any other successor carries the
+predecessor's document and its memory. A subagent spawned with `section` gets that section claimed for it
+(`doing`, owner `sub:<name>` with only letters, digits, `_` and `-` kept, so
+a name cannot close the harness's comment; one held by another agent is not
+given) and
+`doc_write`/`doc_read` for it alone; every subagent context is
+`DocAccess::Section` or `::None`, never the parent's `Main`. No subagent
+outlives the run that spawned it, so a run's start frees any section still
+`doing` under a `sub:` owner. A freed section the subagent never touched goes
+back to the status and owner it had before the claim (kept in the memory's
+`claimed`); one it wrote to without finishing goes to `todo`. `edit_file` refuses the linked document: an
+agent's edit would read as the person's and lock the agent out of its own
+section. The UI hears of
+every write and every detected edit through `AgentEvent::DocumentUpdated`
+and loads the panel with `get_document` (polled every 5 s; it finds the link
+with `persist::linked_document_at`, which parses only the `document_linked`
+lines, not the whole session); `save_document` merges a person's
+save from the app with what agents wrote while the editor was open
+(`document::merge_human_save`) — every app save of that file, however the
+editor was opened on it (App decides with `isLinkedDocument` from the
+document the panel reports). A model-written body that leaves a code fence
+open is closed by the harness, or the fence would swallow the sections after
+it. Both commands take a session id only as a
+plain file name of an existing session (`doc_session::session_file`), and
+write only the document that session links. The Task Panel stays for sessions
+without a document; Brain's `write_plan` plan file is still its own mechanism.
+
+The prefix only stays cheap if the provider caches it. OpenAI-protocol
+servers cache automatically, but on the Anthropic Messages API a prefix is
+cached only up to an explicit `cache_control` breakpoint, and a request without
+one is re-read cold every round. `agent/provider/cache.rs` marks the
+serialized request of `provider::stream_message` (so the loop, the handoff
+document and subagents alike): `system` goes out as one text block carrying the
+marker, which covers the tool list too since tools precede it in the cache
+order; and the last eligible block of the last message and of the most recent
+earlier user message carry a moving pair, so each request reads what the
+previous one wrote even when a round of parallel tool calls adds more blocks
+than the API looks back over. Never more than three markers, never on a
+thinking block or an empty text block, and `Message`/`ContentBlock` are left
+alone — they are also the session format. `wants_cache_markers` decides who
+gets them: providers configured with the Anthropic protocol only (the built-in
+OpenRouter sign-in stores its provider with the OpenAI protocol, so it is not
+marked), never a local engine or a loopback host,
+and **never claudin.io** — its proxy runs a prompt manager that rewrites the
+system prompt server-side and its upstreams cache implicitly (it measures ~96%
+of executor input as cache reads), so changing the shape of `system` there
+would be production risk for no gain. A marked request refused with a 400 is
+retried once without markers, and the provider is remembered for the rest of
+the process when the error names `cache_control` or the retry succeeds. What
+goes into the prefix is deterministic for that reason: skills, plugins and
+specs are scanned in path order, MCP servers are connected by name and their
+tools enter the list by server then tool name, and nothing in it carries a
+timestamp — `prompt.rs`'s `prefix_stability_tests` build it twice and compare
+bytes. Each time the harness rewrites a history the provider had cached (an
+accepted prune, a compaction, a context handoff) or grows the tool list (a
+deferred-tool load) it appends a `cache_break` record, so the cost of a
+rewrite is countable.
 
 Each run writes a `run_config` record (model, window, lines, prefix by part,
-profile), each subagent a `subagent_run`, each routing decision a `mode_route`.
-`scripts/session-stats.py` aggregates them.
+profile), each subagent a `subagent_run`, each routing decision a `mode_route`,
+and every provider request a `usage` record (round, model, uncached input,
+cache-read, cache-creation and output tokens, the provider's cost when it
+reports one, and which subagent asked; OpenAI's `prompt_tokens` includes its
+`cached_tokens`, so the record subtracts them and the three input kinds add up
+to all input on either protocol). A subagent's own turns and usage go to
+`<session>.sub/<parent_tool_use_id>-<n>.jsonl` beside the session file, not
+into it: the session file is the model's history and is replayed into the next
+request. A compaction's summarizer is a subagent too and writes
+`<session>.sub/compact-<n>.jsonl` (a fresh file per attempt). Jev's calls are
+billed into the session total but leave no `usage` record. `scripts/session-stats.py` aggregates them (`--cost` for cost, rounds
+and cache share per run, and cache breaks per session).
+
+### Project memory
+
+`agent/project_memory.rs` (lean-harness Phase 9, decision D6). Two files a
+new session reads, one the harness writes:
+
+- **`<workspace>/.claudinio/MEMORY.md`**, harness-owned: a `## Learned` list of
+  `- YYYY-MM-DD — <line> (plan: <relative plan path>)`. `finalize_plan`'s
+  optional `memory` list (at most 5 lines of at most 200 characters, checked by
+  `proposed_lines` before anything is written, so a refused call never logs the
+  plan twice) is appended after the Implementation Log; no list, no entry — the
+  journal is never copied there. Append-only, capped at 4,000 characters by
+  dropping the oldest entries whole (`appended`); never summarized or
+  rewritten, the ACE paper's brevity bias and context collapse. Written by
+  rename, never through a link at `.claudinio` or the file.
+- **`AGENTS.md`, else `CLAUDE.md`**, at the workspace root: the user's own
+  context, which the harness reads and never writes (the agent may edit it like
+  any other file, through an approved `edit_file` or the shell), capped at 6,000 characters on a character
+  boundary (snapped to a line break in the second half) with a note naming the
+  absolute path and the `start_line` to `read_file` the rest.
+
+`run_loop` reads the instructions file on the first run of every session (no
+`user` record yet) and the memory only on the first run of a session that
+continues none (no `linked_from` record either; `is_first_run`), under a chat
+profile, and
+puts them in the run's user turn after the user's words and before the
+`<tasks>` recital, as `<project-instructions path="...">` then
+`<project-memory>` — the same mechanism as `<hook-context>` and `<tasks>`:
+persisted inside the turn, so a reload replays it, and never in the system
+prompt, whose bytes must not move under the cache. A successor (a plan's
+Builder, a context handoff) gets the instructions, which its plan or handoff
+does not copy — the handoff is told to point at files — and not the memory,
+whose lessons its plan already carries. The git operator gets neither. A
+summarizing compaction does not restate the instructions; the turn that carried
+them survives only in the kept tail.
+`AgentConfig::project_memory` (default on; Settings › Agent › Project memory)
+turns both off. A link out of the workspace is not followed (a cloned repo
+cannot send another file to the provider), files are read at most 1 MiB, and
+a forged closing tag is defused with a zero-width space. The timeline never
+shows either block: the bubble is the raw `user` record.
 
 ## Trust boundaries
 
 Three, and they are the parts to be careful with.
 
 **1. What the model may touch.** `agent/tools/mod.rs::validate_path` gates every
-file tool; `agent/permissions.rs` gates `bash` with an allowlist/denylist and an
-approval prompt. `edit_file` always shows a diff first.
+file tool (the read tools go through `validate_read_path`, which also opens the
+user's skill folders and the harness's own saved outputs, with links resolved
+first — never for writing); `agent/permissions.rs` gates `bash` with an allowlist/denylist and an
+approval prompt. `edit_file` always shows a diff first. It also creates files
+(lean-harness Phase 3b): an empty `old_string` on a path that does not exist
+proposes the whole file as a diff from nothing, and applying it makes the
+missing folders and writes with `create_new`, so it never overwrites. The
+workspace and spec guards run first, as for any edit. A relative path is
+joined onto the workspace (`tools::in_workspace`) before it is checked, so the
+file a tool opens is the one the guard approved — `std::fs` alone would open it
+from the process's directory (`$HOME`, or `/` from Finder).
+Read-before-edit (`ReadTracker`) has nothing to check on a missing path, and
+records a created file as fully read. An `old_string` that occurs more than once
+is refused with the count unless the call sets `replace_all`, and the count is
+taken again on the file at approval; a `replace_all` proposal carries its count,
+and the approval card says "Replaces all N occurrences".
+The project memory (`.claudinio/MEMORY.md`) is written by `finalize_plan`'s
+`memory` lines alone, so a page the agent read does not get a line into what
+every later session reads by asking the model to write one:
+`validate_editable_path` refuses it at the path level (resolved like the
+workspace guard, links followed, compared without case), which covers
+`edit_file` and a subagent's apply; `finalize_plan` refuses it as a
+`plan_file` (its log would otherwise land in the memory) and never picks it as
+the newest plan (`write_plan::latest_plan_path`, which every reader of "the
+plan" uses, filters it). The path guard is the exact one; the shell check
+below is defence in depth, a best-effort heuristic and not a boundary:
+`permissions::bash_call_permission` *denies* —
+rather than asks about — a `bash` call that names it and is not a plain read,
+so neither YOLO nor a hook's `allow` opens it. The shell check
+(`project_memory::mentions_memory`) is a raw scan of the text, in any case,
+with no parsing and no recursion: `memory.md` anywhere, or `.claudinio` not
+continued into another name by a letter, digit, `-` or `_` (directly or after
+dots, so `.claudinio.json` is not it) — a brace list (`{.claudinio,}`,
+`.claudinio{,}`) or a Windows backslash or trailing dot counts — unless `/`
+follows with a path of plain names that ends cleanly and has no empty or
+all-dots part (`.claudinio/plans/x.md`); `.claudinio/`, `.claudinio/M*`,
+`{.claudinio/,}` and `.claudinio/plans/..` count — scanned as written and
+again with quotes, backslashes and cmd's escape `^` dropped. It reads the whole call (`shell_call_names_memory`): the command, the
+`stdin`, a `workdir` inside `.claudinio`, and, with the workspace known, the
+names resolved on disk like the path guard does, so a link an earlier call
+made (`ln -s .claudinio c`, then `>> c/M*`) is seen. A plain read —
+`cat`/`head`/`tail`/`ls`/`wc`/`stat`/`file`/`grep` or `git
+log`/`diff`/`show`/`status`/`blame`, no pipe, under the shell rule's first
+clause, nothing the write check sees (`permissions::plain_memory_read`) — is
+not refused. It cannot see a path the command builds at run time (a variable,
+a script assembling the name), a glob or brace list that spells the folder's
+own name (`.c*`, `.claudi{n,}io`), a name relative to a folder the command
+moves into first (`cd .claudinio/plans && cp x ../M*`; `pushd`, `git -C`,
+`find -execdir` alike), a copy or delete of a parent folder (`rm -rf .`), or a
+hard link to the file; each of those asks in Builder and is refused in Brain
+(`what_the_memory_guard_cannot_see_still_asks`). It errs the other way too: a
+command that only names the folder in text (`echo '.claudinio/' >>
+.gitignore`, `git commit -m "ignore .claudinio"`, `git add
+.claudinio/plans/*.md`) is refused, a known cost of the raw scan. Nothing else stands there for certain: the allowlisted interpreters
+(`node `, `python `) run a script unasked even outside YOLO, and YOLO waives
+the approval of the rest; a file written by an MCP server is
+outside it too. Note the memory is no more trusted than `AGENTS.md`, which the
+agent may edit and which is also read at a session's start — the guard keeps
+the harness's file the harness's, it is not a sandbox.
 
 **2. What the webview may touch.** The chat renders untrusted content, so treat
 the frontend as a place where attacker-influenced script could run. The
 filesystem commands in `commands/fs.rs` therefore enforce workspace containment
-themselves — they do not rely on the frontend asking nicely. Both guards call
+themselves — they do not rely on the frontend asking nicely, and refuse a
+relative path, which `std::fs` would open from the process's directory. Both guards call
 `workspace_path.rs` so they cannot drift apart. Writes outside the workspace go
 through `export_file`, which opens the save dialog *in Rust* so the destination
 is never an IPC argument.
@@ -154,7 +642,7 @@ a config file, and a config file can arrive in a `git clone`. Two rules bound
 them. Nothing spawns until the user has approved that exact set of resolved
 commands, hashed in `~/.claudinio/hook-trust.json` — never in the repository,
 where an approval could arrive pre-approved in a pull request. And a hook's
-`PreToolUse` verdict feeds `session.rs::effective_permission`, which treats an
+`PreToolUse` verdict feeds `tool_exec.rs::effective_permission`, which treats an
 `allow` exactly as it treats YOLO mode: it skips the approval prompt and still
 runs the bash denylist and the browser scheme check. A hook may relax a prompt;
 it may never relax a policy.
@@ -288,6 +776,27 @@ SolidJS, no store library — signals and props.
 The frontend makes no network requests of its own. Every provider call happens
 in Rust, which is why the CSP can keep `connect-src` closed.
 
+## The eval
+
+`src-tauri/src/eval/` is a headless runner over the real agent loop, exposed as
+the `claudinio-eval` Cargo example (not a `[[bin]]`, which the Tauri bundler
+would pick up). It lives in the crate because it drives the private `agent`
+module, and nothing in it is reachable from the IPC surface. A task (YAML under
+`eval/tasks/`) is materialized into a fresh directory outside any repository,
+given one `start` commit and a `.claudinio.json` whose quality `test_cmd` is the
+task's check; then `run_workflow` runs a fresh Builder session with a
+`Channel::new` closure as the event sink, so no Tauri window is involved, and
+the task's oracle decides pass or fail. Approvals and `ask_user` are answered
+by `eval::policy`: edits yes (never inside `.git/` or to the runner's
+`.claudinio.json`), read-only shell yes, every other shell command no (the
+runner turns on `ToolContext::shell_gate`, which only ever adds a prompt, so
+allowlisted commands reach the policy too). The policy prevents accidents; it
+is not a sandbox, since the task's tests run model-written code, so `run`
+belongs in a disposable container. Metrics are read back from the
+session files the run wrote — the same `usage` records and `.sub/` transcripts
+a user's sessions have. `validate` needs no model: each oracle must fail on the
+start tree and pass on the reference. See `eval/README.md`.
+
 ## Things that look odd and are deliberate
 
 - **English only, everywhere.** No translation layer. The system prompts are
@@ -298,7 +807,8 @@ in Rust, which is why the CSP can keep `connect-src` closed.
   in that directory.
 - **`src-tauri` is the Cargo workspace root.** There is no manifest at the
   repository root.
-- **Portuguese test fixtures** in `agent/session.rs` are verbatim captures of
+- **Portuguese test fixtures** in `agent/prompt.rs`, `agent/judge.rs` and the
+  other modules split out of `session.rs` are verbatim captures of
   sessions that broke something. Translating them would destroy the regression.
 - **`ContentBlock` is `#[serde(untagged)]` and its variant order matters.**
   Deserialization takes the first structural match, and the same enum is both

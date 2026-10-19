@@ -1,0 +1,120 @@
+id: js-daily-summary-counts
+title: The daily summary counts internal test accounts
+tags:
+- long
+- bugfix
+- javascript
+prompt: |
+  The daily active-user summary still counts some of our internal test accounts as
+  real users — summary.test.js fails on yesterday's events. Track down why and fix it
+  without changing the test or the fixture.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "fixture",
+        "private": true,
+        "type": "module"
+      }
+    source.js: |
+      import { readFileSync } from "node:fs";
+
+      // One JSON event per line.
+      export function readEvents(path) {
+        return readFileSync(path, "utf8")
+          .split("\n")
+          .filter((line) => line.trim())
+          .map((line) => JSON.parse(line));
+      }
+    normalize.js: |
+      // Lower-cased users, ISO timestamps; drops events with no user.
+      export function normalize(events) {
+        return events
+          .filter((e) => typeof e.user === "string" && e.user.length > 0)
+          .map((e) => ({ ...e, user: e.user.trim().toLowerCase() }));
+      }
+    accounts.js: |
+      const INTERNAL_DOMAINS = ["@claudinio.test", "@qa.internal"];
+
+      export function isInternal(user) {
+        return INTERNAL_DOMAINS.some((d) => user.endsWith(d));
+      }
+    filter.js: |
+      // Drops internal accounts (and anything a rule marks) before counting.
+      export function withoutInternal(events, isInternal) {
+        events.forEach((event, i) => {
+          if (isInternal(event.user)) {
+            events.splice(i, 1);
+          }
+        });
+        return events;
+      }
+    enrich.js: |
+      // Adds the calendar day (UTC) each event happened on.
+      export function withDay(events) {
+        return events.map((e) => ({ ...e, day: e.at.slice(0, 10) }));
+      }
+    aggregate.js: |
+      export function activeUsersByDay(events) {
+        const days = new Map();
+        for (const e of events) {
+          if (!days.has(e.day)) days.set(e.day, new Set());
+          days.get(e.day).add(e.user);
+        }
+        return new Map([...days].map(([day, users]) => [day, users.size]));
+      }
+    summary.js: |
+      import { readEvents } from "./source.js";
+      import { normalize } from "./normalize.js";
+      import { isInternal } from "./accounts.js";
+      import { withoutInternal } from "./filter.js";
+      import { withDay } from "./enrich.js";
+      import { activeUsersByDay } from "./aggregate.js";
+
+      export function summarize(path) {
+        const events = withDay(withoutInternal(normalize(readEvents(path)), isInternal));
+        return Object.fromEntries(activeUsersByDay(events));
+      }
+    fixtures/2026-10-17.jsonl: |
+      {"user": "ana@example.com", "at": "2026-10-17T08:00:00Z", "type": "open"}
+      {"user": "bot1@claudinio.test", "at": "2026-10-17T08:01:00Z", "type": "open"}
+      {"user": "bot2@claudinio.test", "at": "2026-10-17T08:02:00Z", "type": "open"}
+      {"user": "Bea@Example.com", "at": "2026-10-17T09:00:00Z", "type": "open"}
+      {"user": "qa@qa.internal", "at": "2026-10-17T09:30:00Z", "type": "open"}
+      {"user": "ana@example.com", "at": "2026-10-17T10:00:00Z", "type": "save"}
+      {"user": "", "at": "2026-10-17T10:05:00Z", "type": "open"}
+      {"user": "cy@example.com", "at": "2026-10-16T23:59:00Z", "type": "open"}
+    summary.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { summarize } from "./summary.js";
+
+      test("only real users are counted", () => {
+        assert.deepEqual(summarize(new URL("./fixtures/2026-10-17.jsonl", import.meta.url)), {
+          "2026-10-17": 2,
+          "2026-10-16": 1,
+        });
+      });
+oracle:
+  command: node --test
+  timeout_s: 60
+  files:
+    summary.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { summarize } from "./summary.js";
+
+      test("only real users are counted", () => {
+        assert.deepEqual(summarize(new URL("./fixtures/2026-10-17.jsonl", import.meta.url)), {
+          "2026-10-17": 2,
+          "2026-10-16": 1,
+        });
+      });
+reference:
+  files:
+    filter.js: |
+      // Drops internal accounts (and anything a rule marks) before counting.
+      export function withoutInternal(events, isInternal) {
+        return events.filter((event) => !isInternal(event.user));
+      }
+max_rounds: 50

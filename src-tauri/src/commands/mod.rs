@@ -4,6 +4,7 @@ pub mod browser;
 pub mod clipboard;
 pub mod code_intel;
 pub mod context;
+pub mod document;
 pub mod enhance;
 pub mod fs;
 pub mod git;

@@ -1,0 +1,180 @@
+id: py-plan-quota-off-by-one
+title: Customers get one call fewer than their plan allows
+tags:
+- search
+- bugfix
+- python
+prompt: |
+  Customers on the 5-requests-per-minute plan say their fifth call within a minute is
+  rejected. They should get exactly five, and the sixth should be refused. Please fix
+  it — the API tests show the expectation.
+setup:
+  files:
+    service/__init__.py: ''
+    service/api.py: |
+      from service.dispatch import route
+      from service.gatekeeper import Turnstile
+      from service.ledger import Ledger
+
+      PLANS = {"free": 5, "team": 60}
+
+
+      class Api:
+          def __init__(self, clock):
+              self.clock = clock
+              self.ledger = Ledger()
+              self.turnstiles = {name: Turnstile(per_minute) for name, per_minute in PLANS.items()}
+
+          def handle(self, client, plan, path):
+              if not self.turnstiles[plan].admit(client, self.clock()):
+                  return 429, "slow down"
+              self.ledger.record(client, path)
+              return route(path)
+    service/gatekeeper.py: |
+      from collections import defaultdict, deque
+
+      WINDOW_SECONDS = 60.0
+
+
+      class Turnstile:
+          """Sliding one-minute window per client."""
+
+          def __init__(self, per_window):
+              self.per_window = per_window
+              self.seen = defaultdict(deque)
+
+          def admit(self, client, now):
+              stamps = self.seen[client]
+              while stamps and now - stamps[0] >= WINDOW_SECONDS:
+                  stamps.popleft()
+              if len(stamps) + 1 >= self.per_window:
+                  return False
+              stamps.append(now)
+              return True
+    service/ledger.py: |
+      class Ledger:
+          """Billing record of every request that was served."""
+
+          def __init__(self):
+              self.entries = []
+
+          def record(self, client, path):
+              self.entries.append((client, path))
+
+          def count(self, client):
+              return sum(1 for c, _ in self.entries if c == client)
+    service/dispatch.py: |
+      from service.listing import list_items
+
+
+      def route(path):
+          if path.startswith("/items"):
+              return 200, list_items(limit=20)
+          return 404, "not found"
+    service/listing.py: |
+      ITEMS = [f"item-{n}" for n in range(100)]
+
+
+      def list_items(limit=20, offset=0):
+          """One page of items; the limit here is a page size, not a quota."""
+          limit = max(1, min(limit, 50))
+          return ITEMS[offset:offset + limit]
+    tests/__init__.py: ''
+    tests/test_api.py: |
+      from service.api import Api
+
+
+      class Clock:
+          def __init__(self):
+              self.t = 1000.0
+
+          def __call__(self):
+              return self.t
+
+
+      def test_free_plan_gets_exactly_five_per_minute():
+          clock = Clock()
+          api = Api(clock)
+          codes = []
+          for _ in range(6):
+              codes.append(api.handle("c1", "free", "/items")[0])
+              clock.t += 1
+          assert codes == [200, 200, 200, 200, 200, 429]
+          assert api.ledger.count("c1") == 5
+
+
+      def test_the_window_slides():
+          clock = Clock()
+          api = Api(clock)
+          for _ in range(5):
+              assert api.handle("c2", "free", "/items")[0] == 200
+          clock.t += 61
+          assert api.handle("c2", "free", "/items")[0] == 200
+
+
+      def test_page_size_is_unrelated():
+          clock = Clock()
+          assert len(Api(clock).handle("c3", "team", "/items")[1]) == 20
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider tests
+  timeout_s: 60
+  files:
+    tests/test_api.py: |
+      from service.api import Api
+
+
+      class Clock:
+          def __init__(self):
+              self.t = 1000.0
+
+          def __call__(self):
+              return self.t
+
+
+      def test_free_plan_gets_exactly_five_per_minute():
+          clock = Clock()
+          api = Api(clock)
+          codes = []
+          for _ in range(6):
+              codes.append(api.handle("c1", "free", "/items")[0])
+              clock.t += 1
+          assert codes == [200, 200, 200, 200, 200, 429]
+          assert api.ledger.count("c1") == 5
+
+
+      def test_the_window_slides():
+          clock = Clock()
+          api = Api(clock)
+          for _ in range(5):
+              assert api.handle("c2", "free", "/items")[0] == 200
+          clock.t += 61
+          assert api.handle("c2", "free", "/items")[0] == 200
+
+
+      def test_page_size_is_unrelated():
+          clock = Clock()
+          assert len(Api(clock).handle("c3", "team", "/items")[1]) == 20
+reference:
+  files:
+    service/gatekeeper.py: |
+      from collections import defaultdict, deque
+
+      WINDOW_SECONDS = 60.0
+
+
+      class Turnstile:
+          """Sliding one-minute window per client."""
+
+          def __init__(self, per_window):
+              self.per_window = per_window
+              self.seen = defaultdict(deque)
+
+          def admit(self, client, now):
+              stamps = self.seen[client]
+              while stamps and now - stamps[0] >= WINDOW_SECONDS:
+                  stamps.popleft()
+              if len(stamps) >= self.per_window:
+                  return False
+              stamps.append(now)
+              return True
+max_rounds: 40

@@ -51,13 +51,23 @@ pub fn has_nonempty_section(content: &str, heading: &str) -> bool {
 
 /// Newest `.md` file in the plans dir by modified time (ties broken by name).
 /// None when the dir is missing or holds no plan files.
+///
+/// Never the project memory: a repository whose plans directory is
+/// `.claudinio` keeps `MEMORY.md` beside its plans, and right after a
+/// `finalize_plan` append it is the newest `.md` there. Every reader of "the
+/// plan" comes through here — the Builder kickoff, the plan auto-commit, the
+/// handoff, delegation, the Brain LLD gate and `finalize_plan` — so this is
+/// the one place the memory is filtered out (Phase 9 review).
 pub fn latest_plan_path(workspace_root: &str, plan_save_path: Option<&str>) -> Option<PathBuf> {
     let dir = plans_dir(workspace_root, plan_save_path);
     let entries = std::fs::read_dir(&dir).ok()?;
+    let root = std::path::Path::new(workspace_root);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        if path.extension().and_then(|e| e.to_str()) != Some("md")
+            || crate::agent::project_memory::is_memory_path(root, &path)
+        {
             continue;
         }
         let mtime = entry
@@ -71,6 +81,18 @@ pub fn latest_plan_path(workspace_root: &str, plan_save_path: Option<&str>) -> O
         };
     }
     best.map(|(_, path)| path)
+}
+
+/// The slug a plan's auto-commit message names: the file stem without the
+/// `YYYY-MM-DD_` prefix `write_plan` gives it. The folder also holds files
+/// the person named, so the offsets are taken with `get`: byte 4 or 11 of
+/// "ação-…" or "计划-…" lies inside a character, and slicing there panicked
+/// the run at the plan's auto-commit (lean-harness Phase 6f audit).
+pub fn commit_slug(stem: &str) -> &str {
+    match (stem.get(4..5), stem.get(11..)) {
+        (Some("-"), Some(slug)) if !slug.is_empty() => slug, // after "YYYY-MM-DD_"
+        _ => stem,
+    }
 }
 
 /// Turn a free-form plan name into a filesystem-safe slug.
@@ -314,6 +336,27 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    // A repository whose plans directory is `.claudinio` itself holds the
+    // project memory beside its plans, and right after a `finalize_plan`
+    // append the memory is the newest `.md` there. It is never the plan: the
+    // Builder kickoff, the plan auto-commit, the handoff and the Brain LLD
+    // gate all read "the plan" through this function (Phase 9 review).
+    #[test]
+    fn latest_plan_path_never_picks_the_project_memory() {
+        let tmp = std::env::temp_dir().join(format!("wp-latest-mem-{}", std::process::id()));
+        let dir = tmp.join(".claudinio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("2026-10-19_plan.md");
+        std::fs::write(&plan, "# Plan").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let f = std::fs::File::options().write(true).open(&plan).unwrap();
+        f.set_modified(past).unwrap();
+        std::fs::write(dir.join("MEMORY.md"), "## Learned\n").unwrap();
+        let got = latest_plan_path(tmp.to_str().unwrap(), Some(".claudinio"));
+        assert_eq!(got, Some(plan));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     #[test]
     fn latest_plan_path_missing_dir() {
         assert_eq!(latest_plan_path("/nonexistent/root", None), None);
@@ -322,6 +365,7 @@ mod tests {
     fn ctx_with_root(root: &std::path::Path) -> crate::agent::tools::ToolContext {
         use std::sync::Arc;
         crate::agent::tools::ToolContext {
+            doc_access: Default::default(),
             hooks: None,
             db_path: None,
             browser: None,
@@ -338,6 +382,7 @@ mod tests {
             plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
+            shell_gate: None,
             mcp: None,
             mode_ctl: None,
             index_progress: None,
@@ -377,5 +422,18 @@ mod tests {
         assert!(!full.contains("no '## Low-Level Design'"), "got: {full}");
         assert!(!full.contains("expected section(s) missing"), "got: {full}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // The plans folder is any `.md` the person keeps there, not only the
+    // files write_plan named: a stem in Portuguese or Chinese must give a
+    // commit message, never a slice inside one of its characters.
+    #[test]
+    fn a_plan_stem_with_multibyte_characters_gives_a_commit_slug() {
+        assert_eq!(commit_slug("2026-10-19_add-login"), "add-login");
+        assert_eq!(commit_slug("ação-do-plano-novo"), "ação-do-plano-novo");
+        assert_eq!(commit_slug("计划-第一版-登录页面"), "计划-第一版-登录页面");
+        assert_eq!(commit_slug("2026-10-19_ação"), "ação");
+        assert_eq!(commit_slug("abcd-efghij😀x"), "😀x");
+        assert_eq!(commit_slug("abcd-efghi😀x"), "abcd-efghi😀x");
     }
 }

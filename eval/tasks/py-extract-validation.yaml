@@ -1,0 +1,176 @@
+id: py-extract-validation
+title: Extract duplicated validation into one function
+tags:
+- refactor
+- python
+prompt: |
+  The three handlers in handlers.py each repeat the same email and name validation.
+  Refactor: add validate_user(payload) in a new validators.py that returns the list of
+  error strings (empty when the payload is valid) — the same messages, in the same
+  order, as today — and make create_user, update_user and invite_user all use it, so
+  the regular expression lives only in validators.py. Behaviour must not change;
+  test_handlers.py must keep passing.
+setup:
+  files:
+    handlers.py: |
+      import re
+
+
+      def create_user(payload, db):
+          errors = []
+          if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", payload.get("email", "")):
+              errors.append("invalid email")
+          name = payload.get("name", "").strip()
+          if not 1 <= len(name) <= 40:
+              errors.append("name must be 1-40 characters")
+          if errors:
+              return {"ok": False, "errors": errors}
+          db[payload["email"]] = {"name": name}
+          return {"ok": True}
+
+
+      def update_user(payload, db):
+          errors = []
+          if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", payload.get("email", "")):
+              errors.append("invalid email")
+          name = payload.get("name", "").strip()
+          if not 1 <= len(name) <= 40:
+              errors.append("name must be 1-40 characters")
+          if errors:
+              return {"ok": False, "errors": errors}
+          if payload["email"] not in db:
+              return {"ok": False, "errors": ["no such user"]}
+          db[payload["email"]]["name"] = name
+          return {"ok": True}
+
+
+      def invite_user(payload, db, outbox):
+          errors = []
+          if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", payload.get("email", "")):
+              errors.append("invalid email")
+          name = payload.get("name", "").strip()
+          if not 1 <= len(name) <= 40:
+              errors.append("name must be 1-40 characters")
+          if errors:
+              return {"ok": False, "errors": errors}
+          outbox.append((payload["email"], f"Welcome, {name}!"))
+          return {"ok": True}
+    test_handlers.py: |
+      from handlers import create_user, invite_user, update_user
+
+
+      def test_create_and_update():
+          db = {}
+          assert create_user({"email": "a@b.io", "name": " Ana "}, db) == {"ok": True}
+          assert db == {"a@b.io": {"name": "Ana"}}
+          assert update_user({"email": "a@b.io", "name": "Bea"}, db) == {"ok": True}
+          assert update_user({"email": "x@b.io", "name": "Bea"}, db)["errors"] == ["no such user"]
+
+
+      def test_every_handler_reports_both_errors_in_order():
+          for call in (
+              lambda p: create_user(p, {}),
+              lambda p: update_user(p, {}),
+              lambda p: invite_user(p, {}, []),
+          ):
+              assert call({"email": "nope", "name": ""}) == {
+                  "ok": False,
+                  "errors": ["invalid email", "name must be 1-40 characters"],
+              }
+
+
+      def test_invite_sends_a_welcome():
+          outbox = []
+          assert invite_user({"email": "c@d.org", "name": "Cy"}, {}, outbox) == {"ok": True}
+          assert outbox == [("c@d.org", "Welcome, Cy!")]
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider && ! grep -q 're\.' handlers.py
+  timeout_s: 60
+  files:
+    test_handlers.py: |
+      from handlers import create_user, invite_user, update_user
+
+
+      def test_create_and_update():
+          db = {}
+          assert create_user({"email": "a@b.io", "name": " Ana "}, db) == {"ok": True}
+          assert db == {"a@b.io": {"name": "Ana"}}
+          assert update_user({"email": "a@b.io", "name": "Bea"}, db) == {"ok": True}
+          assert update_user({"email": "x@b.io", "name": "Bea"}, db)["errors"] == ["no such user"]
+
+
+      def test_every_handler_reports_both_errors_in_order():
+          for call in (
+              lambda p: create_user(p, {}),
+              lambda p: update_user(p, {}),
+              lambda p: invite_user(p, {}, []),
+          ):
+              assert call({"email": "nope", "name": ""}) == {
+                  "ok": False,
+                  "errors": ["invalid email", "name must be 1-40 characters"],
+              }
+
+
+      def test_invite_sends_a_welcome():
+          outbox = []
+          assert invite_user({"email": "c@d.org", "name": "Cy"}, {}, outbox) == {"ok": True}
+          assert outbox == [("c@d.org", "Welcome, Cy!")]
+    test_validators.py: |
+      from validators import validate_user
+
+
+      def test_valid_payload_has_no_errors():
+          assert validate_user({"email": "a@b.io", "name": "Ana"}) == []
+
+
+      def test_errors_in_order():
+          assert validate_user({}) == ["invalid email", "name must be 1-40 characters"]
+          assert validate_user({"email": "a@b.io", "name": "x" * 41}) == [
+              "name must be 1-40 characters"
+          ]
+          assert validate_user({"email": "a@b", "name": "Ana"}) == ["invalid email"]
+reference:
+  files:
+    validators.py: |
+      import re
+
+      EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$")
+
+
+      def validate_user(payload):
+          """Every problem with a user payload, in a stable order."""
+          errors = []
+          if not EMAIL.match(payload.get("email", "")):
+              errors.append("invalid email")
+          if not 1 <= len(payload.get("name", "").strip()) <= 40:
+              errors.append("name must be 1-40 characters")
+          return errors
+    handlers.py: |
+      from validators import validate_user
+
+
+      def create_user(payload, db):
+          errors = validate_user(payload)
+          if errors:
+              return {"ok": False, "errors": errors}
+          db[payload["email"]] = {"name": payload["name"].strip()}
+          return {"ok": True}
+
+
+      def update_user(payload, db):
+          errors = validate_user(payload)
+          if errors:
+              return {"ok": False, "errors": errors}
+          if payload["email"] not in db:
+              return {"ok": False, "errors": ["no such user"]}
+          db[payload["email"]]["name"] = payload["name"].strip()
+          return {"ok": True}
+
+
+      def invite_user(payload, db, outbox):
+          errors = validate_user(payload)
+          if errors:
+              return {"ok": False, "errors": errors}
+          outbox.append((payload["email"], f"Welcome, {payload['name'].strip()}!"))
+          return {"ok": True}
+max_rounds: 40

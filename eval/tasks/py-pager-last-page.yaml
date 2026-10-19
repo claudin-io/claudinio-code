@@ -1,0 +1,100 @@
+id: py-pager-last-page
+title: The pager drops the last partial page
+tags:
+- bugfix
+- python
+prompt: |
+  Our pager loses the last page of results whenever the number of items is not a
+  multiple of the page size: with 10 items and 3 per page you can only ever reach 9
+  of them. Please fix it. test_pager.py describes the behaviour we expect.
+setup:
+  files:
+    pager.py: |
+      def page_count(total, per_page):
+          """Number of pages needed to show `total` items, `per_page` at a time."""
+          if per_page <= 0:
+              raise ValueError("per_page must be positive")
+          return total // per_page
+
+
+      def page(items, number, per_page):
+          """The items on 1-based page `number`; empty past the last page."""
+          count = page_count(len(items), per_page)
+          if number < 1 or number > count:
+              return []
+          start = (number - 1) * per_page
+          return items[start:start + per_page]
+    test_pager.py: |
+      import pytest
+      from pager import page, page_count
+
+
+      def test_exact_multiple():
+          assert page_count(9, 3) == 3
+
+
+      def test_partial_last_page_counts():
+          assert page_count(10, 3) == 4
+          assert page_count(1, 50) == 1
+
+
+      def test_no_items_no_pages():
+          assert page_count(0, 3) == 0
+
+
+      def test_last_partial_page_has_the_rest():
+          assert page(list(range(10)), 4, 3) == [9]
+          assert page(list(range(10)), 5, 3) == []
+
+
+      def test_page_size_must_be_positive():
+          with pytest.raises(ValueError):
+              page_count(3, 0)
+oracle:
+  command: python3 -m pytest -q -p no:cacheprovider
+  timeout_s: 60
+  files:
+    test_pager.py: |
+      import pytest
+      from pager import page, page_count
+
+
+      def test_exact_multiple():
+          assert page_count(9, 3) == 3
+
+
+      def test_partial_last_page_counts():
+          assert page_count(10, 3) == 4
+          assert page_count(1, 50) == 1
+
+
+      def test_no_items_no_pages():
+          assert page_count(0, 3) == 0
+
+
+      def test_last_partial_page_has_the_rest():
+          assert page(list(range(10)), 4, 3) == [9]
+          assert page(list(range(10)), 5, 3) == []
+
+
+      def test_page_size_must_be_positive():
+          with pytest.raises(ValueError):
+              page_count(3, 0)
+reference:
+  files:
+    pager.py: |
+      def page_count(total, per_page):
+          """Number of pages needed to show `total` items, `per_page` at a time."""
+          if per_page <= 0:
+              raise ValueError("per_page must be positive")
+          return -(-total // per_page)
+
+
+      def page(items, number, per_page):
+          """The items on 1-based page `number`; empty past the last page."""
+          count = page_count(len(items), per_page)
+          if number < 1 or number > count:
+              return []
+          start = (number - 1) * per_page
+          return items[start:start + per_page]
+max_rounds: 30

@@ -276,6 +276,7 @@ pub async fn send_message(
     };
 
     let ctx = ToolContext {
+        doc_access: Default::default(),
         hooks: Some(hook_ctx),
         db_path,
         lsp_manager: Some(ws.lsp_manager.clone()),
@@ -290,6 +291,7 @@ pub async fn send_message(
         plan_save_path: config.plan_save_path.clone(),
         base_commit,
         auto_approve_git: false,
+        shell_gate: None,
         mcp: Some(mcp),
         mode_ctl: Some(mode_ctl.clone()),
         index_progress: Some(ws.index_progress.clone()),
@@ -483,6 +485,7 @@ fn spawn_run_loop(args: RunLoopArgs) {
                         &spec,
                         ctx.workspace_root.as_deref(),
                         ctx.plan_save_path.as_deref(),
+                        &crate::agent::task_recital::session_tasks(&ctx),
                     );
                     match transition::link_session(&maps, &ws, &handle, &spec, &chan).await {
                         Ok(new_handle) => {
@@ -772,6 +775,12 @@ pub struct SetConfigArgs {
     pub jev_route: Option<String>,
     /// One model's tool surface — see `agent::surface`.
     pub tool_surface: Option<ToolSurfaceArg>,
+    /// "v1" | "v2" — which Standard prompt sessions are sent (lean-harness
+    /// Phase 5, decision D7). See `agent::prompt::PromptVersion`.
+    pub prompt_version: Option<String>,
+    /// Whether a new session's first run reads AGENTS.md/CLAUDE.md and the
+    /// project memory (lean-harness Phase 9). See `agent::project_memory`.
+    pub project_memory: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -863,6 +872,7 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(choice) = args.tool_surface {
         crate::agent::surface::set_for(&mut cfg, &choice.model, &choice.surface);
     }
+    crate::agent::prompt::apply_prompt_version_setting(&mut cfg, args.prompt_version.as_deref());
     if let Some(code_intel_enabled) = args.code_intel_enabled {
         cfg.code_intel_enabled = code_intel_enabled;
     }
@@ -878,6 +888,9 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     }
     if let Some(auto_commit_plan) = args.auto_commit_plan {
         cfg.auto_commit_plan = auto_commit_plan;
+    }
+    if let Some(project_memory) = args.project_memory {
+        cfg.project_memory = project_memory;
     }
     if let Some(thinking_effort) = args.thinking_effort
         && ["low", "medium", "high", "xhigh", "max"].contains(&thinking_effort.as_str())
@@ -911,7 +924,7 @@ pub async fn get_config(
     // first `SessionStats` event corrects it.
     let budget = crate::agent::budget::ContextBudget::for_model(&cfg, &cfg.builder_model, 0);
 
-    Ok(serde_json::json!({
+    let mut value = serde_json::json!({
         "baseUrl": cfg.base_url,
         "brainModel": cfg.brain_model,
         "builderModel": cfg.builder_model,
@@ -968,7 +981,11 @@ pub async fn get_config(
             }))
         }).collect::<serde_json::Map<String, Value>>(),
         "workspaceConfig": workspace_config,
-    }))
+    });
+    // Outside the literal: `json!` is at its macro recursion limit here.
+    value["promptVersion"] = Value::from(cfg.prompt_version.as_str());
+    value["projectMemory"] = Value::from(cfg.project_memory);
+    Ok(value)
 }
 
 /// Fetch available models from the API. Calls GET {base_url}/v1/models and
@@ -1108,6 +1125,7 @@ pub async fn compact_session(
     let ctx = ToolContext {
         // No SessionStart: this is not a run, it is a compaction. PreCompact is
         // the event that belongs here, and it fires with `trigger: "manual"`.
+        doc_access: Default::default(),
         hooks: Some(build_hook_ctx(
             ws.resolve_hooks(&config).await,
             state.hook_trust.clone(),
@@ -1130,6 +1148,7 @@ pub async fn compact_session(
         plan_save_path: config.plan_save_path.clone(),
         base_commit: None,
         auto_approve_git: false,
+        shell_gate: None,
         // Compaction only summarizes history; it never dispatches tool calls.
         mcp: None,
         mode_ctl: None,
@@ -1265,11 +1284,13 @@ pub async fn continue_with_builder(
         golden_cycle: 0,
         golden_stalls: 0,
         golden_last_pending: Vec::new(),
+        document: None,
     };
     spec.first_message = transition::resolve_first_message(
         &spec,
         workspace_root.as_deref(),
         config.plan_save_path.as_deref(),
+        &crate::agent::persist::load_last_tasks(&old_handle.store_path).unwrap_or_default(),
     );
 
     let maps = transition_maps(&state);
@@ -1291,6 +1312,7 @@ pub async fn continue_with_builder(
     let ctx = ToolContext {
         // A linked session starting from a kickoff document — the same shape as
         // a context handoff, and reported the same way.
+        doc_access: Default::default(),
         hooks: Some(build_hook_ctx(
             ws.resolve_hooks(&config).await,
             state.hook_trust.clone(),
@@ -1313,6 +1335,7 @@ pub async fn continue_with_builder(
         plan_save_path: config.plan_save_path.clone(),
         base_commit,
         auto_approve_git: false,
+        shell_gate: None,
         mcp: Some(mcp),
         mode_ctl: Some(mode_ctl.clone()),
         index_progress: Some(ws.index_progress.clone()),
@@ -1550,6 +1573,7 @@ pub async fn commit_and_push(
         // so PreToolUse and PostToolUse fire. There is no user prompt and no
         // conversation here, so SessionStart, UserPromptSubmit and Stop do not
         // (see the profile check in `run_workflow_with_profile`).
+        doc_access: Default::default(),
         hooks: Some(build_hook_ctx(
             ws.resolve_hooks(&config).await,
             state.hook_trust.clone(),
@@ -1572,6 +1596,7 @@ pub async fn commit_and_push(
         plan_save_path: config.plan_save_path.clone(),
         base_commit,
         auto_approve_git: true,
+        shell_gate: None,
         mcp: Some(mcp),
         mode_ctl: None,
         index_progress: Some(ws.index_progress.clone()),

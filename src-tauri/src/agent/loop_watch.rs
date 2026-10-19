@@ -218,13 +218,7 @@ impl LoopWatch {
             ));
         }
         self.nudges += 1;
-        LoopAction::Nudge(format!(
-            "[system] You have called {what} in the last few steps and are not \
-             making progress — you are repeating yourself. Stop repeating it. Re-read the last \
-             result carefully and change approach: try a genuinely different action, look for \
-             the root cause somewhere else, or, if you need information or a decision only the \
-             user has, call ask_user."
-        ))
+        LoopAction::Nudge(crate::agent::nudges::repeating(&what))
     }
 }
 
@@ -338,6 +332,39 @@ mod tests {
         assert!(matches!(w.act(Gate::Certain, None), LoopAction::Nudge(_)));
     }
 
+    // The watch sees a result as the history holds it, capped. The same grep
+    // over the cap, repeated, is the same answer every time and must still
+    // reach the judge-free gate: the copy its marker names may not make five
+    // identical answers look like five different ones.
+    #[test]
+    fn the_same_capped_result_repeated_is_still_certain_without_a_judge() {
+        let mut w = LoopWatch::default();
+        let input = json!({"pattern": "needle"});
+        // Its own text: the saved copy is named by its content, and removing
+        // it must not remove another test's.
+        let text: String = (0..500)
+            .map(|i| format!("src/f{i}.rs:3: needle {i} (loop watch test)\n"))
+            .collect();
+        let mut saved = None;
+        for _ in 0..CERTAIN_EXACT {
+            let capped = crate::agent::result_cap::cap(
+                crate::agent::result_cap::Call::tool("grep"),
+                &text,
+                2_000,
+            );
+            w.record("grep", &input, &capped);
+            saved = capped
+                .split("the full output is in ")
+                .nth(1)
+                .and_then(|rest| rest.split(';').next())
+                .map(str::to_string);
+        }
+        if let Some(path) = saved {
+            std::fs::remove_file(path).ok();
+        }
+        assert_eq!(w.gate(), Gate::Certain);
+    }
+
     #[test]
     fn a_jev_no_outranks_even_the_certain_gate() {
         // Five identical polls of a CI run are exactly what the certain gate
@@ -435,5 +462,13 @@ mod tests {
         assert!(a < b);
         assert!(s.contains("first"));
         assert!(s.len() < 2000, "results must be excerpted, got {}", s.len());
+    }
+
+    // An excerpt is cut at EXCERPT_CHARS characters, never inside one.
+    #[test]
+    fn a_multibyte_excerpt_is_cut_on_characters() {
+        let e = excerpt(&"café — 😀 日本語 ".repeat(100));
+        assert_eq!(e.chars().count(), EXCERPT_CHARS + " …".chars().count());
+        assert!(e.ends_with(" …"));
     }
 }

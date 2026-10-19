@@ -12,7 +12,10 @@ use std::path::{Component, Path};
 /// True when `requested` resolves inside `root`.
 ///
 /// Relative paths resolve against `root`, never the process CWD — under a Tauri
-/// GUI the CWD is arbitrary (`/` on macOS when launched from Finder).
+/// GUI the CWD is arbitrary (`/` on macOS when launched from Finder). A caller
+/// must then open that same resolved path, not the relative one: the agent's
+/// tools join it onto the workspace (`agent::tools::in_workspace`), and
+/// `commands::fs` refuses relative paths outright.
 ///
 /// Canonicalization is the primary check: it follows symlinks, so a link inside
 /// the workspace pointing at `/etc` is correctly rejected. It only works on

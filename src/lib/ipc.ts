@@ -123,8 +123,19 @@ export interface AgentConfig {
   /** "compact" when the builder model's window is too small for the full
    *  prompt and tools; its sessions then run a short prompt and ten tools. */
   builderProfile?: "standard" | "compact";
+  /** Which Standard system prompt sessions are sent; absent in a config
+   *  written before the setting existed, which means "v2". */
+  promptVersion?: PromptVersion;
+  /** Whether a new session's first run reads AGENTS.md/CLAUDE.md and
+   *  .claudinio/MEMORY.md; absent in a config written before the setting
+   *  existed, which means on. */
+  projectMemory?: boolean;
   workspaceConfig?: Record<string, unknown> | null;
 }
+
+/** "v2" is the lean prompt (the default); "v1" the previous one, kept
+ *  selectable for one release. */
+export type PromptVersion = "v1" | "v2";
 
 /** Which tools a model is offered. "lean" leaves out the three LSP navigation
  *  tools (go_to_definition, find_references, symbol_lookup). */
@@ -188,6 +199,8 @@ export interface SetConfigArgs {
   jevApiKey?: string;
   /** Set one model's tool surface; "full" clears it. */
   toolSurface?: { model: string; surface: ToolSurface };
+  promptVersion?: PromptVersion;
+  projectMemory?: boolean;
 }
 
 export interface ApproveArgs {
@@ -270,13 +283,18 @@ export type HandoffReason =
   | "plan_execution"
   | "golden_flip"
   | "context_handoff"
-  | "manual_builder";
+  | "manual_builder"
+  // doc_create in a session that already has a document: a new top-level
+  // topic continues in a new session that owns the new document.
+  | "new_document";
 
 export interface SessionLinkedData {
   prevSessionId: string;
   sessionId: string;
   reason: HandoffReason;
   mode: SessionMode;
+  /** Who the successor's mode belongs to, as the backend built its ModeCtl. */
+  origin?: ModeOrigin;
   firstMessage: string;
 }
 
@@ -313,6 +331,26 @@ export interface HooksAwaitingApprovalData {
   commands: string[];
 }
 
+/** One section of a session's living document, as the panel shows it. */
+export interface DocSectionView {
+  id: string;
+  topic: string;
+  /** todo | doing | done | human (last edited by the user). */
+  status: string;
+  /** "main", or "sub:<name>" for a subagent. */
+  owner?: string | null;
+  /** 1-based line of the section in the file. */
+  line: number;
+}
+
+/** A session's living document (lean-harness Phase 4b). */
+export interface DocView {
+  /** Relative to the workspace. */
+  path: string;
+  title: string;
+  sections: DocSectionView[];
+}
+
 export type AgentEvent =
   | { event: "TextStep"; data: { text: string } }
   | { event: "TextDelta"; data: { text: string } }
@@ -336,6 +374,7 @@ export type AgentEvent =
   | { event: "SubagentStarted"; data: SubagentStartedData }
   | { event: "SubagentDone"; data: SubagentDoneData }
   | { event: "Subagent"; data: { subagentId: string; event: AgentEvent } }
+  | { event: "DocumentUpdated"; data: { sessionId: string; document: DocView } }
   | { event: "HookStarted"; data: HookStartedData }
   | { event: "HookFinished"; data: HookFinishedData }
   | { event: "HooksAwaitingApproval"; data: HooksAwaitingApprovalData }
@@ -408,6 +447,10 @@ export interface EditProposalData {
   oldString: string;
   newString: string;
   unifiedDiff: string;
+  /** The edit rewrites every occurrence of oldString (absent before Phase 6f). */
+  replaceAll?: boolean;
+  /** How many places oldString occurs in the file the proposal was read from. */
+  occurrences?: number;
 }
 
 export interface ToolResultData {
@@ -552,7 +595,7 @@ export interface SessionSummary {
 // One line of a session JSONL file. `kind` discriminates the variant; extra
 // fields depend on the kind (see the Rust SessionRecord enum).
 export type SessionRecord = {
-  kind: "meta" | "user" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust" | "run_config" | "subagent_run" | "mode_route";
+  kind: "meta" | "user" | "rejected" | "phase" | "turn" | "phase_result" | "done" | "error" | "steering" | "compacted" | "pruned" | "status" | "mode" | "tasks" | "golden_cycle" | "continuation_judge" | "base_commit" | "plan_finalized" | "linked_from" | "handoff_to" | "handoff" | "hook" | "hook_context" | "hook_trust" | "run_config" | "subagent_run" | "mode_route" | "quality_run" | "usage" | "cache_break" | "tools_loaded" | "document_linked";
   [key: string]: unknown;
 };
 
@@ -1436,6 +1479,25 @@ export interface TaskItem {
 
 export function getTasks(workspace: string): Promise<TaskItem[]> {
   return invoke<TaskItem[]>("get_tasks", { workspace });
+}
+
+/** The session's living document, or null when it has none. */
+export function getDocument(workspace: string, sessionId?: string): Promise<DocView | null> {
+  return invoke<DocView | null>("get_document", { workspace, sessionId: sessionId ?? null });
+}
+
+/**
+ * Save the person's edit of the document: `base` is the text the editor
+ * loaded, `content` what they saved. The backend keeps what agents wrote
+ * meanwhile and marks the sections the person changed.
+ */
+export function saveDocument(
+  workspace: string,
+  base: string,
+  content: string,
+  sessionId?: string,
+): Promise<DocView> {
+  return invoke<DocView>("save_document", { workspace, sessionId: sessionId ?? null, base, content });
 }
 
 export function setTasks(workspace: string, tasks: TaskItem[]): Promise<void> {

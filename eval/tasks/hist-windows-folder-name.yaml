@@ -1,0 +1,65 @@
+id: hist-windows-folder-name
+title: Project labels show the folder name on Windows (history, 458a466)
+tags:
+- history
+- bugfix
+- multi-edit
+- typescript
+prompt: |
+  On Windows the sidebar, the recent-projects list, the file-tree header and the
+  chat header all show the whole path ("C:\Users\me\my-app") where they should
+  show just the folder name ("my-app"). The labels are built with
+  `path.split("/").pop()`, which never matches a backslash.
+
+  Add a shared, exported helper `baseName(path: string): string` in a new file
+  src/lib/path.ts and use it at those call sites. It must split on both "/" and
+  "\", ignore trailing separators ("/a/b/" gives "b"), return "C:" for a drive
+  root "C:\", and return a bare name or an empty string unchanged. Cover it with
+  unit tests in src/lib/path.test.ts (vitest).
+setup:
+  git:
+    repo: ../..
+    commit: f5edced268329acb6e06b37d08d8654b849aaf36
+  symlinks:
+    node_modules: ../../node_modules
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+check: ./node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vitest run --config vitest.eval.config.ts
+oracle:
+  command: ./node_modules/.bin/vitest run --config vitest.eval.config.ts src/lib/path.test.ts
+  timeout_s: 300
+  files:
+    vitest.eval.config.ts: |
+      // Laid over the commit by the eval task. The task links the repository's
+      // node_modules, whose real paths sit outside this tree, and Vite refuses
+      // to serve files outside its root unless fs.strict is off.
+      import { defineConfig, mergeConfig } from "vitest/config";
+      import base from "./vite.config";
+
+      export default defineConfig(async (env) =>
+        mergeConfig(typeof base === "function" ? await base(env) : base, {
+          server: { fs: { strict: false } },
+          // The graded run must run the graded test: a start-tree config that
+          // excludes it would otherwise pass with no tests at all.
+          test: { passWithNoTests: false },
+        }),
+      );
+  reference_files:
+  - src/lib/path.test.ts
+reference:
+  git_commit: 458a466ce585096034b069b979a77908961b856d
+max_rounds: 60

@@ -25,6 +25,26 @@ pub struct TransitionMaps {
     pub records_cache: RecordsCache,
 }
 
+/// The predecessor's tasks a successor starts with. Every handoff carries
+/// the whole list, except a new top-level topic (`NewDocument`): its work is
+/// a new document with a list of its own, so the old topic's tasks stay
+/// behind — but the golden ones go along. They are the user's mandatory
+/// goals (`<goal>` tags), and the golden gate only lets the work finish when
+/// each is done; dropping them would let a second `doc_create` end the run
+/// with goals still pending.
+pub fn tasks_for_successor(
+    tasks: Vec<persist::TaskItem>,
+    reason: &HandoffReason,
+) -> Vec<persist::TaskItem> {
+    if *reason != HandoffReason::NewDocument {
+        return tasks;
+    }
+    tasks
+        .into_iter()
+        .filter(crate::agent::tools::tasks::is_golden)
+        .collect()
+}
+
 /// Create a new linked session and wire it as the workspace's active session.
 /// Returns the new session handle so the caller can rebuild the ToolContext and
 /// continue the run loop.
@@ -76,12 +96,23 @@ pub async fn link_session(
         new_store.try_append(&SessionRecord::BaseCommit { sha, ts });
     }
 
-    // 5. Copy tasks snapshot (golden tasks included).
-    if let Ok(tasks) = tasks_store::load_last_tasks(&old_handle.store_path)
-        && !tasks.is_empty()
-    {
-        let _ = tasks_store::append_tasks(&new_path, &tasks);
+    // 5. Copy tasks snapshot (golden tasks included; a new top-level topic
+    // keeps only those — see `tasks_for_successor`).
+    if let Ok(tasks) = tasks_store::load_last_tasks(&old_handle.store_path) {
+        let tasks = tasks_for_successor(tasks, &spec.reason);
+        if !tasks.is_empty() {
+            let _ = tasks_store::append_tasks(&new_path, &tasks);
+        }
     }
+
+    // 5½. The living document: the predecessor's travels with it, or the new
+    // one for a new topic (lean-harness Phase 4b).
+    crate::agent::doc_session::carry_into(
+        &old_handle.store_path,
+        &old_records,
+        &new_store,
+        spec.document.as_deref(),
+    );
 
     // 6. Append the Mode record for the new session.
     new_store.try_append(&SessionRecord::Mode {
@@ -150,6 +181,7 @@ pub async fn link_session(
         session_id: new_id.clone(),
         reason: spec.reason.as_str().into(),
         mode: spec.next_mode.as_str().into(),
+        origin: spec.next_origin.as_str().into(),
         first_message: spec.first_message.clone(),
     });
 
@@ -164,6 +196,7 @@ pub fn resolve_first_message(
     spec: &HandoffSpec,
     workspace_root: Option<&str>,
     plan_save_path: Option<&str>,
+    tasks: &[persist::TaskItem],
 ) -> String {
     match spec.reason {
         HandoffReason::PlanExecution | HandoffReason::ManualBuilder => {
@@ -172,9 +205,15 @@ pub fn resolve_first_message(
             });
             let path = plan.as_ref().map(|p| p.to_string_lossy().to_string());
             let content = plan.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
-            compose_builder_kickoff(path.as_deref(), content.as_deref())
+            let mut msg = compose_builder_kickoff(path.as_deref(), content.as_deref());
+            if content.is_none() {
+                msg.push_str(&compose_task_details(tasks));
+            }
+            msg
         }
-        HandoffReason::GoldenFlip | HandoffReason::ContextHandoff => spec.first_message.clone(),
+        HandoffReason::GoldenFlip | HandoffReason::ContextHandoff | HandoffReason::NewDocument => {
+            spec.first_message.clone()
+        }
     }
 }
 
@@ -184,15 +223,16 @@ pub fn resolve_first_message(
 pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&str>) -> String {
     let mut msg = String::from(
         "[system] You are in Builder mode, in a fresh session that continues a \
-         planning session. The plan below and the carried-over task list are your \
-         worklist - execute them exactly:\n\n\
-         1. Call `tasks_get` FIRST to load the task list.\n\
-         2. Follow the plan (Solution Design + Low-Level Design).\n\
-         3. Execute ONE task at a time in dependency order:\n\
-           - Mark it 'doing' BEFORE touching code.\n\
-           - Delegate implementation to code-mode subagents.\n\
-           - Mark it 'done' AFTER verifying with evidence.\n\
-         4. After all tasks, verify the whole build and call `finalize_plan`.\n",
+         planning session. The plan below and the carried-over task list (a \
+         `<tasks>` block at the end of this message; no `<tasks>` block means there \
+         is no list) are your worklist - execute them exactly:\n\n\
+         1. Follow the plan (Solution Design + Low-Level Design).\n\
+         2. Take the tasks in dependency order:\n\
+           - Mark one 'doing' in the same round as your first tool call for it.\n\
+           - Implement it: edit directly; delegate only as the Builder rules say.\n\
+           - Mark it 'done' once verified with evidence; closing one task and starting \
+         the next is one `tasks_update` call.\n\
+         3. After all tasks, verify the whole build and call `finalize_plan`.\n",
     );
     if let Some(path) = plan_file {
         msg.push_str(&format!("\nPlan file: {path}\n"));
@@ -202,23 +242,60 @@ pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&st
             "\n--- PLAN START ---\n{content}\n--- PLAN END ---\n"
         ));
     } else if plan_file.is_none() {
-        msg.push_str(
-            "\nNo plan file was found on disk - call `tasks_get` and continue from \
-             the task list alone.\n",
-        );
+        msg.push_str("\nNo plan file was found on disk - continue from the task list.\n");
     }
     msg
 }
 
+/// What Brain wrote for each task — its description and journal — for a
+/// Builder kickoff that has no plan to carry it. The run's `<tasks>` block
+/// names each task (`id · status · title`) and nothing more, and `tasks_get`
+/// is deferred, so without this a Builder started from the task list alone
+/// would work from titles (Phase 4 review). Empty when no task has anything
+/// to add. With a plan inline the plan is the detail, and this is not sent.
+fn compose_task_details(tasks: &[persist::TaskItem]) -> String {
+    let mut out = String::new();
+    for t in tasks {
+        let description = t.description.trim();
+        let journal: Vec<&str> = t
+            .journal
+            .iter()
+            .map(|j| j.trim())
+            .filter(|j| !j.is_empty())
+            .collect();
+        if description.is_empty() && journal.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n### {} \u{b7} {}\n", t.id, t.title.trim()));
+        if !description.is_empty() {
+            out.push_str(description);
+            out.push('\n');
+        }
+        for entry in journal {
+            out.push_str(&format!("- {entry}\n"));
+        }
+    }
+    if out.is_empty() {
+        return out;
+    }
+    format!(
+        "\nWhat was written for each task (descriptions, then journal entries):\n\
+         --- TASK DETAILS START ---{out}--- TASK DETAILS END ---\n"
+    )
+}
+
 /// Wraps the model-generated handoff document as the first user message of
-/// the successor session. Tells the model to read the handoff, load tasks,
-/// and continue.
+/// the successor session. Tells the model to read the handoff and the task
+/// list the run appends after it (`agent::task_recital`), and continue. The
+/// run appends one only when the session has a list, so the text says what
+/// its absence means instead of promising it.
 pub fn compose_context_handoff_message(handoff_text: &str, plan_file: Option<&str>) -> String {
     let mut msg = String::from(
         "[system] This is a fresh session that continues previous work whose context \
-         reached its limit. The predecessor wrote the handoff document below. Read it, \
-         then call `tasks_get` FIRST and continue the in-flight work exactly where it \
-         stopped.\n\n",
+         reached its limit. The predecessor wrote the handoff document below; any \
+         current task list follows it as a `<tasks>` block at the end of this message \
+         (no `<tasks>` block means there is no list). Read them and continue the \
+         in-flight work exactly where it stopped.\n\n",
     );
     if let Some(path) = plan_file {
         msg.push_str(&format!("Plan file: {path}\n\n"));
@@ -247,6 +324,7 @@ pub fn rebuild_tool_context(
         // empty history and a handoff document, which is a compacted context,
         // not a user opening the app (`startup`) and not a human action
         // (`resume`).
+        doc_access: Default::default(),
         hooks: old_ctx.hooks.as_ref().map(|h| {
             let next = h
                 .for_session(new_session_id, new_store_path.to_path_buf())
@@ -271,6 +349,7 @@ pub fn rebuild_tool_context(
         plan_save_path: old_ctx.plan_save_path.clone(),
         base_commit: old_ctx.base_commit.clone(),
         auto_approve_git: old_ctx.auto_approve_git,
+        shell_gate: old_ctx.shell_gate.clone(),
         mcp: old_ctx.mcp.clone(),
         mode_ctl: Some(new_mode_ctl),
         index_progress: old_ctx.index_progress.clone(),
@@ -285,10 +364,22 @@ mod tests {
     #[test]
     fn builder_kickoff_mentions_contract() {
         let msg = compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X"));
-        assert!(msg.contains("tasks_get"));
+        // Phase 4: the run appends the list; the kickoff points at it instead
+        // of ordering a round to fetch it.
+        assert!(!msg.contains("tasks_get"), "{msg}");
+        assert!(msg.contains("`<tasks>` block"), "{msg}");
         assert!(msg.contains("/tmp/plan.md"));
         assert!(msg.contains("--- PLAN START ---"));
         assert!(msg.contains("finalize_plan"));
+    }
+
+    // Decision D1 (lean-harness Phase 3): the Builder edits files itself, so
+    // its kickoff must not order every task through code-mode subagents.
+    #[test]
+    fn builder_kickoff_does_not_order_delegation() {
+        let msg = compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X"));
+        assert!(!msg.contains("code-mode subagents"), "{msg}");
+        assert!(msg.contains("edit directly"), "{msg}");
     }
 
     #[test]
@@ -297,12 +388,129 @@ mod tests {
         assert!(msg.contains("No plan file was found"));
     }
 
+    fn manual_builder_spec() -> HandoffSpec {
+        HandoffSpec {
+            reason: HandoffReason::ManualBuilder,
+            next_mode: crate::agent::session::SessionMode::Builder,
+            next_origin: crate::agent::session::ModeOrigin::Human,
+            first_message: String::new(),
+            golden_cycle: 0,
+            golden_stalls: 0,
+            golden_last_pending: Vec::new(),
+            document: None,
+        }
+    }
+
+    fn brain_task() -> persist::TaskItem {
+        persist::TaskItem {
+            id: "t1".into(),
+            title: "Parse the config".into(),
+            description: "Use the nom grammar from the spike".into(),
+            journal: vec!["the spike lives in spikes/nom.rs".into()],
+            status: "todo".into(),
+        }
+    }
+
+    /// A new top-level topic leaves the old topic's tasks behind but takes
+    /// the golden ones, recognised by the golden prefix itself; every other
+    /// handoff carries the whole list.
+    #[test]
+    fn a_new_document_successor_keeps_only_the_golden_tasks() {
+        let golden = persist::TaskItem {
+            id: format!("{}tests-pass-0", crate::agent::session::GOLDEN_TASK_PREFIX),
+            ..brain_task()
+        };
+        let tasks = vec![brain_task(), golden.clone()];
+        let kept = tasks_for_successor(tasks.clone(), &HandoffReason::NewDocument);
+        assert_eq!(kept.iter().map(|t| &t.id).collect::<Vec<_>>(), [&golden.id]);
+        assert_eq!(
+            tasks_for_successor(tasks.clone(), &HandoffReason::ContextHandoff).len(),
+            2
+        );
+    }
+
+    // With no plan file the Builder works from the task list, and the run's
+    // `<tasks>` block carries only id, status and title. The descriptions and
+    // findings Brain wrote must reach it in the kickoff, or it starts from
+    // titles alone with `tasks_get` deferred (Phase 4 review).
+    #[test]
+    fn a_builder_kickoff_without_a_plan_carries_the_task_descriptions_and_journals() {
+        let msg = resolve_first_message(&manual_builder_spec(), None, None, &[brain_task()]);
+        assert!(msg.contains("No plan file was found"), "{msg}");
+        assert!(msg.contains("Use the nom grammar from the spike"), "{msg}");
+        assert!(msg.contains("the spike lives in spikes/nom.rs"), "{msg}");
+        assert!(!msg.contains("tasks_get"), "{msg}");
+    }
+
+    // With a plan inline the plan is the handoff document (its Low-Level
+    // Design is where the detail lives): the kickoff does not repeat the
+    // task descriptions beside it.
+    #[test]
+    fn a_builder_kickoff_with_a_plan_does_not_repeat_the_task_descriptions() {
+        let root = std::env::temp_dir().join(format!("kickoff-plan-{}", std::process::id()));
+        let plans = root.join(".claudinio/plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        std::fs::write(plans.join("p.md"), "# Plan\nDo X").unwrap();
+        let msg = resolve_first_message(
+            &manual_builder_spec(),
+            Some(root.to_str().unwrap()),
+            None,
+            &[brain_task()],
+        );
+        assert!(msg.contains("--- PLAN START ---"), "{msg}");
+        assert!(!msg.contains("Use the nom grammar from the spike"), "{msg}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Plans saved in `.claudinio` sit beside the project memory: the kickoff
+    // inlines the plan, never the memory that a later append made newer.
+    #[test]
+    fn a_builder_kickoff_inlines_the_plan_not_a_newer_project_memory() {
+        let root = std::env::temp_dir().join(format!("kickoff-mem-{}", std::process::id()));
+        let dir = root.join(".claudinio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = dir.join("2026-10-19_p.md");
+        std::fs::write(&plan, "# Plan\nDo X").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let f = std::fs::File::options().write(true).open(&plan).unwrap();
+        f.set_modified(past).unwrap();
+        std::fs::write(dir.join("MEMORY.md"), "## Learned\n- a lesson\n").unwrap();
+        let msg = resolve_first_message(
+            &manual_builder_spec(),
+            Some(root.to_str().unwrap()),
+            Some(".claudinio"),
+            &[brain_task()],
+        );
+        assert!(msg.contains("Do X"), "{msg}");
+        assert!(!msg.contains("a lesson"), "{msg}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn context_handoff_message_wraps_document() {
         let msg = compose_context_handoff_message("## Purpose\nfinish it", Some("/p/plan.md"));
         assert!(msg.contains("--- HANDOFF DOCUMENT START ---"));
         assert!(msg.contains("finish it"));
         assert!(msg.contains("/p/plan.md"));
-        assert!(msg.contains("tasks_get"));
+        assert!(!msg.contains("tasks_get"), "{msg}");
+        assert!(msg.contains("`<tasks>` block"), "{msg}");
+    }
+
+    // The run appends a `<tasks>` block only when the session has a list
+    // (single-step work has none). A kickoff written before the successor's
+    // first run cannot know, so it must not promise a block that may not
+    // come: a model told a list "ends this message" that finds none goes
+    // looking for it with `tasks_get`, which is deferred — a load and a
+    // prefix rewrite (Phase 4 review). It says that no block means no list.
+    #[test]
+    fn handoff_kickoffs_do_not_promise_a_task_list_the_session_may_not_have() {
+        for msg in [
+            compose_context_handoff_message("## Purpose\nfinish it", None),
+            compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X")),
+            compose_builder_kickoff(None, None),
+        ] {
+            assert!(!msg.contains("block that ends this message"), "{msg}");
+            assert!(msg.contains("no `<tasks>` block means"), "{msg}");
+        }
     }
 }
