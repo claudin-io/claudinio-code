@@ -48,32 +48,37 @@ pub(super) fn effective_permission(
     );
     let yolo_relaxes = config.yolo_mode && !config.yolo_blacklist.iter().any(|b| b == tool_name);
 
-    let relaxed =
-        if matches!(perm, PermissionLevel::RequiresApproval) && (yolo_relaxes || hook_allows) {
-            if tool_name == "bash" {
-                match permissions::bash_call_permission(
+    // The policy of `bash` and `browser` is resolved here whatever the hook
+    // or YOLO says, so neither a relaxation nor an `ask` (whose card is
+    // matched before their own arms in `run_tool`) can reach past a denial.
+    let policy_denies = matches!(perm, PermissionLevel::RequiresApproval)
+        && match tool_name {
+            "bash" => {
+                permissions::bash_call_permission(
                     tool_input,
                     ctx.workspace_root.as_deref().map(std::path::Path::new),
                     ctx.auto_approve_git,
                     false,
-                ) {
-                    PermissionLevel::Denied => PermissionLevel::Denied,
-                    _ => PermissionLevel::Auto,
-                }
-            } else if tool_name == "browser" {
-                match permissions::browser_permission(
+                ) == PermissionLevel::Denied
+            }
+            "browser" => {
+                permissions::browser_permission(
                     tool_input
                         .get("action")
                         .and_then(|v| v.as_str())
                         .unwrap_or(""),
                     tool_input.get("url").and_then(|v| v.as_str()),
-                ) {
-                    PermissionLevel::Denied => PermissionLevel::Denied,
-                    _ => PermissionLevel::Auto,
-                }
-            } else {
-                PermissionLevel::Auto
+                ) == PermissionLevel::Denied
             }
+            _ => false,
+        };
+    if policy_denies {
+        return PermissionLevel::Denied;
+    }
+
+    let relaxed =
+        if matches!(perm, PermissionLevel::RequiresApproval) && (yolo_relaxes || hook_allows) {
+            PermissionLevel::Auto
         } else {
             perm
         };
@@ -816,8 +821,15 @@ pub(crate) async fn run_tool(
             }
         }
         permissions::PermissionLevel::Denied => {
-            let msg = memory_refusal(tool_name, &tool_input, ctx)
-                .unwrap_or_else(|| format!("Command '{tool_name}' is blocked by security policy"));
+            let msg =
+                memory_refusal(tool_name, &tool_input, ctx).unwrap_or_else(|| {
+                    match tool_input.get("command").and_then(|v| v.as_str()) {
+                        Some(command) if tool_name == "bash" => {
+                            format!("Command blocked by security policy: {command}")
+                        }
+                        _ => format!("Command '{tool_name}' is blocked by security policy"),
+                    }
+                });
             let _ = event_tx.send(AgentEvent::ToolCall {
                 session_id: session_id.to_string(),
                 tool_id: tool_use_id.to_string(),
@@ -1599,6 +1611,55 @@ mod tests {
                 &verdict_ask(),
             ),
             PermissionLevel::Denied
+        );
+    }
+
+    /// `bash` and `browser` reach `effective_permission` as RequiresApproval
+    /// and are refused by their own policy (the deny-list, the project-memory
+    /// guard, the scheme check). An `ask` used to skip that policy, so one
+    /// click on an ordinary card ran a command the policy denies (final
+    /// branch review).
+    #[test]
+    fn a_hook_ask_keeps_the_bash_and_browser_policy_denials() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = dummy_ctx();
+        ctx.workspace_root = Some(dir.path().to_string_lossy().to_string());
+        let cfg = AgentConfig::default();
+        for (tool, input) in [
+            ("bash", json!({"command": "sudo rm -rf build"})),
+            (
+                "bash",
+                json!({"command": "echo '- planted' >> .claudinio/MEMORY.md"}),
+            ),
+            (
+                "browser",
+                json!({"action": "navigate", "url": "file:///etc/passwd"}),
+            ),
+        ] {
+            assert_eq!(
+                effective_permission(
+                    PermissionLevel::RequiresApproval,
+                    tool,
+                    &input,
+                    &cfg,
+                    &ctx,
+                    &verdict_ask(),
+                ),
+                PermissionLevel::Denied,
+                "{tool} {input}"
+            );
+        }
+        // An ordinary command still gets the prompt the hook asked for.
+        assert_eq!(
+            effective_permission(
+                PermissionLevel::RequiresApproval,
+                "bash",
+                &json!({"command": "git status"}),
+                &cfg,
+                &ctx,
+                &verdict_ask(),
+            ),
+            PermissionLevel::RequiresApproval
         );
     }
 
