@@ -410,31 +410,58 @@ fn command_segments(lower: &str) -> Vec<Vec<String>> {
 }
 
 /// The names a segment runs, by their last path part: its first word after
-/// any `NAME=value` assignments and, when that word is a command that runs
-/// another (`sudo`, `xargs`, `env`, …), every word after it too, since the
-/// command it runs can sit behind its own flags.
+/// any `NAME=value` assignments and the shell's own words that start a
+/// command (`then`, `do`, `{`, `!`, …); when that word is a shell given a
+/// script (`sh -c '…'`), the names that script runs; when it is a command
+/// that runs another (`sudo`, `xargs`, `stdbuf`, …), every word after it too,
+/// since the command it runs can sit behind its own flags.
 fn commands_of(words: &[String]) -> Vec<&str> {
     fn base(w: &str) -> &str {
         w.rsplit('/').next().unwrap_or(w)
     }
-    let mut rest = words
+    let start = words
         .iter()
-        .skip_while(|w| w.contains('=') && !w.starts_with('-'));
-    let Some(first) = rest.next().map(|w| base(w)) else {
+        .position(|w| {
+            !(SHELL_KEYWORDS.contains(&w.as_str()) || w.contains('=') && !w.starts_with('-'))
+        })
+        .unwrap_or(words.len());
+    let Some(first) = words.get(start).map(|w| base(w)) else {
         return Vec::new();
     };
-    if RUNS_ANOTHER.contains(&first) {
+    let rest = &words[start + 1..];
+    if SHELLS.contains(&first) {
+        // `bash -c '…'`, `sh -ec '…'`: the quotes are already dropped, so
+        // the script is the words after the flag.
+        let script = rest
+            .iter()
+            .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'));
+        let mut out = vec![first];
+        if let Some(at) = script {
+            out.extend(commands_of(&rest[at + 1..]));
+        }
+        out
+    } else if RUNS_ANOTHER.contains(&first) {
         std::iter::once(first)
-            .chain(rest.map(|w| base(w)))
+            .chain(rest.iter().map(|w| base(w)))
             .collect()
     } else {
         vec![first]
     }
 }
 
+/// Words the shell reads before the command of a segment, for `commands_of`.
+const SHELL_KEYWORDS: &[&str] = &[
+    "then", "do", "else", "elif", "if", "while", "until", "{", "!",
+];
+
+/// Shells, whose `-c` takes a script, for `commands_of`.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish"];
+
 /// Commands whose arguments name the command they run, for `commands_of`.
 const RUNS_ANOTHER: &[&str] = &[
     "sudo", "doas", "xargs", "env", "nohup", "nice", "time", "command", "exec", "timeout",
+    "stdbuf", "ionice", "setsid", "flock", "chrt", "taskset", "unbuffer", "busybox", "chroot",
+    "strace", "watch", "su", "runuser",
 ];
 
 /// Commands that write or delete the contents of a folder named as their
@@ -1200,6 +1227,19 @@ mod tests {
             "sudo rm -rf .claudinio",
             "FOO=1 rm -rf .claudinio",
             "/bin/rm -rf .claudinio",
+            // Recheck round: a writer behind a shell's `-c`, a compound
+            // command's keyword or a grouping brace, or a wrapper that runs
+            // the command after it, is still the command of the segment.
+            "sh -c 'rm -rf .claudinio'",
+            "bash -c 'cp -r /tmp/q/. .claudinio/'",
+            "bash -ec 'cp -r /tmp/q/. .claudinio/'",
+            "if true; then cp -r /tmp/q/. .claudinio/; fi",
+            "for f in x; do cp -r /tmp/q/. .claudinio/; done",
+            "{ rm -rf .claudinio; }",
+            "! rm -rf .claudinio",
+            "stdbuf -o0 cp -r /tmp/q/. .claudinio/",
+            "setsid cp -r /tmp/q/. .claudinio/",
+            "flock /tmp/l cp -r /tmp/q/. .claudinio/",
         ] {
             assert!(named_in(c), "{c}");
         }
@@ -1219,6 +1259,9 @@ mod tests {
             "grep -rn install .claudinio/",
             "ls .claudinio && cp a.txt b.txt",
             "cat .claudinio/notes.txt | grep rm",
+            // A shell's script is read as a command line of its own.
+            "bash -c 'grep -rn install .claudinio/'",
+            "if true; then ls .claudinio; fi",
         ] {
             assert!(!named_in(c), "{c}");
         }
