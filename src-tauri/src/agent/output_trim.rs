@@ -209,6 +209,29 @@ fn sweep(dir: &std::path::Path, max_age: std::time::Duration) {
     }
 }
 
+/// The folder long outputs are saved to.
+pub(crate) fn saved_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("claudinio-code").join("outputs")
+}
+
+/// Whether `path` is one of the outputs [`save_full`] wrote: a file directly in
+/// [`saved_dir`] under one of its names, once every link is resolved. The
+/// markers that name these files tell the model to `read_file` or `grep` them,
+/// and the folder is outside any workspace, so `tools::validate_read_path`
+/// lets reads (never writes) through here. Resolving links before comparing
+/// keeps the opening to this one folder: the temp folder is shared, and a link
+/// planted in it, or a `..` out of it, must not lead anywhere else.
+pub(crate) fn is_saved_output(path: &std::path::Path) -> bool {
+    let (Ok(file), Ok(tmp)) = (path.canonicalize(), std::env::temp_dir().canonicalize()) else {
+        return false;
+    };
+    let ours = tmp.join("claudinio-code").join("outputs");
+    let named = file.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        n.ends_with(".log") && (n.starts_with("bash-") || n.starts_with("result-"))
+    });
+    file.parent() == Some(ours.as_path()) && named && file.is_file()
+}
+
 /// Write the full output where the model can read it back, in a file named
 /// after `kind` (`bash`, or `result` for a capped tool result). Best effort.
 ///
@@ -216,7 +239,7 @@ fn sweep(dir: &std::path::Path, max_age: std::time::Duration) {
 /// saved can be private code or a tool's answer, and the temp folder is
 /// shared. The first save of a process sweeps outputs past [`SAVED_MAX_AGE`].
 pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join("claudinio-code").join("outputs");
+    let dir = saved_dir();
     std::fs::create_dir_all(&dir).ok()?;
     #[cfg(unix)]
     {

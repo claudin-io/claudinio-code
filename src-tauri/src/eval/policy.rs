@@ -87,7 +87,7 @@ fn stays_in_workspace(command: &str, workdir: Option<&str>, workspace: &Path) ->
         }
         Some(_) => return false,
     };
-    let saved_outputs = std::env::temp_dir().join("claudinio-code").join("outputs");
+    let saved_outputs = crate::agent::output_trim::saved_dir();
     command.split_whitespace().all(|word| {
         let word = word.trim_matches(|c| c == '"' || c == '\'');
         // `--include=/etc/passwd` names a path after the `=`.

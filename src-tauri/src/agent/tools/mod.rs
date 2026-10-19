@@ -193,13 +193,18 @@ pub fn validate_editable_path(requested: &str, ctx: &ToolContext) -> Result<(), 
 
 /// Like `validate_path`, but additionally allows READ access to user-level
 /// skill directories (`~/{.agents,.claudinio,.claude}/skills`), which live
-/// outside the workspace yet are referenced by the skills system prompt.
+/// outside the workspace yet are referenced by the skills system prompt, and
+/// to the long outputs the harness saved (`output_trim::is_saved_output`),
+/// which the trimmed and capped results name for the model to read back.
 /// Never use this for tools that write or edit files.
 pub fn validate_read_path(requested: &str, ctx: &ToolContext) -> Result<(), String> {
     let workspace_err = match validate_path(requested, ctx) {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
+    if crate::agent::output_trim::is_saved_output(std::path::Path::new(requested)) {
+        return Ok(());
+    }
 
     if let Some(home) = dirs::home_dir() {
         let req = std::path::Path::new(requested);
@@ -2409,6 +2414,90 @@ mod tests {
         };
         assert!(validate_path("/any/path", &ctx).is_ok());
         assert!(validate_path("/etc/passwd", &ctx).is_ok());
+    }
+
+    /// The path a capped result's marker names for its full output.
+    fn saved_path_in(capped: &str) -> String {
+        let marker = crate::agent::result_cap::parse(capped).expect("a cap marker");
+        let path = marker
+            .hint
+            .strip_prefix("the full output is in ")
+            .and_then(|rest| rest.split(';').next())
+            .expect("the marker names the saved copy");
+        path.to_string()
+    }
+
+    // A capped grep, list_dir, MCP answer or subagent report sends the model to
+    // its saved copy with read_file or grep: both must reach it when a
+    // workspace is open, or the model is told the output exists and refused
+    // every time it asks (in a mode with no bash there is no other way).
+    #[tokio::test]
+    async fn the_saved_copy_a_capped_result_names_can_be_read_back_with_read_file_and_grep() {
+        let ws = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(ws.path().to_string_lossy().to_string()),
+            ..test_ctx()
+        };
+        let text: String = (0..400)
+            .map(|i| format!("src/file_{i}.rs:1: needle number {i}\n"))
+            .collect();
+        let capped = crate::agent::result_cap::cap(
+            crate::agent::result_cap::Call::tool("grep"),
+            &text,
+            2_000,
+        );
+        let path = saved_path_in(&capped);
+
+        let read = execute("read_file", serde_json::json!({ "path": path }), &ctx)
+            .await
+            .expect("read_file reaches the saved copy");
+        let ToolOutput::Text { content } = read else {
+            panic!("text")
+        };
+        assert!(content.contains("needle number 399"), "{content}");
+
+        let found = execute(
+            "grep",
+            serde_json::json!({ "pattern": "needle number 217", "path": path }),
+            &ctx,
+        )
+        .await
+        .expect("grep reaches the saved copy");
+        let ToolOutput::Text { content } = found else {
+            panic!("text")
+        };
+        assert!(content.contains("needle number 217"), "{content}");
+    }
+
+    // Reading the saved outputs is the one opening outside the workspace, and
+    // only for the harness's own files: not the folder's neighbours, not a
+    // link planted in it, not a `..` out of it, and never for writing.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_harness_saved_outputs_open_outside_the_workspace() {
+        let ctx = ToolContext {
+            workspace_root: Some("/home/user/project".into()),
+            ..test_ctx()
+        };
+        let saved = crate::agent::output_trim::save_full("result", "x").expect("saved");
+        assert!(validate_read_path(&saved, &ctx).is_ok());
+        assert!(validate_path(&saved, &ctx).is_err(), "never writable");
+
+        let dir = std::path::Path::new(&saved).parent().unwrap();
+        let escape = dir.join("../../../etc/passwd");
+        assert!(validate_read_path(&escape.to_string_lossy(), &ctx).is_err());
+        let sibling = dir.parent().unwrap().join("elsewhere.log");
+        assert!(validate_read_path(&sibling.to_string_lossy(), &ctx).is_err());
+
+        let link = dir.join(format!("result-link-{}.log", std::process::id()));
+        std::fs::remove_file(&link).ok();
+        std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+        let linked = validate_read_path(&link.to_string_lossy(), &ctx);
+        std::fs::remove_file(&link).ok();
+        assert!(
+            linked.is_err(),
+            "a link in the folder does not lead out of it"
+        );
     }
 
     #[test]
