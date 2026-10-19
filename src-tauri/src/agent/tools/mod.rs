@@ -1164,6 +1164,18 @@ fn check_index_ready(ctx: &ToolContext) -> Result<(), String> {
     Ok(())
 }
 
+/// `line` from byte `col`, the cursor column the model sent, stepped back to
+/// the start of the character it falls in: the model's number can land inside
+/// a character of `ação` or `变量`, and a slice there panicked the run
+/// (lean-harness Phase 6f audit).
+fn from_column(line: &str, col: usize) -> &str {
+    let mut at = col.min(line.len());
+    while !line.is_char_boundary(at) {
+        at -= 1;
+    }
+    &line[at..]
+}
+
 fn heuristically_find_definition(
     file_path: &str,
     _line: u64,
@@ -1188,7 +1200,7 @@ fn heuristically_find_definition(
         });
     }
 
-    let cursor_text = &line_text[col..];
+    let cursor_text = from_column(line_text, col);
     let word: String = cursor_text
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -1237,7 +1249,7 @@ fn heuristically_find_references(
         });
     }
 
-    let cursor_text = &line_text[col..];
+    let cursor_text = from_column(line_text, col);
     let word: String = cursor_text
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -2943,5 +2955,26 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    // Without a language server the cursor's symbol is read from the line at
+    // the `character` the model sent. That column is the model's number, so it
+    // can fall inside a character of an identifier like `ação`: the lookup
+    // must name the symbol there, never slice inside the character.
+    #[test]
+    fn a_heuristic_lookup_with_the_cursor_inside_a_multibyte_character_names_the_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "let ação = 1;\n").unwrap();
+        let file = path.to_str().unwrap();
+        // "let a" is bytes 0..5; 'ç' is bytes 5..7, so column 6 is inside it.
+        let text = |out: Result<ToolOutput, String>| match out.unwrap() {
+            ToolOutput::Text { content } => content,
+            other => panic!("text, got {other:?}"),
+        };
+        let def = text(heuristically_find_definition(file, 0, 6, &None));
+        assert!(def.ends_with("symbol at cursor: ção"), "{def}");
+        let refs = text(heuristically_find_references(file, 0, 6, &None));
+        assert!(refs.ends_with("references for ção"), "{refs}");
     }
 }
