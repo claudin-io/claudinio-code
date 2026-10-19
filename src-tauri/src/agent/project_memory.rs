@@ -84,15 +84,19 @@ pub fn entry(date: &str, line: &str, plan: &str) -> String {
 /// call adds stays even when the rest of the file alone is over the cap.
 /// Text outside the list — a person's own notes — is never touched.
 pub fn appended(existing: &str, entries: &[String], cap: usize) -> String {
-    // A file checked out with CRLF keeps it: `lines` drops the `\r`, and
-    // the person's notes outside the list are theirs, terminators included.
-    let nl = if existing.contains("\r\n") {
+    // A file checked out with CRLF keeps it, line by line: the person's notes
+    // outside the list are theirs, terminators included. A new line takes the
+    // file's majority terminator.
+    let crlf = existing.matches("\r\n").count();
+    let nl = if crlf * 2 > existing.matches('\n').count() {
         "\r\n"
     } else {
         "\n"
     };
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let Some(heading) = lines.iter().position(|l| l.trim_end() == LEARNED_HEADING) else {
+    let Some(heading) = existing
+        .lines()
+        .position(|l| l.trim_end() == LEARNED_HEADING)
+    else {
         let mut text = if existing.trim().is_empty() {
             PREAMBLE.to_string()
         } else {
@@ -106,31 +110,44 @@ pub fn appended(existing: &str, entries: &[String], cap: usize) -> String {
         }
         return text;
     };
+    // Each line with its own terminator; a last line without one gets `nl`.
+    let mut lines: Vec<(String, &str)> = existing
+        .split_inclusive('\n')
+        .map(|l| match l.strip_suffix("\r\n") {
+            Some(body) => (body.to_string(), "\r\n"),
+            None => match l.strip_suffix('\n') {
+                Some(body) => (body.to_string(), "\n"),
+                None => (l.to_string(), nl),
+            },
+        })
+        .collect();
     // The list runs to the next heading; new entries go after its last entry.
     let end = (heading + 1..lines.len())
-        .find(|&i| lines[i].starts_with('#'))
+        .find(|&i| lines[i].0.starts_with('#'))
         .unwrap_or(lines.len());
     let mut at = (heading + 1..end)
         .rev()
-        .find(|&i| lines[i].starts_with("- "))
+        .find(|&i| lines[i].0.starts_with("- "))
         .map_or(heading + 1, |i| i + 1);
-    lines.splice(at..at, entries.iter().cloned());
+    lines.splice(at..at, entries.iter().map(|e| (e.clone(), nl)));
 
     // Every line ends with a line break in the result.
-    let mut total: usize = lines.iter().map(|l| l.chars().count() + nl.len()).sum();
+    let size = |(line, end): &(String, &str)| line.chars().count() + end.len();
+    let mut total: usize = lines.iter().map(size).sum();
     let mut i = heading + 1;
     while total > cap && i < at {
-        if lines[i].starts_with("- ") {
-            total -= lines[i].chars().count() + nl.len();
+        if lines[i].0.starts_with("- ") {
+            total -= size(&lines[i]);
             lines.remove(i);
             at -= 1;
         } else {
             i += 1;
         }
     }
-    let mut text = lines.join(nl);
-    text.push_str(nl);
-    text
+    lines
+        .iter()
+        .flat_map(|(line, end)| [line.as_str(), end])
+        .collect()
 }
 
 /// The plan's path as an entry names it: relative to the workspace when it
@@ -785,6 +802,22 @@ mod tests {
         );
         let text = appended("# Notes\r\nsomething\r\n", &lines(&["- new"]), MEMORY_CAP);
         assert_eq!(text, "# Notes\r\nsomething\r\n\r\n## Learned\r\n- new\r\n");
+    }
+
+    // A file with mixed endings keeps each line's own terminator; the new
+    // entries take the file's majority one (final-review follow-up: one CRLF
+    // line used to turn the whole file CRLF).
+    #[test]
+    fn a_mixed_ending_file_keeps_each_lines_terminator() {
+        let existing = "# Project memory\n\n## Learned\r\n- old\n\n## Mine\r\nmy notes\n";
+        let text = appended(existing, &lines(&["- new"]), MEMORY_CAP);
+        assert_eq!(
+            text,
+            "# Project memory\n\n## Learned\r\n- old\n- new\n\n## Mine\r\nmy notes\n"
+        );
+        let existing = "## Learned\r\n- old\r\nmine\n";
+        let text = appended(existing, &lines(&["- new"]), MEMORY_CAP);
+        assert_eq!(text, "## Learned\r\n- old\r\n- new\r\nmine\n");
     }
 
     #[test]
