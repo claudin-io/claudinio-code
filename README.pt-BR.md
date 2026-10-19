@@ -101,7 +101,8 @@ allowlist (um filtro como `grep`, `sort` ou `cut` conta como allowlist na ponta
 que recebe um pipe), mas os interpretadores e runners da allowlist (`node`,
 `python`, `pnpm run`, runners de teste) rodam o script que receberem sem
 perguntar; um `python` ou `node` sem script (sem arquivo, `-c`, `-m` ou `-e` —
-só flags ou `-`), que o lê de um pipe ou do stdin, é perguntado. Ele só passa trabalho a
+só flags ou `-`), ou com uma opção que a checagem não conhece, que pode lê-lo
+de um pipe ou do stdin, é perguntado. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo

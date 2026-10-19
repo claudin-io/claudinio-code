@@ -100,7 +100,8 @@ only when every command of its chain or pipe is allowlisted (a filter such as
 but the allowlisted interpreters and runners (`node`, `python`, `pnpm run`,
 test runners) run whatever script they are given without asking; a `python`
 or `node` given no script (no file, `-c`, `-m` or `-e` — only flags or `-`),
-which reads it from a pipe or stdin, is asked about. It hands work to subagents only when that
+or given an option the check does not know, which may read it from a pipe or
+stdin, is asked about. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
 delegated edit costs a second prompt, a second exploration and the spec written

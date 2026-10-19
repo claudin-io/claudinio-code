@@ -358,42 +358,157 @@ pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel
 
 /// A command that reads what a pipe feeds it and prints a selection of it,
 /// writing nothing and running nothing: `grep`, `cut`, a bare `cat`/`head`/
-/// `tail`/`wc`, `sort` without `-o`/`--compress-program`, and `uniq` without
-/// an output file.
+/// `tail`/`wc`, and `sort` and `uniq` given only flags known to read — so
+/// not `sort -o`/`--compress-program`, nor `uniq IN OUT`. The flags are read
+/// as the command receives them (`shell_words`), so `"-o"` is `-o`, and a
+/// word the shell may still expand (`{-o,F}`, `$OPT`) is refused.
 fn filters_its_input(segment: &str) -> bool {
-    let mut words = segment.split_whitespace();
-    let Some(command) = words.next() else {
+    let words = shell_words(segment);
+    let Some(((command, _), args)) = words.split_first() else {
         return false;
     };
-    let args: Vec<&str> = words.collect();
-    match command {
+    match command.as_str() {
         "grep" | "egrep" | "fgrep" | "cut" | "cat" | "head" | "tail" | "wc" => true,
-        // getopt takes any unambiguous abbreviation of a long option, so
-        // `--o=F` is `--output=F` and `--co=P` runs P: a long option whose
-        // name could start either is refused (`--` alone included).
-        "sort" => !args.iter().any(|a| match a.strip_prefix("--") {
-            Some(long) => {
-                let name = long.split('=').next().unwrap_or(long);
-                "output".starts_with(name) || "compress-program".starts_with(name)
-            }
-            None => a.starts_with('-') && a.contains('o'),
-        }),
+        "sort" => known_options(args, &SORT_OPTIONS).is_some(),
         // `uniq IN OUT` writes OUT, and `-` (stdin) is an operand like any
         // other, as is every word after `--`.
-        "uniq" => {
-            let mut operands = 0;
-            let mut options_end = false;
-            for a in &args {
-                if options_end || *a == "-" || !a.starts_with('-') {
-                    operands += 1;
-                } else if *a == "--" {
-                    options_end = true;
-                }
-            }
-            operands <= 1
-        }
+        "uniq" => known_options(args, &UNIQ_OPTIONS).is_some_and(|operands| operands <= 1),
         _ => false,
     }
+}
+
+/// The options a command is known to take, for `known_options`: short flags
+/// without and with a value, and long options without and with one.
+struct Options {
+    short_flags: &'static str,
+    short_valued: &'static str,
+    long_flags: &'static [&'static str],
+    long_valued: &'static [&'static str],
+}
+
+/// GNU `sort`'s options that only read; `-o`, `-T` and
+/// `--compress-program` are not among them.
+const SORT_OPTIONS: Options = Options {
+    short_flags: "bdfghiMnRrVcCmsuz",
+    short_valued: "ktS",
+    long_flags: &[
+        "--ignore-leading-blanks",
+        "--dictionary-order",
+        "--ignore-case",
+        "--general-numeric-sort",
+        "--ignore-nonprinting",
+        "--human-numeric-sort",
+        "--month-sort",
+        "--numeric-sort",
+        "--random-sort",
+        "--reverse",
+        "--version-sort",
+        "--check",
+        "--merge",
+        "--stable",
+        "--unique",
+        "--zero-terminated",
+        "--debug",
+    ],
+    long_valued: &[
+        "--key",
+        "--field-separator",
+        "--buffer-size",
+        "--parallel",
+        "--sort",
+    ],
+};
+
+/// GNU `uniq`'s options; its output file is an operand, counted apart.
+const UNIQ_OPTIONS: Options = Options {
+    short_flags: "cdDuiz",
+    short_valued: "fsw",
+    long_flags: &[
+        "--count",
+        "--repeated",
+        "--unique",
+        "--ignore-case",
+        "--zero-terminated",
+        "--all-repeated",
+        "--group",
+    ],
+    long_valued: &["--skip-fields", "--skip-chars", "--check-chars"],
+};
+
+/// The number of operands in `args` when every option among them is one of
+/// `options` (an option's value is not an operand, `-` is one, and so is
+/// every word after `--`); `None` when an option is not known — getopt's
+/// abbreviations included, so `--o` is refused rather than read as
+/// `--output` — or a word may still be expanded by the shell.
+fn known_options(args: &[(String, bool)], options: &Options) -> Option<usize> {
+    let mut operands = 0;
+    let mut words = args.iter();
+    while let Some((word, expands)) = words.next() {
+        if *expands {
+            return None;
+        }
+        if word == "--" {
+            return Some(operands + words.count());
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let name = &word[..long.split('=').next().unwrap_or(long).len() + 2];
+            let known = options.long_flags.contains(&name) || options.long_valued.contains(&name);
+            if !known {
+                return None;
+            }
+            if !long.contains('=') && options.long_valued.contains(&name) {
+                words.next()?;
+            }
+            continue;
+        }
+        let Some(short) = word.strip_prefix('-').filter(|s| !s.is_empty()) else {
+            operands += 1;
+            continue;
+        };
+        for (at, flag) in short.char_indices() {
+            if options.short_valued.contains(flag) {
+                if at + flag.len_utf8() == short.len() {
+                    words.next()?;
+                }
+                break;
+            }
+            if !options.short_flags.contains(flag) {
+                return None;
+            }
+        }
+    }
+    Some(operands)
+}
+
+/// The words of `segment` as the shell hands them to the command: split at
+/// unquoted blanks, with quotes and backslashes removed (`"-o"` and `\-o`
+/// are `-o`). Each carries whether the shell may still expand it into other
+/// words — an unquoted `{`, `*`, `?` or `[`, or a `$` outside single quotes —
+/// so that the word the command receives is not the one written.
+fn shell_words(segment: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut word: Option<(String, bool)> = None;
+    let mut quote: Option<char> = None;
+    let mut chars = segment.chars();
+    while let Some(c) = chars.next() {
+        if quote.is_none() && c.is_whitespace() {
+            out.extend(word.take());
+            continue;
+        }
+        let (text, expands) = word.get_or_insert_with(|| (String::new(), false));
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('\''), c) => text.push(c),
+            (Some(_), '\\') | (None, '\\') => text.extend(chars.next()),
+            (None, '\'' | '"') => quote = Some(c),
+            (q, c) => {
+                *expands |= c == '$' || (q.is_none() && "{*?[".contains(c));
+                text.push(c);
+            }
+        }
+    }
+    out.extend(word);
+    out
 }
 
 /// `split_chain` without the pipe marks.
@@ -493,30 +608,64 @@ fn starts_with_word(segment: &str, prefix: &str) -> bool {
 /// arguments — no file, no `-c`/`-m` or `-e`/`-p`, only flags or `-` — reads
 /// its script from stdin or the pipe, which the call does not show: `python`,
 /// `python -`, `cat x | node -`, `python -u`. Asking for the version or the
-/// help exits before any script is read. A flag that takes a value
-/// (`-W ignore`, `-r ./setup.js`) does not make that value the script.
+/// help exits before any script is read, and Node's `--test` and `--run`
+/// read none. A flag that takes a value (`-W ignore`, `-r ./setup.js`) does
+/// not make that value the script. The words are read as the interpreter
+/// receives them (`shell_words`, so `"-"` is `-`), and the check fails
+/// closed: a long option it does not know may take the next word as its
+/// value (`node --env-file .env` reads stdin), and a word the shell may
+/// still expand (`$SCRIPT`) may be nothing, so both are asked about.
 fn interpreter_reads_stdin(segment: &str) -> bool {
     struct Flags {
         script: &'static str,
         exits: &'static str,
         valued: &'static str,
         script_long: &'static [&'static str],
+        bool_long: &'static [&'static str],
         valued_long: &'static [&'static str],
+        /// Every `--no-…` option is a flag (Node's negations).
+        negations: bool,
     }
-    let mut words = segment.split_whitespace();
-    let flags = match words.next() {
+    let words = shell_words(segment);
+    let mut words = words.iter();
+    let flags = match words.next().map(|(w, _)| w.as_str()) {
         Some("python") => Flags {
             script: "cm",
             exits: "Vh",
             valued: "WX",
             script_long: &[],
+            bool_long: &[],
             valued_long: &["--check-hash-based-pycs"],
+            negations: false,
         },
         Some("node") => Flags {
             script: "ep",
             exits: "vh",
             valued: "rC",
-            script_long: &["--eval", "--print"],
+            script_long: &["--eval", "--print", "--test", "--run"],
+            bool_long: &[
+                "--watch",
+                "--inspect",
+                "--inspect-brk",
+                "--inspect-wait",
+                "--enable-source-maps",
+                "--experimental-vm-modules",
+                "--experimental-strip-types",
+                "--experimental-transform-types",
+                "--trace-warnings",
+                "--trace-deprecation",
+                "--trace-uncaught",
+                "--throw-deprecation",
+                "--pending-deprecation",
+                "--expose-gc",
+                "--preserve-symlinks",
+                "--preserve-symlinks-main",
+                "--abort-on-uncaught-exception",
+                "--jitless",
+                "--cpu-prof",
+                "--heap-prof",
+                "--frozen-intrinsics",
+            ],
             valued_long: &[
                 "--require",
                 "--import",
@@ -524,23 +673,33 @@ fn interpreter_reads_stdin(segment: &str) -> bool {
                 "--loader",
                 "--input-type",
             ],
+            negations: true,
         },
         _ => return false,
     };
-    while let Some(word) = words.next() {
-        if word == "-" {
+    while let Some((word, expands)) = words.next() {
+        if *expands || word == "-" {
             return true;
         }
         if let Some(long) = word.strip_prefix("--") {
             let name = long.split('=').next().unwrap_or(long);
             let name = &word[..name.len() + 2];
-            if flags.script_long.contains(&name) || ["--version", "--help"].contains(&name) {
+            if flags.script_long.contains(&name)
+                || ["--version", "--help"].contains(&name)
+                || name.starts_with("--help-")
+            {
                 return false;
             }
-            if flags.valued_long.contains(&name) && !long.contains('=') {
-                words.next();
+            let no_value =
+                flags.bool_long.contains(&name) || (flags.negations && name.starts_with("--no-"));
+            if long.contains('=') || no_value {
+                continue;
             }
-            continue;
+            if flags.valued_long.contains(&name) {
+                words.next();
+                continue;
+            }
+            return true; // it may take the next word, which is then no script
         }
         let Some(short) = word.strip_prefix('-') else {
             return false; // the script file
@@ -1165,6 +1324,27 @@ mod read_only_tests {
             "cat x | node -",
             "python -W ignore",
             "node -r ./x.js",
+            // Recheck round 2: the shell removes quotes and backslashes and
+            // expands braces, variables and globs before `sort` or `uniq`
+            // sees a word, so `"-o"` is `-o` and `{-o,F}` is `-o F`. Only
+            // the flags known to read are let through.
+            "git log | sort \"-o\" src/main.rs",
+            "git log | sort \\-o src/main.rs",
+            "git log | sort ''-o src/main.rs",
+            "git log | sort \"--co=./x.sh\"",
+            "git log | sort {-o,src/main.rs}",
+            "git log | sort $OPT src/main.rs",
+            "git log | sort --rev -o src/main.rs",
+            "git log | uniq {-,src/main.rs}",
+            // A quoted `-` is stdin too, and a long option the check does not
+            // know may take the next word as its value, which is then not
+            // the script (`node --env-file .env` reads its script from stdin).
+            "python \"-\"",
+            "cat x | python \"-\"",
+            "node --env-file .env",
+            "node --title x",
+            "node --disable-warning ExperimentalWarning",
+            "cat x | node --env-file .env",
         ] {
             assert_eq!(
                 bash_permission(cmd, false),
@@ -1204,6 +1384,11 @@ mod read_only_tests {
             "cat a.txt | cut -d, -f1 | sort -rn",
             "git log --oneline | sort -t, -k2 --reverse | uniq -c -",
             "git log --oneline | sort --numeric-sort --key=2",
+            // Recheck round 2: the values of uniq's `-f`/`-s`/`-w` are not
+            // operands, and quoting a read flag does not make it a write.
+            "git log --oneline | uniq -f 1 -s 2",
+            "git log --oneline | uniq -c -w 8",
+            "git log --oneline | sort -t'|' -k2 \"-r\"",
             // A bare `echo` (an empty line) still matches `echo ` (recheck
             // round: only an interpreter needs its arguments).
             "git status; echo; git log",
@@ -1247,6 +1432,10 @@ mod read_only_tests {
             "python -",
             "node -",
             "python -u",
+            "python \"-\"",
+            "node --env-file .env",
+            "node --title x",
+            "node --disable-warning X",
         ] {
             let input = serde_json::json!({
                 "command": command,
@@ -1276,6 +1465,14 @@ mod read_only_tests {
             "node -e \"1\"",
             "python --version",
             "node -v",
+            // Recheck round 2: Node's test runner and `--run` name no script
+            // file and read none from stdin; a flag known to take no value,
+            // or given its value with `=`, does not hide the script.
+            "node --test",
+            "node --run build",
+            "node --watch x.js",
+            "node --no-warnings x.js",
+            "node --max-old-space-size=4096 x.js",
         ] {
             assert_eq!(
                 bash_permission(cmd, false),

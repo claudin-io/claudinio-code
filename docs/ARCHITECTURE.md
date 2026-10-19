@@ -245,12 +245,17 @@ command unasked only when every command of its chain or pipe is allowlisted
 (`permissions::split_chain`, which reads quotes as POSIX does — a backslash is
 literal inside `'…'`; substitution and `--output` disqualify it; an
 interpreter with no script among its arguments — `python`, `python -`,
-`node -u`, only flags or `-` — reads stdin or the pipe and is not allowlisted
-(`interpreter_reads_stdin`), while a bare `echo`/`cat`/`which` still is; a
-read-only filter — `grep`, `cut`, `sort` without `-o` or
-`--compress-program` under any abbreviation getopt accepts (`--o=`, `--co=`),
-`uniq` without a second operand (`-` and every word after `--` count) — is
-allowlisted only where a pipe feeds it). The
+`python -u`, only flags or `-` — reads stdin or the pipe and is not
+allowlisted (`interpreter_reads_stdin`, which reads the words unquoted, so
+`"-"` is `-`, and fails closed: a long option it does not list, such as
+`node --env-file .env`, may take the next word, and a word the shell expands
+may be nothing, so both are asked about), while a bare `echo`/`cat`/`which`
+still is; a read-only filter — `grep`, `cut`, and `sort`/`uniq` given only
+the flags listed as reading (`SORT_OPTIONS`, `UNIQ_OPTIONS`: never `-o`,
+`-T` or `--compress-program`, no getopt abbreviation, no word the shell
+still expands such as `{-o,F}` or `$OPT`, and for `uniq` no second operand,
+with `-` and every word after `--` counted) — is allowlisted only where a
+pipe feeds it; the flags are read unquoted, so `"-o"` and `\-o` are `-o`). The
 allowlisted interpreters and runners still run any script unasked in Builder;
 Brain refuses those too (`bash_permission_brain`), though its builds and test
 runners still run project code. Compact adds one rule
