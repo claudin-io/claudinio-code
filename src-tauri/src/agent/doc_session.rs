@@ -232,9 +232,18 @@ pub fn has_document(ctx: &crate::agent::tools::ToolContext) -> bool {
     linked(ctx).is_some()
 }
 
+/// True unless `path` is there as something other than a plain file — a link
+/// (dangling or not) or a folder. The session folder is workspace data a
+/// cloned repository can commit, so the harness neither reads its memory
+/// through a link nor writes through one.
+fn plain_or_absent(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).map_or(true, |m| m.file_type().is_file())
+}
+
 fn load_state(l: &Linked, content: &str) -> DocState {
-    std::fs::read_to_string(&l.state)
-        .ok()
+    plain_or_absent(&l.state)
+        .then(|| std::fs::read_to_string(&l.state).ok())
+        .flatten()
         .and_then(|t| serde_json::from_str::<DocState>(&t).ok())
         .filter(|s| s.path == l.rel)
         // No memory yet (or of another document): what is there now is
@@ -246,9 +255,28 @@ fn load_state(l: &Linked, content: &str) -> DocState {
         })
 }
 
+/// Written to a new temp file and renamed over the memory, so a link planted
+/// at the temp name or at the memory itself is never followed.
 fn save_state(l: &Linked, state: &DocState) {
-    if let Ok(text) = serde_json::to_string(state) {
-        let _ = std::fs::write(&l.state, text);
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let Ok(text) = serde_json::to_string(state) else {
+        return;
+    };
+    if !plain_or_absent(&l.state) {
+        return;
+    }
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tmp = l.state.clone().into_os_string();
+    tmp.push(format!(".{}.{seq}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, &l.state));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -1228,6 +1256,22 @@ mod tests {
             assert!(written.is_empty(), "{linked}: wrote {written:?}");
         }
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// The session folder is workspace data a cloned repository can commit,
+    /// `<session>.doc.json` included: a link there must not make the next run
+    /// start truncate its target with the harness's JSON.
+    #[cfg(unix)]
+    #[test]
+    fn the_document_memory_is_never_written_through_a_link() {
+        let (ws, _) = Ws::with_doc("state-link", &["origem"]);
+        let victim = ws.root.join("victim-ç.txt");
+        std::fs::write(&victim, "keep me").unwrap();
+        let state = state_path(&ws.store());
+        std::fs::remove_file(&state).ok();
+        std::os::unix::fs::symlink(&victim, &state).unwrap();
+        assert!(!run_start_blocks(&ws.ctx).is_empty());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
     }
 
     #[cfg(unix)]
