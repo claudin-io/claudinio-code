@@ -968,12 +968,7 @@ pub(super) fn handle_mode_switch(
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("plan");
-                        // filename format: YYYY-MM-DD_slug.md — strip date prefix
-                        let slug = if fname.len() > 11 && &fname[4..5] == "-" {
-                            &fname[11..] // after "YYYY-MM-DD_"
-                        } else {
-                            fname
-                        };
+                        let slug = crate::agent::tools::write_plan::commit_slug(fname);
                         let commit_msg = format!("docs(plan): {}", slug);
                         let add = std::process::Command::new("git")
                             .arg("-C")

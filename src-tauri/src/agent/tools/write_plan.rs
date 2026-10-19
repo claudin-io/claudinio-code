@@ -73,6 +73,18 @@ pub fn latest_plan_path(workspace_root: &str, plan_save_path: Option<&str>) -> O
     best.map(|(_, path)| path)
 }
 
+/// The slug a plan's auto-commit message names: the file stem without the
+/// `YYYY-MM-DD_` prefix `write_plan` gives it. The folder also holds files
+/// the person named, so the offsets are taken with `get`: byte 4 or 11 of
+/// "ação-…" or "计划-…" lies inside a character, and slicing there panicked
+/// the run at the plan's auto-commit (lean-harness Phase 6f audit).
+pub fn commit_slug(stem: &str) -> &str {
+    match (stem.get(4..5), stem.get(11..)) {
+        (Some("-"), Some(slug)) if !slug.is_empty() => slug, // after "YYYY-MM-DD_"
+        _ => stem,
+    }
+}
+
 /// Turn a free-form plan name into a filesystem-safe slug.
 pub fn slugify(name: &str) -> String {
     let mut slug = String::new();
@@ -379,5 +391,18 @@ mod tests {
         assert!(!full.contains("no '## Low-Level Design'"), "got: {full}");
         assert!(!full.contains("expected section(s) missing"), "got: {full}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // The plans folder is any `.md` the person keeps there, not only the
+    // files write_plan named: a stem in Portuguese or Chinese must give a
+    // commit message, never a slice inside one of its characters.
+    #[test]
+    fn a_plan_stem_with_multibyte_characters_gives_a_commit_slug() {
+        assert_eq!(commit_slug("2026-10-19_add-login"), "add-login");
+        assert_eq!(commit_slug("ação-do-plano-novo"), "ação-do-plano-novo");
+        assert_eq!(commit_slug("计划-第一版-登录页面"), "计划-第一版-登录页面");
+        assert_eq!(commit_slug("2026-10-19_ação"), "ação");
+        assert_eq!(commit_slug("abcd-efghij😀x"), "😀x");
+        assert_eq!(commit_slug("abcd-efghi😀x"), "abcd-efghi😀x");
     }
 }
