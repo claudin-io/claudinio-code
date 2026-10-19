@@ -691,15 +691,30 @@ pub async fn fetch_remote_skill_meta(url: &str) -> Result<(SkillMeta, String), S
 /// user-level skills directory (`~/.claudinio/skills/<name>/SKILL.md`).
 pub async fn install_remote_skill(remote: &RemoteSkill) -> Result<SkillEntry, String> {
     let (meta, body) = fetch_remote_skill_meta(&remote.url).await?;
-
     let home = dirs::home_dir().ok_or("no home directory")?;
+    install_user_skill(&home, &meta, body)
+}
+
+/// Write a parsed skill to `<home>/.claudinio/skills/<name>/SKILL.md`. A
+/// name in [`RESERVED_BUILTIN_SKILLS`] is refused before anything is written:
+/// the next scan would ignore the file (the prompt points at the built-in),
+/// and an installer that answered "installed" for a skill that never loads
+/// leaves its only trace on stderr.
+fn install_user_skill(home: &Path, meta: &SkillMeta, body: String) -> Result<SkillEntry, String> {
+    if RESERVED_BUILTIN_SKILLS.contains(&meta.name.as_str()) {
+        return Err(format!(
+            "The skill name '{}' is reserved for the built-in skill and would never load. \
+             Not installed; rename the skill (the `name` in its SKILL.md) to install it.",
+            meta.name
+        ));
+    }
     let install_dir = home.join(".claudinio").join("skills").join(&meta.name);
     std::fs::create_dir_all(&install_dir).map_err(|e| format!("create install dir: {e}"))?;
 
     let skill_path = install_dir.join("SKILL.md");
 
     // Rebuild SKILL.md from parsed data so it's normalized
-    let yaml = serde_yaml::to_string(&meta).map_err(|e| format!("serialize yaml: {e}"))?;
+    let yaml = serde_yaml::to_string(meta).map_err(|e| format!("serialize yaml: {e}"))?;
     // serde_yaml may append trailing "..."
     let yaml = yaml.trim_end_matches("...\n").trim_end().to_string();
 
@@ -1141,6 +1156,36 @@ mod plan_skill_tests {
             assert!(!body.contains(gone), "the plan skill says {gone:?}");
         }
         assert!(body.contains("one `ask_user` call"), "{body}");
+    }
+
+    /// The scan ignores a skill on disk named like a reserved built-in, so an
+    /// install under that name would report success for a skill that never
+    /// loads: it is refused, with the reason and what to do instead, and
+    /// nothing is written.
+    #[test]
+    fn installing_a_skill_under_a_reserved_name_is_refused_and_writes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let meta = |name: &str| SkillMeta {
+            name: name.into(),
+            description: "a downloaded skill".into(),
+            license: None,
+            compatibility: None,
+            metadata: None,
+            allowed_tools: None,
+        };
+        let err = install_user_skill(home.path(), &meta("plan"), "body".into())
+            .expect_err("a reserved name is refused");
+        assert!(err.contains("reserved"), "{err}");
+        assert!(err.contains("rename"), "says what to do: {err}");
+        assert!(!home.path().join(".claudinio/skills/plan").exists());
+
+        let ok = install_user_skill(home.path(), &meta("deploy"), "body".into()).unwrap();
+        assert_eq!(ok.scope, SkillScope::User);
+        assert!(
+            home.path()
+                .join(".claudinio/skills/deploy/SKILL.md")
+                .is_file()
+        );
     }
 
     /// Prompt v2's Brain block sends the model to the `plan` skill by name for
