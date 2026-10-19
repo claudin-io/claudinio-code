@@ -419,7 +419,17 @@ Three, and they are the parts to be careful with.
 
 **1. What the model may touch.** `agent/tools/mod.rs::validate_path` gates every
 file tool; `agent/permissions.rs` gates `bash` with an allowlist/denylist and an
-approval prompt. `edit_file` always shows a diff first.
+approval prompt. `edit_file` always shows a diff first. It also creates files
+(lean-harness Phase 3b): an empty `old_string` on a path that does not exist
+proposes the whole file as a diff from nothing, and applying it makes the
+missing folders and writes with `create_new`, so it never overwrites. The
+workspace and spec guards run first, as for any edit; a new file needs an
+absolute path, because the guard resolves a relative one against the workspace
+while the write would resolve it against the process's directory.
+Read-before-edit (`ReadTracker`) has nothing to check on a missing path, and
+records a created file as fully read. An `old_string` that occurs more than once
+is refused with the count unless the call sets `replace_all`, and the count is
+taken again on the file at approval.
 
 **2. What the webview may touch.** The chat renders untrusted content, so treat
 the frontend as a place where attacker-influenced script could run. The

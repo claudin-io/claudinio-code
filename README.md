@@ -86,7 +86,9 @@ them starts a fresh session seeded with the plan, so execution never inherits a
 context window full of exploration.
 
 Builder edits files itself: each `edit_file` is shown to you as a diff to
-approve, and a shell command that writes a file is asked about the same way,
+approve — a new file too, as a diff from nothing (an empty `old_string` creates
+it, missing folders included), and an `old_string` must match one place unless
+the call says `replace_all` — and a shell command that writes a file is asked about the same way,
 even one whose prefix is allowlisted. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
@@ -414,7 +416,7 @@ resident, context used against context served, and the current token rate.
 | `doc_write` / `doc_read` / `doc_add` | auto | with a document | Write, read or add a section of the document |
 | MCP tools | **requires approval** | deferred | Whatever the connected servers offer |
 | **`browser`** | **origin-gated** | deferred | Navigate and interact with a page (local addresses are automatic; other origins ask) |
-| **`edit_file`** | **requires approval** | always (Builder, code subagents) | Propose an edit, shown as a diff |
+| **`edit_file`** | **requires approval** | always (Builder, code subagents) | Propose an edit or a new file, shown as a diff |
 | **`bash`** | **requires approval** | always | Run a shell command (read-only commands are allowlisted) |
 
 *Sent* is what a Standard session puts in every request. A *deferred* tool is

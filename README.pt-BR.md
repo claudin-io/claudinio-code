@@ -87,7 +87,9 @@ verificando. O handoff entre eles abre uma sessão nova semeada com o plano, par
 a execução não herdar uma janela de contexto cheia de exploração.
 
 O Builder edita os arquivos ele mesmo: cada `edit_file` aparece para você como
-um diff a aprovar, e um comando de shell que grava um arquivo é perguntado do
+um diff a aprovar — um arquivo novo também, como diff a partir do nada (um
+`old_string` vazio o cria, pastas que faltam incluídas), e um `old_string` precisa
+casar com um só lugar, a menos que a chamada peça `replace_all` — e um comando de shell que grava um arquivo é perguntado do
 mesmo jeito, mesmo quando o prefixo está na allowlist. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
@@ -414,7 +416,7 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `doc_write` / `doc_read` / `doc_add` | automático | com documento | Escreve, lê ou acrescenta uma seção do documento |
 | Ferramentas MCP | **requer aprovação** | adiada | O que os servidores conectados oferecem |
 | **`browser`** | **barrado por origem** | adiada | Navega e interage com uma página (endereços locais são automáticos; outras origens perguntam) |
-| **`edit_file`** | **requer aprovação** | sempre (Builder, subagentes code) | Propõe uma edição, exibida como diff |
+| **`edit_file`** | **requer aprovação** | sempre (Builder, subagentes code) | Propõe uma edição ou um arquivo novo, exibidos como diff |
 | **`bash`** | **requer aprovação** | sempre | Roda um comando de shell (comandos de leitura são allowlisted) |
 
 *Enviada* é o que uma sessão Standard põe em todo pedido. Uma ferramenta
