@@ -97,8 +97,11 @@ the call says `replace_all`, which the approval card shows with its count — an
 is allowlisted. That check is a heuristic: an allowlisted command runs unasked
 only when every command of its chain or pipe is allowlisted (a filter such as
 `grep`, `sort` or `cut` counts as allowlisted at the receiving end of a pipe),
-but the allowlisted interpreters and runners (`node`, `python`, `pnpm run`,
-test runners) run whatever script they are given without asking; a `python`
+but the allowlisted interpreters (`node`, `python`, `pnpm run`) run whatever
+script they are given without asking, and a test runner or build runs your
+project's own tests and build scripts — given an argument that picks a
+program, plugin, config or folder (`pytest --basetemp=src`, `go test -exec`,
+`cargo test --config`), it is asked about; a `python`
 or `node` given no script (no file, `-c`, `-m` or `-e` — only flags or `-`),
 or given an option the check does not know, which may read it from a pipe or
 stdin, is asked about. It hands work to subagents only when that
@@ -326,7 +329,11 @@ A new session in a repository does not start from nothing:
   refused unless it only reads; YOLO mode and hooks do not open it. It reads
   the call's text, so it does not catch a command that builds the path while
   it runs (a variable, a script), one whose writer sits behind a wrapper the
-  guard does not know, one that copies or deletes a parent folder
+  guard does not know or behind a wrapper's long option whose value is named
+  like a command it knows (`sudo --user git rm …`), a script piped or
+  here-string-fed into a shell (`echo '…' | sh`, `bash <<< '…'`), a command
+  that runs its own arguments (`sed`'s `e`, a `git` alias, `awk`'s
+  `system()`), one that copies or deletes a parent folder
   of it (`rm -rf .`), a link reached through a globbed folder, or a hard link.
   Such a command is not necessarily asked about either: the allowlisted
   interpreters (`node`, `python`) run a script without a prompt, outside YOLO

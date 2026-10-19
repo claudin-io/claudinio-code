@@ -98,9 +98,11 @@ casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão
 prefixo está na allowlist. Essa checagem é uma heurística: um comando da
 allowlist só roda sem perguntar quando cada comando da cadeia ou do pipe está na
 allowlist (um filtro como `grep`, `sort` ou `cut` conta como allowlist na ponta
-que recebe um pipe), mas os interpretadores e runners da allowlist (`node`,
-`python`, `pnpm run`, runners de teste) rodam o script que receberem sem
-perguntar; um `python` ou `node` sem script (sem arquivo, `-c`, `-m` ou `-e` —
+que recebe um pipe), mas os interpretadores da allowlist (`node`, `python`,
+`pnpm run`) rodam o script que receberem sem perguntar, e um runner de teste ou
+build roda os testes e scripts de build do seu próprio projeto — com um
+argumento que escolhe um programa, plugin, config ou pasta (`pytest
+--basetemp=src`, `go test -exec`, `cargo test --config`), ele é perguntado; um `python` ou `node` sem script (sem arquivo, `-c`, `-m` ou `-e` —
 só flags ou `-`), ou com uma opção que a checagem não conhece, que pode lê-lo
 de um pipe ou do stdin, é perguntado. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
@@ -332,8 +334,12 @@ Uma sessão nova num repositório não começa do zero:
   só leia; nem o modo YOLO nem os hooks liberam. Ela lê o texto da chamada,
   então não pega um comando que monta o caminho enquanto roda (uma variável, um
   script), um cujo comando que grava está atrás de um wrapper que a proteção
-  não conhece, um que copia ou apaga uma pasta acima dela (`rm -rf .`), um link
-  alcançado por uma pasta em glob, nem um hard link. Esse comando também não é
+  não conhece ou atrás de uma opção longa de um wrapper cujo valor tem o nome
+  de um comando que ela conhece (`sudo --user git rm …`), um script passado a
+  um shell por pipe ou here-string (`echo '…' | sh`, `bash <<< '…'`), um
+  comando que roda os próprios argumentos (o `e` do `sed`, um alias do `git`,
+  o `system()` do `awk`), um que copia ou apaga uma pasta acima dela
+  (`rm -rf .`), um link alcançado por uma pasta em glob, nem um hard link. Esse comando também não é
   necessariamente perguntado: os interpretadores da allowlist (`node`,
   `python`) rodam um script sem perguntar, fora do YOLO também. Você pode
   editar o arquivo à mão.

@@ -255,10 +255,22 @@ the flags listed as reading (`SORT_OPTIONS`, `UNIQ_OPTIONS`: never `-o`,
 `-T` or `--compress-program`, no getopt abbreviation, no word the shell
 still expands such as `{-o,F}` or `$OPT`, and for `uniq` no second operand,
 with `-` and every word after `--` counted) — is allowlisted only where a
-pipe feeds it; the flags are read unquoted, so `"-o"` and `\-o` are `-o`). The
-allowlisted interpreters and runners still run any script unasked in Builder;
-Brain refuses those too (`bash_permission_brain`), though its builds and test
-runners still run project code. Compact adds one rule
+pipe feeds it; the flags are read unquoted, so `"-o"` and `\-o` are `-o`, and
+a backslash before a line break continues the line as in the shell, and an
+option's value and the words after `--` are checked for expansion too). A
+build or test runner (`cargo test`, `pytest`, `go test`, `vitest`, `npm test`,
+…) runs unasked only with the arguments its `permissions::RunnerArgs` lists —
+test selection, features, reporting — and nothing the shell still expands: an
+argument that picks a program, plugin, config or folder (`pytest
+--basetemp=src`, which empties `src`; `pytest -p`; `go test -exec`;
+`cargo test --config …runner`; `vitest -u`) is asked about. The allowlisted
+interpreters (`node `, `python `, `pnpm run`) still run any script unasked in
+Builder; Brain refuses those too (`bash_permission_brain`), and refuses a
+runner given such an argument. What a runner still runs unasked is the
+project's own code — its tests and build scripts — which can do anything the
+project's author wrote. Discarding output (`2> /dev/null`, `> /dev/null`) is
+neither a write nor refused; a redirection into a disk or memory device
+(`> /dev/sda`, `>/dev/nvme0n1`, `/dev/mem`) is Denied. Compact adds one rule
 of its own: a call to any tool outside the profile's ten is refused rather than
 run.
 
@@ -569,21 +581,33 @@ as the target of a command that writes or deletes into it (`cp`, `mv`,
 `rsync`, `tar -C`, `rm`, a rewriting `git` subcommand) when that command runs
 in the segment naming the folder or after a `cd` into it — as the segment's
 command after `then`/`do`/`{`/`!`, inside a shell's `-c` script (its first
-word that is not an option, so `bash -c -- '…'` and `bash -c -o pipefail '…'`
-count), or behind a wrapper that runs the command after it (`sudo`, `xargs`,
-`env`, `eval`, `coproc`, `stdbuf`, `setsid`, `flock`, … in
-`project_memory::RUNS_ANOTHER`; the wrapper's words are read up to the first
-command the guard knows, so `stdbuf -oL grep -rn install .claudinio/` reads)
+word that is not an option, read as getopt does, so `bash -c -- '…'`,
+`bash -c -o pipefail '…'` and `bash -co pipefail '…'` count), or behind a
+wrapper that runs the command after it (`sudo`, `xargs`, `env`, `eval`,
+`coproc`, `stdbuf`, `setsid`, `flock`, … in `project_memory::RUNS_ANOTHER`;
+the wrapper's own option values and operands are skipped —
+`project_memory::wrapper_syntax`: `flock FILE`, `chroot NEWROOT`, `coproc
+NAME {`, `xargs -I`/`-a`, `strace -o`, `sudo -u`, `su USER -c` — and its words
+are then read up to the first command the guard knows, so
+`stdbuf -oL grep -rn install .claudinio/` reads; nesting past 64 wrappers or
+shells is read as a writer, so it cannot exhaust the stack)
 — and `find` acting
 (`-delete`, `-exec`) in a segment that names the folder or a name matching
 the file — a pattern such as `*.md` matches it, so `find . -name '*.md'
--exec …` is refused; `find`'s `{}` placeholder is not read as a name. It cannot see a writer behind a
-wrapper it does not list or behind a wrapper option value named like a
-command it knows (`flock grep rm …`), a path the
-command assembles at run time (a variable, an interpreter script building the
-name), a copy or delete of a parent folder (`rm -rf .`), a link reached
-through a globbed folder name, or a hard link to the file (which only such a
-command can make). Nothing else stands there for certain: the allowlisted
+-exec …` is refused; `find`'s `{}` placeholder is not read as a name. A plain
+read of the memory — a `READ_ONLY_PREFIXES` command or a `grep`/`rg` (not
+`rg --pre`), then only filters fed by the pipe, nothing redirected
+(`permissions::only_reads`) — is not refused. It cannot see a writer behind a
+wrapper it does not list, or behind a wrapper's long option whose value is a
+separate word named like a command it knows (`sudo --user git rm …`); a
+script fed to a shell on stdin or as a here-string from the command itself
+(`echo 'rm -rf .claudinio' | sh`, `bash <<< '…'`; the call's `stdin` field
+is read); a command that runs its own arguments as a command (`sed`'s `e`,
+a `git -c alias.x='!…'` alias, `awk`'s `system()`, `find -exec` aside); a
+path the command assembles at run time (a variable, an interpreter script
+building the name), a copy or delete of a parent folder (`rm -rf .`), a link
+reached through a globbed folder name, or a hard link to the file (which only
+such a command can make). Nothing else stands there for certain: the allowlisted
 interpreters (`node `, `python `) run a script unasked even outside YOLO, and
 YOLO waives the approval of the rest; a file written by an MCP server is
 outside it too. Note the memory is no more trusted than `AGENTS.md`, which the
