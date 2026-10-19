@@ -38,8 +38,10 @@ pub const BASH_NOT_ALLOWED_IN_BRAIN: &str = "Command not allowed in Brain mode â
 /// A write to the project memory, by `edit_file`, a subagent's apply or the
 /// shell (lean-harness Phase 9): only the harness writes it.
 pub const PROJECT_MEMORY_WRITE: &str = "Refused: .claudinio/MEMORY.md is the project memory, and \
-     only the harness writes it. To add a lesson, pass it in finalize_plan's `memory` list when \
-     the plan is done; to change or remove an entry, ask_user.";
+     only the harness writes it; a shell command that names it runs only when it is a plain \
+     read like cat or head. To read it, use read_file. To add a lesson, pass it in \
+     finalize_plan's `memory` list when the plan is done; to change or remove an entry, \
+     ask_user.";
 
 /// The Low-Level Design gate, before any plan file exists.
 pub fn lld_no_plan(tool: &str) -> String {
@@ -283,7 +285,9 @@ mod tests {
         // The memory is written through finalize_plan, or by the person.
         (
             "PROJECT_MEMORY_WRITE",
-            &["finalize_plan", "`memory`", "ask_user"],
+            // A read the shell guard refused (`grep â€¦ .claudinio/MEMORY.md`)
+            // is pointed at read_file, not told it tried to write.
+            &["read_file", "finalize_plan", "`memory`", "ask_user"],
         ),
         (
             "lld_no_plan",
