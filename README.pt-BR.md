@@ -101,13 +101,14 @@ aprovação mostra com a contagem. Um comando de shell roda sem perguntar sob um
 `cut`, `tr` ou `nl`, sem `;`, `&`, `||`, `$`, crase, barra invertida, chave,
 parêntese, glob, quebra de linha, espaço em branco que não seja espaço ou tab, ou
 redirecionamento (além de `2>&1` e `>/dev/null`) — no Windows, onde o comando
-roda sob `cmd /c`, também sem `%`, `^` ou `!` — e sem nada que a checagem de
+roda sob `cmd /c`, também sem `%`, `^` ou `!`, e o nome nunca é procurado
+primeiro na pasta de trabalho — e sem nada que a checagem de
 gravação veja (redirecionamento, `tee`, `sed -i`, `patch`, script inline que
 grava). Todo o resto é perguntado no Builder e recusado no Brain — uma cadeia de
 comandos da allowlist, um `|` entre aspas, um `2> /dev/null` com espaço
 inclusive: é o preço de uma regra simples o bastante para se ter certeza, e ele
 nunca é recuperado com parsing. Uma deny-list curta, casada por palavras
-inteiras (`rm -rf /`, `chmod 777`, `mkfs`, `dd`, `format`, `chown`, gravação num
+inteiras fora de texto entre aspas (`rm -rf /`, `chmod 777`, `mkfs`, `dd`, `format`, `chown`, gravação num
 dispositivo de disco), é recusada de vez em todos os modos. Um interpretador,
 runner de teste ou build da allowlist roda o que os seus argumentos e o projeto
 escolherem — inclusive um programa a rodar ou uma pasta a limpar
@@ -336,20 +337,27 @@ Uma sessão nova num repositório não começa do zero:
   caminho é a proteção de verdade. `finalize_plan` não o aceita como arquivo de
   plano. A proteção do shell é defesa em profundidade de melhor esforço por
   cima, não uma fronteira: uma chamada de shell cujo texto menciona
-  `MEMORY.md`, ou a própria pasta `.claudinio` — qualquer grafia que não
-  continue em outro nome ou num caminho simples dentro dela, listas entre chaves
-  e barras invertidas do Windows inclusive (`rm -rf .claudinio`,
-  `cp -r q/. .claudinio/`, `.claudinio/M*`, `{.claudinio,}`, `.claudinio\*`),
+  `MEMORY.md`, ou a própria pasta `.claudinio` — escrita por extenso, sem
+  continuar em outro nome ou num caminho simples dentro dela, com uma lista
+  entre chaves em volta, barras invertidas do Windows e o escape `^` do cmd
+  inclusive (`rm -rf .claudinio`, `cp -r q/. .claudinio/`, `.claudinio/M*`,
+  `{.claudinio,}`, `.claudinio\*`, `.claudi^nio`),
   no comando, na pasta de trabalho ou no stdin — ou um nome
   que leva ao arquivo por um link no disco — é recusada a menos que seja uma
   leitura simples (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `file`, `grep`,
   `git log`/`diff`/`show`/`status`/`blame`, sem pipe); nem o modo YOLO nem os
   hooks liberam. Ela varre texto, então não vê um caminho que o comando monta
-  enquanto roda (uma variável, um script), um glob que soletra o nome da
-  própria pasta (`.c*`), uma pasta acima dela (`rm -rf .`) nem um hard link — e
-  esse comando também não é necessariamente perguntado: os interpretadores da
-  allowlist do Builder rodam um script sem perguntar. Você pode editar o
-  arquivo à mão.
+  enquanto roda (uma variável, um script), um glob ou lista entre chaves que
+  soletra o nome da própria pasta (`.c*`, `.claudi{n,}io`), um nome relativo a
+  uma pasta para a qual o comando entra antes (`cd .claudinio/plans && cp x
+  ../M*`), uma pasta acima dela (`rm -rf .`) nem um hard link. Esses são
+  perguntados no Builder, então o YOLO ou o `allow` de um hook os roda, e os
+  interpretadores da allowlist do Builder rodam um script sem perguntar. Ela
+  também erra para o outro lado: um comando que só cita a pasta em texto —
+  `echo '.claudinio/' >> .gitignore`, `git commit -m "ignore .claudinio"`,
+  `git add .claudinio/plans/*.md` — é recusado, então você o roda à mão (ou o
+  agente edita o `.gitignore` com `edit_file`). Você pode editar o arquivo da
+  memória à mão.
 - **Nenhum dos dois entra no system prompt**, que fica com os mesmos bytes de
   uma requisição para a outra para o provedor poder fazer cache, e nenhum é
   enviado de novo mais tarde na sessão; uma sessão que continua outra recebe o

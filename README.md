@@ -99,12 +99,14 @@ runners and builds, `node`/`python`/`pnpm run`, `which`/`echo`/`pwd`, a bare
 `cut`, `tr` or `nl`, with no `;`, `&`, `||`, `$`, backquote, backslash, brace,
 parenthesis, glob, line break, blank other than space and tab, or redirection
 (beyond `2>&1` and `>/dev/null`) — on Windows, where the command runs under
-`cmd /c`, no `%`, `^` or `!` either — and nothing the write check sees
+`cmd /c`, no `%`, `^` or `!` either, and the name is never looked up in the
+working folder first — and nothing the write check sees
 (redirection, `tee`, `sed -i`, `patch`, an inline script that writes).
 Everything else is asked about in Builder and refused in Brain — a chain of
 allowlisted commands, a quoted `|`, a `2> /dev/null` with a space included:
 that is the price of a rule simple enough to be sure of, and it is never won
-back with parsing. A short deny-list, matched by whole words (`rm -rf /`,
+back with parsing. A short deny-list, matched by whole words outside quoted
+text (`rm -rf /`,
 `chmod 777`, `mkfs`, `dd`, `format`, `chown`, a write to a disk device), is
 refused outright in every mode. An allowlisted interpreter, test runner or
 build runs whatever its arguments and the project choose — a program to run or
@@ -328,19 +330,26 @@ A new session in a repository does not start from nothing:
   `.claudinio/MEMORY.md` however the path is spelled — that path check is the
   real guard. `finalize_plan` will not take it as a plan file. The shell guard
   is best-effort defence in depth on top, not a boundary: a shell call whose
-  text mentions `MEMORY.md`, or the `.claudinio` folder itself — any spelling
-  that does not continue into another name or a plain path inside it, brace
-  lists and Windows backslashes included (`rm -rf .claudinio`,
-  `cp -r q/. .claudinio/`, `.claudinio/M*`, `{.claudinio,}`, `.claudinio\*`),
+  text mentions `MEMORY.md`, or the `.claudinio` folder itself — written out,
+  not continued into another name or a plain path inside it, with a brace list
+  around it, Windows backslashes and cmd's `^` escape included
+  (`rm -rf .claudinio`, `cp -r q/. .claudinio/`, `.claudinio/M*`,
+  `{.claudinio,}`, `.claudinio\*`, `.claudi^nio`),
   in its command, its working folder or its stdin — or a name
   that resolves to the file through a link on disk — is refused unless it is a
   plain read (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `file`, `grep`,
   `git log`/`diff`/`show`/`status`/`blame`, with no pipe); YOLO mode and hooks
   do not open it. It scans text, so it does not see a path the command builds
-  while it runs (a variable, a script), a glob that spells the folder's own
-  name (`.c*`), a parent folder (`rm -rf .`) or a hard link — and such a
-  command is not necessarily asked about either: Builder's allowlisted
-  interpreters run a script unasked. You can edit the file yourself.
+  while it runs (a variable, a script), a glob or brace list that spells the
+  folder's own name (`.c*`, `.claudi{n,}io`), a name relative to a folder the
+  command first moves into (`cd .claudinio/plans && cp x ../M*`), a parent
+  folder (`rm -rf .`) or a hard link. Those ask in Builder, so YOLO or a hook's
+  `allow` runs them, and Builder's allowlisted interpreters run a script
+  unasked. It also errs the other way: a command that only names the folder in
+  text — `echo '.claudinio/' >> .gitignore`, `git commit -m "ignore
+  .claudinio"`, `git add .claudinio/plans/*.md` — is refused, so you run it
+  yourself (or the agent edits `.gitignore` with `edit_file`). You can edit
+  the memory file yourself.
 - **Neither ever goes into the system prompt**, which stays the same bytes from
   one request to the next so the provider can cache it, and neither is sent
   again later in the session; a session that continues another gets the

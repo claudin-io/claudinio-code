@@ -1182,3 +1182,20 @@ A review of `11395c2..b76aca6` found new holes, all of them checked in a real sh
 Not changed: design B's `memory.md` trigger still hard-Denies `git add MEMORY.md` and `rg MEMORY.md`, because the design asks for it.
 
 **Line counts** (production): `permissions.rs` 520 → 561, `project_memory.rs` 684 → 696. Both are still well under the 1,114 and 956 they had before the simplification. **Checks:** Rust lib 1,529 passed / 10 ignored, vitest 977 passed.
+
+#### Second review of the simplified rule
+
+A review of `b76aca6..69b7ba6` reported nine findings. Each was checked against the code, and in a real shell where the shell could run it. The fixes make the rule ask or refuse more often. The two exceptions stop refusing ordinary commands. None of them adds parsing.
+
+- **Deny-list inside quotes** (`896c546`, two findings): `d50ba53` split the text at `(`, `)`, `;`, `&` and `|` without regard to quotes. So `git commit -m "chore(format): x"`, `git commit -m "fix(dd): x"`, `git log --grep "(format)"` and `git commit -m "never chmod 777 again"` were Denied in every mode, including the git operator, and nothing could lift that. Quoted text is now blanked before the split. A deliberate behaviour change follows: a destructive command spelled inside quotes (`sh -c 'dd …'`) now asks instead of being refused by the tripwire.
+- **Auto-approved `git push` naming a program** (`a99ed0a`): with `auto_approve_git`, `git push --receive-pack='touch PWNED' ../dst HEAD:main` ran unasked. Git runs that program through the shell for a local remote. `--ex=PROG` did the same in a scratch repo. This was pre-existing on `main`. A push with any word starting `--r` or `--e` now asks.
+- **cmd's `^` escape** (`f32ab41`): `.claudi^nio\MEMORY.m^d` reaches the folder under `cmd /c`, but the scan saw neither name. The unquoted pass of `mentions_memory` and `shell_words` now drop `^` on every platform. On sh `^` is a plain character, so this only refuses more. This was not run on a Windows host.
+- **cmd's working-folder lookup** (`3646c03`): cmd.exe looks in the working folder before PATH, so a `git.cmd` or `ls.bat` in the repository would run on an Auto `git status`. The child now gets `NoDefaultCurrentDirectoryInExePath=1`. The test reads the env of the built `Command`, because this harness's own environment already sets the variable and an echo-based test passed without the fix. This was not run on a Windows host.
+- **Gaps documented, not parsed** (`26a3b72` and the docs commit): a brace list inside the folder's name (`rm -rf .claudi{n,}io` deleted `.claudinio` under `bash --posix`) and a relative glob after a `cd` into a subfolder (`cd .claudinio/plans && cp evil ../MEMORY.m?` overwrote it). Both were checked in a real shell. Catching them would mean expanding braces, including `{m..o}` sequences, and modelling `cd`, `pushd`, `git -C` and `find -execdir`. That is the parser this section removed. They are now listed next to `.c*` in README.md, README.pt-BR.md, ARCHITECTURE.md and the `mentions_memory` comment, and "any spelling" is gone. `what_the_memory_guard_cannot_see_still_asks` pins that each one asks in Builder and is refused in Brain.
+
+Not changed:
+
+- The raw scan still hard-Denies ordinary commands that only name the folder in text, such as `echo '.claudinio/' >> .gitignore`, `git commit -m "chore: ignore .claudinio"` and `git add .claudinio/plans/*.md`, along with the `git add MEMORY.md` and `rg MEMORY.md` noted above. Design B asks for this. It is now recorded as a known cost in both READMEs and in ARCHITECTURE.md.
+- `date -u`, `date -u +%s` and `date +"%Y-%m-%d %H"` ask in Builder and are refused in Brain. They are outside the everyday corpus, and allowing them would mean adding option and quote handling, which this rule does not do.
+
+**Line counts** (production, counted like the lib's `production_lines`): `permissions.rs` 561 → 588, `project_memory.rs` 696 → 697, `tools/bash.rs` 282 → 292. **Checks:** Rust lib 1,532 passed / 10 ignored, examples pass, clippy and fmt clean, tsc clean, vitest 977 passed.

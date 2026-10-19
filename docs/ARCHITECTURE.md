@@ -246,7 +246,9 @@ Builder, `bash_permission_brain` in Brain) only when, after the tokens
 blank but space and tab (a form feed or NBSP splits a word for Rust and not
 for sh), no backquote, `$`, `<`, `>`, `&`, `;`, backslash, brace,
 parenthesis or glob — on Windows, where it runs under `cmd /c`, which
-expands `%NAME%` before it finds `&` and `|`, no `%`, `^` or `!` either — and
+expands `%NAME%` before it finds `&` and `|`, no `%`, `^` or `!` either, and
+the child runs with `NoDefaultCurrentDirectoryInExePath` so an allowlisted
+name is not a `git.cmd` or `ls.bat` in the working folder — and
 no `||`; every `|`-part closes its own quotes; the
 first part starts with an allowlist entry (Builder's `BASH_ALLOWLIST`:
 git inspection, reads, builds, test runners, `node`/`python`/`pnpm run`;
@@ -256,9 +258,12 @@ one of `PIPE_FILTERS` (`head`, `tail`, `wc`, `grep`, `cut`, `tr`, `nl`); and
 the write check sees nothing. With no backslash, `$` or backquote, quotes do
 not escape, so each `|` the split sees is a pipe the shell sees, and no word
 expands into another (only `~` becomes the home folder). Everything else asks in Builder (YOLO or a
-hook's `allow` may approve it) and is refused in Brain. The deny-list
-(`on_the_deny_list`, whole words, so `git log --format %H` or `cp /tmp/x .` is
-not refused) and the memory guard run first and refuse outright; a
+hook's `allow` may approve it) and is refused in Brain. The git operator (the
+one session with `auto_approve_git`) also runs `git add`, `git commit` and
+`git push` unasked, except a push with a word starting `--r` or `--e`
+(`--receive-pack`, `--exec` and their abbreviations name a program git runs). The deny-list
+(`on_the_deny_list`, whole words outside quoted text, so `git log --format
+%H`, `cp /tmp/x .` or `git commit -m "fix(dd): x"` is not refused) and the memory guard run first and refuse outright; a
 redirection into a disk or memory device (`> /dev/sda`, `/dev/mem`, quoted or
 not) is Denied — a tripwire for the obvious spelling, not a boundary. The rule replaced a chain
 splitter, per-option `sort`/`uniq` readers, a stdin detector and runner
@@ -574,7 +579,7 @@ dots, so `.claudinio.json` is not it) — a brace list (`{.claudinio,}`,
 follows with a path of plain names that ends cleanly and has no empty or
 all-dots part (`.claudinio/plans/x.md`); `.claudinio/`, `.claudinio/M*`,
 `{.claudinio/,}` and `.claudinio/plans/..` count — scanned as written and
-again with quotes and backslashes dropped. It reads the whole call (`shell_call_names_memory`): the command, the
+again with quotes, backslashes and cmd's escape `^` dropped. It reads the whole call (`shell_call_names_memory`): the command, the
 `stdin`, a `workdir` inside `.claudinio`, and, with the workspace known, the
 names resolved on disk like the path guard does, so a link an earlier call
 made (`ln -s .claudinio c`, then `>> c/M*`) is seen. A plain read —
@@ -582,9 +587,15 @@ made (`ln -s .claudinio c`, then `>> c/M*`) is seen. A plain read —
 log`/`diff`/`show`/`status`/`blame`, no pipe, under the shell rule's first
 clause, nothing the write check sees (`permissions::plain_memory_read`) — is
 not refused. It cannot see a path the command builds at run time (a variable,
-a script assembling the name), a glob that spells the folder's own name
-(`.c*`), a copy or delete of a parent folder (`rm -rf .`), or a hard link to
-the file. Nothing else stands there for certain: the allowlisted interpreters
+a script assembling the name), a glob or brace list that spells the folder's
+own name (`.c*`, `.claudi{n,}io`), a name relative to a folder the command
+moves into first (`cd .claudinio/plans && cp x ../M*`; `pushd`, `git -C`,
+`find -execdir` alike), a copy or delete of a parent folder (`rm -rf .`), or a
+hard link to the file; each of those asks in Builder and is refused in Brain
+(`what_the_memory_guard_cannot_see_still_asks`). It errs the other way too: a
+command that only names the folder in text (`echo '.claudinio/' >>
+.gitignore`, `git commit -m "ignore .claudinio"`, `git add
+.claudinio/plans/*.md`) is refused, a known cost of the raw scan. Nothing else stands there for certain: the allowlisted interpreters
 (`node `, `python `) run a script unasked even outside YOLO, and YOLO waives
 the approval of the rest; a file written by an MCP server is
 outside it too. Note the memory is no more trusted than `AGENTS.md`, which the

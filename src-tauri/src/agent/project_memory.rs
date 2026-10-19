@@ -318,9 +318,10 @@ fn win32_name(text: &str) -> &str {
 ///
 /// Best-effort defence in depth, not a boundary: `is_memory_path` on the edit
 /// tools is the exact guard. The scan does not see a path the command builds
-/// while it runs (a variable, a script assembling the name), a glob that
-/// spells the folder's own name (`.c*`), a parent folder (`rm -rf .`), or a
-/// hard link. The docs say so.
+/// while it runs (a variable, a script assembling the name), a glob or brace
+/// list that spells the folder's own name (`.c*`, `.claudi{n,}io`), a name
+/// relative to a folder the command moves into (`cd .claudinio/plans && cp x
+/// ../M*`), a parent folder (`rm -rf .`), or a hard link. The docs say so.
 pub fn mentions_memory(command: &str) -> bool {
     let lower = command.to_lowercase();
     let unquoted: String = lower.chars().filter(|c| !"'\"\\^".contains(*c)).collect();
