@@ -88,7 +88,7 @@ context window full of exploration.
 Builder edits files itself: each `edit_file` is shown to you as a diff to
 approve — a new file too, as a diff from nothing (an empty `old_string` creates
 it, missing folders included), and an `old_string` must match one place unless
-the call says `replace_all` — and a shell command that writes a file is asked about the same way,
+the call says `replace_all`, which the approval card shows with its count — and a shell command that writes a file is asked about the same way,
 even one whose prefix is allowlisted. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a

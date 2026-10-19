@@ -89,7 +89,7 @@ a execução não herdar uma janela de contexto cheia de exploração.
 O Builder edita os arquivos ele mesmo: cada `edit_file` aparece para você como
 um diff a aprovar — um arquivo novo também, como diff a partir do nada (um
 `old_string` vazio o cria, pastas que faltam incluídas), e um `old_string` precisa
-casar com um só lugar, a menos que a chamada peça `replace_all` — e um comando de shell que grava um arquivo é perguntado do
+casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão de aprovação mostra com a contagem — e um comando de shell que grava um arquivo é perguntado do
 mesmo jeito, mesmo quando o prefixo está na allowlist. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais

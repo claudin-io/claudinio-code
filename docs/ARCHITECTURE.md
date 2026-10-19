@@ -133,7 +133,8 @@ asset rules, Low-Level Design guidance and Mermaid catalog are the built-in
 `plan` skill (`agent/skills/plan.md`), listed in the catalog and read by
 reference. Because the prompt points at it by name, `plan` is reserved
 (`RESERVED_BUILTIN_SKILLS`): a project, user or plugin skill of that name is
-ignored rather than allowed to shadow it. Under v1 the Brain-exploring nudge is
+ignored rather than allowed to shadow it, and installing a remote skill under
+that name is refused before anything is written. Under v1 the Brain-exploring nudge is
 the pre-phase text too (`nudges::brain_exploring`), so it does not contradict
 v1's interview. The eval selects either prompt with `--prompt-version`.
 Capitals survive only where `v2::KEPT_IMPERATIVES` cites the failure
@@ -202,14 +203,19 @@ and the read that gets them (`lines 412-1880 of 1-2400; read_file with
 start_line=412, end_line=1880`), counted from a ranged read's `start_line` and
 past `read_file`'s own size warning; for anything else the whole output is first
 written to a temp file, as `output_trim` does for `bash`, and the marker names
-it (the file is the user's alone, 0600 in a 0700 folder, named by the hash of
+it (the file is the user's alone, 0600 in a 0700 folder — a folder that is a
+link, another user's or writable by others gets no save and none of its files
+is trusted — named by the hash of
 its content so a repeated output is the same file and `loop_watch` still sees
 the repeat, and saved outputs older than a week are swept on the first save of
 a run; `read_file`, `grep` and the other read tools may open these files, and
 only these, outside the workspace). `fit_round`, which holds one round's results to a share together, re-cuts
 a capped result from what it kept and keeps its true size and hint; `prune`
 reads the same marker (or the head-only note older sessions carry) to know a
-capped read is not the whole file. A marker counts only when its numbers add
+capped read is not the whole file. Every cut lands on a character boundary,
+and the lines a read cut left out are counted on bytes, so text in Portuguese,
+CJK or emoji never splits a character (a slice inside one panicked the run
+until Phase 6f). A marker counts only when its numbers add
 up to the text around it.
 
 An `edit_file` that leaves a file the tree-sitter grammars cover no longer
@@ -471,11 +477,14 @@ proposes the whole file as a diff from nothing, and applying it makes the
 missing folders and writes with `create_new`, so it never overwrites. The
 workspace and spec guards run first, as for any edit; a new file needs an
 absolute path, because the guard resolves a relative one against the workspace
-while the write would resolve it against the process's directory.
+while the write would resolve it against the process's directory; for the same
+reason a read or an edit by a relative path that is not found asks for the
+absolute path instead of offering to create the file.
 Read-before-edit (`ReadTracker`) has nothing to check on a missing path, and
 records a created file as fully read. An `old_string` that occurs more than once
 is refused with the count unless the call sets `replace_all`, and the count is
-taken again on the file at approval.
+taken again on the file at approval; a `replace_all` proposal carries its count,
+and the approval card says "Replaces all N occurrences".
 
 **2. What the webview may touch.** The chat renders untrusted content, so treat
 the frontend as a place where attacker-influenced script could run. The
