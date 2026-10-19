@@ -297,31 +297,34 @@ const DEVICE_SINKS: &[&str] = &["null", "stdout", "stderr", "tty"];
 /// The deny-list, a tripwire for the obvious spelling of a destructive
 /// command and not a boundary: it matters only for a command that would
 /// otherwise run unasked (YOLO, a hook's `allow`), since everything off the
-/// rule already asks. `command` is Denied when, in its lowercased text or in
-/// its normalized text (`normalized`: no quote, backquote, backslash or `^`,
-/// blanks collapsed), a `BASH_BLACKLIST` entry appears anywhere, a redirect
-/// names a device that is not a stream sink (`redirects_into_a_device`), or
-/// cmd's `format X:` runs (`formats_a_drive`). A substring catches a path
-/// (`/bin/rm -rf /`), a wrapper (`time dd if=`), a quote (`r''m -rf /`), a
-/// backslash (`d\d if=`) and a heredoc for free; the word scanner it
-/// replaced missed each in turn. The accepted cost, as on `main`: ordinary
-/// text holding an entry is Denied too (`grep chown src`, `git commit -m
-/// "fix: chown "`, `cp /tmp/x .`), and no parsing wins it back.
+/// rule already asks. `command` is Denied when, in its raw text or in its
+/// normalized text (`normalized`: no quote, backquote, backslash or `^`,
+/// blanks collapsed), a `BASH_BLACKLIST` entry appears anywhere (both
+/// lowercased), a redirect names a device that is not a stream sink
+/// (`redirects_into_a_device`), or cmd's `format X:` runs
+/// (`formats_a_drive`). A substring catches a path (`/bin/rm -rf /`), a
+/// wrapper (`time dd if=`), a quote (`r''m -rf /`), a backslash
+/// (`d\d if=`) and a heredoc for free; the word scanner it replaced missed
+/// each in turn. What it does not see is a spelling no entry names once
+/// those characters are gone, such as bash's `$'\x2f'`. The accepted cost,
+/// as on `main`: ordinary text holding an entry is Denied too (`grep chown
+/// src`, `git commit -m "fix: chown "`, `cp /tmp/x .`), and no parsing wins
+/// it back.
 fn on_the_deny_list(command: &str) -> bool {
-    let raw = command.to_lowercase();
-    let flat = normalized(command);
-    [raw, flat].iter().any(|text| {
-        BASH_BLACKLIST.iter().any(|entry| text.contains(entry))
-            || redirects_into_a_device(text)
-            || formats_a_drive(text)
-    })
+    [command.to_string(), normalized(command)]
+        .iter()
+        .any(|text| {
+            let lower = text.to_lowercase();
+            BASH_BLACKLIST.iter().any(|entry| lower.contains(entry))
+                || redirects_into_a_device(text)
+                || formats_a_drive(&lower)
+        })
 }
 
-/// `command` lowercased, with every `'`, `"`, backquote, backslash and `^`
-/// removed and every run of blanks one space: the word sh (or cmd) runs.
+/// `command` with every `'`, `"`, backquote, backslash and `^` removed and
+/// every run of blanks one space: the word sh (or cmd) runs.
 fn normalized(command: &str) -> String {
     command
-        .to_lowercase()
         .replace(['\'', '"', '`', '\\', '^'], "")
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -329,8 +332,10 @@ fn normalized(command: &str) -> String {
 }
 
 /// A redirect (`>`, `>>`, `>|`, `>&`, after a digit or `&`, spaced or not)
-/// into `/dev/` whose target is not exactly a stream sink (`DEVICE_SINKS`,
-/// or `fd/N`). `/dev/sda`, `/dev/root` and `/dev//sda` are refused alike.
+/// into `/dev/` (in any case) whose target is not exactly a stream sink
+/// (`DEVICE_SINKS`, or `fd/N`; case counts, so `/dev/NULL` is no sink). The
+/// target ends at a blank, an operator, a quote or a backquote.
+/// `/dev/sda`, `/dev/root` and `/dev//sda` are refused alike.
 fn redirects_into_a_device(text: &str) -> bool {
     text.match_indices('>').any(|(at, _)| {
         let rest = text[at + 1..]
@@ -339,11 +344,15 @@ fn redirects_into_a_device(text: &str) -> bool {
         let Some(path) = rest.strip_prefix('/') else {
             return false;
         };
-        let Some(device) = path.trim_start_matches('/').strip_prefix("dev/") else {
+        let path = path.trim_start_matches('/');
+        if !path
+            .get(..4)
+            .is_some_and(|d| d.eq_ignore_ascii_case("dev/"))
+        {
             return false;
-        };
-        let device = device
-            .split(|c: char| c.is_whitespace() || ";|&)<>".contains(c))
+        }
+        let device = path[4..]
+            .split(|c: char| c.is_whitespace() || ";|&)<>'\"`".contains(c))
             .next()
             .unwrap_or("");
         let sink = DEVICE_SINKS.contains(&device)
@@ -356,26 +365,31 @@ fn redirects_into_a_device(text: &str) -> bool {
 
 /// cmd's `format X:`, on every platform: `format` (or `format.com`,
 /// `format.exe`) where a command starts — the text's start, a blank, `;`,
-/// `&`, `|`, `(`, cmd's `@`, or a path separator — then a blank and a drive
-/// letter with its colon. `ruff format src` and `git log --format=%h` are
-/// not it.
+/// `&`, `|`, `(`, cmd's `@`, the `,` and `=` cmd skips before a name, or a
+/// path separator — then a blank and a drive letter with its colon, with
+/// any `/` switches before it. `ruff format src` and `git log --format=%h`
+/// are not it.
 fn formats_a_drive(text: &str) -> bool {
     text.match_indices("format").any(|(at, word)| {
         let starts = text[..at]
             .chars()
             .next_back()
-            .is_none_or(|c| c.is_whitespace() || ";&|(@/\\".contains(c));
+            .is_none_or(|c| c.is_whitespace() || ";&|(@,=/\\".contains(c));
         let after = &text[at + word.len()..];
         let after = after
             .strip_prefix(".com")
             .or_else(|| after.strip_prefix(".exe"))
             .unwrap_or(after);
-        let drive = after.trim_start();
-        let mut chars = drive.chars();
         starts
-            && drive.len() < after.len()
-            && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-            && chars.next() == Some(':')
+            && after.starts_with(char::is_whitespace)
+            && after
+                .split_whitespace()
+                .find(|w| !w.starts_with('/'))
+                .is_some_and(|drive| {
+                    let mut chars = drive.chars();
+                    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                        && chars.next() == Some(':')
+                })
     })
 }
 
@@ -1812,6 +1826,20 @@ mod shell_rule_tests {
         "@FORMAT d: /q /y",
         "ls & @format d: /q /y",
         "(format d:)",
+        // cmd skips `,`, `;` and `=` before a command name, and format takes
+        // its switches before the drive as well as after it.
+        ",format d: /q",
+        "=format d: /q",
+        "ls &,format d: /q /y",
+        "ls &=format d:",
+        "format /q /y d:",
+        "format /q d:",
+        "format /fs:ntfs /q d:",
+        // Only `/dev/null` itself is the null device: `/dev/NULL` is a file
+        // (or a device) under `/dev`, refused as on `main`.
+        "echo x > /dev/NULL",
+        "echo x > /dev/Null",
+        "echo x > /DEV/sda",
     ];
 
     /// Ordinary commands that must reach the rule: none holds an entry, a
@@ -1860,6 +1888,10 @@ mod shell_rule_tests {
         "git commit -m \"$(cat <<'EOF'\nRemove the dd wrapper\nEOF\n)\"",
         "git commit -m \"fix dd\" # x",
         "git commit -m \"50% faster dd\"",
+        // A quote or backquote right after the sink ends its name.
+        "sh -c 'cargo test >/dev/null'",
+        "echo `ls >/dev/null`",
+        "sh -c \"ls 2>/dev/null\"",
     ];
 
     /// The accepted cost, as on `main`: ordinary text that holds an entry is
@@ -1879,6 +1911,17 @@ mod shell_rule_tests {
         "echo x > /dev/shm/scratch.txt",
     ];
 
+    /// The price of the entries `main` lacked (`dd of=`, `parted `, `mkfs `,
+    /// …), kept so every spelling the scanner refused stays refused: text
+    /// that holds one is Denied, which `main` did not do. Accepted, as the
+    /// rows of `DENIED_AS_ON_MAIN` are.
+    const DENIED_BEYOND_MAIN: &[&str] = &[
+        "git commit -m \"departed from x\"",
+        "git commit -m \"add of=x\"",
+        "npm run dd of=x",
+        "grep -rn \"mkfs \" docs",
+    ];
+
     /// Destructive spellings no substring names: they ask, as on `main`. A
     /// tripwire catches the obvious spelling; this is what parsing would
     /// buy, and it is not bought.
@@ -1889,7 +1932,11 @@ mod shell_rule_tests {
     /// Denied is a refusal no approval, YOLO or hook can lift.
     #[test]
     fn the_deny_list_is_a_substring_tripwire_on_the_raw_and_the_normalized_text() {
-        for &c in DENIED.iter().chain(DENIED_AS_ON_MAIN) {
+        for &c in DENIED
+            .iter()
+            .chain(DENIED_AS_ON_MAIN)
+            .chain(DENIED_BEYOND_MAIN)
+        {
             assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
             assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
         }
@@ -1927,6 +1974,7 @@ mod shell_rule_tests {
             .iter()
             .chain(NOT_DENIED)
             .chain(DENIED_AS_ON_MAIN)
+            .chain(DENIED_BEYOND_MAIN)
             .chain(ASKS_AS_ON_MAIN)
             .chain(FOUND_RUNNING_UNASKED)
             .chain(FOUND_READING_STDIN)
