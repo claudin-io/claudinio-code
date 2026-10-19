@@ -65,6 +65,41 @@ pub fn not_read(path: &str) -> String {
     )
 }
 
+/// Read-before-edit, when the file was read but not the text being replaced,
+/// and the text is in the file at `line`.
+pub fn partial_read_at_line(path: &str, line: usize) -> String {
+    format!(
+        "{} The text is at line {line}. Call read_file with start_line/end_line \
+         covering it, then retry edit_file.",
+        partial_read(path)
+    )
+}
+
+/// Read-before-edit, when the text being replaced is not in the file at all.
+pub fn partial_read_not_found(path: &str) -> String {
+    format!(
+        "{} That exact text was not found in the current file — call read_file on it \
+         again, copy old_string verbatim (including indentation), then retry edit_file.",
+        partial_read(path)
+    )
+}
+
+/// Read-before-edit, when the file could not be re-read to locate the text.
+pub fn partial_read_unreadable(path: &str, error: &str) -> String {
+    format!(
+        "{} The file could not be re-read to find it ({error}): check the path, call \
+         read_file on the lines you will change, then retry edit_file.",
+        partial_read(path)
+    )
+}
+
+fn partial_read(path: &str) -> String {
+    format!(
+        "read_file was called on {path}, but you have not read the exact text you're trying \
+         to edit."
+    )
+}
+
 /// The quality gate, with no `run_quality` result in the session.
 pub fn quality_missing(goals: &str) -> String {
     format!(
@@ -129,6 +164,18 @@ pub fn all() -> Vec<(&'static str, String)> {
             lld_missing("tasks_set", ".claudinio/plans/p.md"),
         ),
         ("not_read", not_read("/w/src/a.rs")),
+        (
+            "partial_read_at_line",
+            partial_read_at_line("/w/src/a.rs", 10),
+        ),
+        (
+            "partial_read_not_found",
+            partial_read_not_found("/w/src/a.rs"),
+        ),
+        (
+            "partial_read_unreadable",
+            partial_read_unreadable("/w/src/a.rs", "permission denied"),
+        ),
         ("quality_missing", quality_missing("golden-g-1")),
         ("quality_stale", quality_stale("golden-g-1")),
         (
@@ -164,6 +211,27 @@ mod tests {
             &["write_plan", "## low-level design", "then retry tasks_set"],
         ),
         ("not_read", &["read_file", "then retry edit_file"]),
+        // Read the lines that hold the text, or the file again, then edit.
+        (
+            "partial_read_at_line",
+            &[
+                "line 10",
+                "read_file with start_line/end_line",
+                "then retry edit_file",
+            ],
+        ),
+        (
+            "partial_read_not_found",
+            &[
+                "read_file",
+                "copy old_string verbatim",
+                "then retry edit_file",
+            ],
+        ),
+        (
+            "partial_read_unreadable",
+            &["permission denied", "read_file", "then retry edit_file"],
+        ),
         ("quality_missing", &["call run_quality"]),
         ("quality_stale", &["call run_quality"]),
         ("quality_failed", &["fix the failures", "call run_quality"]),

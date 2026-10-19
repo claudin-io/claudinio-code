@@ -1294,25 +1294,16 @@ impl ReadTracker {
 
         // Not yet read. Point at where the text really is so the model can read
         // the correct range instead of guessing (the source of the old loop).
-        let hint = match std::fs::read_to_string(path) {
+        Err(match std::fs::read_to_string(path) {
             Ok(content) => match content.find(old_string) {
                 Some(byte_idx) => {
-                    let line_num = content[..byte_idx].matches('\n').count() + 1;
-                    format!(
-                        " The text is at line {line_num}. Call read_file with start_line/end_line \
-                         covering it, then edit."
-                    )
+                    let line = content[..byte_idx].matches('\n').count() + 1;
+                    crate::agent::gate_text::partial_read_at_line(path, line)
                 }
-                None => " That exact text was not found in the current file — re-read the file \
-                         and copy old_string verbatim, including indentation."
-                    .to_string(),
+                None => crate::agent::gate_text::partial_read_not_found(path),
             },
-            Err(e) => format!(" (could not re-read file: {e})"),
-        };
-        Err(format!(
-            "read_file was called on {path}, but you have not read the exact text you're trying \
-             to edit.{hint}"
-        ))
+            Err(e) => crate::agent::gate_text::partial_read_unreadable(path, &e.to_string()),
+        })
     }
 }
 
