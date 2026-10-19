@@ -146,6 +146,9 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
     const title = byAction[String(call.args.action ?? "")];
     if (title) return { icon: "globe", title };
   }
+  if (createsFile(call)) {
+    return { icon: toolIcon("edit_file"), title: "Created file" };
+  }
   // A batched update moves several tasks; the title says so.
   if (call.toolName === "tasks_update" && Array.isArray(call.args.updates)) {
     return { icon: toolIcon("tasks_update"), title: TITLES.tasks_set };
@@ -160,6 +163,15 @@ export function toolHeader(call: ToolCallData): { icon: IconName; title: string 
     return { icon: toolIcon("doc_read"), title: "Read the document" };
   }
   return { icon: toolIcon(call.toolName), title: toolTitle(call.toolName) };
+}
+
+/**
+ * An `edit_file` with an empty `old_string` creates its file: the harness
+ * refuses one on a file that exists, so the empty string always means a new
+ * file (lean-harness Phase 3b).
+ */
+export function createsFile(call: Pick<ToolCallData, "toolName" | "args">): boolean {
+  return call.toolName === "edit_file" && call.args.old_string === "";
 }
 
 /** Tools whose body is always shown — small enough to skip the click-to-expand step. */

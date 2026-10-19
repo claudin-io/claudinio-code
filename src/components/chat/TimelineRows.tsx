@@ -1448,7 +1448,8 @@ export const ApprovalCard: Component<{
             fallback={
               <>
                 <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-                  {"Proposed edit"}
+                  {/* An empty old_string creates the file (the harness refuses it on one that exists). */}
+                  {proposal()?.oldString === "" ? "New file" : "Proposed edit"}
                 </span>
                 <span class="truncate font-mono text-[12px] text-ink-muted">
                   {proposal()?.path ?? (props.toolCall.args.path as string)}

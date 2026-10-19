@@ -101,6 +101,15 @@ describe("toolPresentation", () => {
     expect(toolHeader(makeCall("bash", { command: "/usr/bin/grep pattern file" })).title).toBe("Searched files");
   });
 
+  it("titles an edit_file with an empty old_string as a created file", () => {
+    expect(toolHeader(makeCall("edit_file", { path: "a.md", old_string: "", new_string: "x" })).title).toBe(
+      "Created file",
+    );
+    expect(toolHeader(makeCall("edit_file", { path: "a.md", old_string: "x", new_string: "y" })).title).toBe(
+      "Edited file",
+    );
+  });
+
   it("keeps Ran command for bash that merely mentions grep", () => {
     expect(toolHeader(makeCall("bash", { command: "cat file | grep foo" })).title).toBe("Ran command");
     expect(toolHeader(makeCall("bash", { command: "git status" })).title).toBe("Ran command");
@@ -169,6 +178,23 @@ describe("ToolBody", () => {
     const diff = document.querySelector('[data-testid="diff-viewer"]');
     expect(diff).not.toBeNull();
     expect(diff?.getAttribute("data-language")).toBe("typescript");
+    dispose();
+  });
+
+  // An empty old_string creates the file (lean-harness Phase 3b): the
+  // timeline says so, and the diff runs from nothing.
+  it("labels an edit_file that creates a file as a new file, every line added", () => {
+    const call = makeCall("edit_file", { path: "docs/NEW.md", old_string: "", new_string: "# New\n" });
+    const dispose = render(() => <ToolBody call={call} />, document.body);
+    expect(document.body.textContent).toContain("New file");
+    expect(document.querySelector('[data-testid="diff-viewer"]')?.textContent).toBe("|# New\n");
+    dispose();
+  });
+
+  it("does not label an ordinary edit as a new file", () => {
+    const call = makeCall("edit_file", { path: "src/foo.ts", old_string: "a", new_string: "b" });
+    const dispose = render(() => <ToolBody call={call} />, document.body);
+    expect(document.body.textContent).not.toContain("New file");
     dispose();
   });
 

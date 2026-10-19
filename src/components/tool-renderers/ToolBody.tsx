@@ -24,7 +24,14 @@ import { Icon, toolIcon, type IconName } from "../Icon";
 import { DiffViewer } from "../DiffViewer";
 import { ProseContent } from "../ProseContent";
 import { renderMarkdown, escapeHtml } from "../../lib/markdown";
-import { describeTaskUpdate, detectLanguageFromPath, parseOutline, taskUpdates, toolTitle } from "./toolPresentation";
+import {
+  createsFile,
+  describeTaskUpdate,
+  detectLanguageFromPath,
+  parseOutline,
+  taskUpdates,
+  toolTitle,
+} from "./toolPresentation";
 import { parseLineList, UNCHANGED_MARK, type ListRow } from "./lineResults";
 
 // The result goes straight to `innerHTML`, and both inputs are untrusted: the
@@ -637,6 +644,13 @@ const SkillsBody: Component<{ action: string; result?: ToolResultData }> = (prop
   </Show>
 );
 
+/** Marks an `edit_file` that creates its file; the diff below it is all additions. */
+const NewFileBadge: Component = () => (
+  <span class="mb-1 inline-block rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
+    {"New file"}
+  </span>
+);
+
 export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }> = (props) => {
   const name = () => props.call.toolName;
 
@@ -651,6 +665,9 @@ export const ToolBody: Component<{ call: ToolCallData; result?: ToolResultData }
         />
       </Match>
       <Match when={name() === "edit_file"}>
+        <Show when={createsFile(props.call)}>
+          <NewFileBadge />
+        </Show>
         <div class="overflow-hidden rounded border border-border-subtle">
           <DiffViewer
             original={(props.call.args.old_string as string) ?? ""}
