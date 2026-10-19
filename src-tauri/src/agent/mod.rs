@@ -22,6 +22,7 @@ pub mod plugins;
 pub mod prompt;
 pub mod provider;
 pub mod prune;
+pub mod result_cap;
 pub mod retry;
 pub mod route;
 pub mod run_loop;

@@ -18,6 +18,11 @@ export interface ListRow {
 /** What the live result event appends when it cuts an output short. */
 const TRUNCATED = /\.\.\.\(truncated, \d+ chars total\)$/;
 
+/** The line the history cap puts between the head and the tail it kept
+ * (`src-tauri/src/agent/result_cap.rs`); a reloaded session shows the
+ * history copy. */
+const CAP_MARKER = /^\[… \d+ of \d+ chars omitted.* …\]$/;
+
 /** How the history copy of a repeated `read_file` starts. */
 export const UNCHANGED_MARK = "[unchanged: ";
 
@@ -26,7 +31,7 @@ export const UNCHANGED_MARK = "[unchanged: ";
  * (a match on an empty line is written `12: `). */
 function wholeLines(output: string): string[] {
   const text = output.replace(/\n+$/, "");
-  if (!TRUNCATED.test(text)) return text.split("\n");
+  if (!TRUNCATED.test(text)) return text.split("\n").filter((l) => !CAP_MARKER.test(l));
   const lines = text.replace(TRUNCATED, "").split("\n");
   lines.pop();
   return lines;

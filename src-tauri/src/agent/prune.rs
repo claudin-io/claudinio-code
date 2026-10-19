@@ -830,15 +830,14 @@ const NOT_RUN_PREFIXES: [&str; 4] = [
     "Edit rejected",
     "Interrupted by the user",
 ];
-/// How the result cap marks what it cut (`tool_exec::truncate`).
-const CAPPED_MARK: &str = "...(truncated, ";
 
 /// Which results in a history are less than what their tool returned.
 struct ResultKinds<'a> {
     /// The tool failed or never ran, a prune cut the text, or it is a pointer
     /// to an earlier read. None of these can stand in for another result.
     partial: HashSet<&'a str>,
-    /// Cut by the result cap: a real result, but not all of it.
+    /// Cut by the result cap (`result_cap`, either marker): a real result,
+    /// but not all of it.
     capped: HashSet<&'a str>,
 }
 
@@ -863,7 +862,7 @@ impl<'a> ResultKinds<'a> {
                 || NOT_RUN_PREFIXES.iter().any(|p| text.starts_with(p))
             {
                 kinds.partial.insert(tool_use_id.as_str());
-            } else if text.ends_with(" chars total)") && text.contains(CAPPED_MARK) {
+            } else if crate::agent::result_cap::parse(&text).is_some() {
                 kinds.capped.insert(tool_use_id.as_str());
             }
         }
@@ -2095,6 +2094,22 @@ mod tests {
             ("r1", lib.clone(), &capped(2_000)),
             ("r2", lib.clone(), &capped(2_000)),
         ]);
+        assert_eq!(plan_lossless(&same).truncate_results, vec!["r1"]);
+    }
+
+    // The same rule for a read the Phase 6 cap cut (head, marker, tail): it
+    // is a real result, but not all of the file.
+    #[test]
+    fn a_read_cut_by_the_head_and_tail_cap_does_not_replace_a_fuller_copy() {
+        let body = "fn body() {}\n".repeat(400);
+        let lib = json!({"path": "src/lib.rs"});
+        // More than half the file: only knowing it was capped keeps the
+        // fuller copy.
+        let capped = crate::agent::result_cap::cap("read_file", &body, 3_000);
+        assert!(capped.len() * 2 > body.len());
+        let shrunk = old_reads(&[("r1", lib.clone(), &body), ("r2", lib.clone(), &capped)]);
+        assert!(plan_lossless(&shrunk).is_empty());
+        let same = old_reads(&[("r1", lib.clone(), &capped), ("r2", lib.clone(), &capped)]);
         assert_eq!(plan_lossless(&same).truncate_results, vec!["r1"]);
     }
 

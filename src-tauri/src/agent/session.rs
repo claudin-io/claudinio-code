@@ -25,9 +25,10 @@ pub use crate::agent::events::AgentEvent;
 pub use crate::agent::handoff::{HandoffReason, HandoffSpec, RunOutcome, compact_history};
 pub(crate) use crate::agent::handoff::{accept_prune, shed_options};
 pub(crate) use crate::agent::judge::loop_verdict;
+pub(crate) use crate::agent::result_cap::fit_round;
 pub use crate::agent::run_loop::{run_workflow, run_workflow_with_profile};
 pub(crate) use crate::agent::tool_exec::{
-    MAX_STOP_HOOK_BLOCKS, deny_tool, fit_round, run_tool, tool_response_for_hook,
+    MAX_STOP_HOOK_BLOCKS, deny_tool, run_tool, tool_response_for_hook,
 };
 
 /// Context window of the supported models (claudinio and claudius: 256K).

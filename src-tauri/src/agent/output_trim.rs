@@ -182,14 +182,15 @@ fn block_state(command: &str, b: &Block, total_lines: usize) -> String {
     )
 }
 
-/// Write the full output where the model can read it back. Best effort.
-fn save_full(text: &str) -> Option<String> {
+/// Write the full output where the model can read it back, in a file named
+/// after `kind` (`bash`, or `result` for a capped tool result). Best effort.
+pub(crate) fn save_full(kind: &str, text: &str) -> Option<String> {
     let dir = std::env::temp_dir().join("claudinio-code").join("outputs");
     std::fs::create_dir_all(&dir).ok()?;
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!(
-        "bash-{}-{}-{seq}.log",
+        "{kind}-{}-{}-{seq}.log",
         crate::agent::persist::now_ms(),
         std::process::id()
     );
@@ -243,7 +244,7 @@ pub async fn fit(
         _ => None,
     };
     let kept = select(&blocks, scores.as_deref(), budget);
-    let path = save_full(&text);
+    let path = save_full("bash", &text);
     (render(&blocks, &kept, text.len(), path.as_deref()), cost)
 }
 

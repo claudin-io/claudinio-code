@@ -18,6 +18,7 @@ use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::prompt::{build_spec_prompt_section, deferred_tools, run_prefix};
 use crate::agent::provider::{AgentConfig, ContentBlock, Message};
+use crate::agent::result_cap::fit_round;
 use crate::agent::retry::stream_message_with_retry;
 use crate::agent::route::route_first_prompt;
 use crate::agent::run_state::{CostLedger, GoldenLoopState, GuardState};
@@ -29,7 +30,7 @@ use crate::agent::session::{
 use crate::agent::subagent;
 use crate::agent::tool_batch;
 use crate::agent::tool_exec::{
-    MAX_STOP_HOOK_BLOCKS, deny_tool, fit_round, force_explore_mode, handle_mode_switch, run_tool,
+    MAX_STOP_HOOK_BLOCKS, deny_tool, force_explore_mode, handle_mode_switch, run_tool,
     tool_response_for_hook,
 };
 use crate::agent::tools::ToolContext;
@@ -3292,7 +3293,6 @@ mod context_line_tests {
     use super::surface_tests::config_for;
     use super::*;
     use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
-    use crate::agent::tool_exec::{tool_result_block, uncapped};
 
     fn store(tag: &str) -> SessionStore {
         let path = std::env::temp_dir().join(format!(
@@ -3360,106 +3360,6 @@ mod context_line_tests {
             ContextBudget::for_model(&config, &config.builder_model, prefix),
             prefix,
         )
-    }
-
-    #[test]
-    fn a_round_of_results_is_held_to_its_share_together() {
-        let text = |b: &ContentBlock| match b {
-            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
-            _ => panic!("a tool result"),
-        };
-        let round = |sizes: &[usize]| -> Vec<ContentBlock> {
-            sizes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| ContentBlock::tool_result(format!("t{i}"), "x".repeat(*n)))
-                .collect()
-        };
-
-        // Under the cap, or where there is none: untouched.
-        let mut fits = round(&[10_000, 10_000]);
-        fit_round(&mut fits, &[], 30_000);
-        assert!(fits.iter().all(|b| text(b).len() == 10_000));
-        let mut unbounded = round(&[24_000; 6]);
-        fit_round(&mut unbounded, &[], usize::MAX);
-        assert!(unbounded.iter().all(|b| text(b).len() == 24_000));
-
-        // Over it: the small result keeps all of itself, and the room it does
-        // not use goes to the others — (30_000 - 400) / 3 each.
-        let mut over = round(&[15_000, 15_000, 15_000, 400]);
-        fit_round(&mut over, &[], 30_000);
-        for b in &over[..3] {
-            assert!(text(b).starts_with(&"x".repeat(9_866)));
-            assert!(text(b).ends_with("...(truncated, 15000 chars total)"));
-        }
-        assert_eq!(text(&over[3]).len(), 400);
-        let bodies: usize = over.iter().map(|b| uncapped(&text(b)).0.len()).sum();
-        assert!(bodies <= 30_000, "{bodies}");
-    }
-
-    // The cap per result runs first and leaves its note. A round of two such
-    // results is exactly the round's room plus two notes — not "over" — and a
-    // result cut twice must still say how large the file was, not how large
-    // the first cut left it.
-    #[test]
-    fn a_result_cut_twice_still_reports_the_size_it_really_had() {
-        let text = |b: &ContentBlock| match b {
-            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
-            _ => panic!("a tool result"),
-        };
-        let capped = |id: &str, total: usize| tool_result_block(id, &"x".repeat(total), 15_000);
-
-        let mut two = vec![capped("a", 60_000), capped("b", 48_213)];
-        let before: Vec<String> = two.iter().map(&text).collect();
-        fit_round(&mut two, &[], 30_000);
-        assert_eq!(two.iter().map(&text).collect::<Vec<_>>(), before);
-
-        let mut four = vec![
-            capped("a", 60_000),
-            capped("b", 48_213),
-            capped("c", 20_000),
-            capped("d", 16_000),
-        ];
-        fit_round(&mut four, &[], 30_000);
-        for (b, total) in four.iter().zip([60_000, 48_213, 20_000, 16_000]) {
-            let t = text(b);
-            assert!(t.starts_with(&"x".repeat(7_500)) && !t.starts_with(&"x".repeat(7_501)));
-            assert!(
-                t.ends_with(&format!("...(truncated, {total} chars total)")),
-                "{}",
-                &t[7_490..]
-            );
-        }
-    }
-
-    // What the user answered is not a file that can be read again.
-    #[test]
-    fn a_round_never_cuts_what_the_user_answered() {
-        let text = |b: &ContentBlock| match b {
-            ContentBlock::ToolResult { content, .. } => content.as_text().into_owned(),
-            _ => panic!("a tool result"),
-        };
-        let calls = vec![
-            ContentBlock::tool_use("ask", "ask_user", serde_json::json!({})),
-            ContentBlock::tool_use("r1", "read_file", serde_json::json!({})),
-            ContentBlock::tool_use("r2", "read_file", serde_json::json!({})),
-        ];
-        let answer = format!(
-            "Question: which?\nAnswer: {}",
-            "the second one. ".repeat(90)
-        );
-        let mut round = vec![
-            ContentBlock::tool_result("ask", answer.clone()),
-            ContentBlock::tool_result("r1", "x".repeat(2_000)),
-            ContentBlock::tool_result("r2", "y".repeat(2_000)),
-        ];
-        fit_round(&mut round, &calls, 3_864);
-        assert_eq!(text(&round[0]), answer);
-        // The reads share what the answer left.
-        let room = (3_864 - answer.len()) / 2;
-        assert!(text(&round[1]).starts_with(&"x".repeat(room)));
-        assert!(text(&round[1]).ends_with("...(truncated, 2000 chars total)"));
-        assert!(uncapped(&text(&round[2])).0.len() <= room);
     }
 
     fn rewrites(records: &[SessionRecord]) -> usize {

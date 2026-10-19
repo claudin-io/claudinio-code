@@ -118,6 +118,16 @@ describe("parseLineList", () => {
     expect(parseLineList("list_dir", out)).toEqual([{ title: "agent", isDir: true }, { title: "main.rs" }]);
   });
 
+  it("drops the marker a capped history copy carries between its head and tail", () => {
+    const out = [
+      "/ws/src/",
+      "agent/",
+      "[… 5231 of 9000 chars omitted; the full output is in /tmp/r.log; read_file or grep it …]",
+      "main.rs",
+    ].join("\n");
+    expect(parseLineList("list_dir", out)).toEqual([{ title: "agent", isDir: true }, { title: "main.rs" }]);
+  });
+
   it("leaves anything that is not its format to be shown as text", () => {
     expect(parseLineList("list_dir", "Error: not a directory: /ws/x")).toBeNull();
     expect(parseLineList("grep", "rg error: regex parse error")).toBeNull();

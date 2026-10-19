@@ -8,6 +8,7 @@ use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::provider::{AgentConfig, ContentBlock};
+use crate::agent::result_cap::tool_result_block;
 use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, UserAnswer};
 use crate::agent::subagent;
 use crate::agent::tools::{self, ToolContext, ToolOutput};
@@ -185,7 +186,12 @@ pub(super) async fn execute_reported(
                 error: None,
             });
             crate::agent::doc_session::after_tool(tool_name, ctx, event_tx, session_id);
-            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
+            tool_result_block(
+                tool_use_id,
+                tool_name,
+                &content,
+                ctx.limits.tool_result_chars(),
+            )
         }
         Ok(ToolOutput::Rich { content, images }) => rich_result_block(
             tool_use_id,
@@ -417,7 +423,12 @@ pub(crate) async fn run_tool(
                                 output: truncated,
                                 error: None,
                             });
-                            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
+                            tool_result_block(
+                                tool_use_id,
+                                tool_name,
+                                &content,
+                                ctx.limits.tool_result_chars(),
+                            )
                         }
                         _ => {
                             let err = "unexpected output type from bash".to_string();
@@ -468,6 +479,7 @@ pub(crate) async fn run_tool(
                                     });
                                     tool_result_block(
                                         tool_use_id,
+                                        tool_name,
                                         &content,
                                         ctx.limits.tool_result_chars(),
                                     )
@@ -640,7 +652,12 @@ pub(crate) async fn run_tool(
                             output: truncated,
                             error: None,
                         });
-                        tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
+                        tool_result_block(
+                            tool_use_id,
+                            tool_name,
+                            &content,
+                            ctx.limits.tool_result_chars(),
+                        )
                     }
                     Ok(ToolOutput::Rich { content, images }) => rich_result_block(
                         tool_use_id,
@@ -692,7 +709,12 @@ pub(crate) async fn run_tool(
                         output: content.clone(),
                         error: None,
                     });
-                    tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
+                    tool_result_block(
+                        tool_use_id,
+                        tool_name,
+                        &content,
+                        ctx.limits.tool_result_chars(),
+                    )
                 }
                 Ok(ToolOutput::Rich { content, images }) => rich_result_block(
                     tool_use_id,
@@ -1231,6 +1253,9 @@ async fn ask_user(
     ContentBlock::tool_result(tool_use_id, &compiled)
 }
 
+/// The head of `s` for the live `ToolResult` event, which the timeline shows
+/// (`lineResults.ts` reads this note back); the history copy is capped by
+/// `result_cap` instead.
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
         // Respect char boundaries so we never slice mid-codepoint.
@@ -1244,10 +1269,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Build a truncated tool_result block for the conversation history.
-/// The event stream already truncates to MAX_EVENT_CHARS (~2k) for display;
-/// this cap limits the history copy so a giant tool result (e.g. a subagent
-/// report, file read, or search) can't blow up the context.
 /// Replace the `text` of a `browser` type action with a placeholder.
 ///
 /// Everything else about the call stays visible — the selector matters for
@@ -1283,7 +1304,12 @@ async fn run_and_report(
                 output: truncate(&content, 2000),
                 error: None,
             });
-            tool_result_block(tool_use_id, &content, ctx.limits.tool_result_chars())
+            tool_result_block(
+                tool_use_id,
+                tool_name,
+                &content,
+                ctx.limits.tool_result_chars(),
+            )
         }
         Ok(ToolOutput::Rich { content, images }) => rich_result_block(
             tool_use_id,
@@ -1315,113 +1341,6 @@ async fn run_and_report(
     }
 }
 
-/// The history copy of a tool result, cut to `max_chars`
-/// (`ContextBudget::tool_result_chars`) so one large report, file read or
-/// search cannot take the context — a cap that follows the model's window.
-pub(super) fn tool_result_block(
-    tool_use_id: &str,
-    content: &str,
-    max_chars: usize,
-) -> ContentBlock {
-    ContentBlock::tool_result(tool_use_id, truncate(content, max_chars))
-}
-
-/// What `truncate` appends, split around the size it reports.
-const CAP_NOTE: (&str, &str) = ("...(truncated, ", " chars total)");
-
-/// A result's text without the note an earlier cap left on it, and the size
-/// the result had before any cap.
-pub(super) fn uncapped(text: &str) -> (&str, usize) {
-    let (open, close) = CAP_NOTE;
-    if let Some(at) = text.rfind(open)
-        && let Some(total) = text[at + open.len()..]
-            .strip_suffix(close)
-            .and_then(|n| n.parse::<usize>().ok())
-    {
-        return (&text[..at], total);
-    }
-    (text, text.len())
-}
-
-/// The least a result is cut to: below this it says nothing but its own note.
-const MIN_ROUND_SHARE: usize = 200;
-
-/// Hold the results of one round to `round_chars` together
-/// (`ContextBudget::round_chars`). The cap per result does not bound a round:
-/// a model that reads four files in one turn gets four results, and the round
-/// just read is the one thing no prune will cut.
-///
-/// The room is shared the way water fills glasses: a small result keeps all of
-/// itself, and what it does not use goes to the larger ones. A result the cap
-/// per result already cut is cut from its text, not from text plus note, and
-/// still reports the size it really had — that note is the only way the model
-/// learns how much of a file it has not seen. The user's answers (`ask_user`,
-/// looked up in `calls`, the assistant turn these results answer) are never
-/// cut.
-pub(crate) fn fit_round(blocks: &mut [ContentBlock], calls: &[ContentBlock], round_chars: usize) {
-    use crate::agent::provider::ToolResultContent;
-    if round_chars == usize::MAX {
-        return;
-    }
-    let answers: std::collections::HashSet<&str> = calls
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, .. } if name == "ask_user" => Some(id.as_str()),
-            _ => None,
-        })
-        .collect();
-    let mut kept_whole = 0usize;
-    let mut bodies: Vec<usize> = Vec::new();
-    for b in blocks.iter() {
-        if let ContentBlock::ToolResult {
-            tool_use_id,
-            content: ToolResultContent::Text(text),
-            ..
-        } = b
-        {
-            if answers.contains(tool_use_id.as_str()) {
-                kept_whole += text.len();
-            } else {
-                bodies.push(uncapped(text).0.len());
-            }
-        }
-    }
-    let mut room = round_chars.saturating_sub(kept_whole);
-    if bodies.iter().sum::<usize>() <= room {
-        return;
-    }
-    // The level every larger result is cut to.
-    bodies.sort_unstable();
-    let mut level = 0;
-    for (i, len) in bodies.iter().enumerate() {
-        let share = room / (bodies.len() - i);
-        if *len > share {
-            level = share;
-            break;
-        }
-        room -= len;
-    }
-    let level = level.max(MIN_ROUND_SHARE);
-    for b in blocks.iter_mut() {
-        if let ContentBlock::ToolResult {
-            tool_use_id,
-            content: ToolResultContent::Text(text),
-            ..
-        } = b
-            && !answers.contains(tool_use_id.as_str())
-        {
-            let (body, total) = uncapped(text);
-            if body.len() > level {
-                let mut end = level;
-                while end < body.len() && !body.is_char_boundary(end) {
-                    end += 1;
-                }
-                *text = format!("{}{}{total}{}", &body[..end], CAP_NOTE.0, CAP_NOTE.1);
-            }
-        }
-    }
-}
-
 /// Build the tool_result block for a `ToolOutput::Rich`, emitting both the
 /// normal `ToolResult` event and the follow-up `ToolResultImages` one.
 ///
@@ -1443,14 +1362,14 @@ fn rich_result_block(
         error: None,
     });
     if images.is_empty() {
-        return tool_result_block(tool_use_id, content, max_chars);
+        return tool_result_block(tool_use_id, tool_name, content, max_chars);
     }
     let _ = event_tx.send(AgentEvent::ToolResultImages {
         tool_id: tool_use_id.to_string(),
         images: images.clone(),
     });
 
-    let text = truncate(content, max_chars);
+    let text = crate::agent::result_cap::cap(tool_name, content, max_chars);
     let mut blocks = Vec::with_capacity(images.len() + 1);
     // Anthropic rejects empty text blocks, and a tool that returns only an
     // image (a bare screenshot) is a normal case, not an error.
