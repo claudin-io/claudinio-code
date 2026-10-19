@@ -307,7 +307,7 @@ mod tests {
         (
             "golden_renamed",
             &[
-                "Carry on with the renamed ids",
+                "carry on with the renamed ids",
                 "ask the user to add a <goal>",
             ],
         ),
