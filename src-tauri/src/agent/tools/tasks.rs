@@ -31,7 +31,7 @@ pub fn execute_set(
     let _writing = lock_task_list();
     let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
     let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
-    let incoming = keep_stored_details(&prev, incoming);
+    let (incoming, kept) = keep_stored_details(&prev, incoming);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
     check_quality_gate(&prev, &merged, ctx)?;
     crate::agent::persist::append_tasks(Path::new(path), &merged)?;
@@ -41,6 +41,9 @@ pub fn execute_set(
     }
     if preserved > 0 {
         note.push_str(&crate::agent::gate_text::golden_preserved(preserved));
+    }
+    if !kept.is_empty() {
+        note.push_str(&crate::agent::gate_text::kept_stored_details(&kept));
     }
     Ok(format!(
         "Tasks updated: {} task(s) saved.{}",
@@ -421,24 +424,38 @@ fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<T
 /// task that happens to reuse the id. One consequence stays: `tasks_set`
 /// cannot clear the journal of a task it keeps — an empty journal reads as
 /// "not sent".
-fn keep_stored_details(prev: &[TaskItem], incoming: Vec<TaskItem>) -> Vec<TaskItem> {
+///
+/// An unfinished task sent under a new title is the one case the rule cannot
+/// settle: a reword, or a fresh list reusing the ids of one abandoned
+/// unfinished (Phase 4f final review). Its details are kept, and the ids of
+/// such tasks are returned so `tasks_set` names them and says how to start
+/// one clean (a new id).
+fn keep_stored_details(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<TaskItem>, Vec<String>) {
     let same_task = |stored: &TaskItem, t: &TaskItem| {
         stored.status != "done" || stored.title.trim() == t.title.trim()
     };
-    incoming
+    let mut retitled = Vec::new();
+    let tasks = incoming
         .into_iter()
         .map(|mut t| {
             if let Some(stored) = prev.iter().find(|p| p.id == t.id && same_task(p, &t)) {
+                let mut kept = false;
                 if t.description.trim().is_empty() {
+                    kept |= !stored.description.trim().is_empty();
                     t.description = stored.description.clone();
                 }
                 if t.journal.iter().all(|j| j.trim().is_empty()) {
+                    kept |= !stored.journal.is_empty();
                     t.journal = stored.journal.clone();
+                }
+                if kept && stored.title.trim() != t.title.trim() {
+                    retitled.push(t.id.clone());
                 }
             }
             t
         })
-        .collect()
+        .collect();
+    (tasks, retitled)
 }
 
 /// Merge an incoming task list with the previous snapshot, guaranteeing that
@@ -788,6 +805,49 @@ mod lld_gate_tests {
         assert!(after[0].journal.is_empty(), "{:?}", after[0].journal);
         assert_eq!(after[1].description, "README");
         assert_eq!(after[1].journal, ["added a section"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // An unfinished stored task under a new title is either a reword (keep
+    // its details) or a fresh list reusing the id of an abandoned one (do
+    // not). The harness cannot tell, so it keeps them and says which tasks
+    // did, and how to start one clean. A task resent under its own title
+    // is not named: nothing about it is in doubt.
+    #[test]
+    fn tasks_set_names_the_retitled_tasks_that_kept_stored_details() {
+        let (ctx, root) = ctx_for("names-kept-details", None);
+        let store = ctx.session_store_path.clone().unwrap();
+        let task = |id: &str, title: &str, journal: &[&str]| TaskItem {
+            id: id.into(),
+            title: title.into(),
+            description: String::new(),
+            journal: journal.iter().map(|j| j.to_string()).collect(),
+            status: "todo".into(),
+        };
+        crate::agent::persist::append_tasks(
+            Path::new(&store),
+            &[
+                task("t1", "Parse the config", &["uses nom"]),
+                task("t2", "Write the docs", &["added a section"]),
+            ],
+        )
+        .unwrap();
+        let out = execute_set(
+            SetTasksArgs {
+                tasks: vec![
+                    task("t1", "Add a login page", &[]),
+                    task("t2", "Write the docs", &[]),
+                ],
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(
+            out.contains("kept the stored description and journal of t1"),
+            "{out}"
+        );
+        assert!(!out.contains("t2"), "{out}");
+        assert!(out.contains("give it a new id"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

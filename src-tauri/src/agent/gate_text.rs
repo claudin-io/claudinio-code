@@ -191,6 +191,17 @@ pub fn golden_preserved(count: usize) -> String {
     )
 }
 
+/// `tasks_set` kept the stored description and journal of unfinished tasks
+/// it was sent under a new title without them (`tasks::keep_stored_details`):
+/// a reword, or a fresh list reusing the ids of an abandoned one.
+pub fn kept_stored_details(ids: &[String]) -> String {
+    format!(
+        " It kept the stored description and journal of {} (sent without them, under a new \
+         title); if one is a new task rather than a reword, give it a new id.",
+        ids.join(", ")
+    )
+}
+
 /// Every refusal above, by name, rendered with sample arguments: for the
 /// actionability test below and for
 /// `prompt::tests::no_harness_text_orders_a_deferred_tool`. Kept complete by
@@ -243,6 +254,7 @@ pub fn all() -> Vec<(&'static str, String)> {
         ),
         ("golden_renamed", golden_renamed(1)),
         ("golden_preserved", golden_preserved(1)),
+        ("kept_stored_details", kept_stored_details(&["t1".into()])),
     ]
 }
 
@@ -333,6 +345,7 @@ mod tests {
             "golden_preserved",
             &["keep them in the list", "update their status"],
         ),
+        ("kept_stored_details", &["t1", "give it a new id"]),
     ];
 
     #[test]
