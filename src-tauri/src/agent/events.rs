@@ -290,6 +290,13 @@ pub struct EditProposalData {
     pub old_string: String,
     pub new_string: String,
     pub unified_diff: String,
+    /// The approval card shows one old-to-new snippet; with `replace_all`
+    /// the edit rewrites `occurrences` places, and the card says so
+    /// (lean-harness Phase 6f). Defaults keep an older payload readable.
+    #[serde(default)]
+    pub replace_all: bool,
+    #[serde(default)]
+    pub occurrences: usize,
 }
 
 #[cfg(test)]
@@ -610,5 +617,28 @@ mod tests {
             }
             _ => panic!("expected SessionStats"),
         }
+    }
+
+    // The approval card reads these two to say how many places a
+    // replace_all edit rewrites; a payload from before them still parses.
+    #[test]
+    fn an_edit_proposal_carries_replace_all_and_its_occurrences() {
+        let p = EditProposalData {
+            path: "/w/a.py".into(),
+            old_string: "retry()".into(),
+            new_string: "go()".into(),
+            unified_diff: String::new(),
+            replace_all: true,
+            occurrences: 3,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["replaceAll"], json!(true));
+        assert_eq!(v["occurrences"], json!(3));
+        let old: EditProposalData = serde_json::from_value(json!({
+            "path": "/w/a.py", "oldString": "a", "newString": "b", "unifiedDiff": "",
+        }))
+        .unwrap();
+        assert!(!old.replace_all);
+        assert_eq!(old.occurrences, 0);
     }
 }

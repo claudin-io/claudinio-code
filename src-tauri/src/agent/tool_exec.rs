@@ -203,12 +203,15 @@ pub(super) async fn execute_reported(
             new_string,
             unified_diff,
             replace_all,
+            occurrences,
         }) => {
             let proposal = EditProposalData {
                 path: path.clone(),
                 old_string: old_string.clone(),
                 new_string: new_string.clone(),
                 unified_diff,
+                replace_all,
+                occurrences,
             };
             // Reconstruct args since tool_input was moved into execute()
             let mut args = serde_json::json!({
@@ -725,13 +728,16 @@ pub(crate) async fn run_tool(
                     old_string,
                     new_string,
                     unified_diff,
-                    ..
+                    replace_all,
+                    occurrences,
                 }) => {
                     let proposal = EditProposalData {
                         path,
                         old_string,
                         new_string,
                         unified_diff,
+                        replace_all,
+                        occurrences,
                     };
 
                     let approval_key = format!("{session_id}:{tool_use_id}");

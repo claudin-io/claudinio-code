@@ -255,6 +255,8 @@ pub enum ToolOutput {
         /// Carried so an edit applied from the proposal, not from the call's
         /// own input (`tool_exec::execute_reported`), keeps it.
         replace_all: bool,
+        /// See `edit_file::EditDiff::occurrences`.
+        occurrences: usize,
     },
     /// Text plus images the model should actually see (screenshots, images
     /// returned by an MCP server). Producers are responsible for compressing
@@ -796,6 +798,7 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
                 new_string: diff.new_string,
                 unified_diff: diff.unified_diff,
                 replace_all: diff.replace_all,
+                occurrences: diff.occurrences,
             })
         }
         "code_search" => {
@@ -2282,8 +2285,16 @@ mod tests {
             "path": path, "old_string": "retry()", "new_string": "go()", "replace_all": true,
         });
         match edit(&ctx, args.clone()).unwrap() {
-            ToolOutput::EditProposal { unified_diff, .. } => {
+            ToolOutput::EditProposal {
+                unified_diff,
+                replace_all,
+                occurrences,
+                ..
+            } => {
                 assert_eq!(unified_diff.matches("+go()").count(), 2, "{unified_diff}");
+                // The approval card says how many places it rewrites.
+                assert!(replace_all);
+                assert_eq!(occurrences, 2);
             }
             other => panic!("expected a proposal, got {other:?}"),
         }

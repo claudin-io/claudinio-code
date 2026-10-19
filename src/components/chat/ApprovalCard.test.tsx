@@ -59,6 +59,22 @@ describe("ApprovalCard", () => {
     expect(el.querySelector('[data-testid="diff-viewer"]')?.textContent).toBe("|# Notes\nfinal\n");
   });
 
+  // The diff shows one old-to-new snippet; with replace_all the edit rewrites
+  // every occurrence, so the person approving it is told how many.
+  it("says how many places a replace_all edit rewrites", () => {
+    const call = editCall("retry()", "go()");
+    call.editProposal = { ...call.editProposal!, replaceAll: true, occurrences: 3 };
+    const el = mount(call);
+    expect(el.textContent).toContain("Replaces all 3 occurrences");
+  });
+
+  it("says nothing about occurrences for a single-place edit", () => {
+    const call = editCall("retry()", "go()");
+    call.editProposal = { ...call.editProposal!, replaceAll: false, occurrences: 1 };
+    const el = mount(call);
+    expect(el.textContent).not.toContain("occurrence");
+  });
+
   it("keeps the proposed-edit label for a change to an existing file", () => {
     const el = mount(editCall("draft", "final"));
     expect(el.textContent).toContain("Proposed edit");

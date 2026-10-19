@@ -22,6 +22,10 @@ pub struct EditDiff {
     pub unified_diff: String,
     pub applied: bool,
     pub replace_all: bool,
+    /// How many places `old_string` occurs in the file the proposal was read
+    /// from: what a `replace_all` proposal will rewrite, which its one-snippet
+    /// diff on the approval card does not show. 0 for a creation.
+    pub occurrences: usize,
 }
 
 impl EditDiff {
@@ -80,6 +84,11 @@ pub fn preview(args: &EditFileArgs) -> Result<EditDiff, String> {
         unified_diff: unified,
         applied: false,
         replace_all: args.replace_all,
+        occurrences: if args.old_string.is_empty() {
+            0
+        } else {
+            content.matches(args.old_string.as_str()).count()
+        },
     })
 }
 

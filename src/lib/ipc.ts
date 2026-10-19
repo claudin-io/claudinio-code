@@ -442,6 +442,10 @@ export interface EditProposalData {
   oldString: string;
   newString: string;
   unifiedDiff: string;
+  /** The edit rewrites every occurrence of oldString (absent before Phase 6f). */
+  replaceAll?: boolean;
+  /** How many places oldString occurs in the file the proposal was read from. */
+  occurrences?: number;
 }
 
 export interface ToolResultData {
