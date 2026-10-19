@@ -290,11 +290,14 @@ resto do arquivo é seu e é preservado byte a byte.
 
 Uma sessão nova num repositório não começa do zero:
 
-- **As instruções do seu próprio projeto.** A primeira mensagem de cada sessão
-  nova envia também o `AGENTS.md` do workspace — ou o `CLAUDE.md` quando não há
-  `AGENTS.md` — até os seus primeiros 6.000 caracteres, com uma nota dizendo a
-  partir de que linha o agente pode ler o resto. O arquivo é seu; o agente o lê
-  e nunca o escreve.
+- **As instruções do seu próprio projeto.** A primeira mensagem de toda sessão
+  — inclusive a sessão Builder que executa um plano e uma sessão que assume
+  depois de um handoff — envia também o `AGENTS.md` do workspace — ou o
+  `CLAUDE.md` quando não há `AGENTS.md` — até os seus primeiros 6.000
+  caracteres, com uma nota dizendo a partir de que linha o agente pode ler o
+  resto. O arquivo é seu: o harness nunca o escreve, mas o agente pode editá-lo
+  como qualquer outro arquivo (um `edit_file` que você aprova, ou um comando de
+  shell), então ele não é mais protegido que o resto do workspace.
 - **Uma memória do projeto que o harness mantém.** Quando um build termina, o
   `finalize_plan` pode receber até cinco lições de uma linha (200 caracteres
   cada) que uma sessão futura teria de redescobrir. Elas vão para a lista
@@ -316,9 +319,9 @@ Uma sessão nova num repositório não começa do zero:
   Você pode editar o arquivo à mão.
 - **Nenhum dos dois entra no system prompt**, que fica com os mesmos bytes de
   uma requisição para a outra para o provedor poder fazer cache, e nenhum é
-  enviado de novo mais tarde na sessão nem para uma sessão que continua outra
-  (o plano ou o handoff já leva o necessário). Settings › Agent › *Project
-  memory* desliga os dois.
+  enviado de novo mais tarde na sessão; uma sessão que continua outra recebe o
+  arquivo de instruções, mas não a memória (o plano dela já leva as lições).
+  Settings › Agent › *Project memory* desliga os dois.
 
 ### Nada é caixa-preta
 

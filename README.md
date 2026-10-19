@@ -294,11 +294,14 @@ everything else in the file is yours and is kept byte for byte.
 
 A new session in a repository does not start from nothing:
 
-- **Your project's own instructions.** The first message of each new session
-  also sends the workspace's `AGENTS.md` — or `CLAUDE.md` when there is no
-  `AGENTS.md` — up to its first 6,000 characters, with a note saying from which
-  line the agent can read the rest. The file is yours; the agent reads it and
-  never writes it.
+- **Your project's own instructions.** The first message of every session —
+  including the Builder session that executes a plan and a session that takes
+  over after a handoff — also sends the workspace's `AGENTS.md` — or
+  `CLAUDE.md` when there is no `AGENTS.md` — up to its first 6,000 characters,
+  with a note saying from which line the agent can read the rest. The file is
+  yours: the harness never writes it, but the agent can edit it like any other
+  file (an `edit_file` you approve, or a shell command), so it is no more
+  protected than the rest of the workspace.
 - **A project memory the harness keeps.** When a build finishes, `finalize_plan`
   can take up to five one-line lessons (200 characters each) that a later
   session would otherwise have to rediscover. They go to the `## Learned` list
@@ -319,9 +322,9 @@ A new session in a repository does not start from nothing:
   it. You can edit the file yourself.
 - **Neither ever goes into the system prompt**, which stays the same bytes from
   one request to the next so the provider can cache it, and neither is sent
-  again later in the session or to a session that continues another (the plan
-  or the handoff carries what is needed). Settings › Agent › *Project memory*
-  turns both off.
+  again later in the session; a session that continues another gets the
+  instructions file but not the memory (its plan carries the lessons).
+  Settings › Agent › *Project memory* turns both off.
 
 ### Nothing is a black box
 

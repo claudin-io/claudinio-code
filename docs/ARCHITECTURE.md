@@ -485,18 +485,25 @@ new session reads, one the harness writes:
   rewritten, the ACE paper's brevity bias and context collapse. Written by
   rename, never through a link at `.claudinio` or the file.
 - **`AGENTS.md`, else `CLAUDE.md`**, at the workspace root: the user's own
-  context, read and never written, capped at 6,000 characters on a character
+  context, which the harness reads and never writes (the agent may edit it like
+  any other file, through an approved `edit_file` or the shell), capped at 6,000 characters on a character
   boundary (snapped to a line break in the second half) with a note naming the
   absolute path and the `start_line` to `read_file` the rest.
 
-`run_loop` reads both on the first run of a session that continues none (no
-`user` or `linked_from` record yet; `is_first_run`) under a chat profile, and
+`run_loop` reads the instructions file on the first run of every session (no
+`user` record yet) and the memory only on the first run of a session that
+continues none (no `linked_from` record either; `is_first_run`), under a chat
+profile, and
 puts them in the run's user turn after the user's words and before the
 `<tasks>` recital, as `<project-instructions path="...">` then
 `<project-memory>` — the same mechanism as `<hook-context>` and `<tasks>`:
 persisted inside the turn, so a reload replays it, and never in the system
-prompt, whose bytes must not move under the cache. A successor gets neither
-(its plan or handoff carries what it needs), nor does the git operator.
+prompt, whose bytes must not move under the cache. A successor (a plan's
+Builder, a context handoff) gets the instructions, which its plan or handoff
+does not copy — the handoff is told to point at files — and not the memory,
+whose lessons its plan already carries. The git operator gets neither. A
+summarizing compaction does not restate the instructions; the turn that carried
+them survives only in the kept tail.
 `AgentConfig::project_memory` (default on; Settings › Agent › Project memory)
 turns both off. A link out of the workspace is not followed (a cloned repo
 cannot send another file to the provider), files are read at most 1 MiB, and

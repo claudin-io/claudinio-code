@@ -499,7 +499,8 @@ pub const INSTRUCTIONS_OPEN: &str = "<project-instructions";
 /// True for the first run of a session that does not continue another: no
 /// message was sent in it yet and no `linked_from` record says it is a
 /// successor. A successor starts from its predecessor's plan or handoff,
-/// which already carries what the memory would.
+/// which already carries what the memory would — but not the instructions
+/// file, so that one goes to every session's first run (`run_start_blocks`).
 pub fn is_first_run(records: &[crate::agent::persist::SessionRecord]) -> bool {
     use crate::agent::persist::SessionRecord;
     !records.iter().any(|r| {
@@ -510,9 +511,12 @@ pub fn is_first_run(records: &[crate::agent::persist::SessionRecord]) -> bool {
     })
 }
 
-/// The blocks the first run of a new session adds to its user turn: the
+/// The blocks the first run of a session adds to its user turn: the
 /// instructions file, then the memory, each only when there is something in
-/// it. They ride in the user turn, never the system prompt: the memory
+/// it. A successor (a plan's Builder, a handoff) is sent the instructions and
+/// not the memory: the handoff points at files rather than copying them, so
+/// without this the session that runs commands would never see `AGENTS.md`.
+/// They ride in the user turn, never the system prompt: the memory
 /// changes from one session to the next, and the prefix must stay the same
 /// bytes for the cache. Persisted inside the turn, so a reload replays them.
 /// Nothing when `enabled` (the `project_memory` setting) is off.
@@ -521,10 +525,15 @@ pub fn run_start_blocks(
     root: Option<&str>,
     records: &[crate::agent::persist::SessionRecord],
 ) -> Vec<String> {
+    use crate::agent::persist::SessionRecord;
+    let sent_before = records
+        .iter()
+        .any(|r| matches!(r, SessionRecord::User { .. }));
     match root {
-        Some(root) if enabled && is_first_run(records) => {
+        Some(root) if enabled && !sent_before => {
             let root = Path::new(root);
-            [instructions_block(root), memory_block(root)]
+            let memory = is_first_run(records).then(|| memory_block(root));
+            [instructions_block(root), memory.flatten()]
                 .into_iter()
                 .flatten()
                 .collect()
@@ -1396,6 +1405,42 @@ mod tests {
             let _ = std::fs::remove_dir_all(&ws.root);
         }
 
+        /// The user's instructions file is not in the plan or the handoff (the
+        /// handoff is told to point at files, never copy them), so the Builder
+        /// that executes a Brain plan never saw `AGENTS.md` (final branch
+        /// review). A successor's first run is sent it; the memory stays the
+        /// first session's, since the plan carries what it taught.
+        #[tokio::test]
+        async fn a_successor_session_is_sent_the_instructions_but_not_the_memory() {
+            let ws = with_memory("instructions-successor");
+            ws.store.try_append(&SessionRecord::LinkedFrom {
+                prev_session_id: "prev".into(),
+                reason: "plan_execution".into(),
+                golden_cycle: 0,
+                golden_stalls: 0,
+                golden_last_pending: vec![],
+                ts: 1,
+            });
+            let (_, bodies) = run(
+                &ws,
+                PromptProfile::Standard,
+                "execute the plan",
+                vec![Reply::Text("ok")],
+            )
+            .await;
+            let texts = last_message_texts(&bodies[0]);
+            assert!(
+                texts.iter().any(|t| t.starts_with(INSTRUCTIONS_OPEN)
+                    && t.contains("Run cargo with -j 2.")),
+                "{texts:?}"
+            );
+            assert!(
+                texts.iter().all(|t| !t.starts_with(MEMORY_OPEN)),
+                "{texts:?}"
+            );
+            let _ = std::fs::remove_dir_all(&ws.root);
+        }
+
         #[tokio::test]
         async fn a_successor_session_is_not_sent_the_memory() {
             let ws = with_memory("memory-successor");
@@ -1419,7 +1464,9 @@ mod tests {
                 texts.iter().all(|t| !t.starts_with(MEMORY_OPEN)),
                 "{texts:?}"
             );
-            assert!(texts.iter().all(|t| !t.starts_with(INSTRUCTIONS_OPEN)));
+            // The instructions file is the user's and goes to a successor too
+            // (it was pinned absent here until the final branch review).
+            assert!(texts.iter().any(|t| t.starts_with(INSTRUCTIONS_OPEN)));
             let _ = std::fs::remove_dir_all(&ws.root);
         }
 
