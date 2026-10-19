@@ -480,6 +480,53 @@ mod tests {
         );
     }
 
+    /// A call with no `stdin` gives the command an empty one: a command
+    /// that reads stdin (`cat`, cmd's bare `date` prompt) must get end of
+    /// file at once, not wait on an open pipe until the timeout. (tokio's
+    /// `Child::wait` closes the stdin handle before waiting; this pins it.)
+    #[test]
+    fn a_call_with_no_stdin_reads_end_of_file() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let start = Instant::now();
+        let ctx = crate::agent::tools::ToolContext {
+            doc_access: Default::default(),
+            hooks: None,
+            db_path: None,
+            browser: None,
+            lsp_manager: None,
+            workspace_root: None,
+            embedding_model: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            session_store_path: None,
+            limits: Default::default(),
+            read_tracker: std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::agent::tools::ReadTracker::default(),
+            )),
+            interrupt: None,
+            agent_config: None,
+            plan_save_path: None,
+            base_commit: None,
+            auto_approve_git: false,
+            shell_gate: None,
+            mcp: None,
+            mode_ctl: None,
+            index_progress: None,
+            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))),
+        };
+        let result = rt.block_on(execute(
+            BashArgs {
+                command: "cat".to_string(),
+                workdir: None,
+                stdin: None,
+                timeout_seconds: Some(3),
+            },
+            &ctx,
+        ));
+        assert!(result.is_ok(), "expected end of file, got: {result:?}");
+        assert!(start.elapsed().as_secs() < 3, "{:?}", start.elapsed());
+    }
+
     #[test]
     fn timeout_kills_command() {
         let rt = tokio::runtime::Runtime::new().unwrap();
