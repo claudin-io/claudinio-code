@@ -1554,6 +1554,30 @@ mod shell_rule_tests {
         );
     }
 
+    /// What the memory guard's text scan cannot see, as the docs list it: a
+    /// brace list or glob that spells the folder's own name, a name relative
+    /// to a folder the command moves into, a parent folder. Not refused, but
+    /// never run unasked either: rule 1 or the allowlist makes each ask in
+    /// Builder (only YOLO or a hook's `allow` runs it) and Brain refuses it.
+    #[test]
+    fn what_the_memory_guard_cannot_see_still_asks() {
+        for c in [
+            "rm -rf .claudi{n,}io",
+            "echo pwn | tee -a .claudi{n,}io/MEMORY.m{d,}",
+            "rm -rf .c*",
+            "cd .claudinio/plans && cp /tmp/evil ../M*",
+            "cd .claudinio/plans && cp /tmp/evil ../MEMORY.m?",
+            "rm -rf .",
+        ] {
+            assert_eq!(builder(c, None), PermissionLevel::RequiresApproval, "{c:?}");
+            assert_eq!(
+                bash_permission_brain(c),
+                PermissionLevel::RequiresApproval,
+                "{c:?}"
+            );
+        }
+    }
+
     /// Brain's allowlist only reads, and is part of Builder's; the eval's
     /// read-only list is part of Brain's.
     #[test]
