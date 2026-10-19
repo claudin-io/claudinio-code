@@ -9,6 +9,7 @@ mod list_dir;
 pub mod quality;
 mod read_file;
 pub(crate) mod skills_tool;
+mod syntax_check;
 pub mod tasks;
 mod web_search;
 pub(crate) mod write_plan;

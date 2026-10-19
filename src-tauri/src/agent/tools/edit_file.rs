@@ -135,7 +135,21 @@ pub fn apply(diff: &EditDiff) -> Result<String, String> {
     std::fs::write(&diff.path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", diff.path))?;
 
-    Ok(format!("Applied edit to {}", diff.path))
+    Ok(with_syntax_warning(
+        format!("Applied edit to {}", diff.path),
+        &diff.path,
+        &content,
+        &new_content,
+    ))
+}
+
+/// `result`, with the edit guardrail's warning after it when the edit broke
+/// the file's syntax (`syntax_check`, lean-harness Phase 6).
+fn with_syntax_warning(result: String, path: &str, old: &str, new: &str) -> String {
+    match super::syntax_check::new_syntax_error(path, old, new) {
+        Some(warning) => format!("{result}\n\n{warning}"),
+        None => result,
+    }
 }
 
 /// Write a new file, making the folders it needs. `create_new` makes the
@@ -160,5 +174,10 @@ fn create(diff: &EditDiff) -> Result<String, String> {
         })?;
     file.write_all(diff.new_string.as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", diff.path))?;
-    Ok(format!("Created {}", diff.path))
+    Ok(with_syntax_warning(
+        format!("Created {}", diff.path),
+        &diff.path,
+        "",
+        &diff.new_string,
+    ))
 }
