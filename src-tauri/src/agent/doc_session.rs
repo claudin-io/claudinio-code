@@ -968,6 +968,7 @@ pub(crate) fn create_call(
                 .unwrap_or_default(),
         );
     let result = match (ctx.workspace_root.as_deref(), &existing) {
+        _ if pending_handoff.is_some() => Err(crate::agent::handoff::HANDOFF_QUEUED.to_string()),
         (Some(_), Some(own)) if kickoff_run => Err(format!(
             "this session was just opened for {}; fill its sections (doc_add adds one) \
              instead of creating another document. A further new topic waits for the \

@@ -1749,6 +1749,12 @@ pub async fn run_workflow_with_profile(
         let calls = history.last().map_or(&[][..], |m| m.content.as_slice());
         fit_round(&mut tool_result_blocks, calls, budget.round_chars);
         crate::agent::doc_session::note_round(&mut tool_result_blocks, ctx, event_tx, session_id);
+        if hook_stop_request.is_some()
+            && let Some(spec) = pending_handoff.take()
+        {
+            let note = crate::agent::handoff::not_followed(&spec, mode_ctl, event_tx);
+            tool_result_blocks.push(ContentBlock::text(note));
+        }
         push_turn(
             history,
             store,
@@ -3741,11 +3747,25 @@ mod deferred_loop_tests {
         message: &str,
         script: Vec<Reply>,
     ) -> (Result<RunOutcome, String>, Vec<String>) {
+        let mode = Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human));
+        run_with(ws, window, message, &mode, None, script).await
+    }
+
+    /// `run_saying`, in the mode `mode_ctl` holds and with these hooks.
+    pub(super) async fn run_with(
+        ws: &Workspace,
+        window: Option<u32>,
+        message: &str,
+        mode_ctl: &Arc<ModeCtl>,
+        hooks: Option<Arc<crate::agent::hooks::HookCtx>>,
+        script: Vec<Reply>,
+    ) -> (Result<RunOutcome, String>, Vec<String>) {
         let (base, _, bodies) = spawn_recording(script).await;
         let config = super::surface_tests::config_for(&base, window);
         let ctx = ToolContext {
             workspace_root: Some(ws.root.to_string_lossy().to_string()),
             session_store_path: Some(ws.store.path.to_string_lossy().to_string()),
+            hooks,
             ..crate::agent::tools::tests_support::ctx()
         };
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
@@ -3764,7 +3784,7 @@ mod deferred_loop_tests {
             &ctx,
             &ws.store,
             &Arc::new(SteeringCtl::new()),
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
+            mode_ctl,
         )
         .await;
         let bodies = bodies.lock().unwrap().clone();
@@ -4021,10 +4041,11 @@ mod deferred_loop_tests {
 #[cfg(test)]
 mod document_loop_tests {
     use super::deferred_loop_tests::{
-        Workspace, last_result, records_of, run, run_saying, tool_names, workspace,
+        Workspace, last_result, records_of, run, run_saying, run_with, tool_names, workspace,
     };
     use super::*;
     use crate::agent::deferred::DOCUMENT_TOOLS;
+    use crate::agent::session::{ModeCtl, ModeOrigin};
     use crate::agent::subagent::scripted_model::Reply;
 
     /// The text blocks of the last message of a request body.
@@ -4285,6 +4306,253 @@ mod document_loop_tests {
             crate::agent::persist::linked_document(&records_of(&ws)).as_deref(),
             Some(".claudinio/docs/pudim-de-leite.md"),
             "this session keeps its own document"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// One handoff per round: the app follows one successor, so a second
+    /// handoff-producing call in the round that queued one is refused before
+    /// it writes anything, rather than replacing the first and leaving its
+    /// document with no session after the model was told one opens.
+    #[tokio::test]
+    async fn a_second_doc_create_in_the_round_that_queued_a_handoff_is_refused() {
+        let ws = workspace("doc-handoff-twice");
+        link_doc(&ws, &["origem"]);
+        let (outcome, _) = run(
+            &ws,
+            vec![
+                Reply::Tools(vec![
+                    (
+                        "doc_create",
+                        serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                    ),
+                    (
+                        "doc_create",
+                        serde_json::json!({"title": "Torta de limao", "sections": ["base"]}),
+                    ),
+                ]),
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        let Ok(RunOutcome::Handoff(spec)) = outcome else {
+            panic!("expected a handoff");
+        };
+        assert_eq!(
+            spec.document.as_deref(),
+            Some(".claudinio/docs/bolo-de-cenoura.md")
+        );
+        assert!(
+            !ws.root.join(".claudinio/docs/torta-de-limao.md").exists(),
+            "the refused call writes nothing"
+        );
+        let second = results_of(&ws).pop().unwrap();
+        assert!(
+            second.contains(crate::agent::handoff::HANDOFF_QUEUED),
+            "{second}"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[tokio::test]
+    async fn doc_create_after_exit_plan_mode_in_one_round_leaves_the_plan_handoff_standing() {
+        let ws = workspace("doc-after-exit");
+        link_doc(&ws, &["origem"]);
+        let mode = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Agent));
+        let (outcome, _) = run_with(
+            &ws,
+            None,
+            "go",
+            &mode,
+            None,
+            vec![
+                Reply::Tools(vec![
+                    ("exit_plan_mode", serde_json::json!({})),
+                    (
+                        "doc_create",
+                        serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                    ),
+                ]),
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        let Ok(RunOutcome::Handoff(spec)) = outcome else {
+            panic!("expected a handoff");
+        };
+        assert_eq!(spec.reason, HandoffReason::PlanExecution);
+        assert!(!ws.root.join(".claudinio/docs/bolo-de-cenoura.md").exists());
+        let second = results_of(&ws).pop().unwrap();
+        assert!(
+            second.contains(crate::agent::handoff::HANDOFF_QUEUED),
+            "{second}"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_after_doc_create_in_one_round_leaves_the_document_handoff_standing() {
+        let ws = workspace("exit-after-doc");
+        link_doc(&ws, &["origem"]);
+        let mode = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Agent));
+        let (outcome, _) = run_with(
+            &ws,
+            None,
+            "go",
+            &mode,
+            None,
+            vec![
+                Reply::Tools(vec![
+                    (
+                        "doc_create",
+                        serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                    ),
+                    ("exit_plan_mode", serde_json::json!({})),
+                ]),
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        let Ok(RunOutcome::Handoff(spec)) = outcome else {
+            panic!("expected a handoff");
+        };
+        assert_eq!(spec.reason, HandoffReason::NewDocument);
+        assert!(
+            !records_of(&ws).iter().any(|r| matches!(
+                r,
+                SessionRecord::Mode { mode, .. } if mode == "builder"
+            )),
+            "the refused exit records no mode change"
+        );
+        let second = results_of(&ws).pop().unwrap();
+        assert!(
+            second.contains(crate::agent::handoff::HANDOFF_QUEUED),
+            "{second}"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// Every tool result of the session, in order.
+    fn results_of(ws: &Workspace) -> Vec<String> {
+        crate::agent::persist::history_from_records(&records_of(ws))
+            .iter()
+            .flat_map(|m| m.content.clone())
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.as_text().into_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every text block of the session's user turns.
+    fn user_texts(ws: &Workspace) -> Vec<String> {
+        crate::agent::persist::history_from_records(&records_of(ws))
+            .iter()
+            .filter(|m| m.role == "user")
+            .flat_map(|m| m.content.clone())
+            .filter_map(|b| b.get_text().map(str::to_string))
+            .collect()
+    }
+
+    /// A trusted PostToolUse hook, on every tool, that stops the run.
+    #[cfg(unix)]
+    fn stopping_hook(ws: &Workspace) -> Arc<crate::agent::hooks::HookCtx> {
+        std::fs::write(
+            ws.root.join(".claudinio.json"),
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"echo '{\"continue\":false,\"stopReason\":\"stop here\"}'"}]}]}}"#,
+        )
+        .unwrap();
+        let config = AgentConfig {
+            hooks_enabled: true,
+            ..Default::default()
+        };
+        let set = Arc::new(crate::agent::hooks::discovery::resolve_with_home(
+            Some(&ws.root),
+            &config,
+            Some(&ws.root.join("_home")),
+        ));
+        let trust = Arc::new(crate::agent::hooks::TrustStore::with_path(
+            ws.root.join("trust.json"),
+        ));
+        trust
+            .approve(&ws.root.display().to_string(), &set.fingerprint, vec![], 1)
+            .unwrap();
+        Arc::new(crate::agent::hooks::HookCtx::new(
+            set,
+            trust,
+            "deferred-test",
+            ws.store.path.clone(),
+            ws.root.clone(),
+        ))
+    }
+
+    /// A hook's `continue: false` outranks a handoff queued in the same
+    /// round: no successor run starts. The session is left saying so — the
+    /// model had been told a linked session opens, and the new document is on
+    /// disk with no session — instead of dropping the handoff in silence.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_stop_in_a_new_document_round_says_the_linked_session_did_not_open() {
+        let ws = workspace("doc-handoff-hook-stop");
+        link_doc(&ws, &["origem"]);
+        let mode = Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human));
+        let (outcome, bodies) = run_with(
+            &ws,
+            None,
+            "go",
+            &mode,
+            Some(stopping_hook(&ws)),
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
+                },
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        assert!(matches!(outcome, Ok(RunOutcome::Completed)));
+        assert_eq!(bodies.len(), 1);
+        let note = user_texts(&ws)
+            .into_iter()
+            .find(|t| t.starts_with("<handoff-not-followed>"))
+            .expect("the session says the handoff was not followed");
+        assert!(
+            note.contains(".claudinio/docs/bolo-de-cenoura.md"),
+            "{note}"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// `exit_plan_mode` had already recorded Builder and committed the plan;
+    /// a hook stop in its round leaves the session in the Builder its record
+    /// says, so the next message builds here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_stop_in_the_exit_plan_mode_round_leaves_the_session_in_builder() {
+        let ws = workspace("exit-hook-stop");
+        let mode = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Agent));
+        let (outcome, _) = run_with(
+            &ws,
+            None,
+            "go",
+            &mode,
+            Some(stopping_hook(&ws)),
+            vec![
+                Reply::Tool {
+                    name: "exit_plan_mode",
+                    input: serde_json::json!({}),
+                },
+                Reply::Text("never sent"),
+            ],
+        )
+        .await;
+        assert!(matches!(outcome, Ok(RunOutcome::Completed)));
+        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Agent));
+        assert!(
+            user_texts(&ws)
+                .iter()
+                .any(|t| t.starts_with("<handoff-not-followed>")),
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }

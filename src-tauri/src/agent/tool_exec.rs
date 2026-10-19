@@ -3,7 +3,7 @@
 //! returned into the `tool_result` block the next round carries.
 
 use crate::agent::events::{AgentEvent, EditProposalData};
-use crate::agent::handoff::{HandoffReason, HandoffSpec};
+use crate::agent::handoff::{HANDOFF_QUEUED, HandoffReason, HandoffSpec};
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
@@ -929,6 +929,7 @@ pub(super) fn handle_mode_switch(
 
     let (mode, origin) = mode_ctl.get();
     let (result, error): (String, Option<String>) = match tool_name {
+        _ if pending_handoff.is_some() => (HANDOFF_QUEUED.into(), Some("invalid".into())),
         "enter_plan_mode" => {
             if mode == SessionMode::Brain {
                 ("Already in Brain mode.".into(), Some("invalid".into()))

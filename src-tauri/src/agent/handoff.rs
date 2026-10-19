@@ -179,6 +179,44 @@ impl HandoffReason {
     }
 }
 
+/// The answer to a handoff-producing call (`doc_create` in a session that has
+/// a document, `enter_plan_mode`, `exit_plan_mode`) in a round that already
+/// queued a handoff: the app follows one successor per run.
+pub const HANDOFF_QUEUED: &str = "A handoff to a new session is already queued this turn, \
+     so this call was not run. End your turn now; anything else waits for the user's next message.";
+
+/// A PostToolUse hook stopped the run in the round that queued `spec`. A
+/// hook's `continue: false` outranks the handoff, so no successor run starts;
+/// what the round already did stays, and this says so to the model — which
+/// had been told a session opens — as a note for the tool-results turn.
+/// `exit_plan_mode` had already recorded Builder and committed the plan, so
+/// the session takes the Builder its record says and the next message builds
+/// here.
+pub(crate) fn not_followed(
+    spec: &HandoffSpec,
+    mode_ctl: &ModeCtl,
+    event_tx: &Channel<AgentEvent>,
+) -> String {
+    let what = match (&spec.reason, &spec.document) {
+        (HandoffReason::NewDocument, Some(doc)) => format!(
+            "the linked session for {doc} did not open. {doc} was created and no session \
+             owns it; this session keeps its own document."
+        ),
+        (HandoffReason::PlanExecution, _) => {
+            mode_ctl.set(spec.next_mode, spec.next_origin);
+            let _ = event_tx.send(AgentEvent::ModeChanged {
+                mode: spec.next_mode.as_str().into(),
+                origin: spec.next_origin.as_str().into(),
+                reason: None,
+            });
+            "the plan's Builder session did not open. This session is now in Builder mode."
+                .to_string()
+        }
+        _ => "the linked session did not open.".to_string(),
+    };
+    format!("<handoff-not-followed>A hook stopped the run, so {what}</handoff-not-followed>")
+}
+
 /// Data needed to create a linked successor session and resume work.
 pub struct HandoffSpec {
     pub reason: HandoffReason,
