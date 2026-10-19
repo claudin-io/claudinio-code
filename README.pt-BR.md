@@ -80,17 +80,25 @@ Build a partir do código-fonte está em [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Brain e Builder
 
-Dois modos com superfícies de ferramenta diferentes. O **Brain** explora em modo
-somente-leitura, te entrevista sobre os requisitos e escreve um plano, sem nunca
-gravar um arquivo. O **Builder** executa — escrevendo código, rodando comandos,
+Dois modos com superfícies de ferramenta diferentes. O **Brain** explora, te
+entrevista sobre os requisitos e escreve um plano. Ele não tem ferramenta de
+edição, e o shell dele roda só comandos de inspeção, build e teste da allowlist —
+nunca um interpretador, um script do projeto ou uma cadeia com um comando fora
+da allowlist — e recusa um comando que reconhece como gravando um arquivo.
+Builds e testes ainda rodam código do projeto, então é um shell estreito, não
+uma prova de que nada muda. O **Builder** executa — escrevendo código, rodando comandos,
 verificando. O handoff entre eles abre uma sessão nova semeada com o plano, para
 a execução não herdar uma janela de contexto cheia de exploração.
 
 O Builder edita os arquivos ele mesmo: cada `edit_file` aparece para você como
 um diff a aprovar — um arquivo novo também, como diff a partir do nada (um
 `old_string` vazio o cria, pastas que faltam incluídas), e um `old_string` precisa
-casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão de aprovação mostra com a contagem — e um comando de shell que grava um arquivo é perguntado do
-mesmo jeito, mesmo quando o prefixo está na allowlist. Ele só passa trabalho a
+casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão de aprovação mostra com a contagem — e um comando de shell que grava um arquivo por redirecionamento, `tee`,
+`sed -i`, `patch` ou script inline é perguntado do mesmo jeito, mesmo quando o
+prefixo está na allowlist. Essa checagem é uma heurística: um comando da
+allowlist só roda sem perguntar quando cada comando da cadeia ou do pipe está na
+allowlist, mas os interpretadores e runners da allowlist (`node`, `python`,
+`pnpm run`, runners de teste) rodam o script que receberem sem perguntar. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo

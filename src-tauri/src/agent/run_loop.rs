@@ -1644,12 +1644,11 @@ pub async fn run_workflow_with_profile(
             } else if in_brain
                 && tool_name == "bash"
                 && !matches!(
-                    permissions::bash_permission(
+                    permissions::bash_permission_brain(
                         tool_input
                             .get("command")
                             .and_then(|v| v.as_str())
                             .unwrap_or(""),
-                        false
                     ),
                     PermissionLevel::Auto
                 )
@@ -3224,6 +3223,38 @@ pub(crate) mod surface_tests {
         assert!(!sent.contains(&"edit_file"), "{sent:?}");
         assert!(run.bodies[2].contains("not available in Brain mode"));
         assert!(run.bodies[3].contains("In Brain mode you cannot mutate"));
+        std::fs::remove_dir_all(&run.root).ok();
+    }
+
+    /// The write heuristic does not see a script that writes, and `node ` is
+    /// allowlisted, so Brain ran it unasked (final branch review): an
+    /// interpreter or a chain with an unlisted command is refused there.
+    #[tokio::test]
+    async fn a_brain_session_refuses_an_interpreter_and_a_chain() {
+        let run = run_script_in(SessionMode::Brain, "brain-node", Some(true), |path| {
+            vec![
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({
+                        "command": format!("node -e \"require('fs').rmSync('{path}')\""),
+                    }),
+                },
+                Reply::Tool {
+                    name: "bash",
+                    input: serde_json::json!({ "command": format!("ls && rm -f {path}") }),
+                },
+                Reply::Text("done"),
+            ]
+        })
+        .await;
+        assert!(
+            matches!(run.outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            run.outcome.err()
+        );
+        assert_eq!(std::fs::read_to_string(&run.file).unwrap(), "hello world\n");
+        assert!(run.bodies[1].contains("not allowed in Brain mode"));
+        assert!(run.bodies[2].contains("not allowed in Brain mode"));
         std::fs::remove_dir_all(&run.root).ok();
     }
 

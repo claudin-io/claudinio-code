@@ -79,8 +79,12 @@ Building from source is covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Brain and Builder
 
-Two modes with different tool surfaces. **Brain** explores read-only, interviews
-you about requirements and writes a plan, and never writes a file. **Builder**
+Two modes with different tool surfaces. **Brain** explores, interviews you about
+requirements and writes a plan. It has no edit tool, and its shell runs only
+allowlisted inspection, build and test commands — never an interpreter, a
+project script or a chain with a command off the allowlist — and refuses a
+command it recognises as writing a file. Builds and tests still run project
+code, so that is a narrow shell, not a proof that nothing changes. **Builder**
 executes it — writing code, running commands, verifying. The handoff between
 them starts a fresh session seeded with the plan, so execution never inherits a
 context window full of exploration.
@@ -88,8 +92,12 @@ context window full of exploration.
 Builder edits files itself: each `edit_file` is shown to you as a diff to
 approve — a new file too, as a diff from nothing (an empty `old_string` creates
 it, missing folders included), and an `old_string` must match one place unless
-the call says `replace_all`, which the approval card shows with its count — and a shell command that writes a file is asked about the same way,
-even one whose prefix is allowlisted. It hands work to subagents only when that
+the call says `replace_all`, which the approval card shows with its count — and a shell command that writes a file by redirection, `tee`, `sed -i`,
+`patch` or an inline script is asked about the same way, even one whose prefix
+is allowlisted. That check is a heuristic: an allowlisted command runs unasked
+only when every command of its chain or pipe is allowlisted, but the allowlisted
+interpreters and runners (`node`, `python`, `pnpm run`, test runners) run
+whatever script they are given without asking. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
 delegated edit costs a second prompt, a second exploration and the spec written

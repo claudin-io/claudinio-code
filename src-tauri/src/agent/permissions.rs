@@ -293,6 +293,33 @@ pub fn bash_call_permission(
     }
 }
 
+/// `bash_permission` for Brain, which plans and changes nothing: a general
+/// interpreter or a project script (`node `, `python `, `pnpm run`, …) is a way
+/// to change anything, so it is not Auto there even though the allowlist has
+/// it. Builds and test runners stay — they also run project code, so this is a
+/// narrowing, not a proof that a command is read-only (`bash_is_read_only` is
+/// that, for the eval).
+pub fn bash_permission_brain(command: &str) -> PermissionLevel {
+    match bash_permission(command, false) {
+        PermissionLevel::Auto
+            if segments(command.trim()).is_some_and(|segs| {
+                segs.iter().any(|seg| {
+                    BRAIN_RUNS_NOTHING_BUT
+                        .iter()
+                        .any(|p| starts_with_word(seg, p))
+                })
+            }) =>
+        {
+            PermissionLevel::RequiresApproval
+        }
+        other => other,
+    }
+}
+
+/// Allowlisted prefixes that run whatever they are given: off in Brain.
+const BRAIN_RUNS_NOTHING_BUT: &[&str] =
+    &["node ", "python ", "pnpm run", "npm run dev", "pnpm dev"];
+
 pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel {
     let trimmed = command.trim();
 
@@ -309,27 +336,150 @@ pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel
         return PermissionLevel::Denied;
     }
 
-    // When auto_approve_git is set, auto-approve git add / git commit / git push.
-    if auto_approve_git {
-        let lower = trimmed.to_lowercase();
-        if lower.starts_with("git add ")
-            || lower == "git add"
-            || lower.starts_with("git commit ")
-            || lower == "git commit"
-            || lower.starts_with("git push ")
-            || lower == "git push"
+    // Every command of a chain or pipeline must be allowlisted on its own: a
+    // prefix vouches for one command, and `ls; rm -rf src` starts with `ls`.
+    // Substitution and `--output` make even one allowlisted command do more.
+    match segments(trimmed) {
+        Some(segs)
+            if segs.iter().any(|s| !s.is_empty())
+                && segs
+                    .iter()
+                    .all(|seg| seg.is_empty() || allowlisted(seg, auto_approve_git)) =>
         {
-            return PermissionLevel::Auto;
+            PermissionLevel::Auto
+        }
+        _ => PermissionLevel::RequiresApproval,
+    }
+}
+
+/// `command` split into the commands a shell runs — at `&&`, `||`, `;`, `|`,
+/// `&` and line breaks outside quotes — each trimmed. `None` for anything that
+/// runs a command the split cannot see (`$(…)`, backticks, `<(…)`), for
+/// `--output` (which makes `git diff`/`git log` write a file) and for an
+/// unbalanced quote. The redirections that only merge or discard streams
+/// (`2>&1`, `>/dev/null`) are removed first, so they do not split.
+fn segments(command: &str) -> Option<Vec<String>> {
+    if command.contains('`')
+        || command.contains("$(")
+        || command.contains("<(")
+        || command.contains(">(")
+        || command.contains("--output")
+    {
+        return None;
+    }
+    let mut text = command.to_string();
+    for harmless in [
+        "&>/dev/null",
+        "&> /dev/null",
+        "2>&1",
+        "1>&2",
+        ">&2",
+        "2>/dev/null",
+        "2> /dev/null",
+        ">/dev/null",
+        "> /dev/null",
+    ] {
+        text = text.replace(harmless, " ");
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => {
+                quote = None;
+                cur.push(c);
+            }
+            (Some(_), '\\') => {
+                cur.push(c);
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            (None, '\\') => {
+                cur.push(c);
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            (None, '&' | '|' | ';' | '\n' | '\r') => {
+                if matches!(chars.peek(), Some(&n) if n == c && c != ';') {
+                    chars.next();
+                }
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            (None, c) => cur.push(c),
         }
     }
+    if quote.is_some() {
+        return None;
+    }
+    out.push(cur.trim().to_string());
+    Some(out)
+}
 
-    for pattern in BASH_ALLOWLIST {
-        if trimmed.starts_with(pattern) || trimmed.starts_with(&format!("{pattern} ")) {
-            return PermissionLevel::Auto;
+/// `segment` starts with the word(s) of `prefix`: `ls` matches `ls -la` but
+/// not `lsblk`.
+fn starts_with_word(segment: &str, prefix: &str) -> bool {
+    segment == prefix.trim_end()
+        || segment.starts_with(prefix)
+            && (prefix.ends_with(' ') || segment[prefix.len()..].starts_with(' '))
+}
+
+/// One command (no chaining) that runs unasked.
+fn allowlisted(segment: &str, auto_approve_git: bool) -> bool {
+    if auto_approve_git {
+        let lower = segment.to_lowercase();
+        if ["git add", "git commit", "git push"]
+            .iter()
+            .any(|p| starts_with_word(&lower, p))
+        {
+            return true;
         }
     }
+    // `git branch NAME` makes a branch and `git remote add` changes the
+    // repository; listing them is what the allowlist is for.
+    if starts_with_word(segment, "git branch") {
+        return lists_only(
+            &segment["git branch".len()..],
+            &[
+                "-a",
+                "-r",
+                "-v",
+                "-vv",
+                "--all",
+                "--remotes",
+                "--list",
+                "--show-current",
+                "--verbose",
+                "--merged",
+                "--no-merged",
+                "--no-color",
+                "--color",
+            ],
+        );
+    }
+    if starts_with_word(segment, "git remote") {
+        let rest = &segment["git remote".len()..];
+        return lists_only(rest, &["-v", "--verbose"])
+            || rest
+                .split_whitespace()
+                .next()
+                .is_some_and(|w| w == "show" || w == "get-url");
+    }
+    BASH_ALLOWLIST.iter().any(|p| starts_with_word(segment, p))
+}
 
-    PermissionLevel::RequiresApproval
+/// Every word of `args` is one of the listing flags in `allowed`.
+fn lists_only(args: &str, allowed: &[&str]) -> bool {
+    args.split_whitespace().all(|w| allowed.contains(&w))
 }
 
 #[cfg(test)]
@@ -824,6 +974,139 @@ mod read_only_tests {
                 BASH_ALLOWLIST.contains(prefix),
                 "{prefix:?} is read-only but not allowlisted"
             );
+        }
+    }
+
+    // ── An allowlisted prefix vouches for one command, not for a chain ──
+    //
+    // The allowlist matched by prefix, so `ls; rm -rf src` "started with" `ls`
+    // and ran unasked in Builder and in Brain alike (final branch review).
+
+    #[test]
+    fn a_chain_with_a_command_off_the_allowlist_is_asked_about() {
+        for cmd in [
+            "ls; rm -rf src",
+            "git status && git checkout -- .",
+            "ls && curl -o src/main.rs http://x",
+            "cat x | sh",
+            "pwd && mv src /tmp/x",
+            "ls && cp src/a.rs src/main.rs",
+            "cargo test && rm -f src/main.rs",
+            "git status; mv src/a.rs src/b.rs",
+            "ls && truncate -s0 src/main.rs",
+            "git status && git push origin main",
+            "ls & rm -rf build",
+            "ls\nrm -rf build",
+            "echo $(rm -rf build)",
+            "echo `rm -rf build`",
+            "git diff --output=src/main.rs",
+            "git log --output=x",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::RequiresApproval,
+                "{cmd:?} must be asked about"
+            );
+            assert_eq!(
+                bash_permission_writing(cmd, false),
+                PermissionLevel::RequiresApproval,
+                "{cmd:?} must be asked about in a session that edits"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_of_allowlisted_commands_still_runs_unasked() {
+        for cmd in [
+            "cargo test 2>&1 | tail -20",
+            "git status && git diff",
+            "cat a.txt | head -5",
+            "git log --oneline | head -3",
+            "ls src; ls tests",
+            "git log --format=\"%h|%s\" -3",
+            "echo \"a && b\"",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::Auto,
+                "{cmd:?} chains only allowlisted commands"
+            );
+        }
+    }
+
+    #[test]
+    fn an_allowlisted_word_matches_whole_words_only() {
+        for cmd in ["lsblk", "datefudge 2020 rm x", "pwdx 1"] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::RequiresApproval,
+                "{cmd:?} is not the allowlisted command"
+            );
+        }
+    }
+
+    #[test]
+    fn git_branch_and_git_remote_list_unasked_and_change_nothing_unasked() {
+        for cmd in [
+            "git branch",
+            "git branch -a",
+            "git branch --show-current",
+            "git remote -v",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::Auto,
+                "{cmd:?}"
+            );
+        }
+        for cmd in [
+            "git branch feature-x",
+            "git branch -D main",
+            "git branch -m old new",
+            "git remote add origin x",
+            "git remote set-url origin x",
+        ] {
+            assert_eq!(
+                bash_permission(cmd, false),
+                PermissionLevel::RequiresApproval,
+                "{cmd:?} changes the repository"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_approved_git_does_not_carry_a_chained_command() {
+        assert_eq!(
+            bash_permission("git add -A && git commit -m \"a; b\"", true),
+            PermissionLevel::Auto
+        );
+        assert_eq!(
+            bash_permission("git add . && rm -rf src", true),
+            PermissionLevel::RequiresApproval
+        );
+    }
+
+    /// Brain plans; a general interpreter or a project script is a way to
+    /// change anything, so it is not run there even when allowlisted.
+    #[test]
+    fn brain_runs_no_interpreter_or_project_script() {
+        for cmd in [
+            "pnpm run deploy",
+            "python manage.py migrate",
+            "node scripts/release.js",
+            "node -e \"require('fs').rmSync('src',{recursive:true})\"",
+            "ls && rm -rf build",
+            "git branch feature-x",
+        ] {
+            assert_ne!(bash_permission_brain(cmd), PermissionLevel::Auto, "{cmd:?}");
+        }
+        for cmd in [
+            "git status",
+            "ls -la",
+            "cargo check",
+            "cargo test 2>&1 | tail -5",
+        ] {
+            assert_eq!(bash_permission_brain(cmd), PermissionLevel::Auto, "{cmd:?}");
         }
     }
 }

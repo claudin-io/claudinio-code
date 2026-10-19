@@ -237,7 +237,14 @@ A Builder session edits files itself under both chat profiles
 shell command that writes a file (`permissions::bash_writes_files`) is asked
 about like an `edit_file` even when its prefix is allowlisted
 (`RunLimits::writes_files` → `bash_permission_writing`). Brain refuses both,
-approval or not, and the git operator refuses them too. Compact adds one rule
+approval or not, and the git operator refuses them too. `bash_writes_files` is
+a heuristic (redirection, `tee`, in-place `sed`/`perl`, `patch`, inline scripts
+that call a write); what bounds the rest is `bash_permission`, which runs a
+command unasked only when every command of its chain or pipe is allowlisted
+(`permissions::segments`; substitution and `--output` disqualify it). The
+allowlisted interpreters and runners still run any script unasked in Builder;
+Brain refuses those too (`bash_permission_brain`), though its builds and test
+runners still run project code. Compact adds one rule
 of its own: a call to any tool outside the profile's ten is refused rather than
 run.
 
