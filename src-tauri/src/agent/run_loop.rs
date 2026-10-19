@@ -1867,7 +1867,9 @@ pub async fn run_workflow_with_profile(
                         history,
                         store,
                         ctx,
-                        vec![ContentBlock::text(crate::agent::nudges::BRAIN_EXPLORING)],
+                        vec![ContentBlock::text(crate::agent::nudges::brain_exploring(
+                            config.prompt_version,
+                        ))],
                     );
                     continue;
                 }

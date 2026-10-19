@@ -49,6 +49,26 @@ pub const BRAIN_EXPLORING: &str = "[system] You have been exploring for several 
      section, then tasks_set to create executable tasks. Explore further only for \
      a fact the plan is missing.";
 
+/// [`BRAIN_EXPLORING`] as it stood before Phase 5, sent under prompt v1:
+/// v1 is the pre-phase prompt kept so a user can flip back (decision D7), and
+/// its Brain block still runs the one-question-per-call interview — the v2
+/// nudge's "independent questions in one call" would argue with it.
+pub const BRAIN_EXPLORING_V1: &str = "[system] You have been exploring for several consecutive rounds \
+     in Brain mode without making progress on the required deliverables. \
+     Brain mode is for planning — you MUST call ask_user to interview \
+     the user, then write_plan to create the Solution Design, then \
+     write_plan again to add the '## Low-Level Design' section, then \
+     tasks_set to create executable tasks. Do not continue exploring \
+     until you have gathered the information you need.";
+
+/// The Brain-exploring nudge that matches the session's prompt.
+pub fn brain_exploring(version: crate::agent::prompt::PromptVersion) -> &'static str {
+    match version {
+        crate::agent::prompt::PromptVersion::V1 => BRAIN_EXPLORING_V1,
+        crate::agent::prompt::PromptVersion::V2 => BRAIN_EXPLORING,
+    }
+}
+
 /// The context reached its limit: the next reply is the handoff document.
 pub const HANDOFF_REQUEST: &str = "[system] This session's context reached its limit. Your next reply must be \
      ONLY a handoff document for a successor session that will continue this \
@@ -136,6 +156,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("ANNOUNCED_NOT_TAKEN", ANNOUNCED_NOT_TAKEN),
     ("FINALIZE_PLAN", FINALIZE_PLAN),
     ("BRAIN_EXPLORING", BRAIN_EXPLORING),
+    ("BRAIN_EXPLORING_V1", BRAIN_EXPLORING_V1),
     ("HANDOFF_REQUEST", HANDOFF_REQUEST),
     ("HANDOFF_RETRY", HANDOFF_RETRY),
     ("PLAN_APPROVED", PLAN_APPROVED),
@@ -179,6 +200,24 @@ mod tests {
         for step in ["ask_user", "write_plan", "## Low-Level Design", "tasks_set"] {
             assert!(BRAIN_EXPLORING.contains(step), "{step}: {BRAIN_EXPLORING}");
         }
+    }
+
+    // Prompt v1 is the pre-phase prompt (decision D7): choosing it must bring
+    // back the pre-phase nudge too, word for word, not v2's adaptive one that
+    // contradicts v1's one-question-per-call interview. v2 gets the adaptive one.
+    #[test]
+    fn each_prompt_version_gets_the_brain_exploring_nudge_that_matches_it() {
+        use crate::agent::prompt::PromptVersion;
+        let pre_phase = "[system] You have been exploring for several consecutive rounds \
+             in Brain mode without making progress on the required deliverables. \
+             Brain mode is for planning — you MUST call ask_user to interview \
+             the user, then write_plan to create the Solution Design, then \
+             write_plan again to add the '## Low-Level Design' section, then \
+             tasks_set to create executable tasks. Do not continue exploring \
+             until you have gathered the information you need.";
+        assert_eq!(brain_exploring(PromptVersion::V1), pre_phase);
+        assert_eq!(brain_exploring(PromptVersion::V2), BRAIN_EXPLORING);
+        assert!(!brain_exploring(PromptVersion::V1).contains("in one call"));
     }
 
     // A golden flip's successor always has a list (the pending goals are
