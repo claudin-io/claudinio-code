@@ -452,6 +452,39 @@ describe("recordsToMessages — the harness's own blocks in a user turn", () => 
   });
 });
 
+// Lean-harness Phase 9: the first run of a new session carries the
+// project's instructions file and its memory in the user turn. The model
+// reads them; the person must never see them as words they typed.
+describe("recordsToMessages — the project memory blocks of a first run", () => {
+  const INSTRUCTIONS = '<project-instructions path="AGENTS.md">\nRun cargo with -j 2.\n</project-instructions>';
+  const MEMORY =
+    "<project-memory>\nLessons earlier sessions recorded.\n- 2026-10-19 — the index is rebuilt (plan: p.md)\n</project-memory>";
+  const everyText = (messages: ChatMessage[]) =>
+    messages.flatMap((m) => [m.text, ...(m.steps ?? []).map((s) => (s.type === "text" ? s.text ?? "" : ""))]);
+
+  it("shows the user's words, never the instructions or the memory sent with them", () => {
+    const m = recordsToMessages([
+      { kind: "user", text: "fix the build", ts: 1 },
+      {
+        kind: "turn",
+        role: "user",
+        content: [
+          { type: "text", text: "fix the build" },
+          { type: "text", text: INSTRUCTIONS },
+          { type: "text", text: MEMORY },
+        ],
+        ts: 1,
+      },
+      ...toolRound("r1", "read_file", "contents"),
+      answer("fixed"),
+      done(),
+    ]);
+    expect(thread(m)).toEqual(["user: fix the build", "assistant: fixed"]);
+    expect(everyText(m).some((t) => t.includes("<project-memory>"))).toBe(false);
+    expect(everyText(m).some((t) => t.includes("<project-instructions"))).toBe(false);
+  });
+});
+
 // Lean-harness Phase 4b: a run of a session with a living document ends its
 // user turn with a `<document>` outline block, and a person's edit found
 // during a run joins the round's tool results as a `<doc-changed>` note.
