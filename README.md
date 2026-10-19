@@ -95,9 +95,12 @@ it, missing folders included), and an `old_string` must match one place unless
 the call says `replace_all`, which the approval card shows with its count — and a shell command that writes a file by redirection, `tee`, `sed -i`,
 `patch` or an inline script is asked about the same way, even one whose prefix
 is allowlisted. That check is a heuristic: an allowlisted command runs unasked
-only when every command of its chain or pipe is allowlisted, but the allowlisted
-interpreters and runners (`node`, `python`, `pnpm run`, test runners) run
-whatever script they are given without asking. It hands work to subagents only when that
+only when every command of its chain or pipe is allowlisted (a filter such as
+`grep`, `sort` or `cut` counts as allowlisted at the receiving end of a pipe),
+but the allowlisted interpreters and runners (`node`, `python`, `pnpm run`,
+test runners) run whatever script they are given without asking; a bare
+`python` or `node`, which reads its script from a pipe or stdin, is asked
+about. It hands work to subagents only when that
 pays — an explore subagent for a broad read-only investigation or parallel
 research, code subagents for two or more changes to disjoint files — because a
 delegated edit costs a second prompt, a second exploration and the spec written

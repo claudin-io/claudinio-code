@@ -242,7 +242,11 @@ approval or not, and the git operator refuses them too. `bash_writes_files` is
 a heuristic (redirection, `tee`, in-place `sed`/`perl`, `patch`, inline scripts
 that call a write); what bounds the rest is `bash_permission`, which runs a
 command unasked only when every command of its chain or pipe is allowlisted
-(`permissions::segments`; substitution and `--output` disqualify it). The
+(`permissions::split_chain`, which reads quotes as POSIX does — a backslash is
+literal inside `'…'`; substitution and `--output` disqualify it; a prefix
+ending in a space needs arguments, so a bare `python` is not `python `; a
+read-only filter — `grep`, `cut`, `sort` without `-o`, `uniq` without an
+output file — is allowlisted only where a pipe feeds it). The
 allowlisted interpreters and runners still run any script unasked in Builder;
 Brain refuses those too (`bash_permission_brain`), though its builds and test
 runners still run project code. Compact adds one rule
@@ -553,8 +557,11 @@ word counted when it can match the folder or the file. It reads the whole call
 like the path guard does, so a link an earlier call made (`ln -s .claudinio c`,
 then `>> c/MEMORY.md`) is seen. It also counts the `.claudinio` folder itself
 as the target of a command that writes or deletes into it (`cp`, `mv`,
-`rsync`, `tar -C`, `rm`, a rewriting `git` subcommand), and `find` acting
-(`-delete`, `-exec`) on a name that matches the file. It cannot see a path the
+`rsync`, `tar -C`, `rm`, a rewriting `git` subcommand) when that command runs
+in the segment naming the folder or after a `cd` into it, and `find` acting
+(`-delete`, `-exec`) in a segment that names the folder or a name matching
+the file — a pattern such as `*.md` matches it, so `find . -name '*.md'
+-exec …` is refused; `find`'s `{}` placeholder is not read as a name. It cannot see a path the
 command assembles at run time (a variable, an interpreter script building the
 name), a copy or delete of a parent folder (`rm -rf .`), a link reached
 through a globbed folder name, or a hard link to the file (which only such a

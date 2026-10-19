@@ -97,8 +97,11 @@ casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão
 `sed -i`, `patch` ou script inline é perguntado do mesmo jeito, mesmo quando o
 prefixo está na allowlist. Essa checagem é uma heurística: um comando da
 allowlist só roda sem perguntar quando cada comando da cadeia ou do pipe está na
-allowlist, mas os interpretadores e runners da allowlist (`node`, `python`,
-`pnpm run`, runners de teste) rodam o script que receberem sem perguntar. Ele só passa trabalho a
+allowlist (um filtro como `grep`, `sort` ou `cut` conta como allowlist na ponta
+que recebe um pipe), mas os interpretadores e runners da allowlist (`node`,
+`python`, `pnpm run`, runners de teste) rodam o script que receberem sem
+perguntar; um `python` ou `node` sozinho, que lê o script de um pipe ou do
+stdin, é perguntado. Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
 somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo
