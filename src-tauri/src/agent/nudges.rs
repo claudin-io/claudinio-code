@@ -39,13 +39,15 @@ pub const FINALIZE_PLAN: &str = "[system] All goals are met. Before finishing, c
      This is the required last step.";
 
 /// Brain mode explored for several rounds without a deliverable.
+/// Since lean-harness Phase 5 it no longer orders an interview (decision D5):
+/// a decision that is the user's goes to `ask_user`; otherwise the plan is due.
 pub const BRAIN_EXPLORING: &str = "[system] You have been exploring for several consecutive rounds \
-     in Brain mode without making progress on the required deliverables. \
-     Brain mode is for planning — you MUST call ask_user to interview \
-     the user, then write_plan to create the Solution Design, then \
-     write_plan again to add the '## Low-Level Design' section, then \
-     tasks_set to create executable tasks. Do not continue exploring \
-     until you have gathered the information you need.";
+     in Brain mode without making progress on the deliverables. Brain mode is for \
+     planning: if a decision only the user can make is still open, ask it with \
+     ask_user (independent questions in one call); otherwise write the Solution \
+     Design with write_plan, then write_plan again to add the '## Low-Level Design' \
+     section, then tasks_set to create executable tasks. Explore further only for \
+     a fact the plan is missing.";
 
 /// The context reached its limit: the next reply is the handoff document.
 pub const HANDOFF_REQUEST: &str = "[system] This session's context reached its limit. Your next reply must be \
@@ -161,6 +163,22 @@ mod tests {
             declared, listed,
             "nudges::ALL must list every text constant, in order"
         );
+    }
+
+    // Decision D5 (lean-harness Phase 5): the Brain interview is adaptive.
+    // The nudge Brain gets after exploring too long must not bring back the
+    // mandatory interview the prompt dropped: it asks only when a decision
+    // that is the user's is open, and otherwise moves on to the plan.
+    #[test]
+    fn the_brain_exploring_nudge_keeps_the_interview_adaptive() {
+        assert!(!BRAIN_EXPLORING.contains("MUST"), "{BRAIN_EXPLORING}");
+        assert!(
+            !BRAIN_EXPLORING.contains("interview the user"),
+            "{BRAIN_EXPLORING}"
+        );
+        for step in ["ask_user", "write_plan", "## Low-Level Design", "tasks_set"] {
+            assert!(BRAIN_EXPLORING.contains(step), "{step}: {BRAIN_EXPLORING}");
+        }
     }
 
     // A golden flip's successor always has a list (the pending goals are
