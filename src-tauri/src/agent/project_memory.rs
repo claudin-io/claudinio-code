@@ -413,7 +413,7 @@ fn command_segments(lower: &str) -> Vec<Vec<String>> {
 /// any `NAME=value` assignments and the shell's own words that start a
 /// command (`then`, `do`, `{`, `!`, …); when that word is a shell given a
 /// script (`sh -c '…'`), the names that script runs — its first word that is
-/// not an option (`bash -c -- '…'`, `bash -c -o pipefail '…'`); when it is a
+/// not an option (`bash -c -- '…'`, `bash -co pipefail '…'`); when it is a
 /// command that runs another (`sudo`, `xargs`, `eval`, `stdbuf`, …), the
 /// words after it up to the first command this guard knows, since the
 /// command it runs can sit behind its own flags and their values, and that
@@ -452,24 +452,31 @@ fn nested_commands(words: &[String], depth: usize) -> Vec<&str> {
     let mut out = vec![first];
     if SHELLS.contains(&first) {
         // `bash -c '…'`, `sh -ec '…'`: the quotes are already dropped, so
-        // the script is the words after the flag and the options behind it
-        // (`-o`/`-O` take a value; `--` ends them).
+        // the script is the first word after the flag and the options behind
+        // it, read as getopt reads them: each `o` (`-O` lower-cased) in an
+        // option word takes the next word as its value, the `-c` word's own
+        // included (`-co pipefail`), and `--` ends them.
         let Some(flag) = rest
             .iter()
             .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))
         else {
             return out;
         };
+        let values_of = |w: &str| w[1..].matches('o').count();
+        let mut values = values_of(&rest[flag]);
         let mut at = flag + 1;
         while let Some(w) = rest.get(at) {
-            if w == "--" {
-                at += 1;
+            at += 1;
+            if values > 0 {
+                values -= 1;
+            } else if w == "--" {
+                break;
+            } else if w.starts_with('-') || w.starts_with('+') {
+                values = values_of(w);
+            } else {
+                at -= 1;
                 break;
             }
-            if !(w.starts_with('-') || w.starts_with('+')) {
-                break;
-            }
-            at += if w.ends_with('o') { 2 } else { 1 };
         }
         out.extend(nested_commands(
             rest.get(at..).unwrap_or_default(),
@@ -1305,6 +1312,16 @@ mod tests {
             "coproc { rm -rf .claudinio; }",
             "sudo -u root rm -rf .claudinio",
             "sudo nice -n 5 cp -r /tmp/q/. .claudinio/",
+            // Recheck round 3: an `o` clustered with the `-c` takes the next
+            // word as its value, as getopt reads it, so `pipefail` is not
+            // the script.
+            "bash -co pipefail 'rm -rf .claudinio'",
+            "bash -oc pipefail 'rm -rf .claudinio'",
+            "bash -eco pipefail 'rm -rf .claudinio'",
+            "bash -lco pipefail 'rm -rf .claudinio'",
+            "sh -co pipefail 'rm -rf .claudinio'",
+            "bash -c -oo pipefail errexit 'rm -rf .claudinio'",
+            "bash -O extglob -co pipefail 'rm -rf .claudinio'",
         ] {
             assert!(named_in(c), "{c}");
         }
