@@ -149,6 +149,20 @@ pub enum Block {
     Section(Section),
 }
 
+/// The first `n` at or after `from` whose `s<n>` is not `taken`.
+fn free_number(from: u32, taken: impl Fn(&str) -> bool) -> u32 {
+    let mut n = from;
+    while taken(&format!("s{n}")) {
+        n += 1;
+    }
+    n
+}
+
+/// Where harness-numbered section ids stop counting: far beyond any real
+/// document, and far enough below `u32::MAX` that counting on from it for
+/// every section a file can hold never overflows.
+const ID_CEILING: u32 = 1_000_000_000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     /// The first `# ` line's text, or empty.
@@ -596,11 +610,15 @@ impl Document {
     /// Returns the ids it handed out.
     pub fn assign_ids(&mut self) -> Vec<String> {
         let mut next = self.next_number();
+        // Every id in the file is taken, a number above the ceiling included.
+        let mut taken: std::collections::HashSet<String> = self.ids().into_iter().collect();
         let mut seen: Vec<String> = Vec::new();
         let mut assigned = Vec::new();
         for s in self.sections_mut() {
             if s.id.is_empty() || seen.contains(&s.id) {
+                next = free_number(next, |id| taken.contains(id));
                 s.id = format!("s{next}");
+                taken.insert(s.id.clone());
                 next += 1;
                 assigned.push(s.id.clone());
             }
@@ -610,11 +628,14 @@ impl Document {
     }
 
     /// One more than the highest `s<N>` in the document, and never below
-    /// the floor an earlier reading set.
+    /// the floor an earlier reading set. A number at or above `ID_CEILING`
+    /// (only a hand-edited comment has one) does not move it, so counting on
+    /// from it can never overflow.
     pub fn next_number(&self) -> u32 {
         let highest = self
             .sections()
             .filter_map(|s| s.id.strip_prefix('s')?.parse::<u32>().ok())
+            .filter(|n| *n < ID_CEILING)
             .max()
             .unwrap_or(0);
         (highest + 1).max(self.floor)
@@ -629,7 +650,7 @@ impl Document {
 
     /// New ids start at `s<n>` or later.
     pub fn reserve_from(&mut self, n: u32) {
-        self.floor = self.floor.max(n);
+        self.floor = self.floor.max(n.min(ID_CEILING));
     }
 
     /// Claim and write section `id` for `owner`. `body` empty or absent with
@@ -711,7 +732,11 @@ impl Document {
         {
             prev.push('\n');
         }
-        let id = format!("s{}", self.next_number());
+        let taken = self.ids();
+        let id = format!(
+            "s{}",
+            free_number(self.next_number(), |id| taken.contains(&id.to_string()))
+        );
         self.blocks
             .insert(at, Block::Section(placeholder(id.clone(), &topic)));
         Ok(id)
@@ -737,6 +762,38 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ids come from comments a person can edit, so any number may be there.
+    /// The largest u32 must neither overflow the next id (a panic in a debug
+    /// build, a wrap to `s0` in release) nor stop new ids from being unique —
+    /// and neither may a floor a committed memory file carries.
+    #[test]
+    fn an_id_or_a_floor_at_the_top_of_u32_still_mints_unique_ids() {
+        let mut doc = parse(
+            "[first topic] <!-- claudinio: id=s4294967295 status=todo -->\n\
+             [a topic the person typed]\n[another]\n",
+        );
+        doc.assign_ids();
+        let ids = doc.ids();
+        assert_eq!(ids[0], "s4294967295");
+        assert!(ids[1] != ids[2] && !ids[1..].contains(&ids[0]), "{ids:?}");
+        assert!(doc.next_number() < u32::MAX, "{}", doc.next_number());
+
+        let mut doc = parse("[a] <!-- claudinio: id=s1 status=todo -->\n[b]\n[c]\n");
+        doc.reserve_from(u32::MAX);
+        doc.assign_ids();
+        let ids = doc.ids();
+        assert!(
+            ids[1] != ids[2] && ids[1] != "s1" && ids[2] != "s1",
+            "{ids:?}"
+        );
+
+        // A new placeholder skips an id the file already has, too.
+        let mut doc = parse("[a] <!-- claudinio: id=s1000000000 status=todo -->\n");
+        doc.reserve_from(u32::MAX);
+        let added = doc.add_placeholder("b", None).unwrap();
+        assert_ne!(added, "s1000000000");
+    }
 
     const PUDIM: &str = "# Pudim de leite\n\n[origem do pudim de leite]\n[ingredientes originais]\n[Modo de preparo clássico]\n[Como servir o pudim]\n[Como armazenar o pudim]\n";
 
