@@ -236,7 +236,9 @@ pub fn is_memory_path(root: &Path, requested: &Path) -> bool {
 }
 
 /// `path` with its deepest existing ancestor canonicalized (links followed)
-/// and the rest folded lexically: `.` dropped, `..` taking one part back.
+/// and the rest folded lexically: `.` dropped, `..` taking one part back, and
+/// each name read as Win32 opens it (`win32_name`), since nothing on disk
+/// says yet which file it will be.
 fn resolved(path: &Path) -> PathBuf {
     let mut base = path.to_path_buf();
     let mut rest = Vec::new();
@@ -261,10 +263,23 @@ fn resolved(path: &Path) -> PathBuf {
             Some("..") => {
                 out.pop();
             }
-            _ => out.push(name),
+            Some(text) => match win32_name(text) {
+                "" => {}
+                name => out.push(name),
+            },
+            None => out.push(name),
         }
     }
     out
+}
+
+/// The file Win32 opens for the name `text`: a stream after the first `:`
+/// belongs to the file before it (`MEMORY.md::$DATA`, `MEMORY.md:x`), and
+/// trailing dots and spaces are dropped (`MEMORY.md. `). Empty for a name
+/// made only of those, which Win32 reads as the folder itself.
+fn win32_name(text: &str) -> &str {
+    let file = text.split(':').next().unwrap_or(text);
+    file.trim_end_matches(['.', ' '])
 }
 
 /// Whether a shell command names the memory file. The shell cannot be
@@ -951,6 +966,38 @@ mod tests {
             PathBuf::from("/elsewhere/.claudinio/MEMORY.md"),
         ] {
             assert!(!is_memory_path(root, &p), "{}", p.display());
+        }
+    }
+
+    /// Win32 opens `MEMORY.md.`, `MEMORY.md ` and `MEMORY.md::$DATA` as
+    /// `MEMORY.md` (trailing dots and spaces dropped, a stream of the file
+    /// after `:`), and creates it if it is missing — where canonicalize has
+    /// nothing to follow yet. The guard reads a not-yet-existing name the way
+    /// Windows will open it, on every platform (on Unix such a name is merely
+    /// refused).
+    #[test]
+    fn a_windows_spelling_of_the_memory_is_the_memory_before_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for p in [
+            ".claudinio/MEMORY.md.",
+            ".claudinio/MEMORY.md ",
+            ".claudinio/MEMORY.md. .",
+            ".claudinio/MEMORY.md::$DATA",
+            ".claudinio/MEMORY.md:x",
+            ".claudinio./MEMORY.md",
+            ".claudinio /memory.md.",
+        ] {
+            assert!(is_memory_path(root, Path::new(p)), "{p:?}");
+        }
+        std::fs::create_dir(root.join(".claudinio")).unwrap();
+        assert!(is_memory_path(root, Path::new(".claudinio/MEMORY.md.")));
+        for p in [
+            ".claudinio/MEMORY.md.bak",
+            ".claudinio/MEMORY",
+            ".claudinio/MEMORY.mdx",
+        ] {
+            assert!(!is_memory_path(root, Path::new(p)), "{p:?}");
         }
     }
 
