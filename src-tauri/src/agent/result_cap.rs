@@ -124,7 +124,7 @@ impl ReadRange {
     /// took no whole or partial line (one line break).
     fn of(text: &str, head_end: usize, tail_start: usize, first: usize) -> Option<Self> {
         let header = crate::agent::tools::read_file::header_lines(text);
-        let line = |at: usize| file_line(&text[..at], first, header);
+        let line = |at: usize| file_line(&text.as_bytes()[..at], first, header);
         let skip_break = usize::from(text.as_bytes().get(head_end) == Some(&b'\n'));
         let range = ReadRange {
             from: line(head_end + skip_break),
@@ -151,7 +151,12 @@ impl ReadRange {
         } else {
             let skip_break = usize::from(head.as_bytes()[head_len] == b'\n');
             let header = crate::agent::tools::read_file::header_lines(head);
-            file_line(&head[..head_len + skip_break], self.first, header).min(self.from)
+            file_line(
+                &head.as_bytes()[..head_len + skip_break],
+                self.first,
+                header,
+            )
+            .min(self.from)
         };
         let dropped = tail.len() - tail_len.min(tail.len());
         let to = if dropped == 0 {
@@ -159,7 +164,7 @@ impl ReadRange {
         } else {
             let after = tail.len().saturating_sub(1).max(dropped - 1);
             self.last
-                .saturating_sub(tail[dropped - 1..after].matches('\n').count())
+                .saturating_sub(line_breaks(&tail.as_bytes()[dropped - 1..after]))
                 .max(self.first)
         };
         let range = ReadRange { from, to, ..self };
@@ -201,10 +206,21 @@ impl ReadRange {
 /// The file line of the byte right after `before`, in a read whose text starts
 /// on file line `first` behind `header` lines of `read_file`'s own warning
 /// (a byte inside the warning counts as the read's first line).
-fn file_line(before: &str, first: usize, header: usize) -> usize {
-    (first + before.matches('\n').count())
+fn file_line(before: &[u8], first: usize, header: usize) -> usize {
+    (first + line_breaks(before))
         .saturating_sub(header)
         .max(first)
+}
+
+/// The line breaks in `bytes`. The offsets a cut counts lines at are byte
+/// offsets — the byte before the tail, the text's last byte — and they fall
+/// inside a character whenever that character takes more than one byte (é, —,
+/// an emoji, CJK). A `str` slice there panics, and the panic kills the run in
+/// the middle of a tool round (lean-harness Phase 6f; Phase 6 shipped it). A
+/// `\n` byte is never part of a longer UTF-8 character, so counting it on the
+/// bytes is exact at any offset.
+fn line_breaks(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&b| b == b'\n').count()
 }
 
 /// The hint for an output about to be cut: the path of a saved copy.
@@ -691,6 +707,66 @@ mod tests {
         assert!(c.head.chars().all(|ch| ch == 'é') && c.tail.chars().all(|ch| ch == 'é'));
         if let Some(p) = c.hint.split("the full output is in ").nth(1) {
             std::fs::remove_file(p.split(';').next().unwrap()).ok();
+        }
+    }
+
+    // A capped read counts the lines it left out on line breaks; the bytes
+    // around a cut may belong to a character of several bytes (é, —, emoji,
+    // CJK). Counting there must never slice inside one: a panic in the cap
+    // kills the run in the middle of a tool round.
+    #[test]
+    fn a_capped_read_whose_text_ends_in_a_multibyte_character_names_its_range() {
+        let text = (1..=2_000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + " café";
+        let out = cap(Call::tool("read_file"), &text, 10_000);
+        let c = parse(&out).expect("a capped result parses");
+        assert!(c.tail.ends_with("café"), "{}", c.tail);
+        let (from, to) = offered_range(c.hint);
+        assert!(from < to && to < 2_000, "{}", c.hint);
+        assert!(c.hint.contains("of 1-2000"), "{}", c.hint);
+    }
+
+    #[test]
+    fn a_capped_read_of_one_long_multibyte_line_names_that_line() {
+        let text = "é".repeat(20_000) + "x";
+        let out = cap(Call::tool("read_file"), &text, 9_999);
+        let c = parse(&out).expect("a capped result parses");
+        assert_eq!(c.total, text.len());
+        assert!(c.hint.contains("lines 1-1 of 1-1"), "{}", c.hint);
+    }
+
+    #[test]
+    fn a_read_of_multibyte_lines_cut_twice_by_its_round_names_its_range() {
+        let read = (0..100)
+            .map(|_| "é".repeat(200))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "x";
+        let call = Call::tool("read_file");
+        let once = cap(call, &read, 15_000);
+        let first = parse(&once).expect("capped once");
+        assert!(first.hint.contains("of 1-100"), "{}", first.hint);
+        // fit_round's share for one of several reads.
+        for room in [997, 600, 200, 61] {
+            let twice = recut(call, &once, room).expect("cut again");
+            let second = parse(&twice).expect("capped twice");
+            assert_eq!(second.total, read.len());
+            assert!(second.hint.contains("of 1-100"), "{}", second.hint);
+        }
+        let calls = vec![
+            ContentBlock::tool_use("r0", "read_file", serde_json::json!({})),
+            ContentBlock::tool_use("r1", "read_file", serde_json::json!({})),
+        ];
+        let mut round = vec![
+            tool_result_block("r0", call, &read, 15_000),
+            tool_result_block("r1", call, &read, 15_000),
+        ];
+        fit_round(&mut round, &calls, 1_994);
+        for b in &round {
+            assert!(parse(&text(b)).is_some(), "still a marker");
         }
     }
 
