@@ -43,6 +43,7 @@ pub fn record(workspace: Option<&str>, session_id: &str, note: &str, ts_ms: u64)
         .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_default();
     if append(
+        ws,
         &path,
         &format!("## Compaction — {when}\n\n{}\n\n", note.trim_end()),
     )
@@ -59,12 +60,19 @@ pub fn record(workspace: Option<&str>, session_id: &str, note: &str, ts_ms: u64)
 
 /// Append to `path`, making the notes folder, and never through a link: a
 /// link planted at the note's path would make every compaction append to
-/// whatever it points at.
-fn append(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-        if std::fs::symlink_metadata(dir)?.file_type().is_symlink() {
-            return Err(std::io::Error::other("the notes folder is a link"));
+/// whatever it points at, and one at `.claudinio` or `notes` (a cloned
+/// repository can commit either) would put the folder itself outside the
+/// workspace. Each folder under `workspace` is checked before it is used, so
+/// nothing is created through a link either.
+fn append(workspace: &Path, path: &Path, text: &str) -> std::io::Result<()> {
+    let mut dir = workspace.to_path_buf();
+    for part in Path::new(NOTES_DIR).components() {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(std::io::Error::other("a notes folder is a link or a file")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&dir)?,
+            Err(e) => return Err(e),
         }
     }
     if let Ok(meta) = std::fs::symlink_metadata(path)
@@ -146,5 +154,24 @@ mod tests {
         let ws = dir.path().to_str().unwrap();
         assert_eq!(record(Some(ws), ID, "note", TS), "note");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "[package]\n");
+    }
+
+    // A cloned repository can carry `.claudinio` itself as a committed link:
+    // following it would make the notes folder, and every note, land outside
+    // the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_claudinio_folder_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws_dir = dir.path().join("ws");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws_dir.join(".claudinio")).unwrap();
+        let ws = ws_dir.to_str().unwrap();
+        assert_eq!(record(Some(ws), ID, "note", TS), "note");
+        assert!(
+            !outside.path().join("notes").exists(),
+            "nothing is written through the link"
+        );
     }
 }
