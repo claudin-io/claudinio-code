@@ -156,7 +156,20 @@ pub fn plan_ref(root: &Path, plan: &Path) -> String {
 /// link: a cloned repository can commit `.claudinio` or `MEMORY.md` as a link,
 /// and following it would write wherever it points. The new text replaces
 /// the file through a rename, so a reader never sees half of it.
+///
+/// Every session of the app runs in one process, and two may finish a plan
+/// in the same workspace at once: the read-modify-write runs under one
+/// process-wide lock (appends are rare, so one lock for every workspace
+/// costs nothing), and the temporary file's name is unique per call, so one
+/// writer never removes or renames another's half-written file (Phase 9
+/// review). Another process writing the file at the same instant is not
+/// covered; the app runs one.
 pub fn append(root: &Path, plan: &Path, date: &str, lines: &[String]) -> Result<PathBuf, String> {
+    static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _guard = APPEND_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fail = |e: &dyn std::fmt::Display| format!("could not write {MEMORY_FILE}: {e}");
     let dir = root.join(".claudinio");
     match std::fs::symlink_metadata(&dir) {
@@ -179,7 +192,8 @@ pub fn append(root: &Path, plan: &Path, date: &str, lines: &[String]) -> Result<
     let plan = plan_ref(root, plan);
     let entries: Vec<String> = lines.iter().map(|l| entry(date, l, &plan)).collect();
     let text = appended(&existing, &entries, MEMORY_CAP);
-    let tmp = dir.join(format!(".MEMORY.md.{}.tmp", std::process::id()));
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".MEMORY.md.{}.{seq}.tmp", std::process::id()));
     // A leftover (or planted) file under the temporary name goes first;
     // removing a link removes the link, never what it points at.
     let _ = std::fs::remove_file(&tmp);
@@ -681,6 +695,41 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    // Every session in the app shares one process, so two that finish a plan
+    // in the same workspace at once must both keep their lines, and neither
+    // may report an error for a write that landed (Phase 9 review).
+    #[test]
+    fn concurrent_appends_in_one_workspace_all_land() {
+        const WRITERS: usize = 8;
+        for round in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+            let handles: Vec<_> = (0..WRITERS)
+                .map(|i| {
+                    let (root, barrier) = (root.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        let plan = root.join(".claudinio/plans/p.md");
+                        barrier.wait();
+                        append(&root, &plan, "2026-10-19", &[format!("writer {i} é")])
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join()
+                    .unwrap()
+                    .unwrap_or_else(|e| panic!("round {round}: {e}"));
+            }
+            let text = std::fs::read_to_string(root.join(MEMORY_FILE)).unwrap();
+            for i in 0..WRITERS {
+                assert!(
+                    text.contains(&format!("writer {i} é")),
+                    "round {round}: {text}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
