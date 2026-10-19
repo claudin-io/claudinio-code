@@ -255,18 +255,37 @@ const MEMORY_READS: &[&str] = &[
 ];
 
 /// Commands refused outright wherever they start a part of the command
-/// (split at `;`, `&`, `|`, a parenthesis or a line break; a leading `sudo`
-/// skipped).
+/// (split at `;`, `&`, `|`, a parenthesis or a line break outside quotes; a
+/// leading `sudo` skipped).
 const BASH_BLACKLIST: &[&str] = &["chown", "dd", "fdisk", "format", "mkfs"];
 
 /// The deny-list (`BASH_BLACKLIST`), by whole words: a tripwire for the
 /// obvious spelling of a destructive command (`rm -rf /`, `chmod 777`, a
 /// fork bomb), not a boundary — `rm -fr /` only asks. Words, not
 /// substrings, so `git log --format %H`, `cp /tmp/x .` and `rm -rf
-/// /tmp/build` reach the rule instead of a refusal nothing can lift.
+/// /tmp/build` reach the rule instead of a refusal nothing can lift. Quoted
+/// text is blanked first: `git commit -m "fix(dd): x"` holds no command
+/// `dd`, and a quoted script (`sh -c 'dd …'`) asks, as a tripwire may.
 fn on_the_deny_list(command: &str) -> bool {
+    let mut open = None;
+    let unquoted: String = command
+        .chars()
+        .map(|c| match open {
+            None if c == '\'' || c == '"' => {
+                open = Some(c);
+                ' '
+            }
+            None => c,
+            Some(q) => {
+                if c == q {
+                    open = None;
+                }
+                ' '
+            }
+        })
+        .collect();
     command.contains(":(){")
-        || command.split([';', '&', '|', '(', ')', '\n']).any(|part| {
+        || unquoted.split([';', '&', '|', '(', ')', '\n']).any(|part| {
             let words: Vec<&str> = part.split_whitespace().collect();
             let command = words.iter().find(|w| **w != "sudo").copied().unwrap_or("");
             BASH_BLACKLIST.contains(&command.split('.').next().unwrap_or(""))
@@ -1532,6 +1551,19 @@ mod shell_rule_tests {
             "rm -rf /tmp/build",
             "grep -rn \"chown \" src",
             "grep -rn \"chmod\" src",
+            // A word inside quotes is text, not a command, even after a
+            // parenthesis, `;` or `&` (review of the simplified rule:
+            // conventional-commit scopes were refused with no override).
+            "grep -rn \"fix(format)\" CHANGELOG.md",
+            "git log --grep \"fix(format)\"",
+            "git log --oneline | grep \"(format)\"",
+            "git commit -m \"chore(format): apply prettier\"",
+            "git commit -m \"feat(format): add date formatter\"",
+            "git commit -m \"fix(dd): handle sizes\"",
+            "git commit -m \"lint & format code\"",
+            "git commit -m \"style: tidy; format imports\"",
+            "git commit -m \"never chmod 777 again\"",
+            "git commit -m 'fix(mkfs): x'",
         ] {
             assert_ne!(builder(c, None), PermissionLevel::Denied, "{c:?}");
             assert_ne!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
