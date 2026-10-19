@@ -1082,15 +1082,19 @@ async fn edit_gates(a: &edit_file::EditFileArgs, ctx: &ToolContext) -> Result<()
     // `symlink_metadata`: a dangling link is something there, not a new file.
     if std::fs::symlink_metadata(&a.path).is_err() {
         let path = Path::new(&a.path);
+        // A relative path is checked against the workspace but opened from
+        // the process's directory: a create could land outside the workspace,
+        // and an edit of a file that exists would be called missing.
         if let Some(root) = ctx.workspace_root.as_deref()
-            && a.old_string.is_empty()
             && path.is_relative()
         {
             let absolute = Path::new(root).join(path);
-            return Err(crate::agent::gate_text::create_needs_absolute_path(
-                &a.path,
-                &absolute.to_string_lossy(),
-            ));
+            let absolute = absolute.to_string_lossy();
+            return Err(if a.old_string.is_empty() {
+                crate::agent::gate_text::create_needs_absolute_path(&a.path, &absolute)
+            } else {
+                crate::agent::gate_text::edit_needs_absolute_path(&a.path, &absolute)
+            });
         }
         return Ok(());
     }
@@ -2146,6 +2150,28 @@ mod tests {
         assert!(!std::path::Path::new("phase3b-relative").exists());
     }
 
+    /// The same mismatch on an edit: a relative path to a file that exists in
+    /// the workspace is not found from the app's directory, and calling it
+    /// missing sends the model into a create that is then refused. It is told
+    /// the absolute path instead.
+    #[test]
+    fn editing_by_a_relative_path_asks_for_the_absolute_one_not_a_create() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("phase6f-edit.rs"), "fn main() {}\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        let err = edit(
+            &ctx,
+            serde_json::json!({
+                "path": "phase6f-edit.rs", "old_string": "main", "new_string": "start",
+            }),
+        )
+        .unwrap_err();
+        assert!(!err.contains("create"), "{err}");
+        let absolute = dir.path().join("phase6f-edit.rs");
+        assert!(err.contains(&*absolute.to_string_lossy()), "{err}");
+        assert!(err.contains("absolute"), "{err}");
+    }
+
     #[test]
     fn reading_a_missing_file_points_at_creating_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -2166,6 +2192,32 @@ mod tests {
             err.contains("edit_file") && err.contains("old_string \"\""),
             "{err}"
         );
+        // read_file cannot tell whether the calling session may edit (an
+        // explore subagent or a Brain session may not), so the hint is
+        // conditional, never an order to create the file.
+        assert!(err.contains("If you meant to create it"), "{err}");
+        assert!(err.contains("where edit_file is available"), "{err}");
+    }
+
+    /// A relative path is read from the app's own directory while the
+    /// workspace guard resolves it against the workspace, so a relative read
+    /// can miss a file that exists in the workspace. Telling the model to
+    /// create it there sends it into a refused create and a needless round;
+    /// the answer is the absolute path.
+    #[test]
+    fn reading_a_missing_relative_path_asks_for_the_absolute_one_not_a_create() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("phase6f-exists.rs"), "fn main() {}\n").unwrap();
+        let ctx = ctx_at(dir.path());
+        let err = futures::executor::block_on(execute(
+            "read_file",
+            serde_json::json!({ "path": "phase6f-exists.rs" }),
+            &ctx,
+        ))
+        .unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(!err.contains("create"), "{err}");
+        assert!(err.contains("absolute path"), "{err}");
     }
 
     // ── edit_file edits exactly one place (lean-harness Phase 3b) ──

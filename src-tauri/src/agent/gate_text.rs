@@ -122,6 +122,16 @@ pub fn create_needs_absolute_path(path: &str, absolute: &str) -> String {
     )
 }
 
+/// An edit of text in a file named by a relative path that is not found from
+/// the process's directory: the file may well exist in the workspace, which
+/// the containment check resolved the path against (lean-harness Phase 6f).
+pub fn edit_needs_absolute_path(path: &str, absolute: &str) -> String {
+    format!(
+        "{path} is relative and is not found from the app's directory; edit_file needs an \
+         absolute path inside the workspace. Retry edit_file with path {absolute}."
+    )
+}
+
 /// `edit_file` with an `old_string` that occurs `count` times.
 pub fn ambiguous_match(path: &str, count: usize) -> String {
     format!(
@@ -220,6 +230,10 @@ pub fn all() -> Vec<(&'static str, String)> {
             "create_needs_absolute_path",
             create_needs_absolute_path("src/new.rs", "/w/src/new.rs"),
         ),
+        (
+            "edit_needs_absolute_path",
+            edit_needs_absolute_path("src/a.rs", "/w/src/a.rs"),
+        ),
         ("ambiguous_match", ambiguous_match("/w/src/a.rs", 2)),
         ("quality_missing", quality_missing("golden-g-1")),
         ("quality_stale", quality_stale("golden-g-1")),
@@ -289,6 +303,10 @@ mod tests {
         (
             "create_needs_absolute_path",
             &["absolute", "retry edit_file with path /w/src/new.rs"],
+        ),
+        (
+            "edit_needs_absolute_path",
+            &["absolute", "retry edit_file with path /w/src/a.rs"],
         ),
         (
             "ambiguous_match",
