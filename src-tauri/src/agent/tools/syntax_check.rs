@@ -43,11 +43,20 @@ pub fn new_syntax_error(path: &str, old: &str, new: &str) -> Option<String> {
     let row = first_error_row(root)?;
     let line = new.lines().nth(row).unwrap_or("").trim();
     let snippet: String = line.chars().take(SNIPPET_CHARS).collect();
-    Some(format!(
-        "Warning: after this edit {path} no longer parses as {lang} — first syntax error at \
-         line {}: `{snippet}`. The edit was applied; fix it unless that is intended.",
-        row + 1
-    ))
+    let row = row + 1;
+    // An empty `old` is a file edit_file just created (an existing file is
+    // never edited from nothing): it never parsed, so it is not "no longer".
+    Some(if old.is_empty() {
+        format!(
+            "Warning: the new file {path} does not parse as {lang} — first syntax error at \
+             line {row}: `{snippet}`. The file was created; fix it unless that is intended."
+        )
+    } else {
+        format!(
+            "Warning: after this edit {path} no longer parses as {lang} — first syntax error at \
+             line {row}: `{snippet}`. The edit was applied; fix it unless that is intended."
+        )
+    })
 }
 
 /// The 0-based row of the first error or missing node in document order.
@@ -113,6 +122,13 @@ mod tests {
     fn a_created_file_that_does_not_parse_is_named() {
         let warning = new_syntax_error("/ws/src/new.rs", "", "fn broken( {\n").expect("a warning");
         assert!(warning.contains("line 1"), "{warning}");
+        // A file that did not exist never parsed: it is not "no longer"
+        // parsing, and nothing was "edited".
+        assert!(!warning.contains("no longer"), "{warning}");
+        assert!(
+            warning.contains("the new file /ws/src/new.rs does not parse as rust"),
+            "{warning}"
+        );
     }
 
     #[test]
