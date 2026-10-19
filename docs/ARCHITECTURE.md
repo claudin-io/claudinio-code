@@ -272,9 +272,12 @@ backslash and `^` removed, blanks collapsed), contains a `BASH_BLACKLIST`
 entry, redirects into `/dev/` other than exactly `null`, `stdout`, `stderr`,
 `tty` or `fd/N`, or runs cmd's `format X:` — so a path (`/bin/rm -rf /`), a
 wrapper (`time dd if=…`), a quote (`r''m`), a backslash (`d\d`) or a heredoc
-hides nothing, with no parsing. Its accepted false positives, as on the
-original list, are ordinary text that contains an entry (`grep chown src`,
-`cp /tmp/x .`, `git commit -m "fix: chown "`). The rule replaced a chain
+is caught with no parsing; a spelling no entry names once those characters
+are gone, such as bash's ANSI-C quote (`rm -rf $'\x2f'`), is not, as on the
+original list. Its accepted false positives, as on the original list, are
+ordinary text that contains an entry (`grep chown src`, `cp /tmp/x .`,
+`git commit -m "fix: chown "`), plus text holding one of the entries the
+original lacked (`git commit -m "departed from x"`). The rule replaced a chain
 splitter, per-option `sort`/`uniq` readers, a stdin detector and runner
 argument tables after three review rounds kept finding bypasses in them
 (lean-harness plan, "Shell policy simplified"). Builder's allowlisted
