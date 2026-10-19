@@ -686,13 +686,14 @@ pub fn write_plan_def() -> ToolDef {
 pub fn finalize_plan_def() -> ToolDef {
     ToolDef {
         name: "finalize_plan".into(),
-        description: "Append the Implementation Log to the plan once all tasks are done and verified. Changed files and commits are read from git, so `journal` holds findings, decisions and gotchas, not a file list.".into(),
+        description: "Append the Implementation Log to the plan once all tasks are verified. Files and commits come from git; `journal` holds findings, decisions and gotchas.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "journal": { "type": "string", "description": "Findings, decisions and gotchas: the 'why'." },
+                "journal": { "type": "string" },
                 "plan_file": { "type": "string", "description": "Plan basename or path; default: the latest plan." },
-                "summary": { "type": "string", "description": "One-line summary." }
+                "summary": { "type": "string" },
+                "memory": { "type": "array", "items": { "type": "string" }, "description": "Up to 5 lessons (200 chars each) a later session in this repo would otherwise re-learn; saved to .claudinio/MEMORY.md." }
             },
             "required": ["journal"]
         }),
@@ -1419,6 +1420,25 @@ mod tests {
             .map(|t| (t.name.clone(), t.description.chars().count()))
             .collect();
         assert!(over.is_empty(), "over 400 characters: {over:?}");
+    }
+
+    /// Phase 9: `finalize_plan` takes the lines the project memory gains, as
+    /// an optional list of strings whose description states the limits the
+    /// code enforces (`project_memory::proposed_lines`) and stays short —
+    /// `finalize_plan` is core in Builder, so it rides on every request.
+    #[test]
+    fn finalize_plan_offers_an_optional_memory_list_described_in_400_characters() {
+        let def = finalize_plan_def();
+        let memory = &def.input_schema["properties"]["memory"];
+        assert_eq!(memory["type"], "array", "{memory}");
+        assert_eq!(memory["items"]["type"], "string", "{memory}");
+        let description = memory["description"].as_str().unwrap_or_default();
+        assert!(description.chars().count() <= 400, "{description}");
+        for limit in ["5", "200", ".claudinio/MEMORY.md"] {
+            assert!(description.contains(limit), "{description}");
+        }
+        let required = def.input_schema["required"].as_array().unwrap();
+        assert!(!required.iter().any(|r| r == "memory"));
     }
 
     /// Phase 3b: models that could not tell edit_file creates files wrote

@@ -19,6 +19,7 @@ pub mod output_trim;
 pub mod permissions;
 pub mod persist;
 pub mod plugins;
+pub mod project_memory;
 pub mod prompt;
 pub mod provider;
 pub mod prune;

@@ -33,6 +33,10 @@ pub struct FinalizePlanArgs {
     /// Optional one-line summary of the implementation.
     #[serde(default)]
     pub summary: Option<String>,
+    /// Optional lessons for later sessions in this workspace, appended to
+    /// the project memory (`agent::project_memory`) with the plan's path.
+    #[serde(default)]
+    pub memory: Option<Vec<String>>,
 }
 
 /// What a finalize produced — returned so the caller can persist / report it.
@@ -256,15 +260,35 @@ fn run_finalize(
 }
 
 /// The Builder-only tool entry point.
+///
+/// The `memory` lines are checked before anything is written, so the retry a
+/// refusal asks for does not append the log twice; they are appended to the
+/// project memory only after the log is on disk, since each entry points at
+/// it. A memory that cannot be written (a planted link) does not undo the
+/// log: the result says so instead.
 pub fn execute(args: FinalizePlanArgs, ctx: &ToolContext) -> Result<String, String> {
+    let memory = crate::agent::project_memory::proposed_lines(&args.memory.unwrap_or_default())
+        .map_err(|e| format!("{e} (nothing was written)"))?;
     let plan_path = resolve_plan_file(ctx, args.plan_file.as_deref())?;
     let outcome = run_finalize(ctx, &plan_path, args.summary.as_deref(), &args.journal)?;
-    Ok(format!(
+    let mut msg = format!(
         "Implementation Log appended to {} ({} commit(s), {} changed file(s) recorded).",
         outcome.plan_file,
         outcome.commits.len(),
         outcome.files.len()
-    ))
+    );
+    if let (false, Some(root)) = (memory.is_empty(), ctx.workspace_root.as_deref()) {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        match crate::agent::project_memory::append(Path::new(root), &plan_path, &today, &memory) {
+            Ok(_) => msg.push_str(&format!(
+                " {} line(s) added to {}.",
+                memory.len(),
+                crate::agent::project_memory::MEMORY_FILE
+            )),
+            Err(e) => msg.push_str(&format!(" The memory lines were not saved: {e}.")),
+        }
+    }
+    Ok(msg)
 }
 
 /// Harness fallback: finalize the most recent plan when the model finished
@@ -386,6 +410,7 @@ mod tests {
             journal: "found a gotcha".into(),
             plan_file: None,
             summary: None,
+            memory: None,
         };
         let msg = execute(args, &ctx).expect("finalize should succeed");
         assert!(msg.contains("Implementation Log appended"));
@@ -393,6 +418,95 @@ mod tests {
         assert!(content.starts_with("# Original plan"), "original preserved");
         assert!(content.contains("## Implementation Log"));
         assert!(content.contains("found a gotcha"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn memory_file(root: &Path) -> PathBuf {
+        root.join(crate::agent::project_memory::MEMORY_FILE)
+    }
+
+    // Phase 9: the lines the model proposes become entries of the project
+    // memory, dated and pointing at the plan that holds their detail.
+    #[test]
+    fn memory_lines_are_appended_to_the_project_memory_with_the_plan_path() {
+        let root = tmp_workspace("memory");
+        write_plan_md(&root, "2026-10-19_cache.md", "# Plan\n");
+        let ctx = ctx_for(root.to_str().unwrap(), None);
+        let args = FinalizePlanArgs {
+            journal: "j".into(),
+            plan_file: None,
+            summary: None,
+            memory: Some(vec![
+                "The cache key must include the model id".into(),
+                "Run vitest with --pool=forks here".into(),
+            ]),
+        };
+        let msg = execute(args, &ctx).expect("finalize should succeed");
+        assert!(msg.contains("2 line(s)"), "{msg}");
+        assert!(msg.contains(".claudinio/MEMORY.md"), "{msg}");
+        let text = std::fs::read_to_string(memory_file(&root)).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert!(
+            text.contains(&format!(
+                "- {today} — The cache key must include the model id \
+                 (plan: .claudinio/plans/2026-10-19_cache.md)\n\
+                 - {today} — Run vitest with --pool=forks here \
+                 (plan: .claudinio/plans/2026-10-19_cache.md)\n"
+            )),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // No list, no entry: the memory is what the model chose to keep, never
+    // a dump of the journal.
+    #[test]
+    fn without_memory_lines_nothing_is_appended_to_the_project_memory() {
+        let root = tmp_workspace("nomemory");
+        write_plan_md(&root, "2026-10-19_x.md", "# Plan\n");
+        let ctx = ctx_for(root.to_str().unwrap(), None);
+        for memory in [None, Some(vec![]), Some(vec!["  ".to_string()])] {
+            let args = FinalizePlanArgs {
+                journal: "a long journal of findings".into(),
+                plan_file: None,
+                summary: None,
+                memory,
+            };
+            let msg = execute(args, &ctx).expect("finalize should succeed");
+            assert!(!msg.contains("MEMORY.md"), "{msg}");
+        }
+        assert!(!memory_file(&root).exists());
+        assert!(auto_finalize(&ctx).is_some());
+        assert!(
+            !memory_file(&root).exists(),
+            "the fallback writes no memory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Checked before anything is written, so the retry the refusal asks for
+    // does not log the plan twice.
+    #[test]
+    fn memory_lines_over_the_limits_are_refused_before_anything_is_written() {
+        let root = tmp_workspace("badmemory");
+        let plan = write_plan_md(&root, "2026-10-19_x.md", "# Plan\n");
+        let ctx = ctx_for(root.to_str().unwrap(), None);
+        for memory in [
+            (0..6).map(|i| format!("line {i}")).collect::<Vec<_>>(),
+            vec!["日".repeat(201)],
+        ] {
+            let args = FinalizePlanArgs {
+                journal: "j".into(),
+                plan_file: None,
+                summary: None,
+                memory: Some(memory),
+            };
+            let err = execute(args, &ctx).unwrap_err();
+            assert!(err.contains("call finalize_plan again"), "{err}");
+            assert!(err.contains("nothing was written"), "{err}");
+        }
+        assert_eq!(std::fs::read_to_string(&plan).unwrap(), "# Plan\n");
+        assert!(!memory_file(&root).exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -419,6 +533,7 @@ mod tests {
             journal: "j".into(),
             plan_file: Some("2026-07-05_target.md".into()),
             summary: None,
+            memory: None,
         };
         execute(args, &ctx).expect("finalize should succeed");
         let content = std::fs::read_to_string(&target).unwrap();
@@ -434,6 +549,7 @@ mod tests {
             journal: "j".into(),
             plan_file: None,
             summary: None,
+            memory: None,
         };
         let err = execute(args, &ctx).unwrap_err();
         assert!(err.contains("no plan file found"), "got: {err}");

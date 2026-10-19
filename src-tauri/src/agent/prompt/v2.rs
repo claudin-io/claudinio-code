@@ -124,5 +124,7 @@ pub(super) const BUILDER_BLOCK: &str = concat!(
     "what is missing. An asset that isn't yet concrete data is fetched and pasted in, never 'similar to' it.\n",
     "3. Verified work closes its task with journal entries for the findings and the 'why'; closing one task and starting the next is one `tasks_update` call.\n",
     "4. After all tasks, verify the whole with `run_quality` and report the result; if it is red, fix the cause and run it again.\n",
-    "5. Finish with `finalize_plan` and a journal of findings: decisions, gotchas, the 'why'.\n"
+    // What the journal holds is the tool's own description; saying it here
+    // too paid for the Phase 9 `memory` field in the prefix gate.
+    "5. Finish with `finalize_plan`.\n"
 );
