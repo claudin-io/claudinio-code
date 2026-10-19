@@ -2106,7 +2106,15 @@ pub(crate) mod surface_tests {
             assert!(!lean.contains("LSP"), "{mode:?} still ranks LSP first");
             // Everything else is the same prompt.
             assert!(lean.contains("`semantic_search`") && lean.contains(SKILLS));
-            assert!(lean.len() <= full.len() && lean.len() > full.len() - 400);
+            assert!(lean.len() > full.len() - 400);
+            // v1 steers toward the LSP tools, so Lean must take text out of it;
+            // v2 names none of them, so its Lean prompt is its full prompt.
+            match version {
+                crate::agent::prompt::PromptVersion::V1 => {
+                    assert!(lean.len() < full.len(), "{mode:?}: v1 Lean is shorter")
+                }
+                crate::agent::prompt::PromptVersion::V2 => assert_eq!(lean, full, "{mode:?}"),
+            }
         }
     }
 
