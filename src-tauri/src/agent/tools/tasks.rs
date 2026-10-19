@@ -430,7 +430,13 @@ fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<T
 /// unfinished (Phase 4f final review). Its details are kept, and the ids of
 /// such tasks are returned so `tasks_set` names them and says how to start
 /// one clean (a new id).
-fn keep_stored_details(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<TaskItem>, Vec<String>) {
+///
+/// Each named task comes with what was kept of it ("description", "journal"
+/// or both), so the note never claims a part the stored task did not have.
+fn keep_stored_details(
+    prev: &[TaskItem],
+    incoming: Vec<TaskItem>,
+) -> (Vec<TaskItem>, Vec<(String, &'static str)>) {
     let same_task = |stored: &TaskItem, t: &TaskItem| {
         stored.status != "done" || stored.title.trim() == t.title.trim()
     };
@@ -439,17 +445,25 @@ fn keep_stored_details(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<TaskI
         .into_iter()
         .map(|mut t| {
             if let Some(stored) = prev.iter().find(|p| p.id == t.id && same_task(p, &t)) {
-                let mut kept = false;
+                let (mut description, mut journal) = (false, false);
                 if t.description.trim().is_empty() {
-                    kept |= !stored.description.trim().is_empty();
+                    description = !stored.description.trim().is_empty();
                     t.description = stored.description.clone();
                 }
                 if t.journal.iter().all(|j| j.trim().is_empty()) {
-                    kept |= !stored.journal.is_empty();
+                    journal = !stored.journal.is_empty();
                     t.journal = stored.journal.clone();
                 }
-                if kept && stored.title.trim() != t.title.trim() {
-                    retitled.push(t.id.clone());
+                let kept = match (description, journal) {
+                    (true, true) => Some("description and journal"),
+                    (true, false) => Some("description"),
+                    (false, true) => Some("journal"),
+                    (false, false) => None,
+                };
+                if let Some(kept) = kept
+                    && stored.title.trim() != t.title.trim()
+                {
+                    retitled.push((t.id.clone(), kept));
                 }
             }
             t
@@ -842,10 +856,10 @@ mod lld_gate_tests {
             &ctx,
         )
         .unwrap();
-        assert!(
-            out.contains("kept the stored description and journal of t1"),
-            "{out}"
-        );
+        // t1 had a journal and no description: the note names what was kept,
+        // never a description that did not exist.
+        assert!(out.contains("kept the stored journal of t1"), "{out}");
+        assert!(!out.contains("description"), "{out}");
         assert!(!out.contains("t2"), "{out}");
         assert!(out.contains("give it a new id"), "{out}");
         let _ = std::fs::remove_dir_all(&root);

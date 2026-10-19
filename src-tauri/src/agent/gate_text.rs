@@ -179,14 +179,18 @@ pub fn golden_preserved(count: usize) -> String {
     )
 }
 
-/// `tasks_set` kept the stored description and journal of unfinished tasks
+/// `tasks_set` kept the stored description or journal (each named) of unfinished tasks
 /// it was sent under a new title without them (`tasks::keep_stored_details`):
 /// a reword, or a fresh list reusing the ids of an abandoned one.
-pub fn kept_stored_details(ids: &[String]) -> String {
+pub fn kept_stored_details(kept: &[(String, &str)]) -> String {
+    let named: Vec<String> = kept
+        .iter()
+        .map(|(id, what)| format!("the stored {what} of {id}"))
+        .collect();
     format!(
-        " It kept the stored description and journal of {} (sent without them, under a new \
-         title); if one is a new task rather than a reword, give it a new id.",
-        ids.join(", ")
+        " It kept {} (sent without them, under a new title); if one is a new task rather \
+         than a reword, give it a new id.",
+        named.join("; ")
     )
 }
 
@@ -235,7 +239,10 @@ pub fn all() -> Vec<(&'static str, String)> {
         ),
         ("golden_renamed", golden_renamed(1)),
         ("golden_preserved", golden_preserved(1)),
-        ("kept_stored_details", kept_stored_details(&["t1".into()])),
+        (
+            "kept_stored_details",
+            kept_stored_details(&[("t1".into(), "journal")]),
+        ),
     ]
 }
 
