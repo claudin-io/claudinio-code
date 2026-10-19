@@ -260,10 +260,15 @@ not escape, so each `|` the split sees is a pipe the shell sees, and no word
 expands into another (only `~` becomes the home folder). Everything else asks in Builder (YOLO or a
 hook's `allow` may approve it) and is refused in Brain. The git operator (the
 one session with `auto_approve_git`) also runs `git add`, `git commit` and
-`git push` unasked, except a push with a word starting `--r` or `--e`
+`git push` past the allowlist, still under rule 1 — so a commit message with
+a parenthesis (`feat(ui): x`), `&`, `;`, `$`, `<`, `>` or a glob character
+asks — and a push with a word starting `--r` or `--e` asks too
 (`--receive-pack`, `--exec` and their abbreviations name a program git runs). The deny-list
-(`on_the_deny_list`, whole words outside quoted text, so `git log --format
-%H`, `cp /tmp/x .` or `git commit -m "fix(dd): x"` is not refused) and the memory guard run first and refuse outright; a
+(`on_the_deny_list`, whole words outside inert quoted text, so `git log --format
+%H`, `cp /tmp/x .` or `git commit -m "fix(dd): x"` is not refused; quotes are
+inert only in a command with no `$`, backquote, backslash or `#`, so
+`echo "$(rm -rf /)"`, `echo don\'t; rm -rf /` and a quote in a `#` comment
+are read raw and refused) and the memory guard run first and refuse outright; a
 redirection into a disk or memory device (`> /dev/sda`, `/dev/mem`, quoted or
 not) is Denied — a tripwire for the obvious spelling, not a boundary. The rule replaced a chain
 splitter, per-option `sort`/`uniq` readers, a stdin detector and runner

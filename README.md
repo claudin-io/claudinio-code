@@ -105,8 +105,9 @@ working folder first — and nothing the write check sees
 Everything else is asked about in Builder and refused in Brain — a chain of
 allowlisted commands, a quoted `|`, a `2> /dev/null` with a space included:
 that is the price of a rule simple enough to be sure of, and it is never won
-back with parsing. A short deny-list, matched by whole words outside quoted
-text (`rm -rf /`,
+back with parsing. A short deny-list, matched by whole words outside inert
+quoted text — quotes count only in a command with no `$`, backquote,
+backslash or `#`, so `echo "$(rm -rf /)"` is still refused — (`rm -rf /`,
 `chmod 777`, `mkfs`, `dd`, `format`, `chown`, a write to a disk device), is
 refused outright in every mode. An allowlisted interpreter, test runner or
 build runs whatever its arguments and the project choose — a program to run or
