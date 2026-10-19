@@ -28,9 +28,9 @@
 //! comes out of the cut. Older cuts are not asked about: plain observation
 //! masking costs about half of LLM summarization at an equal or slightly
 //! better solve rate (Lindenbauer et al., *The Complexity Trap*, JetBrains,
-//! arXiv 2508.21433), so the judge's money goes where age is the worst proxy. Before Phase 6 Jev judged every
-//! old call first (up to 160, ~40 requests) and masking ran only when Jev was
-//! absent or not enough.
+//! arXiv 2508.21433), so the judge's money goes where age is the worst
+//! proxy. Before Phase 6 Jev judged every old call first (up to 160, ~40
+//! requests) and masking ran only when Jev was absent or not enough.
 //!
 //! The state Jev reads is the whole history oldest-first with tool results
 //! replaced by a one-line note, fitted into [`MAX_STATE_CHARS`] in stages. It
@@ -75,7 +75,7 @@ const INPUT_CHARS: [usize; 3] = [1000, 200, 60];
 const TEXT_HEAD: usize = 400;
 const TEXT_TAIL: usize = 150;
 
-pub const STATE_CONTEXT: &str = "A coding assistant conversation is being compacted to free context. `history` is the whole conversation so far, oldest first; tool outputs are replaced by a short `result` note and long texts may be abridged. Each question asks whether one tool call, or the full output of that call, still needs to stay in the history verbatim. Whatever is not kept is deleted permanently, but the assistant can always re-run a tool or re-read a file.";
+pub const STATE_CONTEXT: &str = "A coding assistant conversation is being compacted to free context. `history` is the whole conversation so far, oldest first; tool outputs are replaced by a short `result` note and long texts may be abridged. Each question asks whether the full output of one recent tool call, which would otherwise be cut to its first lines, still needs to stay in the history verbatim. Whatever is not kept is cut permanently, but the assistant can always re-run a tool or re-read a file.";
 
 /// One tool call paired with its result.
 #[derive(Debug, Clone)]
@@ -1027,9 +1027,10 @@ const CUT_RESULT_CHARS: usize = TRUNCATE_HEAD_CHARS + 100;
 /// Stage 2: cut the oldest tool results to their head until `free_chars` are
 /// freed, leaving the first message and the recent window alone.
 ///
-/// The blunt rule, for when there is no judge: age is a poor proxy for "no
-/// longer needed", which is why Jev goes first when it can. But the cost of a
-/// wrong cut is a re-read, and the alternative here is a handoff, a summary or
+/// The rule every shed starts from since lean-harness Phase 6: age is a poor
+/// proxy for "no longer needed", which is why Jev, when there is one, may
+/// keep the cuts this plan makes in the newest rounds ([`arbitrate`]). But
+/// the cost of a wrong cut is a re-read, and the alternative here is a handoff, a summary or
 /// an overflow. On the stored sessions that reached 96k it frees a median 70%
 /// of the history.
 ///

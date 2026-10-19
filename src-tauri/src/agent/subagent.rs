@@ -1127,7 +1127,6 @@ pub(crate) async fn run_subagent_recorded(
     }
 }
 
-/// The goal handed to the summarizer that writes a context handoff.
 /// The compaction summarizer's goal. Lean-harness Phase 6 made it a note
 /// written for recall: the old "under 600 words" summary in six loose sections
 /// dropped exactly what a successor then re-read files to recover — a path,
