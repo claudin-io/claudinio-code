@@ -359,12 +359,18 @@ fn starts_with_entry(part: &str, entry: &str) -> bool {
     words.starts_with(&wanted) && (!entry.ends_with(' ') || words.len() > wanted.len())
 }
 
-/// Rule 3's allowlist half for the first part of a pipeline.
+/// Rule 3's allowlist half for the first part of a pipeline. The git
+/// toggle approves pushes, not programs: `git push --receive-pack=PROG` and
+/// `--exec=PROG` run PROG through the shell, so a push with any word (quotes
+/// dropped) starting `--r` or `--e` — every abbreviation git accepts — asks.
 fn allowlisted(part: &str, allowlist: &[&str], auto_approve_git: bool) -> bool {
-    if auto_approve_git
-        && AUTO_GIT
-            .iter()
-            .any(|e| starts_with_entry(&part.to_lowercase(), e))
+    let lower = part.to_lowercase();
+    let names_a_program = starts_with_entry(&lower, "git push")
+        && lower
+            .replace(['\'', '"'], "")
+            .split_whitespace()
+            .any(|w| w.starts_with("--r") || w.starts_with("--e"));
+    if auto_approve_git && !names_a_program && AUTO_GIT.iter().any(|e| starts_with_entry(&lower, e))
     {
         return true;
     }
@@ -768,6 +774,29 @@ mod tests {
             bash_permission("git push", true),
             PermissionLevel::Auto
         ));
+    }
+
+    /// `git push --receive-pack=PROG` (or `--exec`, or any abbreviation
+    /// git accepts, `--ex=PROG`) runs PROG through the shell for a local
+    /// remote: the toggle approves pushes, not programs, so these ask.
+    #[test]
+    fn auto_approve_git_push_naming_a_program_asks() {
+        for c in [
+            "git push --receive-pack='touch PWNED' ../dst HEAD:main",
+            "git push --receive-pack 'rm -rf src' ../dst",
+            "git push --exec='touch PWNED' ../dst HEAD:main",
+            "git push --ex='touch PWNED' ../dst HEAD:main",
+            "git push --rece='touch PWNED' ../dst",
+            "git push '--receive-pack=touch PWNED' ../dst",
+            "git push --rec\"\"eive-pack='touch PWNED' ../dst",
+            "git push \"--exec=touch PWNED\" ../dst",
+        ] {
+            assert_eq!(
+                bash_permission(c, true),
+                PermissionLevel::RequiresApproval,
+                "{c:?}"
+            );
+        }
     }
 
     #[test]
