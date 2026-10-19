@@ -63,14 +63,10 @@ pub struct Call<'a> {
 impl<'a> Call<'a> {
     /// The call `tool` made with `input`. `read_file` honours a range only
     /// when both ends are given (`tools::read_file::execute`); otherwise its
-    /// text starts on line 1.
+    /// text starts on line 1. Its line numbers are numbers (`ReadFileArgs`):
+    /// a call that sent strings was refused and has no read to cap.
     pub fn of(tool: &'a str, input: &serde_json::Value) -> Self {
-        let line = |key: &str| {
-            let v = input.get(key)?;
-            v.as_u64()
-                .map(|n| n as usize)
-                .or_else(|| v.as_str()?.trim().parse().ok())
-        };
+        let line = |key: &str| input.get(key)?.as_u64().map(|n| n as usize);
         let first_line = match (line("start_line"), line("end_line")) {
             (Some(start), Some(_)) if tool == "read_file" => start.max(1),
             _ => 1,
@@ -562,10 +558,14 @@ mod tests {
             call(json!({"path": "a", "start_line": 300, "end_line": 900})).first_line,
             300
         );
-        assert_eq!(
-            call(json!({"path": "a", "start_line": "40", "end_line": "90"})).first_line,
-            40
+        // read_file's arguments are numbers: a string range is refused before
+        // there is a result to cap, so it names no first line here either.
+        let strings = json!({"path": "a", "start_line": "40", "end_line": "90"});
+        assert!(
+            serde_json::from_value::<crate::agent::tools::read_file::ReadFileArgs>(strings.clone())
+                .is_err()
         );
+        assert_eq!(call(strings).first_line, 1);
         // read_file reads the whole file unless both ends are given.
         assert_eq!(call(json!({"path": "a", "start_line": 300})).first_line, 1);
         assert_eq!(call(json!({"path": "a"})).first_line, 1);
