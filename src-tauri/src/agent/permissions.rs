@@ -201,6 +201,32 @@ fn reads_by_shape(trimmed: &str) -> bool {
     })
 }
 
+/// A plain read, or a pipe of them, with nothing that chains, redirects or
+/// substitutes: a `reads_by_shape` command or a `grep`/`rg` that runs no
+/// program (`rg --pre` does), then only filters fed by the pipe
+/// (`filters_its_input`). The memory guard lets these through, so reading
+/// the memory through `| head` or a `grep` of it is not a refusal.
+fn only_reads(trimmed: &str) -> bool {
+    let greps = |seg: &str| {
+        let words = shell_words(seg);
+        words.first().is_some_and(|(w, _)| {
+            ["grep", "egrep", "fgrep"].contains(&w.as_str())
+                || w == "rg" && !words.iter().any(|(w, _)| w.starts_with("--pre"))
+        })
+    };
+    reads_by_shape(trimmed)
+        || split_chain(trimmed).is_some_and(|segs| {
+            segs.iter().enumerate().all(|(at, (seg, piped))| {
+                !seg.contains(['>', '<'])
+                    && if at == 0 {
+                        reads_by_shape(seg) || greps(seg)
+                    } else {
+                        *piped && filters_its_input(seg)
+                    }
+            })
+        })
+}
+
 /// `bash_permission` for a session that edits files itself (Builder under the
 /// Compact or Standard profile, `PromptProfile::edits_files`). Everywhere else
 /// (Brain, the git operator) a command that writes a file is refused before
@@ -273,7 +299,7 @@ pub fn bash_call_permission(
 ) -> PermissionLevel {
     let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
     if crate::agent::project_memory::shell_call_names_memory(root, input)
-        && !reads_by_shape(command.trim())
+        && !only_reads(command.trim())
     {
         return PermissionLevel::Denied;
     }
@@ -324,8 +350,8 @@ pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel
     // The project memory is written by `finalize_plan` alone (lean-harness
     // Phase 9). Denied rather than asked about, so YOLO and a hook's `allow`
     // — which relax a prompt, never a policy — cannot open it; only a plain
-    // read of it passes.
-    if crate::agent::project_memory::named_in(trimmed) && !reads_by_shape(trimmed) {
+    // read of it passes (`only_reads`).
+    if crate::agent::project_memory::named_in(trimmed) && !only_reads(trimmed) {
         return PermissionLevel::Denied;
     }
 
@@ -1096,6 +1122,51 @@ mod tests {
             bash_permission("echo x >> MEMORY.md", false),
             PermissionLevel::Auto
         );
+    }
+
+    // Recheck round 3: a read of the memory through a pipe of filters, or a
+    // `grep` of it, only reads, so it is not a policy refusal nobody can
+    // lift — the read runs or is asked about like any other. A pipe into
+    // anything but a filter, a redirection, or a filter that writes is
+    // still refused.
+    #[test]
+    fn a_read_of_the_project_memory_through_a_filter_or_grep_is_not_refused() {
+        for c in [
+            "cat .claudinio/MEMORY.md | head",
+            "cat .claudinio/MEMORY.md | grep -n x | wc -l",
+            "grep -n foo .claudinio/MEMORY.md",
+            "rg foo .claudinio/MEMORY.md",
+            "grep -c x .claudinio/MEMORY.md 2>/dev/null",
+        ] {
+            assert_ne!(bash_permission(c, false), PermissionLevel::Denied, "{c}");
+            assert_ne!(
+                bash_permission_writing(c, false),
+                PermissionLevel::Denied,
+                "{c}"
+            );
+        }
+        assert_eq!(
+            bash_permission("cat .claudinio/MEMORY.md | head", false),
+            PermissionLevel::Auto
+        );
+        let call = serde_json::json!({"command": "grep -n x MEMORY.md", "workdir": ".claudinio"});
+        assert_ne!(
+            bash_call_permission(&call, None, false, true),
+            PermissionLevel::Denied
+        );
+        for c in [
+            "cat .claudinio/MEMORY.md | sh",
+            "cat .claudinio/MEMORY.md | head > .claudinio/MEMORY.md",
+            "grep x .claudinio/MEMORY.md > .claudinio/MEMORY.md",
+            "cat .claudinio/MEMORY.md | sort -o .claudinio/MEMORY.md",
+            "grep -l foo .claudinio/MEMORY.md | xargs rm",
+            "rg --pre ./x.sh foo .claudinio/MEMORY.md",
+            "rg --pre=./x.sh foo .claudinio/MEMORY.md",
+            "grep x .claudinio/MEMORY.md; rm .claudinio/MEMORY.md",
+            "head .claudinio/MEMORY.md | tee .claudinio/MEMORY.md",
+        ] {
+            assert_eq!(bash_permission(c, false), PermissionLevel::Denied, "{c}");
+        }
     }
 
     // Phase 9 review: a glob or quotes around the name reach the same file,
