@@ -1457,9 +1457,11 @@ export const ApprovalCard: Component<{
                 {/* The diff below is one snippet; replace_all rewrites every place it occurs. */}
                 <Show when={proposal()?.replaceAll}>
                   <span class="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-500">
-                    {proposal()?.occurrences
-                      ? `Replaces all ${proposal()?.occurrences} occurrences`
-                      : "Replaces every occurrence"}
+                    {proposal()?.occurrences === 1
+                      ? "Replaces 1 occurrence"
+                      : proposal()?.occurrences
+                        ? `Replaces all ${proposal()?.occurrences} occurrences`
+                        : "Replaces every occurrence"}
                   </span>
                 </Show>
               </>

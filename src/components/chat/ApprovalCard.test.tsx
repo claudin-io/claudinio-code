@@ -68,6 +68,16 @@ describe("ApprovalCard", () => {
     expect(el.textContent).toContain("Replaces all 3 occurrences");
   });
 
+  // replace_all accepts a text that occurs once; "Replaces all 1 occurrences"
+  // read as a bug in the card.
+  it("says a replace_all edit that matches once replaces one occurrence", () => {
+    const call = editCall("retry()", "go()");
+    call.editProposal = { ...call.editProposal!, replaceAll: true, occurrences: 1 };
+    const el = mount(call);
+    expect(el.textContent).toContain("Replaces 1 occurrence");
+    expect(el.textContent).not.toContain("occurrences");
+  });
+
   it("says nothing about occurrences for a single-place edit", () => {
     const call = editCall("retry()", "go()");
     call.editProposal = { ...call.editProposal!, replaceAll: false, occurrences: 1 };
