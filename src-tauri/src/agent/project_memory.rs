@@ -316,8 +316,11 @@ fn win32_name(text: &str) -> &str {
 /// allowlisted interpreters run unasked, and YOLO waives the rest's approval.
 /// The docs say so.
 pub fn named_in(command: &str) -> bool {
+    // A backslash before a line break continues the line: the shell drops
+    // both, so `rm -rf \⏎.claudinio` is one command (recheck round 3).
     let lower: String = command
         .to_lowercase()
+        .replace("\\\n", "")
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
         .collect();
@@ -1407,6 +1410,10 @@ mod tests {
             "su git -c 'cp -r /tmp/q/. .claudinio/'",
             "runuser -u git -- rm -rf .claudinio",
             "flock -c 'cp -r /tmp/q/. .claudinio/' /tmp/l",
+            // A backslash before a line break continues the line: the shell
+            // drops both, so the writer and the folder are one command.
+            "rm -rf \\\n.claudinio",
+            "cp -r /tmp/q/. \\\n  .claudinio/",
         ] {
             assert!(named_in(c), "{c}");
         }
