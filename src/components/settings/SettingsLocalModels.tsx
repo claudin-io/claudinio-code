@@ -342,8 +342,8 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
           Runs models on this machine. Nothing leaves the computer and nothing is billed —
           in exchange, a local model is slower and less capable than a hosted one. Which engine
           serves a model is decided per model: GGUF on llama.cpp, MLX on MLX, and MLX
-          checkpoints carrying an MTP head on MTPLX. Downloaded models appear in the Brain and
-          Builder pickers under “Local”.
+          checkpoints carrying an MTP head on MTPLX. Downloaded models appear in the model
+          picker under “Local”.
         </p>
       </div>
 
@@ -362,7 +362,7 @@ export const SettingsLocalModels: Component<{ onChanged?: () => void }> = (props
           <Icon name="alert-triangle" class="mt-0.5 h-3 w-3 shrink-0" />
           <span>
             You have models downloaded, but local models are switched off — that is why they are
-            not in the Brain and Builder pickers. Tick the box above.
+            not in the model picker. Tick the box above.
           </span>
         </div>
       </Show>

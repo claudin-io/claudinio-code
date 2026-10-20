@@ -7,13 +7,13 @@ const SURFACES: { id: ToolSurface; label: string }[] = [
 ];
 
 interface Props {
-  brainModel: Accessor<string>;
-  builderModel: Accessor<string>;
+  /** The session's model, as picked above (saved or not). */
+  model: Accessor<string>;
 }
 
 /**
- * Which tools each of the two models in use is offered. Every tool's schema is
- * sent with every request, so a tool a model never calls is paid for anyway.
+ * Which tools the session's model is offered. Every tool's schema is sent
+ * with every request, so a tool a model never calls is paid for anyway.
  *
  * The choice is per model, not per session: the tool list is part of what the
  * provider caches, and a list that moved between turns would throw the cache
@@ -21,26 +21,17 @@ interface Props {
  */
 export const SettingsToolSurface: Component<Props> = (props) => {
   const [surfaces, setSurfaces] = createSignal<Record<string, ToolSurface>>({});
-  // The builder model the profile below was computed for — the saved one,
-  // which a model picked a moment ago and not yet saved is not.
+  // The model the profile below was computed for — the saved one, which a
+  // model picked a moment ago and not yet saved is not.
   const [compactFor, setCompactFor] = createSignal<string | null>(null);
 
   onMount(async () => {
     const cfg = await getConfig();
     setSurfaces(cfg.toolSurface ?? {});
-    setCompactFor(cfg.builderProfile === "compact" ? (cfg.builderModel ?? null) : null);
+    setCompactFor(cfg.profile === "compact" ? (cfg.model ?? null) : null);
   });
 
-  // One row per distinct model: the same model in both roles has one surface.
-  const rows = createMemo(() => {
-    const brain = props.brainModel();
-    const builder = props.builderModel();
-    if (brain === builder) return [{ model: brain, role: "Brain and Builder" }];
-    return [
-      { model: brain, role: "Brain" },
-      { model: builder, role: "Builder and subagents" },
-    ];
-  });
+  const rows = createMemo(() => [{ model: props.model(), role: "Main session and subagents" }]);
 
   const surfaceOf = (model: string): ToolSurface => surfaces()[model] ?? "full";
 
@@ -51,7 +42,7 @@ export const SettingsToolSurface: Component<Props> = (props) => {
 
   return (
     <div class="mt-6 border-t border-border-subtle pt-4" data-tool-surface>
-      <span class="text-sm font-medium text-ink">{"Tools offered to each model"}</span>
+      <span class="text-sm font-medium text-ink">{"Tools offered to the model"}</span>
       <p class="mb-3 mt-1 text-[11px] text-ink-faint">
         {
           "Lean leaves out go_to_definition, find_references and symbol_lookup, and the prompt lines that point to them. Search, outline and every other tool stay. Applies from the next message."
@@ -87,10 +78,10 @@ export const SettingsToolSurface: Component<Props> = (props) => {
           </div>
         )}
       </For>
-      <Show when={compactFor() !== null && compactFor() === props.builderModel()}>
+      <Show when={compactFor() !== null && compactFor() === props.model()}>
         <p class="mt-2 text-[11px] text-ink-muted" data-compact-note>
           {
-            "This Builder model's context window is under 64k tokens, so its Builder sessions run the compact profile whatever is chosen here: a short prompt, ten tools, no subagents, skills or MCP tools, and the session edits files itself."
+            "This model's context window is under 64k tokens, so its sessions run the compact profile whatever is chosen here: a short prompt, ten tools, no subagents, skills or MCP tools."
           }
         </p>
       </Show>

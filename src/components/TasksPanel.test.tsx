@@ -87,8 +87,10 @@ describe("TasksPanel", () => {
     const dispose = await mount();
     const titles = rows().map((r) => r.querySelector("[data-task-title]")!.textContent);
     expect(titles).toEqual([
+      // A goal reads as the goal; a "-0" plan half only exists in a
+      // session from before one timeline.
       "Plan: Refactor auth flow",
-      "Execute: Implement caching",
+      "Implement caching",
       "First Task",
       "In Progress",
       "Completed Task",

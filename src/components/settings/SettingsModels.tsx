@@ -4,10 +4,9 @@ import { ModelSelect } from "../ModelSelect";
 import type { ModelGroup } from "../../lib/ipc";
 
 interface SettingsModelsProps {
-  brainModel: Accessor<string>;
-  setBrainModel: Setter<string>;
-  builderModel: Accessor<string>;
-  setBuilderModel: Setter<string>;
+  /** The model a session runs on — main session, subagents and the judge. */
+  model: Accessor<string>;
+  setModel: Setter<string>;
   maxParallelAgents: Accessor<number>;
   setMaxParallelAgents: Setter<number>;
   maxRounds: Accessor<number | null>;
@@ -54,63 +53,33 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
 
   return (
     <>
-      {/* 1. Brain Model + Builder Model */}
-      <div class="grid grid-cols-2 gap-x-4 mb-4">
-        {/* Brain model */}
-        <div>
-          <div class="flex items-center gap-2 mb-1">
-            <label class="block text-xs text-ink-muted">{"Brain Model"}</label>
-            {sourceBadge("brain_model")}
-          </div>
-
-          <Show
-            when={props.easterEggActive()}
-            fallback={
-              <ModelSelect
-                value={props.brainModel}
-                onChange={(m) => props.setBrainModel(m)}
-                groups={props.modelGroups}
-                disabled={() => props.workspaceConfigFields().has("brain_model")}
-              />
-            }
-          >
-            <input
-              type="text"
-              value={props.brainModel()}
-              onInput={(e) => props.setBrainModel(e.currentTarget.value)}
-              placeholder="claudius"
-              class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            />
-          </Show>
+      {/* 1. The session's model */}
+      <div class="mb-4">
+        <div class="flex items-center gap-2 mb-1">
+          <label class="block text-xs text-ink-muted">{"Model"}</label>
+          {sourceBadge("model")}
         </div>
 
-        {/* Builder model */}
-        <div>
-          <div class="flex items-center gap-2 mb-1">
-            <label class="block text-xs text-ink-muted">{"Builder Model"}</label>
-            {sourceBadge("builder_model")}
-          </div>
-
-          <Show
-            when={props.easterEggActive()}
-            fallback={
-              <ModelSelect
-                value={props.builderModel}
-                onChange={(m) => props.setBuilderModel(m)}
-                groups={props.modelGroups}
-                disabled={() => props.workspaceConfigFields().has("builder_model")}
-              />
-            }
-          >
-            <input
-              type="text"
-              value={props.builderModel()}
-              onInput={(e) => props.setBuilderModel(e.currentTarget.value)}
-              placeholder="claudinio"
-              class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+        <Show
+          when={props.easterEggActive()}
+          fallback={
+            <ModelSelect
+              value={props.model}
+              onChange={(m) => props.setModel(m)}
+              groups={props.modelGroups}
+              disabled={() => props.workspaceConfigFields().has("model")}
             />
-          </Show>
-        </div>
+          }
+        >
+          <input
+            data-model-input
+            type="text"
+            value={props.model()}
+            onInput={(e) => props.setModel(e.currentTarget.value)}
+            placeholder="claudinio"
+            class="w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+        </Show>
       </div>
 
       {/* 2. Max Parallel Agents slider */}
@@ -205,7 +174,7 @@ export const SettingsModels: Component<SettingsModelsProps> = (props) => {
             placeholder="5"
             class="mb-1 w-full rounded-md border border-border-subtle bg-surface-0 p-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          <p class="mb-0 text-[11px] text-ink-faint">{"How many automatic Brain↔Builder cycles to run while golden goals (<goal> tags) are pending. Empty = 5."}</p>
+          <p class="mb-0 text-[11px] text-ink-faint">{"How many times a run is sent back to its golden goals (<goal> tags) while they are pending. Empty = 5."}</p>
         </div>
 
         <div>

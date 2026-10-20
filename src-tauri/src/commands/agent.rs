@@ -1292,35 +1292,3 @@ pub async fn commit_and_push(
 
     Ok(SessionStarted { session_id: id })
 }
-
-/// Write a value to the workspace-level `.claudinio.json` config file.
-/// Creates the file if it doesn't exist; updates only the specified key.
-#[tauri::command]
-pub async fn set_workspace_config(
-    workspace_root: String,
-    plan_save_path: Option<String>,
-) -> Result<(), String> {
-    let config_path = Path::new(&workspace_root).join(".claudinio.json");
-    let mut cfg: Value = if config_path.exists() {
-        std::fs::read_to_string(&config_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    if let Some(obj) = cfg.as_object_mut() {
-        match plan_save_path {
-            Some(ref path) if !path.is_empty() => {
-                obj.insert("plan_save_path".into(), Value::String(path.clone()));
-            }
-            _ => {
-                obj.insert("plan_save_path".into(), Value::Null);
-            }
-        }
-    }
-    let json = serde_json::to_string_pretty(&cfg)
-        .map_err(|e| format!("serialize .claudinio.json: {e}"))?;
-    std::fs::write(&config_path, json).map_err(|e| format!("write .claudinio.json: {e}"))?;
-    Ok(())
-}

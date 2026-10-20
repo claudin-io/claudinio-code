@@ -89,8 +89,8 @@ export interface McpServerStatus {
 
 export interface AgentConfig {
   baseUrl: string;
-  brainModel: string;
-  builderModel: string;
+  /** The model a session runs on — main session, subagents and the judge. */
+  model: string;
   hasApiKey: boolean;
   maxContextTokens: number;
   compactThreshold: number;
@@ -104,14 +104,12 @@ export interface AgentConfig {
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
   maxParallelAgents?: number | null;
-  planSavePath?: string | null;
   overrideBaseUrl?: string | null;
   overrideApiKey?: string | null;
   mcp?: McpServerMap;
   codeIntelEnabled?: boolean;
   preferredIde?: string | null;
   handoffContextTokens?: number | null;
-  autoCommitPlan?: boolean;
   thinkingEffort?: string;
   browser?: BrowserPrefs;
   local?: LocalPrefs;
@@ -120,12 +118,9 @@ export interface AgentConfig {
   jev?: JevStatus;
   /** Models set to something other than the full tool catalog, by model id. */
   toolSurface?: Record<string, ToolSurface>;
-  /** "compact" when the builder model's window is too small for the full
-   *  prompt and tools; its sessions then run a short prompt and ten tools. */
-  builderProfile?: "standard" | "compact";
-  /** Which Standard system prompt sessions are sent; absent in a config
-   *  written before the setting existed, which means "v2". */
-  promptVersion?: PromptVersion;
+  /** "compact" when the model's window is too small for the full prompt and
+   *  tools; its sessions then run a short prompt and ten tools. */
+  profile?: "standard" | "compact";
   /** Whether a new session's first run reads AGENTS.md/CLAUDE.md and
    *  .claudinio/MEMORY.md; absent in a config written before the setting
    *  existed, which means on. */
@@ -133,23 +128,15 @@ export interface AgentConfig {
   workspaceConfig?: Record<string, unknown> | null;
 }
 
-/** "v2" is the lean prompt (the default); "v1" the previous one, kept
- *  selectable for one release. */
-export type PromptVersion = "v1" | "v2";
 
 /** Which tools a model is offered. "lean" leaves out the three LSP navigation
  *  tools (go_to_definition, find_references, symbol_lookup). */
 export type ToolSurface = "full" | "lean";
 
-/** How much say Jev has over the phase a new session starts in. */
-export type JevRoute = "off" | "shadow" | "on";
-
 export interface JevStatus {
   enabled: boolean;
   hasApiKey: boolean;
   backend: "typesafe" | "claudinio" | "openrouter" | null;
-  /** Absent in a config written before the setting existed. */
-  route?: JevRoute;
 }
 
 /** A connected external provider as reported by get_config — never the key. */
@@ -172,8 +159,7 @@ export interface ConnectedProviderInfo {
 export interface SetConfigArgs {
   baseUrl?: string;
   apiKey?: string;
-  brainModel?: string;
-  builderModel?: string;
+  model?: string;
   maxRounds?: number | null;
   subMaxRounds?: number | null;
   yoloMode?: boolean;
@@ -182,24 +168,20 @@ export interface SetConfigArgs {
   maxGoldenCycles?: number | null;
   maxGoldenStalls?: number | null;
   maxParallelAgents?: number | null;
-  planSavePath?: string | null;
   overrideBaseUrl?: string;
   overrideApiKey?: string;
   mcp?: McpServerMap;
   codeIntelEnabled?: boolean;
   preferredIde?: string;
   handoffContextTokens?: number | null;
-  autoCommitPlan?: boolean;
   thinkingEffort?: ThinkingEffort;
   browser?: BrowserPrefs;
   local?: LocalPrefs;
   jevEnabled?: boolean;
-  jevRoute?: JevRoute;
   /** A TypeSafe API key; an empty string removes it. */
   jevApiKey?: string;
   /** Set one model's tool surface; "full" clears it. */
   toolSurface?: { model: string; surface: ToolSurface };
-  promptVersion?: PromptVersion;
   projectMemory?: boolean;
 }
 
@@ -241,24 +223,16 @@ export function normalizeThinkingEffort(s: unknown): ThinkingEffort {
   return THINKING_EFFORTS.includes(s as ThinkingEffort) ? (s as ThinkingEffort) : "medium";
 }
 
-/// Map a persisted mode string to the current ids. Old session JSONLs carry
-/// the original names "pensador"/"constructor".
+/// Map a mode string a session written before one timeline carries to the
+/// two ids it rendered as. Older JSONLs still say "pensador"/"constructor".
 export function normalizeSessionMode(s: unknown): SessionMode {
   return s === "brain" || s === "pensador" ? "brain" : "builder";
-}
-export type ModeOrigin = "human" | "agent";
-
-export interface ModeChangedData {
-  mode: SessionMode;
-  origin: ModeOrigin;
-  reason?: string | null;
 }
 
 export interface GoldenLoopData {
   cycle: number;
   maxCycles: number;
   pending: string[];
-  mode: SessionMode;
 }
 
 /** One layer of the quality harness, as scored against one stack. */
@@ -278,7 +252,9 @@ export interface QualityVerdictData {
   trigger: "tool" | "harness";
 }
 
-/// Why a session handed off to a linked successor.
+/// Why a session handed off to a linked successor. "plan_execution",
+/// "golden_flip" and "manual_builder" only appear in sessions written before
+/// one timeline.
 export type HandoffReason =
   | "plan_execution"
   | "golden_flip"
@@ -292,9 +268,6 @@ export interface SessionLinkedData {
   prevSessionId: string;
   sessionId: string;
   reason: HandoffReason;
-  mode: SessionMode;
-  /** Who the successor's mode belongs to, as the backend built its ModeCtl. */
-  origin?: ModeOrigin;
   firstMessage: string;
 }
 
@@ -358,7 +331,6 @@ export type AgentEvent =
   // activity follows, the run went on past it and the chat closes the message
   // there (see `commitSegment` in ChatPanel).
   | { event: "FinalText"; data: { text: string } }
-  | { event: "ModeChanged"; data: ModeChangedData }
   | { event: "GoldenLoop"; data: GoldenLoopData }
   | { event: "QualityVerdict"; data: QualityVerdictData }
   | { event: "SessionLinked"; data: SessionLinkedData }
@@ -519,9 +491,6 @@ export function sendMessage(
   message: string,
   attachments: AttachmentInput[],
   onEvent: (event: AgentEvent) => void,
-  // "auto" leaves the session's mode alone and lets the harness pick the
-  // starting phase of a fresh session — see lib/modeChoice.
-  mode?: SessionMode | "auto",
 ): Promise<SessionStarted> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
@@ -529,7 +498,6 @@ export function sendMessage(
     workspace,
     message,
     attachments: attachments.length > 0 ? attachments : undefined,
-    mode,
     eventChannel: channel,
   });
 }
@@ -543,37 +511,15 @@ export function commitAndPush(
   return invoke<{ sessionId: string }>("commit_and_push", { workspace, eventChannel: channel });
 }
 
-export function setSessionMode(workspace: string, mode: SessionMode): Promise<SessionStarted> {
-  return invoke<SessionStarted>("set_session_mode", { workspace, mode });
-}
-
-/// Approve the Brain's plan: creates a NEW linked Builder session whose first
-/// prompt carries the plan, and starts executing it. Returns the new session id.
-export function continueWithBuilderSession(
-  workspace: string,
-  onEvent: (event: AgentEvent) => void,
-): Promise<SessionStarted> {
-  const channel = new Channel<AgentEvent>();
-  channel.onmessage = onEvent;
-  return invoke<SessionStarted>("continue_with_builder", { workspace, eventChannel: channel });
-}
-
-export function getSessionMode(workspace: string): Promise<{ mode: SessionMode; origin: ModeOrigin }> {
-  return invoke<{ mode: SessionMode; origin: ModeOrigin }>("get_session_mode", { workspace });
-}
-
-export function checkPlanExists(workspace: string): Promise<boolean> {
-  return invoke<boolean>("check_plan_exists", { workspace });
-}
-
-export interface PlanEntry {
+export interface DocumentEntry {
   name: string;
   path: string;
   modifiedAt: number;
 }
 
-export function listPlans(workspace: string): Promise<PlanEntry[]> {
-  return invoke<PlanEntry[]>("list_plans", { workspace });
+/** The workspace's living documents, newest first. */
+export function listDocuments(workspace: string): Promise<DocumentEntry[]> {
+  return invoke<DocumentEntry[]>("list_documents", { workspace });
 }
 
 export function readAttachment(path: string): Promise<AttachmentData> {
@@ -1184,10 +1130,6 @@ export function setKeepAwake(active: boolean): Promise<void> {
   return invoke<void>("set_keep_awake", { active });
 }
 
-export function setWorkspaceConfig(workspaceRoot: string, planSavePath: string | null): Promise<void> {
-  return invoke<void>("set_workspace_config", { workspaceRoot, planSavePath });
-}
-
 export function listMcpServers(workspace?: string): Promise<McpServerStatus[]> {
   return invoke<McpServerStatus[]>("mcp_list_servers", { workspace: workspace ?? null });
 }
@@ -1512,7 +1454,6 @@ export function dismissGoldenTasks(workspace: string, taskId?: string): Promise<
 
 export interface EnhancePromptContext {
   messages: Array<{ role: string; text: string }>;
-  mode: string;
   mentionedFiles: string[];
   activeTaskTitles: string[];
   projectSummary: string;

@@ -54,7 +54,6 @@ pub fn run() {
             commands::agent::submit_answers,
             commands::agent::set_config,
             commands::agent::get_config,
-            commands::agent::set_workspace_config,
             commands::agent::list_models,
             commands::auth::login_with_claudinio,
             commands::auth::logout_claudinio,

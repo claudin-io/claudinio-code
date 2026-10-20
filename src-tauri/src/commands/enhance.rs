@@ -15,7 +15,6 @@ pub struct MessageContext {
 #[serde(rename_all = "camelCase")]
 pub struct EnhanceContext {
     pub messages: Vec<MessageContext>,
-    pub mode: String,
     pub mentioned_files: Vec<String>,
     pub active_task_titles: Vec<String>,
     pub project_summary: String,
@@ -89,9 +88,6 @@ pub async fn enhance_prompt(
         }
         user_message.push('\n');
     }
-
-    // Current mode
-    user_message.push_str(&format!("=== CURRENT MODE: {} ===\n\n", context.mode));
 
     // Mentioned files
     if !context.mentioned_files.is_empty() {
