@@ -189,5 +189,10 @@ Deviations from §4:
 ### Phase 5 — code
 `tasks_set` requires only `id` and `title`; a known task resent without title/status keeps them; `tasks_update` lets a named top-level task join a batch (F6). Docs (README, README.pt-BR, ARCHITECTURE, eval README) follow in the same PR.
 
-### Measurements
-Eval of the Phases 1–4 binary: *pending — added here when the run finishes.*
+### Measurements (2026-10-20, Phases 1–4 at `59de40e` + #99's tasks; deepseek-flash, 2 runs, same sandbox and prices as before; raw output in `/srv/claudinio-eval/out/st/`)
+
+25 baseline tasks (final a / b → st a / b): M1 $0.0060 / $0.0070 → **$0.0059 / $0.0063**; M2 15 / 14 → **11 / 12**; M3 25/25 / 25/25 → **25/25 / 25/25**; M4 main 2.6% / 2.1% → 1.7% / 2.0% (the drop is `finalize_plan`'s error rounds; without them the baseline was ~1.5%). No session called a removed tool; neither new refusal fired.
+
+doc-parallel (before a / b → st a / b): M3 2/2 everywhere; **every session now delegates** (one `doc_create` with one section per question, one `spawn_agents` call, 7 subagents per run, all wrote their section), but **the main session still redoes their work**: in all 4 sessions it re-read 7–9 source files after the subagents finished, and in 3 it rewrote 2–3 delegated sections. M1 $0.0085 / $0.0219 → $0.0326 / $0.0248, M2 15.5 / 35 → 47 / 41. The runner's M6 reads 100% because F4 keeps a revised section's author; counted the old way (a section main rewrote is main's) it is 0/7, 2/7 → **2/7, 4/7**.
+
+**Open:** the delegation now happens; the re-verification by the main session is the next cost to remove (§2.3's goal is not met on cost). F5 and F7 remain as noted above.
