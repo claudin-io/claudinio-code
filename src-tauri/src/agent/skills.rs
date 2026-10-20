@@ -296,26 +296,26 @@ An invalid manifest rejects the entire plugin. An invalid skill or MCP server\n\
 entry only skips that entry. Prefer shipping a plugin whose components fail\n\
 independently over one that takes everything down with it.";
 
-/// How to plan a feature in Brain mode: the consensus checklist, UI sizing
-/// and assets, the Low-Level Design, diagrams. Prompt v1 carried all of it in
-/// every Brain request; prompt v2 (lean-harness Phase 5) names this skill in
-/// one line and the model reads it when a request is large enough to need it.
-/// Kept as Markdown beside this file so it reads as what the model reads.
-const BUILTIN_PLAN: &str = include_str!("skills/plan.md");
+/// How to design a feature before code: the consensus checklist, UI sizing
+/// and assets, the design document, diagrams. The Standard prompt names this
+/// skill in one line and the model reads it when a request is large enough to
+/// need it. Kept as Markdown beside this file so it reads as what the model
+/// reads.
+const BUILTIN_DESIGN: &str = include_str!("skills/design.md");
 
 /// All built-in skills shipped with the binary.
 const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("find-skills", BUILTIN_FIND_SKILLS),
-    ("plan", BUILTIN_PLAN),
+    ("design", BUILTIN_DESIGN),
     ("plugin-crafter", BUILTIN_PLUGIN_CRAFTER),
 ];
 
 /// Built-in skills a system prompt sends the model to by name. Every other
-/// built-in is a fallback a skill on disk may replace; these are not: prompt
-/// v2's Brain block reads `plan` for the checklists it gave up (Phase 5), and
-/// a project or user skill that happened to share the name would leave that
-/// guidance unreachable while the prompt still pointed at it.
-const RESERVED_BUILTIN_SKILLS: &[&str] = &["plan"];
+/// built-in is a fallback a skill on disk may replace; these are not: the
+/// work block reads `design` for the checklists it leaves out, and a project
+/// or user skill that happened to share the name would leave that guidance
+/// unreachable while the prompt still pointed at it.
+const RESERVED_BUILTIN_SKILLS: &[&str] = &["design"];
 
 // ─── Skill Manager ────────────────────────────────────────────────────────────
 
@@ -952,8 +952,8 @@ mod tests {
         let text = build_skills_system_prompt_section(&SkillManager::builtin_only()).unwrap();
         let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- ")).collect();
         assert_eq!(lines.len(), 3, "{text}");
-        assert!(lines[0].starts_with("- find-skills \u{2014} Helps users discover"));
-        assert!(lines[1].starts_with("- plan \u{2014} Planning a feature"));
+        assert!(lines[0].starts_with("- design \u{2014} Designing a feature"));
+        assert!(lines[1].starts_with("- find-skills \u{2014} Helps users discover"));
         assert!(lines[2].starts_with("- plugin-crafter \u{2014} Authors a portable"));
         for body_text in [
             "<body>",
@@ -1011,8 +1011,8 @@ mod tests {
                 "a-user",
                 "b-user",
                 "m-plugin",
+                "design",
                 "find-skills",
-                "plan",
                 "plugin-crafter"
             ]
         );
@@ -1082,39 +1082,40 @@ mod tests {
     }
 }
 
-/// The built-in `plan` skill (lean-harness Phase 5): what prompt v1 carried
-/// in every Brain request — the consensus checklist, the UI sizing and asset
-/// rules, the Low-Level Design guidance, the Mermaid guidance — read just in
-/// time when a planning request is large enough to need it. The v2 Brain
-/// block names it in one line.
+/// The built-in `design` skill (single-timeline plan; it was `plan` until
+/// Brain/Builder left): the consensus checklist, the UI sizing and asset
+/// rules, how a design is written into the living document, the Mermaid
+/// guidance — read just in time when a request is large enough to need it.
+/// The work block names it in one line.
 #[cfg(test)]
 mod plan_skill_tests {
     use super::*;
 
     fn plan() -> SkillEntry {
         SkillManager::builtin_only()
-            .get("plan")
+            .get("design")
             .cloned()
-            .expect("a built-in skill named plan")
+            .expect("a built-in skill named design")
     }
 
     #[test]
-    fn the_plan_skill_is_built_in_and_listed_in_the_catalog() {
+    fn the_design_skill_is_built_in_and_listed_in_the_catalog() {
         let skill = plan();
         assert_eq!(skill.scope, SkillScope::Builtin);
         let text = build_skills_system_prompt_section(&SkillManager::builtin_only()).unwrap();
         let line = text
             .lines()
-            .find(|l| l.starts_with("- plan \u{2014} "))
-            .unwrap_or_else(|| panic!("plan is not in the catalog: {text}"));
+            .find(|l| l.starts_with("- design \u{2014} "))
+            .unwrap_or_else(|| panic!("design is not in the catalog: {text}"));
         // On every request of every session: one short line.
         assert!(line.chars().count() <= 140, "{line}");
+        assert!(!line.contains("Brain"), "{line}");
     }
 
-    /// The body is what v1's Brain block said about these four subjects, so
-    /// a session that reads it loses none of the guidance v2 left out.
+    /// The body keeps the guidance the old Brain block carried, aimed at the
+    /// living document instead of a plan file.
     #[test]
-    fn the_plan_skill_carries_the_checklists_the_brain_block_gave_up() {
+    fn the_design_skill_carries_the_checklists_and_writes_into_the_document() {
         let body = plan().body.unwrap();
         for said in [
             // The consensus checklist and its five dimensions.
@@ -1128,8 +1129,10 @@ mod plan_skill_tests {
             "Sizing and layout",
             "GROUND TRUTH",
             "lucide:notebook-pen",
-            // The Low-Level Design.
-            "## Low-Level Design",
+            // The design, in the living document.
+            "`doc_create`",
+            "independent question",
+            "one `spawn_agents` call",
             "exact files and symbols",
             "data flow",
             "integration points",
@@ -1138,7 +1141,13 @@ mod plan_skill_tests {
             "FULL Mermaid catalog",
             "stateDiagram-v2",
         ] {
-            assert!(body.contains(said), "the plan skill does not say {said:?}");
+            assert!(
+                body.contains(said),
+                "the design skill does not say {said:?}"
+            );
+        }
+        for gone in ["write_plan", "Brain", "Builder", "## Low-Level Design"] {
+            assert!(!body.contains(gone), "the design skill still says {gone:?}");
         }
     }
 
@@ -1173,11 +1182,11 @@ mod plan_skill_tests {
             metadata: None,
             allowed_tools: None,
         };
-        let err = install_user_skill(home.path(), &meta("plan"), "body".into())
+        let err = install_user_skill(home.path(), &meta("design"), "body".into())
             .expect_err("a reserved name is refused");
         assert!(err.contains("reserved"), "{err}");
         assert!(err.contains("rename"), "says what to do: {err}");
-        assert!(!home.path().join(".claudinio/skills/plan").exists());
+        assert!(!home.path().join(".claudinio/skills/design").exists());
 
         let ok = install_user_skill(home.path(), &meta("deploy"), "body".into()).unwrap();
         assert_eq!(ok.scope, SkillScope::User);
@@ -1188,15 +1197,15 @@ mod plan_skill_tests {
         );
     }
 
-    /// Prompt v2's Brain block sends the model to the `plan` skill by name for
-    /// the checklists it no longer carries. A project, user or plugin skill
-    /// that happened to be called `plan` would answer instead, and the
-    /// guidance v2 moved out of the prompt would be unreachable: the name the
-    /// prompt points at stays the built-in's. Other skills on disk still load.
+    /// The work block sends the model to the `design` skill by name for the
+    /// checklists it does not carry. A project, user or plugin skill that
+    /// happened to be called `design` would answer instead, and that guidance
+    /// would be unreachable: the name the prompt points at stays the
+    /// built-in's. Other skills on disk still load.
     #[test]
-    fn a_skill_on_disk_named_plan_does_not_replace_the_built_in_one() {
+    fn a_skill_on_disk_named_design_does_not_replace_the_built_in_one() {
         let root = tempfile::tempdir().unwrap();
-        for name in ["plan", "deploy"] {
+        for name in ["design", "deploy"] {
             let dir = root.path().join(".claude").join("skills").join(name);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
@@ -1206,7 +1215,7 @@ mod plan_skill_tests {
             .unwrap();
         }
         let mgr = SkillManager::new(Some(root.path().to_path_buf()));
-        let plan = mgr.get("plan").expect("plan");
+        let plan = mgr.get("design").expect("design");
         assert_eq!(plan.scope, SkillScope::Builtin, "{}", plan.location);
         assert!(plan.body.as_deref().unwrap().contains("false consensus"));
         assert_eq!(

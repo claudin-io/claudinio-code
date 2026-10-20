@@ -129,13 +129,6 @@ pub struct GuardState {
     pub empty_streak: u32,
     /// Terminal turns the completion judge ruled unfinished.
     pub unfinished_streak: u32,
-    /// Brain-mode rounds using only explore tools — no interview, plan or tasks.
-    pub brain_explore_streak: u32,
-    /// The agent called `finalize_plan` during this run.
-    pub plan_finalized: bool,
-    /// The single reminder to finalize has been sent; next time the harness
-    /// appends the log itself.
-    pub finalize_nudged: bool,
     /// The one reminder about a task left `doing` at the finish line has
     /// been sent (`nudges::still_doing`); the next finish is let through.
     pub doing_nudged: bool,

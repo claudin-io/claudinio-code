@@ -1,19 +1,15 @@
 //! Running one tool call the model asked for: the permission decision, the
-//! approval gate, `ask_user` and mode switches, and shaping what the tool
+//! approval gate, `ask_user`, and shaping what the tool
 //! returned into the `tool_result` block the next round carries.
 
 use crate::agent::events::{AgentEvent, EditProposalData};
-use crate::agent::handoff::{HANDOFF_QUEUED, HandoffReason, HandoffSpec};
 use crate::agent::permissions;
 use crate::agent::permissions::PermissionLevel;
-use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::provider::{AgentConfig, ContentBlock};
 use crate::agent::result_cap::{Call, tool_result_block};
-use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SessionMode, UserAnswer};
-use crate::agent::subagent;
+use crate::agent::session::{AnswerMap, ApprovalMap, UserAnswer};
 use crate::agent::tools::{self, ToolContext, ToolOutput};
 use serde_json::Value;
-use std::sync::Arc;
 use tauri::ipc::Channel;
 use tokio::sync::oneshot;
 
@@ -884,156 +880,6 @@ pub(crate) fn deny_tool(
     ContentBlock::tool_result(tool_use_id, msg)
 }
 
-/// Rewrite a spawn_agents input so every agent runs in 'explore' mode.
-/// Brain must never spawn code-mode (write-capable) subagents.
-/// Normalizes flattened single-spec inputs first so they can't bypass the
-/// rewrite and reach run_spawn_agents still carrying mode='code'.
-pub(super) fn force_explore_mode(tool_input: Value) -> Value {
-    let mut tool_input = subagent::normalize_spawn_input(tool_input);
-    if let Some(agents) = tool_input.get_mut("agents").and_then(|v| v.as_array_mut()) {
-        for agent in agents {
-            if let Some(obj) = agent.as_object_mut() {
-                obj.insert("mode".into(), Value::String("explore".into()));
-            }
-        }
-    }
-    tool_input
-}
-
-/// Handle the agent-initiated mode switch tools. enter_plan_mode always
-/// works (origin becomes Agent); exit_plan_mode only works when the agent
-/// itself entered Brain — a human-initiated Brain is exited only by
-/// the human toggle.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn handle_mode_switch(
-    tool_name: &str,
-    tool_use_id: &str,
-    tool_input: &Value,
-    mode_ctl: &Arc<ModeCtl>,
-    store: &SessionStore,
-    ctx: &ToolContext,
-    event_tx: &Channel<AgentEvent>,
-    session_id: &str,
-    pending_handoff: &mut Option<HandoffSpec>,
-) -> ContentBlock {
-    let _ = event_tx.send(AgentEvent::ToolCall {
-        session_id: session_id.to_string(),
-        tool_id: tool_use_id.to_string(),
-        tool_name: tool_name.to_string(),
-        args: tool_input.clone(),
-        permission: "auto".into(),
-        edit_proposal: None,
-    });
-
-    let (mode, origin) = mode_ctl.get();
-    let (result, error): (String, Option<String>) = match tool_name {
-        _ if pending_handoff.is_some() => (HANDOFF_QUEUED.into(), Some("invalid".into())),
-        "enter_plan_mode" => {
-            if mode == SessionMode::Brain {
-                ("Already in Brain mode.".into(), Some("invalid".into()))
-            } else {
-                let reason = tool_input
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                mode_ctl.set(SessionMode::Brain, ModeOrigin::Agent);
-                store.try_append(&SessionRecord::Mode {
-                    mode: SessionMode::Brain.as_str().into(),
-                    origin: ModeOrigin::Agent.as_str().into(),
-                    ts: now_ms(),
-                });
-                crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-                let _ = event_tx.send(AgentEvent::ModeChanged {
-                    mode: SessionMode::Brain.as_str().into(),
-                    origin: ModeOrigin::Agent.as_str().into(),
-                    reason,
-                });
-                (
-                    "Entered Brain mode (read-only planning). Editing tools are now \
-                     disabled. Explore, interview the user, write the plan with write_plan, \
-                     create tasks with tasks_set, then call exit_plan_mode to build."
-                        .into(),
-                    None,
-                )
-            }
-        }
-        "exit_plan_mode" => {
-            if mode != SessionMode::Brain {
-                ("Not in Brain mode.".into(), Some("invalid".into()))
-            } else if origin != ModeOrigin::Agent {
-                (
-                    "The USER enabled Brain mode — only they can switch back to \
-                     Builder. Finish the plan and tasks, then end your turn telling \
-                     the user everything is ready for them to flip the toggle."
-                        .into(),
-                    Some("denied".into()),
-                )
-            } else {
-                store.try_append(&SessionRecord::Mode {
-                    mode: SessionMode::Builder.as_str().into(),
-                    origin: ModeOrigin::Agent.as_str().into(),
-                    ts: now_ms(),
-                });
-                crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-                *pending_handoff = Some(HandoffSpec {
-                    reason: HandoffReason::PlanExecution,
-                    next_mode: SessionMode::Builder,
-                    next_origin: ModeOrigin::Agent,
-                    first_message: crate::agent::nudges::PLAN_APPROVED.into(),
-                    golden_cycle: 0,
-                    golden_stalls: 0,
-                    golden_last_pending: vec![],
-                    document: None,
-                });
-                // Auto-commit the latest plan when exiting Brain mode
-                let auto_commit = ctx
-                    .agent_config
-                    .as_ref()
-                    .map(|c| c.auto_commit_plan)
-                    .unwrap_or(true);
-                if auto_commit && let Some(root) = &ctx.workspace_root {
-                    let plan_save_path = ctx.plan_save_path.as_deref();
-                    if let Some(plan_path) =
-                        crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path)
-                    {
-                        let fname = plan_path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("plan");
-                        let slug = crate::agent::tools::write_plan::commit_slug(fname);
-                        let commit_msg = format!("docs(plan): {}", slug);
-                        let add = std::process::Command::new("git")
-                            .arg("-C")
-                            .arg(root)
-                            .arg("add")
-                            .arg(plan_path.to_string_lossy().as_ref())
-                            .output();
-                        if add.is_ok() {
-                            let _ = std::process::Command::new("git")
-                                .arg("-C")
-                                .arg(root)
-                                .arg("commit")
-                                .arg("-m")
-                                .arg(&commit_msg)
-                                .output();
-                        }
-                    }
-                }
-                (crate::agent::nudges::PLAN_APPROVED_RESULT.into(), None)
-            }
-        }
-        _ => ("unknown mode tool".into(), Some("invalid".into())),
-    };
-
-    let _ = event_tx.send(AgentEvent::ToolResult {
-        tool_id: tool_use_id.to_string(),
-        tool_name: tool_name.to_string(),
-        output: result.clone(),
-        error,
-    });
-    ContentBlock::tool_result(tool_use_id, &result)
-}
-
 /// Await the user's answer, guarding against the oneshot being dropped early.
 /// If the sender goes away (aborted task, lifecycle churn) the channel is
 /// recreated up to a retry limit — the gate must only be released by a real
@@ -1716,36 +1562,12 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
         }
-    }
-
-    #[test]
-    fn force_explore_mode_rewrites_all_agents() {
-        let input = json!({ "agents": [
-            { "name": "a", "goal": "g", "mode": "code" },
-            { "name": "b", "goal": "g", "mode": "explore" }
-        ]});
-        let out = force_explore_mode(input);
-        for agent in out["agents"].as_array().unwrap() {
-            assert_eq!(agent["mode"], "explore");
-        }
-    }
-
-    #[test]
-    fn force_explore_mode_normalizes_flattened_code_spec() {
-        // A flattened single spec must not bypass the explore rewrite.
-        let input = json!({ "name": "a", "goal": "g", "mode": "code" });
-        let out = force_explore_mode(input);
-        let agents = out["agents"].as_array().unwrap();
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0]["mode"], "explore");
     }
 
     #[test]

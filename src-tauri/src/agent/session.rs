@@ -12,7 +12,7 @@
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::provider::{ContentBlock, Message, ToolDescription, ToolResultContent};
 use crate::agent::tools::ToolContext;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -143,36 +143,8 @@ pub(crate) fn prefix_breakdown(
     }
 }
 
-/// The session's operating mode: Brain plans with read-only tools,
-/// Builder executes with the full toolset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SessionMode {
-    Brain,
-    Builder,
-}
-
-impl SessionMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SessionMode::Brain => "brain",
-            SessionMode::Builder => "builder",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<SessionMode> {
-        match s {
-            // "pensador"/"constructor" are the original names of these modes;
-            // JSONL files written before the rename still carry them.
-            "brain" | "pensador" => Some(SessionMode::Brain),
-            "builder" | "constructor" => Some(SessionMode::Builder),
-            _ => None,
-        }
-    }
-}
-
 /// Which situational prompt/toolset a workflow run uses. `Standard` is the
-/// full agent (task system, Brain/Builder modes, skills, subagents, golden
+/// full agent (task list or living document, skills, subagents, golden
 /// tasks). Other variants are lean, purpose-built profiles for a single kind
 /// of job — no task system, no modes, minimal toolset — so the model isn't
 /// paying for ceremony it doesn't need.
@@ -195,16 +167,13 @@ impl PromptProfile {
         matches!(self, PromptProfile::Standard | PromptProfile::Compact)
     }
 
-    /// True when the main session in `mode` changes files itself: offered
+    /// True when the main session changes files itself: offered
     /// `edit_file`, and a shell command that writes a file is asked about like
-    /// an edit instead of refused. Builder under a
-    /// chat profile — Compact always did; Standard since decision D1
-    /// (lean-harness Phase 3), because delegating every edit cost a second
-    /// prefix, a second exploration and the spec re-emitted as output on each
-    /// one. Brain is read-only under every profile, and the git operator
-    /// never edits (a conflict is the person's to resolve).
-    pub fn edits_files(self, mode: SessionMode) -> bool {
-        self.is_chat() && mode == SessionMode::Builder
+    /// an edit instead of refused. Every chat profile does (decision D1,
+    /// lean-harness Phase 3); the git operator never edits (a conflict is the
+    /// person's to resolve).
+    pub fn edits_files(self) -> bool {
+        self.is_chat()
     }
 
     pub fn as_str(self) -> &'static str {
@@ -213,48 +182,6 @@ impl PromptProfile {
             PromptProfile::GitSync => "git_sync",
             PromptProfile::Compact => "compact",
         }
-    }
-}
-
-/// Who put the session in its current mode. The agent may only exit Brain
-/// on its own if it was the one who entered it; a human-initiated Brain
-/// can only be exited by the human toggle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModeOrigin {
-    Human,
-    Agent,
-}
-
-impl ModeOrigin {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ModeOrigin::Human => "human",
-            ModeOrigin::Agent => "agent",
-        }
-    }
-}
-
-/// Shared, mutable mode state for a session. Lives in AppState keyed by
-/// session id so the UI toggle and the running workflow see the same value.
-/// The Mutex is never held across await.
-pub struct ModeCtl {
-    state: StdMutex<(SessionMode, ModeOrigin)>,
-}
-
-impl ModeCtl {
-    pub fn new(mode: SessionMode, origin: ModeOrigin) -> Self {
-        Self {
-            state: StdMutex::new((mode, origin)),
-        }
-    }
-
-    pub fn get(&self) -> (SessionMode, ModeOrigin) {
-        *self.state.lock().unwrap()
-    }
-
-    pub fn set(&self, mode: SessionMode, origin: ModeOrigin) {
-        *self.state.lock().unwrap() = (mode, origin);
     }
 }
 
@@ -496,20 +423,6 @@ pub(crate) fn cost_or_estimate(
 
 #[cfg(test)]
 mod tests {
-    // The loop derives a tool call's Brain refusal and its permission to edit
-    // from one reading of the mode: for that to hold, no reading can be both
-    // Brain and a mode that edits files, under any profile.
-    #[test]
-    fn brain_never_edits_files_under_any_profile() {
-        for profile in [
-            PromptProfile::Standard,
-            PromptProfile::GitSync,
-            PromptProfile::Compact,
-        ] {
-            assert!(!profile.edits_files(SessionMode::Brain), "{profile:?}");
-        }
-    }
-
     use super::*;
     use lru::LruCache;
 
@@ -538,12 +451,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
         }
     }

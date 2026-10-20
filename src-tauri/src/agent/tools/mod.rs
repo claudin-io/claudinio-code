@@ -2,7 +2,6 @@ pub(crate) mod bash;
 mod browser;
 pub mod doc;
 mod edit_file;
-pub mod finalize_plan;
 mod grep;
 mod lines;
 mod list_dir;
@@ -12,9 +11,12 @@ pub(crate) mod skills_tool;
 mod syntax_check;
 pub mod tasks;
 mod web_search;
-pub(crate) mod write_plan;
 
-pub use finalize_plan::git_head;
+/// The current git HEAD sha for `root`, or None when not a git repo / git
+/// unavailable. Anchors the quality gate's diff window at run start.
+pub fn git_head(root: &str) -> Option<String> {
+    crate::quality::evidence::git_head(std::path::Path::new(root))
+}
 
 use crate::code_intel::db::IndexDb;
 use crate::code_intel::embeddings::SharedEmbedder;
@@ -49,11 +51,8 @@ pub struct ToolContext {
     /// Loaded AgentConfig — used by tools that call claudin.io services
     /// (currently just web_search). None when unavailable (e.g. some tests).
     pub agent_config: Option<crate::agent::provider::AgentConfig>,
-    /// Custom plan save path (relative to workspace_root).
-    /// None = use default (.claudinio/plans).
-    pub plan_save_path: Option<String>,
-    /// The git commit HEAD pointed at when this run started, used by
-    /// finalize_plan to compute the changed files / commits since work began.
+    /// The git commit HEAD pointed at when this run started, used by the
+    /// quality gate to tell what changed since work began.
     /// None when not a git repo (or git unavailable).
     pub base_commit: Option<String>,
     /// When true, git add / git commit / git push commands are auto-approved
@@ -77,7 +76,7 @@ pub struct ToolContext {
     /// Live handle to the session's mode state. Used by tasks_set to enforce
     /// the Brain-mode Low-Level-Design gate. None in tests and one-off
     /// workflows, which disables the gate.
-    pub mode_ctl: Option<Arc<crate::agent::session::ModeCtl>>,
+
     /// Tracks indexing progress for this workspace. `Some(progress)` means
     /// the index is still being built; `None` means the index is ready.
     /// Index-dependent tools check this and return a user-friendly message
@@ -130,28 +129,15 @@ pub(crate) mod tests_support {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(4).unwrap(),
             ))),
         }
-    }
-}
-
-impl ToolContext {
-    /// True when the session this context belongs to is currently in Brain
-    /// mode. False when no mode handle is attached (tests, aux workflows).
-    pub fn is_brain(&self) -> bool {
-        matches!(
-            self.mode_ctl.as_ref().map(|m| m.get().0),
-            Some(crate::agent::session::SessionMode::Brain)
-        )
     }
 }
 
@@ -684,67 +670,51 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     ]
 }
 
-/// Definition of the write_plan tool. Only offered in Brain mode — it is
-/// the one write the planning mode is allowed to perform, and its target path
-/// is confined to `<workspace>/.claudinio/plans/`.
-pub fn write_plan_def() -> ToolDef {
-    ToolDef {
-        name: "write_plan".into(),
-        description: "Write the plan to <workspace>/.claudinio/plans/YYYY-MM-DD_<name>.md. Overwrites the file, so always pass the FULL plan content — call again with the same name and the complete updated text to revise (this is how the '## Low-Level Design' section is added after the Solution Design). Expected sections: Context, Solution Design, Risks, Non-goals, Low-Level Design, Tasks summary.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "description": "Short plan name; becomes the file identifier (e.g. 'dark mode toggle')" },
-                "content": { "type": "string", "description": "Full Markdown content of the plan" }
-            },
-            "required": ["name", "content"]
-        }),
-    }
-}
-
 /// Definition of the finalize_plan tool. Only offered in Builder mode — it
 /// appends an Implementation Log (changed files, commits, journal) to the plan
 /// `.md`, feeding the plan with data for future reference once a build is done.
-pub fn finalize_plan_def() -> ToolDef {
+pub fn remember_def() -> ToolDef {
     ToolDef {
-        name: "finalize_plan".into(),
-        description: "Append the Implementation Log to the plan once all tasks are verified. Files and commits come from git; `journal` holds findings, decisions and gotchas.".into(),
+        name: "remember".into(),
+        description: "Save up to 5 one-line lessons to the project memory (.claudinio/MEMORY.md) that a later session in this repository would need: a fact that cost rounds to find, a convention, a trap. Not progress notes.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "journal": { "type": "string" },
-                "plan_file": { "type": "string", "description": "Plan basename or path; default: the latest plan." },
-                "summary": { "type": "string" },
-                "memory": { "type": "array", "items": { "type": "string" }, "description": "Up to 5 lessons (200 chars each) a later session in this repo would otherwise re-learn; saved to .claudinio/MEMORY.md." }
+                "lines": { "type": "array", "items": { "type": "string" }, "maxItems": 5 }
             },
-            "required": ["journal"]
+            "required": ["lines"]
         }),
     }
 }
 
-/// Definition of the enter_plan_mode tool. Only offered in Builder mode.
-pub fn enter_plan_mode_def() -> ToolDef {
-    ToolDef {
-        name: "enter_plan_mode".into(),
-        description: "Switch this session into Brain (planning) mode. Use when the task turns out to be genuinely hard or ambiguous — unclear requirements, large design space, conflicting constraints — and designing first beats guessing. Editing tools are disabled until the plan and tasks are ready; because you initiated it, you can return with exit_plan_mode.".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "reason": { "type": "string", "description": "One sentence: why this task needs planning first (shown to the user)" }
-            },
-            "required": ["reason"]
-        }),
+/// `remember`: the project memory's one writer since `finalize_plan` left
+/// (single-timeline plan, decision S4). An entry points at the session's
+/// document when it has one.
+fn remember(args: &Value, ctx: &ToolContext) -> Result<String, String> {
+    let lines: Vec<String> = args
+        .get("lines")
+        .and_then(|v| v.as_array())
+        .ok_or("remember needs lines: [\"...\"]")?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let lines = crate::agent::project_memory::proposed_lines(&lines)
+        .map_err(|e| format!("{e} (nothing was written)"))?;
+    if lines.is_empty() {
+        return Err("remember needs at least one non-empty line".into());
     }
-}
-
-/// Definition of the exit_plan_mode tool. Only offered in Brain mode, and
-/// only succeeds when the agent itself entered Brain via enter_plan_mode.
-pub fn exit_plan_mode_def() -> ToolDef {
-    ToolDef {
-        name: "exit_plan_mode".into(),
-        description: "Leave Brain mode and return to Builder to execute the plan. Only works if YOU entered Brain via enter_plan_mode; when the user enabled Brain, only their toggle can exit — finish by telling them the plan and tasks are ready.".into(),
-        input_schema: serde_json::json!({"type": "object", "properties": {}, "required": []}),
-    }
+    let root = ctx
+        .workspace_root
+        .as_deref()
+        .ok_or("remember needs an open workspace")?;
+    let doc = crate::agent::doc_session::linked_path(ctx);
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    crate::agent::project_memory::append(Path::new(root), doc.as_deref(), &today, &lines)?;
+    Ok(format!(
+        "{} line(s) added to {}.",
+        lines.len(),
+        crate::agent::project_memory::MEMORY_FILE
+    ))
 }
 
 pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
@@ -1022,18 +992,9 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
             let content = tasks::execute_updates(items, ctx)?;
             Ok(ToolOutput::Text { content })
         }
-        "write_plan" => {
-            let a: write_plan::WritePlanArgs =
-                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            let content = write_plan::execute(a, ctx)?;
-            Ok(ToolOutput::Text { content })
-        }
-        "finalize_plan" => {
-            let a: finalize_plan::FinalizePlanArgs =
-                serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
-            let content = finalize_plan::execute(a, ctx)?;
-            Ok(ToolOutput::Text { content })
-        }
+        "remember" => Ok(ToolOutput::Text {
+            content: remember(&args, ctx)?,
+        }),
         "web_search" => {
             let a: web_search::WebSearchArgs =
                 serde_json::from_value(args).map_err(|e| format!("invalid args: {e}"))?;
@@ -1076,9 +1037,6 @@ pub async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolO
         }
         "doc_create" | "doc_write" | "doc_read" | "doc_add" => doc::execute(name, &args, ctx),
         "spawn_agents" => Err("spawn_agents is handled by the session orchestrator".into()),
-        "enter_plan_mode" | "exit_plan_mode" => {
-            Err("mode switch tools are handled by the session orchestrator".into())
-        }
         "agent" | "task" | "spawn_agent" | "subagent" => Err(format!(
             "unknown tool: {name}. To spawn subagents, make ONE spawn_agents call with an \
              'agents' array (1-4 specs: name, goal, mode, expected_output) — all agents in \
@@ -1402,12 +1360,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -1424,9 +1380,7 @@ mod tests {
     #[test]
     fn every_core_tool_description_is_at_most_400_characters() {
         let mut defs = get_defs(4);
-        defs.push(write_plan_def());
-        defs.push(exit_plan_mode_def());
-        defs.push(finalize_plan_def());
+        defs.push(remember_def());
         defs.push(crate::agent::deferred::load_tools_def());
         let over: Vec<(String, usize)> = defs
             .iter()
@@ -1437,25 +1391,6 @@ mod tests {
             .map(|t| (t.name.clone(), t.description.chars().count()))
             .collect();
         assert!(over.is_empty(), "over 400 characters: {over:?}");
-    }
-
-    /// Phase 9: `finalize_plan` takes the lines the project memory gains, as
-    /// an optional list of strings whose description states the limits the
-    /// code enforces (`project_memory::proposed_lines`) and stays short —
-    /// `finalize_plan` is core in Builder, so it rides on every request.
-    #[test]
-    fn finalize_plan_offers_an_optional_memory_list_described_in_400_characters() {
-        let def = finalize_plan_def();
-        let memory = &def.input_schema["properties"]["memory"];
-        assert_eq!(memory["type"], "array", "{memory}");
-        assert_eq!(memory["items"]["type"], "string", "{memory}");
-        let description = memory["description"].as_str().unwrap_or_default();
-        assert!(description.chars().count() <= 400, "{description}");
-        for limit in ["5", "200", ".claudinio/MEMORY.md"] {
-            assert!(description.contains(limit), "{description}");
-        }
-        let required = def.input_schema["required"].as_array().unwrap();
-        assert!(!required.iter().any(|r| r == "memory"));
     }
 
     /// Phase 3b: models that could not tell edit_file creates files wrote
@@ -2580,12 +2515,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2612,12 +2545,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2644,12 +2575,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2763,12 +2692,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2816,12 +2743,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2856,12 +2781,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2900,12 +2823,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2933,12 +2854,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2966,12 +2885,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -2998,12 +2915,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -3033,12 +2948,10 @@ mod tests {
             browser: None,
             interrupt: None,
             agent_config: None,
-            plan_save_path: None,
             base_commit: None,
             auto_approve_git: false,
             shell_gate: None,
             mcp: None,
-            mode_ctl: None,
             index_progress: None,
             records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(1).unwrap(),
@@ -3212,5 +3125,45 @@ mod tests {
         assert!(def.ends_with("symbol at cursor: ção"), "{def}");
         let refs = text(heuristically_find_references(file, 0, 6, &None));
         assert!(refs.ends_with("references for ção"), "{refs}");
+    }
+
+    /// With `finalize_plan` gone (single-timeline plan, decision S4), the
+    /// project memory keeps a writer: `remember` appends up to five
+    /// one-line lessons to `.claudinio/MEMORY.md`, pointing at the session's
+    /// document when it has one, and refuses more than five whole.
+    #[tokio::test]
+    async fn remember_appends_lessons_to_the_project_memory() {
+        let root = std::env::temp_dir().join(format!(
+            "claudinio-remember-{}-{}",
+            std::process::id(),
+            crate::agent::persist::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = ToolContext {
+            workspace_root: Some(root.to_string_lossy().to_string()),
+            ..tests_support::ctx()
+        };
+        let out = execute(
+            "remember",
+            serde_json::json!({"lines": ["the tests need  BRAMBLE_HOME set\nto a temp dir"]}),
+            &ctx,
+        )
+        .await
+        .expect("remember writes");
+        assert!(matches!(out, ToolOutput::Text { .. }));
+        let memory = std::fs::read_to_string(root.join(".claudinio/MEMORY.md")).unwrap();
+        assert!(
+            memory.contains("the tests need BRAMBLE_HOME set to a temp dir"),
+            "{memory}"
+        );
+        let six: Vec<String> = (1..=6).map(|i| format!("lesson {i}")).collect();
+        let refused = execute("remember", serde_json::json!({ "lines": six }), &ctx).await;
+        assert!(refused.is_err());
+        assert!(
+            !std::fs::read_to_string(root.join(".claudinio/MEMORY.md"))
+                .unwrap()
+                .contains("lesson 1")
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

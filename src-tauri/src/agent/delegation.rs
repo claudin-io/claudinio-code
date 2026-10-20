@@ -117,7 +117,7 @@ fn relative<'a>(path: &'a str, workspace_root: Option<&str>) -> &'a str {
 }
 
 /// The brief for the code subagents `ctx`'s session is about to spawn: its
-/// task in progress, the latest plan in the plans directory, and every file
+/// task in progress, the session's document, and every file
 /// read through `read_file` in this run. The read tracker is the run's, and
 /// subagents share it, so the paths include what earlier subagents read —
 /// facts the session has, whoever fetched them.
@@ -127,9 +127,8 @@ pub(crate) async fn brief_for(ctx: &ToolContext) -> Option<String> {
         .as_deref()
         .and_then(|p| crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok())
         .and_then(|tasks| tasks.into_iter().find(|t| t.status == "doing"));
-    let plan = ctx.workspace_root.as_deref().and_then(|root| {
-        crate::agent::tools::write_plan::latest_plan_path(root, ctx.plan_save_path.as_deref())
-    });
+    // The session's living document is its plan when it has one.
+    let plan = crate::agent::doc_session::linked_path(ctx);
     let read_paths: Vec<String> = ctx
         .read_tracker
         .lock()
@@ -148,7 +147,7 @@ pub(crate) async fn brief_for(ctx: &ToolContext) -> Option<String> {
 
 /// The `<brief>` block prepended to a code subagent's goal, or `None` when
 /// there is nothing to share: the task in progress (title and the start of
-/// its description), the latest plan's path, and the files read in this run
+/// its description), the session's document, and the files read in this run
 /// as paths only — sorted, so the same reads give the same bytes, and at most
 /// [`BRIEF_PATHS`] of them with a count of the rest.
 pub(crate) fn compose_brief(

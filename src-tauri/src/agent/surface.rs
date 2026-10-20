@@ -30,7 +30,7 @@
 //! cached prefix.
 
 use crate::agent::provider::AgentConfig;
-use crate::agent::session::{PromptProfile, SessionMode};
+use crate::agent::session::PromptProfile;
 use crate::agent::tools::ToolDef;
 
 /// The tool catalog a model gets under the Standard profile.
@@ -231,24 +231,15 @@ start_line/end_line for the part you need: your context is small, so never read 
 
 /// Should a run that asked for `profile` use Compact instead?
 ///
-/// Only a Standard session, only in Builder, and only on a window that needs
-/// it. Brain keeps the Standard profile whatever the window: its read-only
-/// protocol — interview, design, tasks — is the thing Compact leaves out, and a
-/// model too small for it is told so rather than handed something else under
-/// the same name. Golden goals stay on Standard for the same reason: their
-/// loop flips the session into Brain.
+/// Only a Standard session, and only on a window that needs it. Golden goals
+/// stay on Standard: Compact's prompt has no golden-task rules.
 pub fn effective_profile(
     profile: PromptProfile,
     config: &AgentConfig,
-    mode: SessionMode,
     has_golden_goals: bool,
 ) -> PromptProfile {
     let small = config.context_window_for(config.model()) < COMPACT_BELOW;
-    if profile == PromptProfile::Standard
-        && mode == SessionMode::Builder
-        && small
-        && !has_golden_goals
-    {
+    if profile == PromptProfile::Standard && small && !has_golden_goals {
         PromptProfile::Compact
     } else {
         profile
@@ -297,26 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn compact_is_for_a_small_window_in_builder_and_nothing_else() {
+    fn compact_is_for_a_small_window_and_nothing_else() {
         let small = config_with_window(Some(32_768));
         let std = PromptProfile::Standard;
         assert_eq!(
-            effective_profile(std, &small, SessionMode::Builder, false),
+            effective_profile(std, &small, false),
             PromptProfile::Compact
         );
-        // Brain keeps its own protocol whatever the window.
-        assert_eq!(
-            effective_profile(std, &small, SessionMode::Brain, false),
-            std
-        );
-        // Golden goals flip the session into Brain; they stay on Standard.
-        assert_eq!(
-            effective_profile(std, &small, SessionMode::Builder, true),
-            std
-        );
+        // Golden goals stay on Standard: Compact has no golden rules.
+        assert_eq!(effective_profile(std, &small, true), std);
         // A purpose-built profile is never swapped for another.
         assert_eq!(
-            effective_profile(PromptProfile::GitSync, &small, SessionMode::Builder, false),
+            effective_profile(PromptProfile::GitSync, &small, false),
             PromptProfile::GitSync
         );
     }
@@ -326,27 +309,11 @@ mod tests {
         let std = PromptProfile::Standard;
         for window in [None, Some(64_000), Some(128_000), Some(200_000)] {
             let cfg = config_with_window(window);
-            assert_eq!(
-                effective_profile(std, &cfg, SessionMode::Builder, false),
-                std,
-                "{window:?}"
-            );
+            assert_eq!(effective_profile(std, &cfg, false), std, "{window:?}");
         }
         // The default models are 200k: nothing changes for them.
         let cfg = AgentConfig::default();
-        assert_eq!(
-            effective_profile(std, &cfg, SessionMode::Builder, false),
-            std
-        );
-    }
-
-    #[test]
-    fn a_brain_on_a_small_model_keeps_standard_too() {
-        let cfg = config_with_window(Some(32_768));
-        assert_eq!(
-            effective_profile(PromptProfile::Standard, &cfg, SessionMode::Brain, false),
-            PromptProfile::Standard
-        );
+        assert_eq!(effective_profile(std, &cfg, false), std);
     }
 
     #[test]

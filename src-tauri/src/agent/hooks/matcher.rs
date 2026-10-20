@@ -21,8 +21,8 @@ use regex::Regex;
 ///
 /// Tools with no Claude Code counterpart are absent on purpose — `browser`,
 /// `run_quality`, `code_search`, `semantic_search`, `symbol_lookup`,
-/// `file_outline`, `go_to_definition`, `find_references`, `write_plan`,
-/// `finalize_plan`, `enter_plan_mode`. Inventing an alias for them would be
+/// `file_outline`, `go_to_definition`, `find_references`, `remember`, the
+/// document tools. Inventing an alias for them would be
 /// inventing a name no config in the world is written against.
 const TOOL_ALIASES: &[(&str, &[&str])] = &[
     ("bash", &["Bash"]),
@@ -41,7 +41,6 @@ const TOOL_ALIASES: &[(&str, &[&str])] = &[
     // fire here would stop seeing most task changes.
     ("tasks_update", &["TodoWrite"]),
     ("tasks_get", &["TodoRead"]),
-    ("exit_plan_mode", &["ExitPlanMode"]),
 ];
 
 /// Every name a matcher may use to select this tool, native first.

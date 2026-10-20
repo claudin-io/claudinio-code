@@ -43,24 +43,15 @@ use tauri::ipc::Channel;
 
 /// The built-in tools a Standard main session does not send until they are
 /// loaded, each with the line the catalog shows for it. Everything else
-/// built in is core: `read_file`, `list_dir`, `grep`, `bash`, `ask_user`,
-/// `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`, `skills`,
-/// `load_tools`, and the mode's own (`edit_file` and `finalize_plan` in
-/// Builder, `write_plan`, `exit_plan_mode` in Brain). Every MCP tool is
-/// deferred too. The order here is the catalog's order.
+/// built in is core: `read_file`, `list_dir`, `grep`, `edit_file`, `bash`,
+/// `ask_user`, `tasks_set`, `tasks_update`, `run_quality`, `spawn_agents`,
+/// `skills`, `doc_create`, `remember` and `load_tools`. Every MCP tool is
+/// deferred too.
+/// The order here is the catalog's order.
 ///
-/// `tasks_get` is deferred again since lean-harness Phase 4. Phase 2's review
-/// had made it core because the Builder prompt and every handoff kickoff
-/// (`agent::transition`) made it the session's first call; Phase 4 removed
-/// that mandate — each run's user turn now ends with the list as a `<tasks>`
-/// block (`agent::task_recital`) — so it is left for the rare "show me task
-/// 3's journal".
-///
-/// `finalize_plan` is core in Builder (the only mode that has it): the
-/// Builder prompt makes it the last step, the plan kickoff ends on it and the
-/// loop's last nudge (`nudges::FINALIZE_PLAN`) orders it. A load at the end of
-/// a session rewrites the cached prefix in front of the whole conversation —
-/// the most expensive cache write a session can make. The rule is pinned by
+/// `tasks_get` is deferred again since lean-harness Phase 4: each run's user
+/// turn ends with the list as a `<tasks>` block (`agent::task_recital`), so
+/// it is left for the rare "show me task 3's journal". The rule is pinned by
 /// `prompt::tests::no_harness_text_orders_a_deferred_tool` and
 /// `no_standard_prompt_line_makes_a_deferred_tool_mandatory_or_first`: no
 /// text the harness or the prompt puts in front of the model orders a
@@ -102,10 +93,6 @@ pub const DEFERRED_BUILTIN: &[(&str, &str)] = &[
     (
         "browser_screenshot",
         "see the open page, or part of it, as an image",
-    ),
-    (
-        "enter_plan_mode",
-        "switch to Brain (planning) mode when a task needs a design before code",
     ),
     (
         "tasks_get",
@@ -433,12 +420,10 @@ mod tests {
 
     #[test]
     fn every_deferred_builtin_is_a_real_tool_and_mcp_is_always_deferred() {
-        let mut all: Vec<String> = crate::agent::tools::get_defs(4)
+        let all: Vec<String> = crate::agent::tools::get_defs(4)
             .into_iter()
             .map(|t| t.name)
             .collect();
-        all.push("finalize_plan".into());
-        all.push("enter_plan_mode".into());
         for (name, purpose) in DEFERRED_BUILTIN {
             assert!(all.contains(&name.to_string()), "{name} is not a tool");
             assert!(!purpose.is_empty() && purpose.len() <= 160, "{name}");
@@ -474,20 +459,17 @@ mod tests {
             tool("code_search", ""),
             tool("bash", ""),
             tool("mcp__a__x", ""),
-            tool("enter_plan_mode", ""),
-            tool("finalize_plan", ""),
+            tool("tasks_get", ""),
+            tool("remember", ""),
         ]);
-        assert_eq!(names(&core), ["read_file", "bash", "finalize_plan"]);
-        assert_eq!(
-            names(&deferred),
-            ["code_search", "mcp__a__x", "enter_plan_mode"]
-        );
+        assert_eq!(names(&core), ["read_file", "bash", "remember"]);
+        assert_eq!(names(&deferred), ["code_search", "mcp__a__x", "tasks_get"]);
     }
 
     #[test]
     fn the_catalog_is_one_line_per_deferred_tool_in_a_fixed_order() {
         let deferred = vec![
-            tool("enter_plan_mode", "x"),
+            tool("tasks_get", "x"),
             tool("mcp__b__two", "Second server tool"),
             tool("code_search", "x"),
             tool("mcp__a__one", &format!("First line\n{}", "y".repeat(300))),
@@ -498,7 +480,7 @@ mod tests {
         // Built-ins in the table's order, then MCP tools in the order they came
         // (server then tool name, as `mcp::snapshots` stores them).
         assert!(lines[0].starts_with("- code_search \u{2014} find definitions"));
-        assert!(lines[1].starts_with("- enter_plan_mode \u{2014} "));
+        assert!(lines[1].starts_with("- tasks_get \u{2014} "));
         assert!(lines[2].starts_with("- mcp__b__two \u{2014} Second server tool"));
         let mcp_desc = lines[3].strip_prefix("- mcp__a__one \u{2014} ").unwrap();
         assert!(mcp_desc.starts_with("First line yyy"), "{mcp_desc}");

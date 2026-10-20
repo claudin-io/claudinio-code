@@ -8,10 +8,10 @@
 //! "AGENTS.md as a table of contents" shape of OpenAI's harness-engineering
 //! post).
 //!
-//! **The harness writes it, never the model.** `finalize_plan` takes an
-//! optional `memory` list (at most `MAX_LINES` lines of at most
-//! `MAX_LINE_CHARS` characters) and this module appends those lines; with no
-//! list nothing is appended — no journal is dumped here automatically. The
+//! **The harness writes it, never the model's file tools.** The `remember`
+//! tool takes a list (at most `MAX_LINES` lines of at most `MAX_LINE_CHARS`
+//! characters) and this module appends those lines; nothing else is
+//! appended — no journal is dumped here automatically. The
 //! file is append-only with a cap of `MEMORY_CAP` characters: past it the
 //! oldest entries are dropped, whole, and stay in the plans they point to.
 //! Nothing is ever summarized or rewritten — the ACE paper's (arXiv
@@ -35,9 +35,9 @@ pub const MEMORY_CAP: usize = 4_000;
 
 /// What a new file starts with, above its list.
 const PREAMBLE: &str = "# Project memory\n\n\
-Written by Claudinio Code from the `memory` lines of `finalize_plan`. Append-only: \
+Written by Claudinio Code from the lines its `remember` tool saves. Append-only: \
 when the file passes about 4,000 characters the oldest entries are dropped, and \
-each stays in the plan it points to.\n\n";
+each stays in the document it points to, when it has one.\n\n";
 
 /// The lines a `finalize_plan` call proposed, made one-line and checked:
 /// whitespace runs (a newline included) become one space, blank lines are
@@ -53,7 +53,7 @@ pub fn proposed_lines(lines: &[String]) -> Result<Vec<String>, String> {
     if lines.len() > MAX_LINES {
         return Err(format!(
             "memory takes at most {MAX_LINES} lines per call, and this one has {}: keep the \
-             ones a later session would most need and call finalize_plan again.",
+             ones a later session would most need and call again.",
             lines.len()
         ));
     }
@@ -65,16 +65,20 @@ pub fn proposed_lines(lines: &[String]) -> Result<Vec<String>, String> {
     {
         return Err(format!(
             "memory line {} has {n} characters, over the {MAX_LINE_CHARS} allowed: shorten it \
-             (a lesson and where it is written down) and call finalize_plan again.",
+             (a lesson and where it is written down) and call again.",
             i + 1
         ));
     }
     Ok(lines)
 }
 
-/// One entry: `- YYYY-MM-DD — <line> (plan: <plan path>)`.
-pub fn entry(date: &str, line: &str, plan: &str) -> String {
-    format!("- {date} \u{2014} {line} (plan: {plan})")
+/// One entry: `- YYYY-MM-DD — <line> (plan: <path>)`, or without the
+/// pointer when the lesson has no document behind it.
+pub fn entry(date: &str, line: &str, plan: Option<&str>) -> String {
+    match plan {
+        Some(plan) => format!("- {date} \u{2014} {line} (plan: {plan})"),
+        None => format!("- {date} \u{2014} {line}"),
+    }
 }
 
 /// `existing` with `entries` appended to the end of its `## Learned` list
@@ -188,7 +192,12 @@ pub fn plan_ref(root: &Path, plan: &Path) -> String {
 /// writer never removes or renames another's half-written file (Phase 9
 /// review). Another process writing the file at the same instant is not
 /// covered; the app runs one.
-pub fn append(root: &Path, plan: &Path, date: &str, lines: &[String]) -> Result<PathBuf, String> {
+pub fn append(
+    root: &Path,
+    plan: Option<&Path>,
+    date: &str,
+    lines: &[String],
+) -> Result<PathBuf, String> {
     static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let _guard = APPEND_LOCK
@@ -213,8 +222,11 @@ pub fn append(root: &Path, plan: &Path, date: &str, lines: &[String]) -> Result<
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(fail(&e)),
     };
-    let plan = plan_ref(root, plan);
-    let entries: Vec<String> = lines.iter().map(|l| entry(date, l, &plan)).collect();
+    let plan = plan.map(|p| plan_ref(root, p));
+    let entries: Vec<String> = lines
+        .iter()
+        .map(|l| entry(date, l, plan.as_deref()))
+        .collect();
     let text = appended(&existing, &entries, MEMORY_CAP);
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = dir.join(format!(".MEMORY.md.{}.{seq}.tmp", std::process::id()));
@@ -743,7 +755,7 @@ mod tests {
             entry(
                 "2026-10-19",
                 "Builds need -j 2 here",
-                ".claudinio/plans/p.md"
+                Some(".claudinio/plans/p.md")
             ),
             "- 2026-10-19 — Builds need -j 2 here (plan: .claudinio/plans/p.md)"
         );
@@ -875,9 +887,15 @@ mod tests {
     fn append_writes_the_entries_under_the_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let plan = dir.path().join(".claudinio/plans/2026-10-19_x.md");
-        let path = append(dir.path(), &plan, "2026-10-19", &lines(&["one", "two"])).unwrap();
+        let path = append(
+            dir.path(),
+            Some(&plan),
+            "2026-10-19",
+            &lines(&["one", "two"]),
+        )
+        .unwrap();
         assert_eq!(path, dir.path().join(MEMORY_FILE));
-        append(dir.path(), &plan, "2026-10-20", &lines(&["three"])).unwrap();
+        append(dir.path(), Some(&plan), "2026-10-20", &lines(&["three"])).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.ends_with(
@@ -906,7 +924,7 @@ mod tests {
                     std::thread::spawn(move || {
                         let plan = root.join(".claudinio/plans/p.md");
                         barrier.wait();
-                        append(&root, &plan, "2026-10-19", &[format!("writer {i} é")])
+                        append(&root, Some(&plan), "2026-10-19", &[format!("writer {i} é")])
                     })
                 })
                 .collect();
@@ -935,13 +953,13 @@ mod tests {
         std::fs::create_dir(dir.path().join(".claudinio")).unwrap();
         std::os::unix::fs::symlink(&target, dir.path().join(MEMORY_FILE)).unwrap();
         let plan = dir.path().join("p.md");
-        assert!(append(dir.path(), &plan, "2026-10-19", &lines(&["x"])).is_err());
+        assert!(append(dir.path(), Some(&plan), "2026-10-19", &lines(&["x"])).is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched\n");
 
         // A link at `.claudinio` itself would put the whole folder outside.
         let dir2 = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), dir2.path().join(".claudinio")).unwrap();
-        assert!(append(dir2.path(), &plan, "2026-10-19", &lines(&["x"])).is_err());
+        assert!(append(dir2.path(), Some(&plan), "2026-10-19", &lines(&["x"])).is_err());
         assert!(!outside.path().join("MEMORY.md").exists());
     }
 

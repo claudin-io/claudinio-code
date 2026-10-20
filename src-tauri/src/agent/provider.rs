@@ -157,10 +157,6 @@ pub struct AgentConfig {
     /// stops with "golden_stalled". None falls back to the default (2).
     #[serde(default)]
     pub max_golden_stalls: Option<usize>,
-    /// Custom path for saving plans, relative to workspace root.
-    /// None = use default (.claudinio/plans).
-    #[serde(default)]
-    pub plan_save_path: Option<String>,
     /// Opaque per-device id (salted SHA-256 of the OS install GUID), sent at
     /// login to gate the once-per-device app-install promo. Cached here so it's
     /// stable across runs. See `agent::install_id`.
@@ -230,10 +226,6 @@ pub struct AgentConfig {
     /// (120k). Clamped to 120k-256k (the Settings slider range).
     #[serde(default)]
     pub handoff_context_tokens: Option<u64>,
-    /// When true, automatically `git add` + `git commit` the plan file after the
-    /// final write_plan call (with Low-Level Design) or when exiting Brain mode.
-    #[serde(default = "default_true")]
-    pub auto_commit_plan: bool,
     /// Thinking effort level: "low" | "medium" | "high" | "xhigh" | "max".
     /// Mapped to an Anthropic `thinking.budget_tokens` value on each
     /// stream_message request; the claudin_router buckets it upstream.
@@ -254,10 +246,6 @@ pub struct AgentConfig {
     /// full catalog — see `crate::agent::surface`.
     #[serde(default)]
     pub tool_surface: std::collections::HashMap<String, String>,
-    /// Which Standard prompt sessions are sent: v2 (default) or v1, the
-    /// pre-Phase-5 prompt kept for one release — see `agent::prompt`.
-    #[serde(default)]
-    pub prompt_version: crate::agent::prompt::PromptVersion,
     /// The first run of a new session reads the workspace's AGENTS.md or
     /// CLAUDE.md and `.claudinio/MEMORY.md` — see `agent::project_memory`.
     #[serde(default = "default_true")]
@@ -550,7 +538,6 @@ impl Default for AgentConfig {
             account_tier: None,
             max_golden_cycles: None,
             max_golden_stalls: None,
-            plan_save_path: None,
             install_id: None,
             install_fallback_seed: None,
             max_parallel_agents: None,
@@ -562,13 +549,11 @@ impl Default for AgentConfig {
             code_intel_enabled: true,
             preferred_ide: None,
             handoff_context_tokens: None,
-            auto_commit_plan: true,
             thinking_effort: default_thinking_effort(),
             providers: std::collections::HashMap::new(),
             jev: crate::agent::jev::JevPrefs::default(),
             local: crate::llama::LocalPrefs::default(),
             tool_surface: std::collections::HashMap::new(),
-            prompt_version: Default::default(),
             project_memory: true,
         }
     }
@@ -773,7 +758,7 @@ pub fn read_workspace_config(workspace_root: &str) -> Option<Value> {
 
 /// Merge workspace config values into an AgentConfig.
 /// Workspace values OVERRIDE the local config for these fields ONLY:
-/// plan_save_path, model, max_rounds, sub_max_rounds,
+/// model, max_rounds, sub_max_rounds,
 /// yolo_mode, yolo_blacklist, max_parallel_agents.
 /// Fields like api_key, base_url, account_*, max_golden_*, services_url
 /// are NEVER read from workspace config.
@@ -782,13 +767,6 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
         Some(o) => o,
         None => return,
     };
-    if let Some(v) = obj.get("plan_save_path") {
-        if v.is_null() {
-            cfg.plan_save_path = None;
-        } else if let Some(s) = v.as_str() {
-            cfg.plan_save_path = Some(s.to_string());
-        }
-    }
     // `builder_model` is the name a workspace config written before one
     // timeline uses for the same thing.
     if let Some(v) = obj

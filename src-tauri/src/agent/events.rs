@@ -133,21 +133,15 @@ pub enum AgentEvent {
         subagent_id: String,
         event: Box<AgentEvent>,
     },
-    #[serde(rename = "ModeChanged")]
-    ModeChanged {
-        mode: String,
-        origin: String,
-        reason: Option<String>,
-    },
+
     /// The run tried to finish with golden tasks still pending: a new golden
-    /// cycle starts in `mode`. `pending` lists the unfinished golden task ids.
+    /// cycle starts. `pending` lists the unfinished golden task ids.
     #[serde(rename = "GoldenLoop")]
     GoldenLoop {
         cycle: u32,
         #[serde(rename = "maxCycles")]
         max_cycles: u32,
         pending: Vec<String>,
-        mode: String,
     },
     /// A quality-harness run finished: the project's own tests / coverage ran
     /// and were scored against the gate. Emitted whether the harness or the
@@ -180,12 +174,6 @@ pub enum AgentEvent {
         #[serde(rename = "sessionId")]
         session_id: String,
         reason: String,
-        mode: String,
-        /// Who the successor's mode belongs to (`human` | `agent`), as its
-        /// `ModeCtl` was built: the UI takes it from here rather than
-        /// deriving it from `reason`.
-        #[serde(default)]
-        origin: String,
         #[serde(rename = "firstMessage")]
         first_message: String,
     },
@@ -306,19 +294,18 @@ mod tests {
 
     use serde_json::json;
 
-    // A successor's mode origin is the backend's call (a new-document or a
-    // context handoff keeps the predecessor's, a plan execution is the
-    // agent's, the Builder button the person's): the event carries it, so
-    // the UI follows it instead of guessing from the reason.
+    // An app that still sends a successor's mode (or an old fixture) is read
+    // without it: one timeline has none.
     #[test]
-    fn session_linked_carries_the_successors_mode_origin() {
+    fn session_linked_reads_an_old_event_with_a_mode() {
         let json = json!({"event": "SessionLinked", "data": {
             "prevSessionId": "a", "sessionId": "b", "reason": "new_document",
             "mode": "brain", "origin": "human", "firstMessage": "go"
         }});
         let ev: AgentEvent = serde_json::from_value(json).unwrap();
         let back = serde_json::to_value(&ev).unwrap();
-        assert_eq!(back["data"]["origin"], "human", "{back}");
+        assert!(back["data"].get("mode").is_none(), "{back}");
+        assert_eq!(back["data"]["firstMessage"], "go", "{back}");
     }
 
     #[test]

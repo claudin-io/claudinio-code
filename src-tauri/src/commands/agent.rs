@@ -152,7 +152,6 @@ pub async fn send_message(
     workspace: String,
     message: String,
     attachments: Option<Vec<AttachmentInput>>,
-    mode: Option<String>,
     event_channel: Channel<AgentEvent>,
     state: State<'_, AppState>,
 ) -> Result<SessionStarted, String> {
@@ -205,23 +204,6 @@ pub async fn send_message(
     let store = SessionStore {
         path: handle.store_path.clone(),
     };
-
-    // Sync the session's mode with what the UI toggle sent: a human-set value
-    // that differs from the current one is persisted before the run starts.
-    let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
-    if let Some(m) = mode.as_deref().and_then(session::SessionMode::parse)
-        && mode_ctl.get().0 != m
-    {
-        mode_ctl.set(m, session::ModeOrigin::Human);
-        let store = SessionStore {
-            path: handle.store_path.clone(),
-        };
-        store.try_append(&SessionRecord::Mode {
-            mode: m.as_str().into(),
-            origin: session::ModeOrigin::Human.as_str().into(),
-            ts: now_ms(),
-        });
-    }
 
     // Reset this session's steering for the new run, then drain any residual
     // from a race.
@@ -285,12 +267,10 @@ pub async fn send_message(
         browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
-        plan_save_path: config.plan_save_path.clone(),
         base_commit,
         auto_approve_git: false,
         shell_gate: None,
         mcp: Some(mcp),
-        mode_ctl: Some(mode_ctl.clone()),
         index_progress: Some(ws.index_progress.clone()),
         records_cache: state.records_cache.clone(),
     };
@@ -360,7 +340,6 @@ pub async fn send_message(
         handle,
         store,
         ctx,
-        mode_ctl,
         steering,
         history,
         message,
@@ -410,7 +389,6 @@ fn build_hook_ctx(
 fn transition_maps(state: &State<'_, AppState>) -> transition::TransitionMaps {
     transition::TransitionMaps {
         steering: state.steering.clone(),
-        modes: state.modes.clone(),
         records_cache: state.records_cache.clone(),
     }
 }
@@ -425,7 +403,6 @@ struct RunLoopArgs {
     handle: SessionHandle,
     store: SessionStore,
     ctx: ToolContext,
-    mode_ctl: Arc<session::ModeCtl>,
     steering: Arc<session::SteeringCtl>,
     history: Vec<crate::agent::provider::Message>,
     message: String,
@@ -448,7 +425,6 @@ fn spawn_run_loop(args: RunLoopArgs) {
         mut handle,
         mut store,
         mut ctx,
-        mut mode_ctl,
         steering,
         mut history,
         mut message,
@@ -471,41 +447,20 @@ fn spawn_run_loop(args: RunLoopArgs) {
                 &ctx,
                 &store,
                 &steering,
-                &mode_ctl,
             )
             .await
             {
                 Ok(session::RunOutcome::Completed) => break,
                 Ok(session::RunOutcome::Handoff(spec)) => {
-                    let mut spec = *spec;
-                    spec.first_message = transition::resolve_first_message(
-                        &spec,
-                        ctx.workspace_root.as_deref(),
-                        ctx.plan_save_path.as_deref(),
-                        &crate::agent::task_recital::session_tasks(&ctx),
-                    );
+                    let spec = *spec;
                     match transition::link_session(&maps, &ws, &handle, &spec, &chan).await {
                         Ok(new_handle) => {
-                            let new_mode_ctl = maps
-                                .modes
-                                .lock()
-                                .await
-                                .get(&new_handle.id)
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    Arc::new(session::ModeCtl::new(
-                                        spec.next_mode,
-                                        spec.next_origin,
-                                    ))
-                                });
                             ctx = transition::rebuild_tool_context(
                                 &ctx,
                                 &new_handle.id,
                                 &new_handle.store_path,
-                                new_mode_ctl.clone(),
                                 cfg.clone(),
                             );
-                            mode_ctl = new_mode_ctl;
                             store = SessionStore {
                                 path: new_handle.store_path.clone(),
                             };
@@ -571,7 +526,6 @@ pub async fn new_session(workspace: String, state: State<'_, AppState>) -> Resul
         .await;
         state.session_started.lock().await.remove(&h.id);
         state.remove_steering(&h.id).await;
-        state.modes.lock().await.remove(&h.id);
         // A session abandoned before any real content (only meta/mode records,
         // e.g. created lazily by a mode toggle) is noise on disk — delete it
         // instead of leaving an "(empty session)" orphan in the list.
@@ -753,14 +707,12 @@ pub struct SetConfigArgs {
     pub max_golden_cycles: Option<Option<usize>>,
     pub max_golden_stalls: Option<Option<usize>>,
     pub max_parallel_agents: Option<Option<usize>>,
-    pub plan_save_path: Option<String>,
     pub override_base_url: Option<String>,
     pub override_api_key: Option<String>,
     pub mcp: Option<std::collections::HashMap<String, crate::agent::provider::McpServerEntry>>,
     pub code_intel_enabled: Option<bool>,
     pub preferred_ide: Option<String>,
     pub handoff_context_tokens: Option<Option<u64>>,
-    pub auto_commit_plan: Option<bool>,
     pub thinking_effort: Option<String>,
     pub browser: Option<crate::browser::BrowserPrefs>,
     pub local: Option<crate::llama::LocalPrefs>,
@@ -769,9 +721,6 @@ pub struct SetConfigArgs {
     pub jev_api_key: Option<String>,
     /// One model's tool surface — see `agent::surface`.
     pub tool_surface: Option<ToolSurfaceArg>,
-    /// "v1" | "v2" — which Standard prompt sessions are sent (lean-harness
-    /// Phase 5, decision D7). See `agent::prompt::PromptVersion`.
-    pub prompt_version: Option<String>,
     /// Whether a new session's first run reads AGENTS.md/CLAUDE.md and the
     /// project memory (lean-harness Phase 9). See `agent::project_memory`.
     pub project_memory: Option<bool>,
@@ -843,13 +792,6 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(max_parallel_agents) = args.max_parallel_agents {
         cfg.max_parallel_agents = max_parallel_agents.map(|n| n.clamp(1, 8));
     }
-    if let Some(plan_save_path) = args.plan_save_path {
-        cfg.plan_save_path = if plan_save_path.is_empty() {
-            None
-        } else {
-            Some(plan_save_path)
-        };
-    }
     if let Some(url) = args.override_base_url {
         cfg.override_base_url = if url.is_empty() { None } else { Some(url) };
     }
@@ -863,7 +805,6 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     if let Some(choice) = args.tool_surface {
         crate::agent::surface::set_for(&mut cfg, &choice.model, &choice.surface);
     }
-    crate::agent::prompt::apply_prompt_version_setting(&mut cfg, args.prompt_version.as_deref());
     if let Some(code_intel_enabled) = args.code_intel_enabled {
         cfg.code_intel_enabled = code_intel_enabled;
     }
@@ -876,9 +817,6 @@ pub async fn set_config(args: SetConfigArgs, state: State<'_, AppState>) -> Resu
     }
     if let Some(handoff_context_tokens) = args.handoff_context_tokens {
         cfg.handoff_context_tokens = handoff_context_tokens.map(|n| n.clamp(120_000, 256_000));
-    }
-    if let Some(auto_commit_plan) = args.auto_commit_plan {
-        cfg.auto_commit_plan = auto_commit_plan;
     }
     if let Some(project_memory) = args.project_memory {
         cfg.project_memory = project_memory;
@@ -928,11 +866,9 @@ pub async fn get_config(
         "keepAwake": cfg.keep_awake,
         "accountLogin": cfg.account_login,
         "accountTier": cfg.account_tier,
-        "autoCommitPlan": cfg.auto_commit_plan,
         "maxGoldenCycles": cfg.max_golden_cycles,
         "maxGoldenStalls": cfg.max_golden_stalls,
         "maxParallelAgents": cfg.max_parallel_agents,
-        "planSavePath": cfg.plan_save_path,
         "overrideBaseUrl": cfg.override_base_url,
         "overrideApiKey": cfg.override_api_key,
         "mcp": cfg.mcp,
@@ -946,13 +882,12 @@ pub async fn get_config(
         "jev": crate::agent::jev::status_json(&cfg),
         // Models set to something other than the full tool catalog.
         "toolSurface": cfg.tool_surface,
-        // "compact" when the builder model's window is too small for the
-        // Standard prompt — Settings says so rather than offering a surface
-        // that would not apply.
-        "builderProfile": crate::agent::surface::effective_profile(
+        // "compact" when the model's window is too small for the Standard
+        // prompt — Settings says so rather than offering a surface that
+        // would not apply.
+        "profile": crate::agent::surface::effective_profile(
             session::PromptProfile::Standard,
             &cfg,
-            session::SessionMode::Builder,
             false,
         ).as_str(),
         // Connected external providers — never the keys (hasApiKey precedent).
@@ -973,7 +908,6 @@ pub async fn get_config(
         "workspaceConfig": workspace_config,
     });
     // Outside the literal: `json!` is at its macro recursion limit here.
-    value["promptVersion"] = Value::from(cfg.prompt_version.as_str());
     value["projectMemory"] = Value::from(cfg.project_memory);
     Ok(value)
 }
@@ -1135,13 +1069,11 @@ pub async fn compact_session(
         browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
-        plan_save_path: config.plan_save_path.clone(),
         base_commit: None,
         auto_approve_git: false,
         shell_gate: None,
         // Compaction only summarizes history; it never dispatches tool calls.
         mcp: None,
-        mode_ctl: None,
         index_progress: Some(ws.index_progress.clone()),
         records_cache: state.records_cache.clone(),
     };
@@ -1166,302 +1098,35 @@ pub async fn compact_session(
     Ok(summary)
 }
 
-/// Switch the workspace's active session between Brain and Builder.
-/// Always human-originated (the UI toggle); a running workflow picks the new
-/// mode up on its next round. Creates the session lazily so the toggle can be
-/// flipped before the first message.
-#[tauri::command]
-pub async fn set_session_mode(
-    workspace: String,
-    mode: String,
-    state: State<'_, AppState>,
-) -> Result<SessionStarted, String> {
-    let m = session::SessionMode::parse(&mode)
-        .ok_or_else(|| format!("invalid mode '{mode}' (expected 'pensador' or 'constructor')"))?;
-
-    let ws = state.workspace(&workspace).await?;
-    let workspace_root = ws.root.to_string_lossy().to_string();
-    let handle = {
-        let mut guard = ws.active_session.lock().await;
-        match guard.as_ref() {
-            Some(h) => h.clone(),
-            None => {
-                let id = uuid::Uuid::new_v4().to_string();
-                let store = SessionStore::create(&id, Some(&workspace_root))?;
-                let h = SessionHandle {
-                    id,
-                    store_path: store.path,
-                };
-                *guard = Some(h.clone());
-                h
-            }
-        }
-    };
-
-    let mode_ctl = state.mode_for(&handle.id, &handle.store_path).await;
-    if mode_ctl.get().0 != m {
-        mode_ctl.set(m, session::ModeOrigin::Human);
-        let store = SessionStore {
-            path: handle.store_path.clone(),
-        };
-        store.try_append(&SessionRecord::Mode {
-            mode: m.as_str().into(),
-            origin: session::ModeOrigin::Human.as_str().into(),
-            ts: now_ms(),
-        });
-    }
-    Ok(SessionStarted {
-        session_id: handle.id,
-    })
-}
-
-/// Approve the Brain's plan and continue in a NEW linked Builder session whose
-/// first prompt carries the plan. Replaces the old in-session mode flip: the
-/// planning context stays behind, the Builder starts fresh with just the plan
-/// and the carried-over task list.
-#[tauri::command]
-pub async fn continue_with_builder(
-    workspace: String,
-    event_channel: Channel<AgentEvent>,
-    state: State<'_, AppState>,
-) -> Result<SessionStarted, String> {
-    let config = {
-        let cfg = state.config.lock().await;
-        if cfg.api_key.is_empty() {
-            return Err("API key not configured. Use set_config first.".into());
-        }
-        cfg.clone()
-    };
-
-    let ws = state.workspace(&workspace).await?;
-    let workspace_root = Some(ws.root.to_string_lossy().to_string());
-
-    let mut config = config;
-    if let Some(ref root) = workspace_root
-        && let Some(ws_cfg) = crate::agent::provider::read_workspace_config(root)
-    {
-        crate::agent::provider::merge_workspace_config(&mut config, &ws_cfg);
-    }
-
-    let old_handle = ws
-        .active_session
-        .lock()
-        .await
-        .clone()
-        .ok_or("no active session to hand off from")?;
-    let old_mode = state
-        .mode_for(&old_handle.id, &old_handle.store_path)
-        .await
-        .get()
-        .0;
-    if old_mode != session::SessionMode::Brain {
-        return Err("active session is not in Brain mode".into());
-    }
-
-    // Compose the kickoff (plan inline) before linking so the SessionLinked
-    // event already carries the real first message.
-    let mut spec = session::HandoffSpec {
-        reason: session::HandoffReason::ManualBuilder,
-        next_mode: session::SessionMode::Builder,
-        next_origin: session::ModeOrigin::Human,
-        first_message: String::new(),
-        golden_cycle: 0,
-        golden_stalls: 0,
-        golden_last_pending: Vec::new(),
-        document: None,
-    };
-    spec.first_message = transition::resolve_first_message(
-        &spec,
-        workspace_root.as_deref(),
-        config.plan_save_path.as_deref(),
-        &crate::agent::persist::load_last_tasks(&old_handle.store_path).unwrap_or_default(),
-    );
-
-    let maps = transition_maps(&state);
-    let new_handle =
-        transition::link_session(&maps, &ws, &old_handle, &spec, &event_channel).await?;
-
-    // Fresh run on the new session: build its ToolContext from scratch (no old
-    // running context exists — this command fires from an idle Brain session).
-    let steering = state.steering_for(&new_handle.id).await;
-    steering.clear();
-    let mode_ctl = state.mode_for(&new_handle.id, &new_handle.store_path).await;
-
-    let db_path: Option<String> = Some(ws.index_db_path.to_string_lossy().to_string());
-    let base_commit: Option<String> = workspace_root
-        .as_ref()
-        .and_then(|root| crate::agent::tools::git_head(root));
-    let mcp = ws.ensure_mcp_connected(&config).await;
-
-    let ctx = ToolContext {
-        // A linked session starting from a kickoff document — the same shape as
-        // a context handoff, and reported the same way.
-        doc_access: Default::default(),
-        hooks: Some(build_hook_ctx(
-            ws.resolve_hooks(&config).await,
-            state.hook_trust.clone(),
-            &new_handle.id,
-            &new_handle.store_path,
-            &ws.root,
-            Some(steering.interrupt.clone()),
-            Some(crate::agent::hooks::SessionStartSource::Compact),
-        )),
-        db_path,
-        lsp_manager: Some(ws.lsp_manager.clone()),
-        workspace_root,
-        embedding_model: state.embedding_model.clone(),
-        session_store_path: Some(new_handle.store_path.to_string_lossy().to_string()),
-        limits: Default::default(),
-        read_tracker: Arc::new(Mutex::new(ReadTracker::default())),
-        browser: Some(ws.browser.clone()),
-        interrupt: Some(steering.interrupt.clone()),
-        agent_config: Some(config.clone()),
-        plan_save_path: config.plan_save_path.clone(),
-        base_commit,
-        auto_approve_git: false,
-        shell_gate: None,
-        mcp: Some(mcp),
-        mode_ctl: Some(mode_ctl.clone()),
-        index_progress: Some(ws.index_progress.clone()),
-        records_cache: state.records_cache.clone(),
-    };
-
-    let store = SessionStore {
-        path: new_handle.store_path.clone(),
-    };
-    let session_id = new_handle.id.clone();
-    let message = spec.first_message;
-    spawn_run_loop(RunLoopArgs {
-        config,
-        ws,
-        maps,
-        approvals: state.approvals.clone(),
-        answers: state.answers.clone(),
-        chan: event_channel,
-        handle: new_handle,
-        store,
-        ctx,
-        mode_ctl,
-        steering,
-        history: Vec::new(),
-        message,
-        attachment_blocks: Vec::new(),
-    });
-
-    Ok(SessionStarted { session_id })
-}
-
-/// The current mode of the workspace's active session (for UI init).
-#[tauri::command]
-pub async fn get_session_mode(
-    workspace: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let ws = state.workspace(&workspace).await?;
-    let handle = { ws.active_session.lock().await.clone() };
-    match handle {
-        Some(h) => {
-            let mode_ctl = state.mode_for(&h.id, &h.store_path).await;
-            let (mode, origin) = mode_ctl.get();
-            Ok(serde_json::json!({ "mode": mode.as_str(), "origin": origin.as_str() }))
-        }
-        None => Ok(serde_json::json!({ "mode": "constructor", "origin": "human" })),
-    }
-}
-
-/// Check whether a plan file (.md) exists on disk for this workspace.
-/// Used by the frontend to decide whether to show the "Continue with Builder" button
-/// when the user manually switches to Brain mode.
-#[tauri::command]
-pub async fn check_plan_exists(
-    workspace: String,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let ws = state.workspace(&workspace).await?;
-    let workspace_root = ws.root.to_string_lossy().to_string();
-
-    // Resolve plan_save_path respecting workspace-level override
-    let cfg = state.config.lock().await;
-    let global_plan_save_path = cfg.plan_save_path.clone();
-    drop(cfg);
-
-    let ws_config = crate::agent::provider::read_workspace_config(&workspace_root);
-    let effective_plan_save_path = ws_config
-        .as_ref()
-        .and_then(|w| w.get("plan_save_path"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or(global_plan_save_path);
-
-    let dir = crate::agent::tools::write_plan::plans_dir(
-        &workspace_root,
-        effective_plan_save_path.as_deref(),
-    );
-
-    if !dir.exists() {
-        return Ok(false);
-    }
-
-    let has_md = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("md"))
-        })
-        .unwrap_or(false);
-
-    Ok(has_md)
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlanEntry {
+pub struct DocumentEntry {
     pub name: String,
     pub path: String,
     pub modified_at: u64,
 }
 
+/// The workspace's living documents (`.claudinio/docs/*.md`), newest first:
+/// the "Documents" list beside the chat.
 #[tauri::command]
-pub async fn list_plans(
+pub async fn list_documents(
     workspace: String,
     state: State<'_, AppState>,
-) -> Result<Vec<PlanEntry>, String> {
+) -> Result<Vec<DocumentEntry>, String> {
     let ws = state.workspace(&workspace).await?;
-    let workspace_root = ws.root.to_string_lossy().to_string();
+    Ok(documents_in(&ws.root))
+}
 
-    // Resolve plan_save_path respecting workspace-level override
-    let cfg = state.config.lock().await;
-    let global_plan_save_path = cfg.plan_save_path.clone();
-    drop(cfg);
-
-    let ws_config = crate::agent::provider::read_workspace_config(&workspace_root);
-    let effective_plan_save_path = ws_config
-        .as_ref()
-        .and_then(|w| w.get("plan_save_path"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or(global_plan_save_path);
-
-    let dir = crate::agent::tools::write_plan::plans_dir(
-        &workspace_root,
-        effective_plan_save_path.as_deref(),
-    );
-
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut plans: Vec<PlanEntry> = std::fs::read_dir(&dir)
+fn documents_in(root: &std::path::Path) -> Vec<DocumentEntry> {
+    let dir = root.join(".claudinio").join("docs");
+    let mut docs: Vec<DocumentEntry> = std::fs::read_dir(&dir)
         .map(|entries| {
             entries
                 .flatten()
                 .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("md"))
                 .filter_map(|entry| {
                     let path = entry.path();
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())?;
+                    let name = path.file_stem()?.to_str()?.to_string();
                     let modified_at = entry
                         .metadata()
                         .ok()?
@@ -1470,7 +1135,7 @@ pub async fn list_plans(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    Some(PlanEntry {
+                    Some(DocumentEntry {
                         name,
                         path: path.to_string_lossy().to_string(),
                         modified_at,
@@ -1479,10 +1144,8 @@ pub async fn list_plans(
                 .collect()
         })
         .unwrap_or_default();
-
-    plans.sort_by_key(|p| std::cmp::Reverse(p.modified_at));
-
-    Ok(plans)
+    docs.sort_by_key(|d| std::cmp::Reverse(d.modified_at));
+    docs
 }
 
 /// Set the interrupt flag on a running session's steering controller.
@@ -1577,12 +1240,10 @@ pub async fn commit_and_push(
         browser: Some(ws.browser.clone()),
         interrupt: Some(steering.interrupt.clone()),
         agent_config: Some(config.clone()),
-        plan_save_path: config.plan_save_path.clone(),
         base_commit,
         auto_approve_git: true,
         shell_gate: None,
         mcp: Some(mcp),
-        mode_ctl: None,
         index_progress: Some(ws.index_progress.clone()),
         records_cache: state.records_cache.clone(),
     };
@@ -1594,8 +1255,6 @@ pub async fn commit_and_push(
     }
 
     let message = "Commit and push all current changes.".to_string();
-
-    let mode_ctl = state.mode_for(&id, &store.path).await;
 
     let sid = id.clone();
     let chan = event_channel;
@@ -1616,7 +1275,6 @@ pub async fn commit_and_push(
             &ctx,
             &store,
             &steering,
-            &mode_ctl,
             session::PromptProfile::GitSync,
         )
         .await

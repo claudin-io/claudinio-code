@@ -3015,14 +3015,20 @@ mod delegation_tests {
             }],
         )
         .unwrap();
-        let plans = ws.join(".claudinio").join("plans");
-        std::fs::create_dir_all(&plans).unwrap();
-        std::fs::write(plans.join("greeting.md"), "# Plan\n").unwrap();
         let ctx = ToolContext {
             workspace_root: Some(ws_str.clone()),
             session_store_path: Some(store.path.to_string_lossy().to_string()),
             ..crate::agent::tools::tests_support::ctx()
         };
+        // The session's document is its plan: the brief points at it.
+        let (rel, _) = crate::agent::doc_session::create(
+            &ws,
+            Some(&store.path),
+            "Greeting",
+            &["what to say".to_string()],
+        )
+        .unwrap();
+        crate::agent::doc_session::link(&store, &ctx.records_cache, &rel);
         {
             let mut tracker = ctx.read_tracker.lock().await;
             tracker.record_read(&format!("{ws_str}/src/b.rs"), None, None, "fn b() {}");
@@ -3054,7 +3060,7 @@ mod delegation_tests {
         assert!(!explore.contains("<brief>"), "{explore}");
         assert!(code.contains("<brief>"), "{code}");
         assert!(code.contains("Rename the greeting"), "{code}");
-        assert!(code.contains(".claudinio/plans/greeting.md"), "{code}");
+        assert!(code.contains(".claudinio/docs/greeting.md"), "{code}");
         let (a, b) = (
             code.find("- src/a.rs").expect("a read path"),
             code.find("- src/b.rs").expect("a read path"),

@@ -308,9 +308,7 @@ pub(crate) mod loop_tests {
     use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
     use crate::agent::provider::AgentConfig;
     use crate::agent::provider::ContentBlock;
-    use crate::agent::session::{
-        AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, PromptProfile, SessionMode, SteeringCtl,
-    };
+    use crate::agent::session::{AnswerMap, ApprovalMap, PromptProfile, SteeringCtl};
     use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
     use serde_json::Value;
     use std::sync::Arc;
@@ -401,7 +399,6 @@ pub(crate) mod loop_tests {
             &ctx,
             &ws.store,
             &Arc::new(SteeringCtl::new()),
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
             profile,
         )
         .await;
