@@ -469,7 +469,6 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             ("prompt.rs", include_str!("prompt.rs")),
             ("events.rs", include_str!("events.rs")),
             ("retry.rs", include_str!("retry.rs")),
-            ("route.rs", include_str!("route.rs")),
         ];
         let gate = ["reject_non", "_english("].concat();
         let refusal = ["Only English", " is supported"].concat();

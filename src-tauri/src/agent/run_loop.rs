@@ -20,7 +20,6 @@ use crate::agent::prompt::{build_spec_prompt_section, deferred_tools, run_prefix
 use crate::agent::provider::{AgentConfig, ContentBlock, Message};
 use crate::agent::result_cap::fit_round;
 use crate::agent::retry::stream_message_with_retry;
-use crate::agent::route::route_first_prompt;
 use crate::agent::run_state::{CostLedger, GoldenLoopState, GuardState};
 use crate::agent::session::{
     AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, PromptProfile, SessionMode, SteeringCtl,
@@ -206,18 +205,6 @@ pub async fn run_workflow_with_profile(
     } else {
         Vec::new()
     };
-    let route_cost = route_first_prompt(
-        config,
-        profile,
-        history.is_empty(),
-        &user_message,
-        store,
-        ctx,
-        mode_ctl,
-        event_tx,
-    )
-    .await;
-
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
         ts: now_ms(),
@@ -351,7 +338,7 @@ pub async fn run_workflow_with_profile(
     // Lossless first: Jev drops old tool traffic, every word stays. Only when
     // that is unavailable or not enough does the handoff / summary run.
     let mut estimated = estimated;
-    let mut pre_run_jev_cost = route_cost;
+    let mut pre_run_jev_cost = 0.0;
     if let Some((new_estimate, cost)) = try_verbatim_compaction(
         config, &budget, profile, estimated, history, &system, &tools, store, ctx, event_tx,
     )

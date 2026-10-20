@@ -240,27 +240,13 @@ impl ModeOrigin {
 /// The Mutex is never held across await.
 pub struct ModeCtl {
     state: StdMutex<(SessionMode, ModeOrigin)>,
-    /// The user left the choice of phase to the harness for the next prompt.
-    /// Consumed by the run that routes it, so it applies to one prompt only.
-    auto: AtomicBool,
 }
 
 impl ModeCtl {
     pub fn new(mode: SessionMode, origin: ModeOrigin) -> Self {
         Self {
             state: StdMutex::new((mode, origin)),
-            auto: AtomicBool::new(false),
         }
-    }
-
-    /// Set by the command layer from what the mode control sent with a prompt.
-    pub fn request_auto(&self, auto: bool) {
-        self.auto.store(auto, Ordering::SeqCst);
-    }
-
-    /// Whether Auto was requested, clearing it.
-    pub fn take_auto(&self) -> bool {
-        self.auto.swap(false, Ordering::SeqCst)
     }
 
     pub fn get(&self) -> (SessionMode, ModeOrigin) {
