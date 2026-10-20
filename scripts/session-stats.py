@@ -11,6 +11,7 @@ decides to plan.
     python3 scripts/session-stats.py path/to/sessions
     python3 scripts/session-stats.py --since 2026-10-01    # sessions created on or after
     python3 scripts/session-stats.py --cost                # cost, rounds and cache per run
+    python3 scripts/session-stats.py --meters              # M4 tool errors, M6 document sections
 
 Stdlib only. Read-only. It prints aggregates, never message contents.
 
@@ -31,6 +32,17 @@ unpriced, never estimated. It also counts `cache_break` records per session
 (written since the lean-harness Phase 1, one each time the harness rewrites a
 history the provider had cached: an accepted prune, a compaction, a context
 handoff, a deferred-tool load); sessions from earlier builds count zero.
+
+`--meters` prints the two numbers the single-timeline plan adds
+(docs/plans/2026-10-20_single-timeline-and-one-plan.md, section 1). M4 is the
+tool-call error rate: results that are errors over all tool calls, main
+session and subagent transcripts apart, with the tools that produced them. A
+result is an error when it starts with `Error` (what every tool arm writes on
+failure) or when a `spawn_agents` call started none of its agents (`not
+started:`); refusals by a person or by the eval's approval policy are not
+errors. M6 is the share of living-document sections written by subagents:
+the latest `document_linked` record of each session, resolved against the
+session's workspace, read as the file stands now, each document once.
 
 Limits worth knowing before quoting a number:
 - Thinking is not persisted, and before `subagent_run` records existed nothing
@@ -599,12 +611,138 @@ def cost_report(s):
     return "\n".join(lines) + "\n"
 
 
+def is_error_result(name, text):
+    """Whether a tool result is an error (M4). The same rule as
+    `is_error_result` in `src-tauri/src/eval/metrics.rs`: the `Error` prefix
+    every tool arm writes, or a `spawn_agents` call that started none of its
+    agents — each agent's report then reads `not started: …`, never `Error`."""
+    if text.startswith("Error"):
+        return True
+    if name == "spawn_agents":
+        headers = [line for line in text.splitlines() if line.startswith("## ")]
+        not_started = [line for line in text.splitlines() if line.startswith("not started: ")]
+        return bool(headers) and len(not_started) >= len(headers)
+    return False
+
+
+def _session_paths(sessions_dir, since_ms):
+    """(main session path, its records) for each session created on or after `since_ms`."""
+    for path in sorted(glob.glob(os.path.join(sessions_dir, "*.jsonl"))):
+        records = read_records(path)
+        created = next((r.get("created_at") for r in records if r.get("kind") == "meta"), None)
+        if since_ms and (created or 0) < since_ms:
+            continue
+        yield path, records
+
+
+def tool_error_stats(sessions_dir, since_ms=0):
+    """M4: tool calls and the error results among them, main session and
+    subagents (transcripts in `<id>.sub/`) apart; errors booked to the tool."""
+    s = {"main_calls": 0, "main_errors": 0, "subagent_calls": 0, "subagent_errors": 0,
+         "by_tool": Counter()}
+
+    def count(records, who):
+        names = {}
+        for rec in records:
+            if rec.get("kind") != "turn":
+                continue
+            for block in rec.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    names[block.get("id")] = tool_label(block.get("name"))
+                    s[who + "_calls"] += 1
+                elif block.get("type") == "tool_result":
+                    name = names.get(block.get("tool_use_id"), "?")
+                    if is_error_result(name, result_text(block)):
+                        s[who + "_errors"] += 1
+                        s["by_tool"][name] += 1
+
+    for path, records in _session_paths(sessions_dir, since_ms):
+        count(records, "main")
+        for sub_path in sorted(glob.glob(os.path.join(path[:-len(".jsonl")] + ".sub", "*.jsonl"))):
+            count(read_records(sub_path), "subagent")
+    return s
+
+
+DOC_COMMENT = re.compile(r"<!--\s*claudinio:\s*(.*?)\s*-->")
+
+
+def document_sections(text):
+    """(id, written, owner) per section of a living document, from the
+    harness's comments (`agent/document.rs`): a written section has its
+    comment on the line after its `## heading`, a placeholder on its own
+    `[topic]` line. The end markers carry no id and are skipped."""
+    sections = []
+    for line in text.splitlines():
+        m = DOC_COMMENT.search(line)
+        if not m:
+            continue
+        fields = dict(part.split("=", 1) for part in m.group(1).split() if "=" in part)
+        if "id" not in fields:
+            continue
+        placeholder = line.strip().startswith("[")
+        sections.append((fields["id"], not placeholder, fields.get("by")))
+    return sections
+
+
+def document_stats(sessions_dir, since_ms=0):
+    """M6: each living document a session linked (the latest `document_linked`
+    record, relative to the session's workspace), counted once however many
+    linked sessions carry it, with its sections by owner as the file stands."""
+    s = {"sessions": 0, "sessions_with_document": 0, "documents": [],
+         "sections": 0, "written": 0, "by_sub": 0, "by_main": 0}
+    seen = set()
+    fallback_ws = os.path.dirname(os.path.dirname(os.path.abspath(sessions_dir)))
+    for _, records in _session_paths(sessions_dir, since_ms):
+        s["sessions"] += 1
+        rel = next((r.get("path") for r in reversed(records)
+                    if r.get("kind") == "document_linked"), None)
+        if not rel:
+            continue
+        s["sessions_with_document"] += 1
+        ws = next((r.get("workspace") for r in records if r.get("kind") == "meta"), None)
+        path = os.path.normpath(os.path.join(ws or fallback_ws, rel))
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            with open(path, errors="replace") as handle:
+                sections = document_sections(handle.read())
+        except OSError:
+            sections = []
+        doc = {"path": rel, "sections": len(sections),
+               "written": sum(1 for _, written, _ in sections if written),
+               "by_sub": sum(1 for _, written, by in sections
+                             if written and (by or "").startswith("sub:")),
+               "by_main": sum(1 for _, written, by in sections if written and by == "main")}
+        s["documents"].append(doc)
+        for key in ("sections", "written", "by_sub", "by_main"):
+            s[key] += doc[key]
+    return s
+
+
+def meters_report(errors, docs):
+    rate = lambda part, whole: f"{pct(part, whole)} ({part}/{whole})"
+    lines = [f"M4 tool-call error rate: main {rate(errors['main_errors'], errors['main_calls'])} | "
+             f"subagents {rate(errors['subagent_errors'], errors['subagent_calls'])}"]
+    top = ", ".join(f"{name} {n}" for name, n in errors["by_tool"].most_common(8)) or "none"
+    lines.append(f"  errors by tool: {top}")
+    lines.append(f"M6 sections written by subagents: {pct(docs['by_sub'], docs['written'])} "
+                 f"({docs['by_sub']} of {docs['written']} written; main {docs['by_main']})")
+    lines.append(f"  sessions with a document {docs['sessions_with_document']} of {docs['sessions']} | "
+                 f"documents {len(docs['documents'])} | sections {docs['sections']}")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("sessions_dir", nargs="?", default=os.path.join(".claudinio", "sessions"))
     parser.add_argument("--since", help="only sessions created on or after YYYY-MM-DD (UTC)")
     parser.add_argument("--cost", action="store_true",
                         help="cost, rounds and cache share per run, from per-request usage records")
+    parser.add_argument("--meters", action="store_true",
+                        help="M4 tool-call error rate and M6 document sections by owner")
     args = parser.parse_args()
     since_ms = 0
     if args.since:
@@ -612,6 +750,10 @@ def main():
         since_ms = int(since.timestamp() * 1000)
     if args.cost:
         print(cost_report(cost_stats(args.sessions_dir, since_ms)), end="")
+        return
+    if args.meters:
+        print(meters_report(tool_error_stats(args.sessions_dir, since_ms),
+                            document_stats(args.sessions_dir, since_ms)), end="")
         return
     files = sorted(glob.glob(os.path.join(args.sessions_dir, "*.jsonl")))
     if not files:

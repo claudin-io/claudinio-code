@@ -1,4 +1,4 @@
-"""Tests for scripts/session-stats.py --cost.
+"""Tests for scripts/session-stats.py --cost and --meters.
 
     python3 -m unittest scripts/test_session_stats.py
 
@@ -206,6 +206,101 @@ class SubagentTranscriptsFindTheirRun(unittest.TestCase):
         self.assertEqual((first["rounds"], first["subagent_rounds"]), (2, 2))
         self.assertAlmostEqual(first["cost"], 0.029)
         self.assertEqual(second["subagent_rounds"], 0)
+
+
+def call(id_, name, result):
+    """A tool call and its result, as the loop persists them."""
+    return [
+        {"kind": "turn", "role": "assistant", "ts": 1, "content": [
+            {"type": "tool_use", "id": id_, "name": name, "input": {}}]},
+        {"kind": "turn", "role": "user", "ts": 1, "content": [
+            {"type": "tool_result", "tool_use_id": id_, "content": result}]},
+    ]
+
+
+class ToolErrors(unittest.TestCase):
+    """M4: tool results that are errors over all tool calls, main and subagents
+    apart, booked to the tool. Same rule as `eval/metrics.rs`: a result that
+    starts with `Error`, or a `spawn_agents` call that started none of its
+    agents (`not started:`, which never says `Error`)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        write(os.path.join(d, "s1.jsonl"), [
+            {"kind": "meta", "session_id": "s1", "created_at": 1, "workspace": None},
+            *call("t1", "read_file", "Error: end_line must be >= start_line"),
+            *call("t2", "grep", "src/a.py:3: def load()"),
+            *call("t3", "spawn_agents", "## config — failed (0 rounds)\nnot started: the document "
+                                        "has no section ''. Two agents cannot hold one section.\n---"),
+            # The image-carrying shape of a result: a list of blocks.
+            *call("t4", "spawn_agents", [{"type": "text", "text": "## retry — done (5 rounds)\nok\n---"}]),
+        ])
+        write(os.path.join(d, "s1.sub", "t4-0.jsonl"), [
+            {"kind": "meta", "session_id": "s1:sub", "created_at": 2, "workspace": None},
+            *call("u1", "doc_read", "Error: you were given section s2 only; s3 belongs to another agent"),
+            *call("u2", "read_file", "def retry(): ..."),
+            *call("u3", "doc_write", "Wrote s2."),
+        ])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_errors_are_counted_apart_for_main_and_subagents_and_booked_to_the_tool(self):
+        s = session_stats.tool_error_stats(self.tmp.name)
+        self.assertEqual((s["main_calls"], s["main_errors"]), (4, 2))
+        self.assertEqual((s["subagent_calls"], s["subagent_errors"]), (3, 1))
+        self.assertEqual(dict(s["by_tool"]), {"read_file": 1, "spawn_agents": 1, "doc_read": 1})
+
+    def test_the_report_names_m4_and_the_tools(self):
+        text = session_stats.meters_report(session_stats.tool_error_stats(self.tmp.name),
+                                           session_stats.document_stats(self.tmp.name))
+        self.assertIn("M4 tool-call error rate: main 50.0% (2/4) | subagents 33.3% (1/3)", text)
+        self.assertIn("spawn_agents 1", text)
+
+
+class DocumentSections(unittest.TestCase):
+    """M6: the sections of each living document a session linked, by owner,
+    as the file stands now — read from the workspace the session names."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        ws = self.tmp.name
+        self.sessions = os.path.join(ws, ".claudinio", "sessions")
+        os.makedirs(os.path.join(ws, ".claudinio", "docs"))
+        with open(os.path.join(ws, ".claudinio", "docs", "notes.md"), "w") as handle:
+            handle.write(
+                "# Notes\n\n"
+                "## Config\n<!-- claudinio: id=s1 status=done by=sub:config -->\nenv wins\n"
+                "<!-- claudinio: end -->\n\n"
+                "## Retry\n<!-- claudinio: id=s2 status=done by=sub:retry -->\n429 and 503\n"
+                "<!-- claudinio: end -->\n\n"
+                "## CLI\n<!-- claudinio: id=s3 status=done by=main -->\n--dry-run\n"
+                "<!-- claudinio: end -->\n\n"
+                "[Open questions] <!-- claudinio: id=s4 status=todo -->\n")
+        linked = {"kind": "document_linked", "path": ".claudinio/docs/notes.md", "ts": 2}
+        write(os.path.join(self.sessions, "a.jsonl"), [
+            {"kind": "meta", "session_id": "a", "created_at": 1, "workspace": ws}, linked])
+        # A successor carries the same document: counted once.
+        write(os.path.join(self.sessions, "b.jsonl"), [
+            {"kind": "meta", "session_id": "b", "created_at": 3, "workspace": ws}, linked])
+        write(os.path.join(self.sessions, "c.jsonl"), [
+            {"kind": "meta", "session_id": "c", "created_at": 4, "workspace": ws}])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_sections_are_counted_by_owner_once_per_document(self):
+        s = session_stats.document_stats(self.sessions)
+        self.assertEqual(s["sessions"], 3)
+        self.assertEqual(s["sessions_with_document"], 2)
+        self.assertEqual(len(s["documents"]), 1)
+        self.assertEqual((s["sections"], s["written"], s["by_sub"], s["by_main"]), (4, 3, 2, 1))
+
+    def test_the_report_names_m6(self):
+        text = session_stats.meters_report(session_stats.tool_error_stats(self.sessions),
+                                           session_stats.document_stats(self.sessions))
+        self.assertIn("M6 sections written by subagents: 66.7% (2 of 3 written; main 1)", text)
 
 
 if __name__ == "__main__":
