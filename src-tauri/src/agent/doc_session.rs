@@ -202,6 +202,32 @@ fn linked_at(workspace: &Path, store_path: &Path) -> Option<Linked> {
     )
 }
 
+/// The most sections `doc_create` starts a document with (single-timeline
+/// plan, decision S3). `doc_add` is not capped.
+pub(crate) const MAX_SECTIONS: usize = 6;
+
+/// One plan per session: a document replaces the task list. The user's
+/// golden goals stay; the rest is dropped. Returns the sentence that tells
+/// the model so, empty when nothing was dropped.
+fn drop_checklist(store: &crate::agent::persist::SessionStore) -> &'static str {
+    let tasks = crate::agent::persist::load_last_tasks(&store.path).unwrap_or_default();
+    let golden: Vec<_> = tasks
+        .iter()
+        .filter(|t| crate::agent::tools::tasks::is_golden(t))
+        .cloned()
+        .collect();
+    if golden.len() == tasks.len() {
+        return "";
+    }
+    match crate::agent::persist::append_tasks(&store.path, &golden) {
+        Ok(()) => {
+            "This document replaces the task list: its sections are the plan now (the \
+             user's golden goals stay).\n"
+        }
+        Err(_) => "",
+    }
+}
+
 /// Through the run's records cache: the loop asks after every round, and
 /// re-parsing the whole session file each time would be the cost of a
 /// feature most sessions do not use.
@@ -1009,6 +1035,12 @@ pub(crate) fn create_call(
              user's next message.",
             own.rel
         )),
+        _ if topics.iter().filter(|t| !t.trim().is_empty()).count() > MAX_SECTIONS => Err(format!(
+            "a document starts with at most {MAX_SECTIONS} sections, each an independent \
+                 question (not the Risks/Rollout/Next steps of one answer): nothing was \
+                 created. Merge the topics and call doc_create again; doc_add adds a section \
+                 later if the work or the user needs one"
+        )),
         (None, _) => Err("doc_create needs an open workspace".to_string()),
         (Some(ws), _) => create(
             Path::new(ws),
@@ -1020,11 +1052,12 @@ pub(crate) fn create_call(
     .map(|(rel, doc)| match existing {
         None => {
             link(store, &ctx.records_cache, &rel);
+            let replaced = drop_checklist(store);
             format!(
-                "Created {rel}, linked to this session:\n{}\nFill sections with doc_write \
-                 {{id, body}}; give independent sections to explore subagents (spawn_agents \
-                 with \"section\": \"<id>\") — each writes only its own. The user may edit the \
-                 file at any time, and their edits win.",
+                "Created {rel}, linked to this session:\n{}\n{replaced}Give every independent \
+                 section to an explore subagent now, all in one spawn_agents call (\"section\": \
+                 \"<id>\" each; each writes only its own), and write yourself only what depends \
+                 on them. The user may edit the file at any time, and their edits win.",
                 doc.outline()
             )
         }

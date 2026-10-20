@@ -24,6 +24,9 @@ pub fn execute_set(
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
     check_brain_lld_gate(ctx, "tasks_set")?;
+    if crate::agent::doc_session::has_document(ctx) {
+        return Err(crate::agent::gate_text::TASKS_WITH_DOCUMENT.into());
+    }
     let path = ctx
         .session_store_path
         .as_ref()
