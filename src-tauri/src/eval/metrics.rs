@@ -7,8 +7,9 @@
 //! files do not show it, the run did not do it.
 
 use crate::agent::persist::{SessionRecord, load_records};
+use crate::agent::provider::ContentBlock;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// USD per million tokens, for providers that report no cost. Cache prices
@@ -66,6 +67,24 @@ pub(crate) struct RunMetrics {
     /// Compaction summaries, each a subagent run of its own.
     pub compactions: u32,
     pub sessions: u32,
+    /// M4, main session: tool calls, and the results among them that are
+    /// errors ([`is_error_result`]).
+    pub main_tool_calls: u32,
+    pub main_tool_errors: u32,
+    /// M4, subagents (spawned ones and compaction summarizers alike).
+    pub subagent_tool_calls: u32,
+    pub subagent_tool_errors: u32,
+    /// Tool name → error results, main session and subagents together.
+    pub tool_errors: BTreeMap<String, u32>,
+    /// M6: living documents linked by the task's sessions, and their
+    /// sections as the files stand at the end of the task — in all, written
+    /// (a `## heading`, not a `[placeholder]`), and written by a subagent
+    /// (`by=sub:<name>`) or by the main session (`by=main`).
+    pub documents: u32,
+    pub doc_sections: u32,
+    pub doc_sections_written: u32,
+    pub doc_sections_by_sub: u32,
+    pub doc_sections_by_main: u32,
 }
 
 /// Collect the metrics of every session under `sessions_dir`.
@@ -78,12 +97,19 @@ pub(crate) fn collect(sessions_dir: &Path, prices: &Prices) -> RunMetrics {
     m.sessions = main.len() as u32;
     m.compactions = subs.iter().filter(|p| is_compaction(p)).count() as u32;
     m.subagents = subs.len() as u32 - m.compactions;
+    let mut linked = BTreeSet::new();
     for (path, is_sub) in main
         .iter()
         .map(|p| (p, false))
         .chain(subs.iter().map(|p| (p, true)))
     {
-        for record in load_records(path).unwrap_or_default() {
+        let records = load_records(path).unwrap_or_default();
+        if !is_sub && let Some(rel) = crate::agent::persist::linked_document(&records) {
+            linked.insert(rel);
+        }
+        // Tool-use id → tool name, for the results that answer them.
+        let mut tool_of: HashMap<String, String> = HashMap::new();
+        for record in records {
             match record {
                 SessionRecord::Usage {
                     input_tokens,
@@ -120,10 +146,34 @@ pub(crate) fn collect(sessions_dir: &Path, prices: &Prices) -> RunMetrics {
                         None => m.cost_known = false,
                     }
                 }
-                SessionRecord::Turn { message, .. } if message.role == "assistant" => {
+                SessionRecord::Turn { message, .. } => {
                     for block in &message.content {
-                        if let crate::agent::provider::ContentBlock::ToolUse { name, .. } = block {
-                            *m.tool_calls.entry(name.clone()).or_default() += 1;
+                        match block {
+                            ContentBlock::ToolUse { id, name, .. } => {
+                                *m.tool_calls.entry(name.clone()).or_default() += 1;
+                                if is_sub {
+                                    m.subagent_tool_calls += 1;
+                                } else {
+                                    m.main_tool_calls += 1;
+                                }
+                                tool_of.insert(id.clone(), name.clone());
+                            }
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                ..
+                            } => {
+                                let name = tool_of.get(tool_use_id).map_or("?", String::as_str);
+                                if is_error_result(name, &content.as_text()) {
+                                    *m.tool_errors.entry(name.to_string()).or_default() += 1;
+                                    if is_sub {
+                                        m.subagent_tool_errors += 1;
+                                    } else {
+                                        m.main_tool_errors += 1;
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -131,7 +181,58 @@ pub(crate) fn collect(sessions_dir: &Path, prices: &Prices) -> RunMetrics {
             }
         }
     }
+    // The sessions directory is `<workspace>/.claudinio/sessions`, and a
+    // linked document's path is relative to the workspace.
+    if let Some(workspace) = sessions_dir.parent().and_then(Path::parent) {
+        for rel in &linked {
+            count_sections(&mut m, &workspace.join(rel));
+        }
+    }
     m
+}
+
+/// Whether a tool result is an error (M4): it starts with `Error`, the prefix
+/// every tool arm and `tool_exec` write on failure (and the one `prune` and
+/// the hook payload already read, there being no error flag on a
+/// `tool_result` block), or it is a `spawn_agents` call that started none of
+/// its agents — each agent's report then reads `not started: …` and the
+/// result never says `Error` (single-timeline plan, F1). Refusals by a person
+/// or by the eval's approval policy are the gates working, not errors.
+/// `scripts/session-stats.py --meters` applies the same rule.
+pub(crate) fn is_error_result(tool: &str, text: &str) -> bool {
+    if text.starts_with("Error") {
+        return true;
+    }
+    if tool != "spawn_agents" {
+        return false;
+    }
+    let agents = text.lines().filter(|l| l.starts_with("## ")).count();
+    let not_started = text
+        .lines()
+        .filter(|l| l.starts_with("not started: "))
+        .count();
+    agents > 0 && not_started >= agents
+}
+
+/// M6: one living document's sections as the file stands, by who wrote them.
+/// A file that cannot be read still counts as a document, with no sections.
+fn count_sections(m: &mut RunMetrics, path: &Path) {
+    m.documents += 1;
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for section in crate::agent::document::parse(&text).sections() {
+        m.doc_sections += 1;
+        if !section.written {
+            continue;
+        }
+        m.doc_sections_written += 1;
+        match section.owner.as_deref() {
+            Some("main") => m.doc_sections_by_main += 1,
+            Some(owner) if owner.starts_with("sub:") => m.doc_sections_by_sub += 1,
+            _ => {}
+        }
+    }
 }
 
 /// A compaction summarizer's transcript (`compact-<n>.jsonl`), as opposed to
@@ -296,6 +397,148 @@ mod tests {
         );
         let expected = (100.0 * 3.0 + 900.0 * 0.3 + 10.0 * 15.0) / 1e6;
         assert!((m.cost - expected).abs() < 1e-12, "{}", m.cost);
+    }
+
+    fn turn(store: &SessionStore, role: &str, content: Vec<ContentBlock>) {
+        store
+            .append(&SessionRecord::Turn {
+                message: Message {
+                    role: role.into(),
+                    content,
+                },
+                ts: 1,
+            })
+            .unwrap();
+    }
+
+    /// One tool call and its result, as the loop persists them: the call in
+    /// an assistant turn, the result in the user turn that follows.
+    fn call(store: &SessionStore, id: &str, tool: &str, result: &str) {
+        turn(
+            store,
+            "assistant",
+            vec![ContentBlock::tool_use(id, tool, serde_json::json!({}))],
+        );
+        turn(store, "user", vec![ContentBlock::tool_result(id, result)]);
+    }
+
+    /// M4: a tool result is an error when the tool says so (`Error…`, the
+    /// prefix every tool arm and `tool_exec` write, and the one the prune and
+    /// hook code already read), or when it is a `spawn_agents` call that
+    /// started none of its agents — the "section": "" failure of the
+    /// single-timeline plan (F1), which reports `not started:` per agent and
+    /// never says `Error`. Main session and subagents are counted apart,
+    /// and every error is booked to its tool.
+    #[test]
+    fn tool_errors_are_counted_per_tool_and_apart_for_main_and_subagents() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = SessionStore {
+            path: dir.path().join("s1.jsonl"),
+        };
+        call(
+            &main,
+            "t1",
+            "read_file",
+            "Error: end_line must be >= start_line",
+        );
+        call(&main, "t2", "grep", "src/a.py:3: def load()");
+        call(
+            &main,
+            "t3",
+            "spawn_agents",
+            "## config — failed (0 rounds)\nnot started: the document has no section ''. \
+             Two agents cannot hold one section.\n---",
+        );
+        call(
+            &main,
+            "t4",
+            "spawn_agents",
+            "## retry — done (5 rounds)\nWrote s2.\n---",
+        );
+        std::fs::create_dir_all(dir.path().join("s1.sub")).unwrap();
+        let sub = SessionStore {
+            path: dir.path().join("s1.sub").join("t4-0.jsonl"),
+        };
+        call(
+            &sub,
+            "u1",
+            "doc_read",
+            "Error: you were given section s2 only; s3 belongs to another agent",
+        );
+        call(&sub, "u2", "read_file", "def retry(): ...");
+        call(&sub, "u3", "doc_write", "Wrote s2.");
+
+        let m = collect(dir.path(), &Prices::default());
+        assert_eq!((m.main_tool_calls, m.main_tool_errors), (4, 2));
+        assert_eq!((m.subagent_tool_calls, m.subagent_tool_errors), (3, 1));
+        assert_eq!(
+            m.tool_errors,
+            BTreeMap::from([
+                ("doc_read".to_string(), 1),
+                ("read_file".to_string(), 1),
+                ("spawn_agents".to_string(), 1),
+            ])
+        );
+    }
+
+    /// M6: the sections of the session's living document, by who wrote them,
+    /// read from the file itself at the end of the task — main's rewrite of a
+    /// subagent's section makes it main's (F4), and that is what is counted.
+    #[test]
+    fn the_linked_documents_sections_are_counted_by_owner() {
+        let ws = tempfile::tempdir().unwrap();
+        let sessions = ws.path().join(".claudinio").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let docs = ws.path().join(".claudinio").join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("notes.md"),
+            "# Notes\n\n\
+             ## Config\n<!-- claudinio: id=s1 status=done by=sub:config -->\nenv wins\n\
+             <!-- claudinio: end -->\n\n\
+             ## Retry\n<!-- claudinio: id=s2 status=done by=sub:retry -->\n429 and 503\n\
+             <!-- claudinio: end -->\n\n\
+             ## CLI\n<!-- claudinio: id=s3 status=done by=main -->\n--dry-run\n\
+             <!-- claudinio: end -->\n\n\
+             [Open questions] <!-- claudinio: id=s4 status=todo -->\n",
+        )
+        .unwrap();
+        let main = SessionStore {
+            path: sessions.join("s1.jsonl"),
+        };
+        main.append(&SessionRecord::DocumentLinked {
+            path: ".claudinio/docs/notes.md".into(),
+            ts: 1,
+        })
+        .unwrap();
+
+        let m = collect(&sessions, &Prices::default());
+        assert_eq!(m.documents, 1);
+        assert_eq!(
+            (
+                m.doc_sections,
+                m.doc_sections_written,
+                m.doc_sections_by_sub,
+                m.doc_sections_by_main
+            ),
+            (4, 3, 2, 1)
+        );
+    }
+
+    #[test]
+    fn a_task_without_a_document_counts_no_sections() {
+        let ws = tempfile::tempdir().unwrap();
+        let sessions = ws.path().join(".claudinio").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let main = SessionStore {
+            path: sessions.join("s1.jsonl"),
+        };
+        call(&main, "t1", "grep", "nothing");
+        let m = collect(&sessions, &Prices::default());
+        assert_eq!(
+            (m.documents, m.doc_sections, m.doc_sections_written),
+            (0, 0, 0)
+        );
     }
 
     #[test]

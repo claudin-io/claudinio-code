@@ -27,6 +27,7 @@ use crate::agent::prompt::PromptVersion;
 use metrics::{Prices, cache_read_share, median};
 use runner::{RunOptions, TaskResult};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -324,6 +325,19 @@ pub(crate) struct Summary {
     /// Cache reads over all input processed (uncached + cache reads + writes).
     pub cache_read_share: Option<f64>,
     pub subagent_token_share: Option<f64>,
+    /// M4 over the run: tool calls and error results, main sessions and
+    /// subagents apart, and the errors by tool.
+    pub main_tool_calls: u32,
+    pub main_tool_errors: u32,
+    pub subagent_tool_calls: u32,
+    pub subagent_tool_errors: u32,
+    pub tool_errors: BTreeMap<String, u32>,
+    /// M6 over the run: tasks whose sessions linked a document, and those
+    /// documents' written sections by owner.
+    pub tasks_with_document: usize,
+    pub doc_sections_written: u32,
+    pub doc_sections_by_sub: u32,
+    pub doc_sections_by_main: u32,
 }
 
 pub(crate) fn summarize(results: &[TaskResult]) -> Summary {
@@ -331,6 +345,7 @@ pub(crate) fn summarize(results: &[TaskResult]) -> Summary {
     let total_cost: f64 = results.iter().map(|r| r.metrics.cost).sum();
     let cost_known = results.iter().all(|r| r.metrics.cost_known);
     let sum = |f: fn(&TaskResult) -> u64| results.iter().map(f).sum::<u64>();
+    let sum32 = |f: fn(&TaskResult) -> u32| results.iter().map(f).sum::<u32>();
     let input = sum(|r| r.metrics.input_tokens);
     let read = sum(|r| r.metrics.cache_read_tokens);
     let created = sum(|r| r.metrics.cache_creation_tokens);
@@ -352,6 +367,21 @@ pub(crate) fn summarize(results: &[TaskResult]) -> Summary {
         },
         cache_read_share: cache_read_share(input, read, created),
         subagent_token_share: (all_tokens > 0).then(|| sub as f64 / all_tokens as f64),
+        main_tool_calls: sum32(|r| r.metrics.main_tool_calls),
+        main_tool_errors: sum32(|r| r.metrics.main_tool_errors),
+        subagent_tool_calls: sum32(|r| r.metrics.subagent_tool_calls),
+        subagent_tool_errors: sum32(|r| r.metrics.subagent_tool_errors),
+        tool_errors: results.iter().flat_map(|r| &r.metrics.tool_errors).fold(
+            BTreeMap::new(),
+            |mut all, (tool, n)| {
+                *all.entry(tool.clone()).or_default() += n;
+                all
+            },
+        ),
+        tasks_with_document: results.iter().filter(|r| r.metrics.documents > 0).count(),
+        doc_sections_written: sum32(|r| r.metrics.doc_sections_written),
+        doc_sections_by_sub: sum32(|r| r.metrics.doc_sections_by_sub),
+        doc_sections_by_main: sum32(|r| r.metrics.doc_sections_by_main),
     }
 }
 
@@ -379,6 +409,51 @@ impl Summary {
             },
             pct(self.cache_read_share),
             pct(self.subagent_token_share),
+        ) + &self.render_meters()
+    }
+
+    /// M4 and M6, the single-timeline plan's meters.
+    fn render_meters(&self) -> String {
+        let rate = |part: u32, whole: u32| {
+            let share = if whole == 0 {
+                "n/a".to_string()
+            } else {
+                format!("{:.1}%", f64::from(part) * 100.0 / f64::from(whole))
+            };
+            format!("{share} ({part}/{whole})")
+        };
+        let mut by_tool: Vec<(&String, &u32)> = self.tool_errors.iter().collect();
+        by_tool.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let by_tool = if by_tool.is_empty() {
+            "none".to_string()
+        } else {
+            by_tool
+                .iter()
+                .take(8)
+                .map(|(tool, n)| format!("{tool} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let m6 = if self.doc_sections_written == 0 {
+            "n/a".to_string()
+        } else {
+            format!(
+                "{:.1}%",
+                f64::from(self.doc_sections_by_sub) * 100.0 / f64::from(self.doc_sections_written)
+            )
+        };
+        format!(
+            "M4 tool-call error rate: main {} | subagents {}\n  \
+             errors by tool: {by_tool}\n\
+             M6 sections written by subagents: {m6} ({} of {} written; main {}) \
+             in {} of {} tasks with a document\n",
+            rate(self.main_tool_errors, self.main_tool_calls),
+            rate(self.subagent_tool_errors, self.subagent_tool_calls),
+            self.doc_sections_by_sub,
+            self.doc_sections_written,
+            self.doc_sections_by_main,
+            self.tasks_with_document,
+            self.tasks,
         )
     }
 }
@@ -426,6 +501,56 @@ mod tests {
         assert!((s.pass_rate - 2.0 / 3.0).abs() < 1e-9);
         assert_eq!(s.cache_read_share, Some(400.0 / 700.0));
         assert!(s.render().contains("M3 pass rate: 2/3"));
+    }
+
+    /// M4 and M6 sum over the tasks of the run: errors over calls for the
+    /// main sessions and the subagents apart, the tools that erred most, and
+    /// the written sections of every task's document by who wrote them.
+    #[test]
+    fn the_summary_reports_m4_and_m6() {
+        let mut a = result(true, 4, 0.1, 0);
+        a.metrics.main_tool_calls = 10;
+        a.metrics.main_tool_errors = 2;
+        a.metrics.subagent_tool_calls = 6;
+        a.metrics.subagent_tool_errors = 3;
+        a.metrics.tool_errors =
+            BTreeMap::from([("doc_read".into(), 3), ("spawn_agents".into(), 2)]);
+        a.metrics.documents = 1;
+        a.metrics.doc_sections = 4;
+        a.metrics.doc_sections_written = 4;
+        a.metrics.doc_sections_by_sub = 3;
+        a.metrics.doc_sections_by_main = 1;
+        let mut b = result(true, 4, 0.1, 0);
+        b.metrics.main_tool_calls = 10;
+        b.metrics.tool_errors = BTreeMap::new();
+        let s = summarize(&[a, b]);
+        assert_eq!((s.main_tool_calls, s.main_tool_errors), (20, 2));
+        assert_eq!((s.subagent_tool_calls, s.subagent_tool_errors), (6, 3));
+        assert_eq!(s.tasks_with_document, 1);
+        assert_eq!(
+            (
+                s.doc_sections_written,
+                s.doc_sections_by_sub,
+                s.doc_sections_by_main
+            ),
+            (4, 3, 1)
+        );
+        let text = s.render();
+        assert!(
+            text.contains("M4 tool-call error rate: main 10.0% (2/20) | subagents 50.0% (3/6)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("errors by tool: doc_read 3, spawn_agents 2"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "M6 sections written by subagents: 75.0% (3 of 4 written; main 1) \
+                 in 1 of 2 tasks with a document"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

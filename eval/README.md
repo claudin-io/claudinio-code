@@ -13,6 +13,14 @@ faster or better is gated on the numbers this produces (lean-harness plan,
 | **M2** | Rounds per task | Median over tasks of provider requests, main session and subagents together. Each round re-sends the whole context, so this is latency and money even when cached. |
 | **M3** | Pass rate | Tasks whose oracle passed after the session, over tasks run. Nothing ships that lowers it. |
 
+Two more, added by the single-timeline plan
+(`docs/plans/2026-10-20_single-timeline-and-one-plan.md`, §1):
+
+| | Metric | How the runner computes it |
+|---|---|---|
+| **M4** | Tool-call error rate | Tool results that are errors over all tool calls, main sessions and subagents apart, with the tools that produced the errors. There is no error flag on a persisted `tool_result`, so a result is an error when it starts with `Error` (what every tool arm and `tool_exec` write on failure) or when a `spawn_agents` call started none of its agents (`not started: …`, which never says `Error`). A refusal by the approval policy is the gate working and is not counted. |
+| **M6** | Share of document sections written by subagents | For each task whose sessions linked a living document (`document_linked`), the document's sections as the file stands when the task ends: written sections owned `by=sub:<name>` over all written sections (`by=main` is the rest). Main rewriting a subagent's section makes it main's, and is counted so. |
+
 Also printed: the **cache-read share** (cache reads over all input processed:
 uncached + cache reads + cache writes) and the **subagent share** of all
 tokens. Token counts on their own are not a metric: a leaner context that costs
@@ -62,10 +70,16 @@ output tail, `prompt_version`, and the metrics: `rounds` (`main_rounds` + `subag
 `input_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `output_tokens`,
 `subagent_tokens`, `cost`, `cost_known`, `tool_calls` per tool, `subagents`
 (spawned with `spawn_agents`), `compactions` (summarizer runs, whose requests
-count in `subagent_rounds` and `subagent_tokens`), `sessions` — then prints M1, M2, M3 and the shares. The sessions themselves are
+count in `subagent_rounds` and `subagent_tokens`), `sessions`, the M4 counts
+(`main_tool_calls`, `main_tool_errors`, `subagent_tool_calls`,
+`subagent_tool_errors`, `tool_errors` per tool) and the M6 counts
+(`documents`, `doc_sections`, `doc_sections_written`, `doc_sections_by_sub`,
+`doc_sections_by_main`) — then prints M1, M2, M3, the shares, M4 and M6. The sessions themselves are
 ordinary session files under the task's workspace (`.claudinio/sessions/`,
 subagent and compaction transcripts in `<id>.sub/`), so `scripts/session-stats.py --cost` reads
-them too.
+them too, and `scripts/session-stats.py --meters` computes M4 and M6 from them
+by the same rule (which is how a run made by an older binary gets the two
+numbers after the fact).
 
 ## What a run is
 
@@ -209,7 +223,7 @@ this repository's own `node_modules` into `/tmp`. Call tools by path
 
 ## The task set (`eval/tasks/`)
 
-25 tasks, all valid under `validate` (about 50 seconds for the whole set).
+27 tasks, all valid under `validate` (about 50 seconds for the whole set).
 
 - **18 self-contained fixtures** in Python (pytest) and JavaScript
   (`node --test`), covering the tags `bugfix`, `feature`, `refactor`,
@@ -225,6 +239,15 @@ this repository's own `node_modules` into `/tmp`. Call tools by path
   the assertion instead of the code (pinned by
   `every_graded_file_the_agent_can_see_is_rewritten_by_the_oracle` in
   `src-tauri/src/eval/task.rs`).
+- **2 doc-parallel fixtures** (`doc-parallel-*`, tag `doc-parallel`): a
+  research question over a small codebase with 3 or 4 independent
+  sub-questions, each answered by one file, and a prompt that asks for a
+  document with one section per question. The oracle reads the living
+  document (`.claudinio/docs/*.md`, which only the document tools can write)
+  and grades content: each question needs a written section holding facts that
+  are only found by reading the right file, and a section of its own. They are
+  the tasks M6 is meant to move; the baseline is
+  `eval/baselines/2026-10-20-doc-parallel-before/`.
 - **7 history tasks** (`hist-*`) from this repository's own frontend: the start
   tree is the parent of a real commit, the oracle is the vitest file that
   commit added or changed (copied in from the commit only when the oracle
