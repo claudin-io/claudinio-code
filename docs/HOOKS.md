@@ -96,13 +96,12 @@ Claude Code calls its tools `Bash`, `Edit`, `Read`, `Task`. Claudinio calls them
 | `WebSearch` | `web_search` |
 | `TodoWrite` / `TodoRead` | `tasks_set` and `tasks_update` / `tasks_get` |
 | `AskUserQuestion` | `ask_user` |
-| `ExitPlanMode` | `exit_plan_mode` |
 | `mcp__server__tool` | itself — Claudinio uses the same prefix |
 
 Tools with no Claude Code counterpart (`browser`, `run_quality`, `code_search`,
 `semantic_search`, `symbol_lookup`, `file_outline`, `go_to_definition`,
-`find_references`, `write_plan`, `finalize_plan`, `enter_plan_mode`) are matched
-by their own names.
+`find_references`, `remember`, `doc_create`, `doc_write`, `doc_read`,
+`doc_add`) are matched by their own names.
 
 Matching is a case-sensitive, **unanchored** regex, as in Claude Code. Absent,
 empty and `*` all mean everything. The sharp edge is inherited rather than
@@ -208,7 +207,7 @@ Hooks in a batch run in parallel; `deny` beats `ask` beats `allow`, and
 **Hooks may relax a prompt. They may never relax a policy.** A `PreToolUse`
 `allow` skips the approval dialog exactly as YOLO mode does — and, exactly as
 YOLO mode does, it still hits the bash deny-list and the browser scheme check.
-An `allow` on `sudo rm -rf /` is still denied. Brain mode stays read-only. An
+An `allow` on `sudo rm -rf /` is still denied. An
 `ask` can only tighten: it turns an automatic tool into a prompt and can never
 un-deny anything.
 

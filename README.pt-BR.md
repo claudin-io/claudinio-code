@@ -71,25 +71,43 @@ Build a partir do código-fonte está em [CONTRIBUTING.md](CONTRIBUTING.md).
    funciona de imediato, o ranking semântico entra assim que os embeddings terminam.
 2. **Conecte um provedor.** Configurações → API key e base URL (padrão:
    `https://api.claudin.io`), ou faça login no OpenRouter via OAuth.
-3. **Descreva a tarefa.** O agente planeja, chama ferramentas e transmite o
-   raciocínio na timeline.
+3. **Descreva a tarefa.** O agente decide se o trabalho precisa de um plano,
+   chama ferramentas e transmite o raciocínio na timeline.
 4. **Aprove o que importa.** Comandos de shell e edições de arquivo param para
    sua aprovação; edições mostram um diff no Monaco antes de escrever qualquer coisa.
 
 ## O que o torna diferente
 
-### Brain e Builder
+### Uma timeline só
 
-Dois modos com superfícies de ferramenta diferentes. O **Brain** explora, te
-entrevista sobre os requisitos e escreve um plano. Ele não tem ferramenta de
-edição, e o shell dele roda só comandos de leitura (`git status`/`diff`/`log`,
-`ls`, `cat`, `head`, `tail`, `wc`, …) sob a regra abaixo — nenhum build,
-runner de teste, gerenciador de pacotes ou interpretador; o resto é recusado.
-O **Builder** executa — escrevendo código, rodando comandos,
-verificando. O handoff entre eles abre uma sessão nova semeada com o plano, para
-a execução não herdar uma janela de contexto cheia de exploração.
+Não há modos para escolher. Uma sessão é uma timeline só: o agente lê, te
+pergunta o que não consegue descobrir sozinho (`ask_user`), edita, roda
+comandos e passa trabalho a subagentes, e decide pelo seu pedido se o trabalho
+precisa de um plano. Um modelo atende a sessão — Settings › Models › *Model* —,
+subagentes inclusive.
 
-O Builder edita os arquivos ele mesmo: cada `edit_file` aparece para você como
+**Um plano por sessão, do tamanho do pedido.** Uma mudança de um passo não
+ganha nenhum, e o painel mostra *Single step*. Trabalho de código em várias
+etapas ganha uma lista de tarefas (`tasks_set`, em que uma tarefa é um id e um
+título, depois `tasks_update` para movê-la). Uma pesquisa, um design, um texto
+— ou qualquer coisa que você peça como documento — ganha um
+[documento vivo](#um-documento-vivo-por-sessão) no lugar: de três a seis
+seções, cada uma uma pergunta independente, entregues a subagentes explore numa
+só chamada de `spawn_agents`. Nunca os dois: um documento substitui a lista de
+tarefas (os seus golden goals ficam), `tasks_set` é recusado enquanto a sessão
+tem um, e `doc_create` recusa mais de seis seções — `doc_add` acrescenta mais
+depois, quando o trabalho ou você precisarem. O painel de tarefas mostra a
+lista em linhas, cada uma com um chip de status e um título; sob um documento,
+mostra só os seus goals.
+
+**As metas que você define continuam definidas.** Ponha um requisito entre
+`<goal>…</goal>` e ele vira um golden goal: uma tarefa que o agente não pode
+descartar, nem fechar sem um `run_quality` passando sobre o código como está. Uma
+execução que termina com um goal ainda aberto é mandada de volta a ele na mesma
+sessão, até o limite de *Max golden cycles* (e de *Max golden stalls*, ciclos
+seguidos sem progresso) em Settings › Models.
+
+O agente edita os arquivos ele mesmo: cada `edit_file` aparece para você como
 um diff a aprovar — um arquivo novo também, como diff a partir do nada (um
 `old_string` vazio o cria, pastas que faltam incluídas), e um `old_string` precisa
 casar com um só lugar, a menos que a chamada peça `replace_all`, que o cartão de
@@ -104,7 +122,7 @@ redirecionamento (além de `2>&1` e `>/dev/null`) — no Windows, onde o comando
 roda sob `cmd /c`, também sem `%`, `^` ou `!`, e o nome nunca é procurado
 primeiro na pasta de trabalho — e sem nada que a checagem de
 gravação veja (redirecionamento, `tee`, `sed -i`, `patch`, script inline que
-grava). Todo o resto é perguntado no Builder e recusado no Brain — uma cadeia de
+grava). Todo o resto é perguntado, como uma edição — uma cadeia de
 comandos da allowlist, um `|` entre aspas, um `2> /dev/null` com espaço
 inclusive: é o preço de uma regra simples o bastante para se ter certeza, e ele
 nunca é recuperado com parsing. A deny-list é um alarme por substring: um comando cujo texto em
@@ -113,7 +131,7 @@ com os espaços colapsados, contém uma entrada (`rm -rf /`, `rm -fr ~`,
 `sudo rm`, `dd if=`, `mkfs.`, `fdisk`, `chmod 777`, `chown `, `mv /`, `cp /`,
 uma fork bomb e afins), redireciona para um dispositivo que não seja
 `/dev/null` e os outros destinos de fluxo, ou roda o `format X:` do cmd é
-recusado de vez em todos os modos, YOLO e o `allow` de um hook inclusive —
+recusado de vez, YOLO e o `allow` de um hook inclusive —
 então `/bin/rm -rf /`, `time dd if=…`, `r''m -rf /` e um comando num heredoc
 são pegos sem parsing. Os falsos positivos aceitos são texto comum que
 contém uma entrada, como `grep chown src`, `cp /tmp/x .` ou
@@ -122,7 +140,7 @@ os recusava. Um interpretador,
 runner de teste ou build da allowlist roda o que os seus argumentos e o projeto
 escolherem — inclusive um programa a rodar ou uma pasta a limpar
 (`pytest --basetemp=…`, `go test -exec …`, `cargo --config …`) —, então a
-allowlist do Builder é uma conveniência, não um sandbox; um interpretador que
+allowlist é uma conveniência, não um sandbox; um interpretador que
 recebe um script pelo stdin da chamada é perguntado, e um `date` que recebe
 stdin também (sob `cmd /c` ele lê dali uma data nova; lá todo `date` pergunta). Ele só passa trabalho a
 subagentes quando compensa — um subagente explore para uma investigação ampla
@@ -130,26 +148,16 @@ somente-leitura ou pesquisa em paralelo, subagentes code para duas ou mais
 mudanças em arquivos disjuntos — porque uma edição delegada custa um segundo
 prompt, uma segunda exploração e a especificação escrita duas vezes.
 
-Você escolhe o modo, ou deixa o harness escolher. Uma sessão nova começa em
-**Auto** onde o modelo de decisão por trás dele (o Jev) estiver disponível: a
-primeira mensagem é roteada — um pedido que precisa de decisões e de um design
-começa em Brain, todo o resto em Builder — e você ainda pode escolher qualquer
-um dos dois na mão. O Auto envia essa primeira mensagem ao Jev; em Settings ›
-Agent dá para desligá-lo, ou passá-lo para *Shadow*, que só registra o que o
-Auto teria escolhido ao lado do que você escolheu.
-
-O Brain só pergunta sobre as decisões cuja resposta muda o plano — perguntas
-independentes juntas num só formulário, nenhuma para um pedido que já vem
-totalmente especificado — e confirma o design numa pergunta antes de
-escrevê-lo. O checklist mais longo (o que o consenso precisa cobrir, tamanho e
-assets de UI, o que o Low-Level Design contém, diagramas) é a skill embutida
-`plan`, lida quando um pedido precisa dela. O prompt explica como as
-ferramentas se encaixam em vez de listar regras: o que o harness impõe — ler um
-arquivo antes de editá-lo, nenhuma gravação no Brain, tarefas só depois do
-Low-Level Design, uma meta fechada só com uma verificação passando — é imposto
-pela ferramenta, cuja recusa diz o que fazer em seguida. **Settings › Agent ›
-System prompt** volta ao prompt anterior, mais longo (*v1*), durante esta
-versão.
+O agente só pergunta sobre as decisões cuja resposta muda o trabalho —
+perguntas independentes juntas num só formulário, a resposta que ele recomenda
+primeiro, nenhuma para um pedido que já vem totalmente especificado. Para um
+pedido grande ou visual ele lê antes a skill embutida `design`: o checklist
+mais longo (o que o consenso precisa cobrir, tamanho e assets de UI,
+diagramas), uma pergunta que confirma o design, e o design escrito no
+documento vivo. O prompt explica como as ferramentas se encaixam em vez de
+listar regras: o que o harness impõe — ler um arquivo antes de editá-lo, um
+plano por sessão, uma meta fechada só com uma verificação passando — é imposto
+pela ferramenta, cuja recusa diz o que fazer em seguida.
 
 ### Ele se ajusta ao modelo que você escolheu
 
@@ -174,18 +182,18 @@ leitura de arquivo — em vez de requisições várias vezes maiores que ele.
   diz quanto ficou de fora e onde está a saída inteira. Uma edição que quebra
   a sintaxe de um arquivo recebe um aviso com a linha, no mesmo resultado.
 - **Janela pequena recebe prompt pequeno.** Abaixo de 64k tokens, uma sessão
-  Builder roda um perfil compacto — um prompt curto e dez ferramentas, sem
-  subagentes e sem planos — cerca de 2,4k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
-  cerca de 5k.
-- **Ferramentas e skills chegam quando são necessárias.** Uma sessão Builder
+  roda um perfil compacto — um prompt curto e dez ferramentas, sem
+  subagentes e sem documento — cerca de 2,4k tokens antes de a conversa começar, onde o prompt e as ferramentas do perfil Standard ocupam
+  cerca de 5k. Uma sessão com golden goals fica no Standard.
+- **Ferramentas e skills chegam quando são necessárias.** Uma sessão
   Standard envia catorze ferramentas centrais; as demais — as buscas do índice e do LSP, as
-  ferramentas de web e browser, a troca para o modo de plano, a leitura completa
+  ferramentas de web e browser, a leitura completa
   das tarefas e toda ferramenta MCP — aparecem no prompt em uma linha cada, e o modelo carrega as que a
   tarefa pede (`load_tools`, ou simplesmente chamando uma). Uma ferramenta
   carregada é acrescentada ao fim e fica pela sessão, então o prefixo em cache
   só cresce no final. As skills são listadas do mesmo jeito, uma linha cada, e
   lidas com a ferramenta `skills`. Com dez skills e um servidor MCP de vinte
-  ferramentas o prefixo fica em cerca de 6,5k tokens, onde antes passava de 17k.
+  ferramentas o prefixo fica em cerca de 6,3k tokens, onde antes passava de 17k.
 - **A lista de tarefas vem até o agente, e não o contrário.** A mensagem de
   cada execução termina com a lista de tarefas da sessão, uma linha por tarefa
   (`id · status · título`), então nenhum pedido é gasto relendo-a; o agente
@@ -266,15 +274,16 @@ explore é instruído a entregar um relatório curto — achados, referências
 `caminho:linha`, perguntas em aberto — e o contexto do agente principal carrega
 no máximo 6.000 caracteres de qualquer relatório (o meio de um mais longo é
 cortado; a timeline guarda tudo). Todo subagente code de uma chamada parte do
-mesmo briefing: a tarefa em andamento, o caminho do plano e os arquivos que a
-sessão já leu, como caminhos.
+mesmo briefing: a tarefa em andamento, o documento da sessão e os arquivos que
+a sessão já leu, como caminhos.
 
 ### Um documento vivo por sessão
 
-Um trabalho com várias partes distintas — uma pesquisa, um texto, uma feature
-em várias etapas — ganha um arquivo Markdown que pertence à sessão, em
-`.claudinio/docs/`. O agente escreve primeiro o esqueleto, um título e um
-placeholder por parte:
+Uma pesquisa, um design, um texto — ou qualquer coisa que você peça como
+documento — ganha um arquivo Markdown que pertence à sessão, em
+`.claudinio/docs/`, no lugar de uma lista de tarefas. O agente escreve primeiro
+o esqueleto, um título e um placeholder por seção — de três a seis, cada uma
+uma pergunta que se responde sozinha:
 
 ```md
 # Pudim de leite
@@ -286,9 +295,11 @@ placeholder por parte:
 [Como armazenar o pudim]
 ```
 
-e depois preenche cada placeholder com `doc_write`, em ordem ou em paralelo:
-um subagente explore criado com `"section": "s2"` escreve essa seção ele mesmo,
-e só ela, então o relatório de volta pode ter duas linhas. O harness marca cada
+e depois entrega cada seção independente a um subagente explore, todas numa
+só chamada de `spawn_agents`, escrevendo ele mesmo só o que depende delas. Um
+subagente criado com `"section": "s2"` escreve essa seção ele mesmo com
+`doc_write`, e só ela — pode ler as outras —, então o relatório de volta pode
+ter duas linhas. O harness marca cada
 seção com um comentário HTML que é dele (`<!-- claudinio: id=s2 status=doing
 by=sub:ingredientes -->`), invisível na renderização, e fecha cada seção que
 escreveu com `<!-- claudinio: end -->`, então uma nota que você digita entre
@@ -302,8 +313,9 @@ resto do arquivo é seu e é preservado byte a byte.
   (`[caramelo]`) vira uma seção. O agente fica sabendo o que mudou numa nota
   curta na próxima mensagem — ids e tópicos, nunca o seu texto.
 - **O painel mostra quem está em quê.** No lugar do Task Panel, uma sessão com
-  documento lista as seções com status e dono (`main`, ou o subagente, cujo
-  nome abre a timeline dele). Clique numa linha para editar o documento naquela
+  documento lista as seções com status e um chip de dono (`main`, ou o
+  subagente, cujo nome abre a timeline dele), com os seus golden goals, se
+  houver, embaixo, em *Goals*. Clique numa linha para editar o documento naquela
   seção. Uma seção entregue a um subagente que não escreve nada volta a ser o
   que era — terminada, ou editada por você.
 - **Cada execução começa com o esboço** (`id · status · dono · tópico`), não com
@@ -325,27 +337,29 @@ resto do arquivo é seu e é preservado byte a byte.
 Uma sessão nova num repositório não começa do zero:
 
 - **As instruções do seu próprio projeto.** A primeira mensagem de toda sessão
-  — inclusive a sessão Builder que executa um plano e uma sessão que assume
-  depois de um handoff — envia também o `AGENTS.md` do workspace — ou o
+  — inclusive uma sessão que assume depois de um handoff — envia também o
+  `AGENTS.md` do workspace — ou o
   `CLAUDE.md` quando não há `AGENTS.md` — até os seus primeiros 6.000
   caracteres, com uma nota dizendo a partir de que linha o agente pode ler o
   resto. O arquivo é seu: o harness nunca o escreve, mas o agente pode editá-lo
   como qualquer outro arquivo (um `edit_file` que você aprova, ou um comando de
   shell), então ele não é mais protegido que o resto do workspace.
-- **Uma memória do projeto que o harness mantém.** Quando um build termina, o
-  `finalize_plan` pode receber até cinco lições de uma linha (200 caracteres
-  cada) que uma sessão futura teria de redescobrir. Elas vão para a lista
+- **Uma memória do projeto que o harness mantém.** A ferramenta `remember` do
+  agente guarda até cinco lições de uma linha (200 caracteres cada) que uma
+  sessão futura teria de redescobrir — um fato que custou rodadas para achar,
+  uma convenção, uma armadilha; não notas de progresso. Elas vão para a lista
   `## Learned` de `.claudinio/MEMORY.md` como
-  `- 2026-10-19 — <lição> (plan: <arquivo do plano>)`: cada uma aponta para o
-  plano que guarda o detalhe. Sem lições, sem entrada — nada é copiado para lá
-  sozinho. O arquivo só cresce por acréscimo e é mantido abaixo de cerca de
-  4.000 caracteres descartando as entradas mais antigas inteiras (elas
-  continuam nos seus planos); nada nele é resumido ou reescrito. A primeira
+  `- 2026-10-19 — <lição> (plan: <documento>)` quando a sessão tem um
+  documento, que guarda o detalhe, e sem o ponteiro quando não tem. Sem
+  chamada, sem entrada — nada é copiado para lá sozinho. O arquivo só cresce
+  por acréscimo e é mantido abaixo de cerca de 4.000 caracteres descartando as
+  entradas mais antigas inteiras (as que têm ponteiro continuam nos seus
+  documentos); nada nele é resumido ou reescrito. A primeira
   mensagem de cada sessão nova leva as suas entradas.
 - **Só o harness escreve a memória.** `edit_file` recusa
   `.claudinio/MEMORY.md` seja qual for a grafia do caminho — essa checagem de
-  caminho é a proteção de verdade. `finalize_plan` não o aceita como arquivo de
-  plano. A proteção do shell é defesa em profundidade de melhor esforço por
+  caminho é a proteção de verdade, e o `remember` é o único que o escreve. A
+  proteção do shell é defesa em profundidade de melhor esforço por
   cima, não uma fronteira: uma chamada de shell cujo texto menciona
   `MEMORY.md`, ou a própria pasta `.claudinio` — escrita por extenso, sem
   continuar em outro nome ou num caminho simples dentro dela, com uma lista
@@ -359,19 +373,20 @@ Uma sessão nova num repositório não começa do zero:
   hooks liberam. Ela varre texto, então não vê um caminho que o comando monta
   enquanto roda (uma variável, um script), um glob ou lista entre chaves que
   soletra o nome da própria pasta (`.c*`, `.claudi{n,}io`), um nome relativo a
-  uma pasta para a qual o comando entra antes (`cd .claudinio/plans && cp x
+  uma pasta para a qual o comando entra antes (`cd .claudinio/docs && cp x
   ../M*`), uma pasta acima dela (`rm -rf .`) nem um hard link. Esses são
-  perguntados no Builder, então o YOLO ou o `allow` de um hook os roda, e os
-  interpretadores da allowlist do Builder rodam um script sem perguntar. Ela
+  perguntados, então o YOLO ou o `allow` de um hook os roda, e os
+  interpretadores da allowlist rodam um script sem perguntar. Ela
   também erra para o outro lado: um comando que só cita a pasta em texto —
   `echo '.claudinio/' >> .gitignore`, `git commit -m "ignore .claudinio"`,
-  `git add .claudinio/plans/*.md` — é recusado, então você o roda à mão (ou o
+  `git add .claudinio/docs/*.md` — é recusado, então você o roda à mão (ou o
   agente edita o `.gitignore` com `edit_file`). Você pode editar o arquivo da
   memória à mão.
 - **Nenhum dos dois entra no system prompt**, que fica com os mesmos bytes de
   uma requisição para a outra para o provedor poder fazer cache, e nenhum é
   enviado de novo mais tarde na sessão; uma sessão que continua outra recebe o
-  arquivo de instruções, mas não a memória (o plano dela já leva as lições).
+  arquivo de instruções, mas não a memória (o handoff de onde ela parte já
+  leva o que ela precisa).
   Settings › Agent › *Project memory* desliga os dois.
 
 ### Nada é caixa-preta
@@ -465,7 +480,7 @@ Referência completa em [docs/HOOKS.md](docs/HOOKS.md).
 ### Ele pode rodar o modelo na sua máquina
 
 Ajustes → **Local models** baixa o llama.cpp e um modelo GGUF do Hugging Face, e
-o modelo passa a aparecer nos seletores de Brain e Builder em *Local*. Nada sai
+o modelo passa a aparecer no seletor de modelo em *Local*. Nada sai
 do computador e nada é cobrado — útil para código que não pode ir para terceiros,
 para trabalhar offline e para não pagar por token enquanto você experimenta.
 
@@ -508,20 +523,18 @@ memória residente, contexto usado contra contexto servido, e a taxa de tokens.
 | `browser_screenshot` | automático | adiada | Captura o viewport, a página inteira, um elemento ou uma região |
 | `ask_user` | automático | sempre | Faz uma pergunta a você, com opções |
 | `tasks_get` | automático | adiada | Descrição e diário de cada tarefa (cada execução já traz a lista) |
-| `tasks_set` / `tasks_update` | automático | sempre | Reescreve a lista de tarefas, ou altera uma ou várias tarefas numa chamada |
+| `tasks_set` / `tasks_update` | automático | sempre | Reescreve a lista de tarefas (recusado enquanto a sessão tem documento), ou altera uma ou várias tarefas numa chamada |
 | `run_quality` | automático | sempre | Roda os testes (e a cobertura) do projeto e registra o resultado |
-| `write_plan` / `exit_plan_mode` | automático | sempre (Brain) | Escreve o plano; volta ao Builder |
-| `finalize_plan` | automático | sempre (Builder) | Fecha o plano; acrescenta lições à memória do projeto |
-| `enter_plan_mode` | automático | adiada (Builder) | Passa para o Brain |
 | `spawn_agents` | automático | sempre | Dispara subagentes paralelos |
 | `skills` | automático | sempre | Lista as skills instaladas ou lê uma |
 | `load_tools` | automático | sempre | Acrescenta ferramentas adiadas à lista pelo resto da sessão |
-| `doc_create` | automático | sempre | Inicia o documento vivo da sessão (um novo tópico abre uma nova sessão) |
+| `remember` | automático | sempre | Guarda até cinco lições de uma linha na memória do projeto |
+| `doc_create` | automático | sempre | Inicia o documento vivo da sessão, de 3 a 6 seções; ele substitui a lista de tarefas (um novo tópico abre uma nova sessão) |
 | `doc_write` / `doc_read` / `doc_add` | automático | com documento | Escreve, lê ou acrescenta uma seção do documento |
 | Ferramentas MCP | **requer aprovação** | adiada | O que os servidores conectados oferecem |
 | **`browser`** | **barrado por origem** | adiada | Navega e interage com uma página (endereços locais são automáticos; outras origens perguntam) |
-| **`edit_file`** | **requer aprovação** | sempre (Builder, subagentes code) | Propõe uma edição ou um arquivo novo, exibidos como diff |
-| **`bash`** | **requer aprovação** | sempre | Roda um comando de shell (comandos de leitura são allowlisted) |
+| **`edit_file`** | **requer aprovação** | sempre (sessão principal, subagentes code) | Propõe uma edição ou um arquivo novo, exibidos como diff |
+| **`bash`** | **requer aprovação** | sempre | Roda um comando de shell (os da allowlist rodam sem perguntar) |
 
 *Enviada* é o que uma sessão Standard põe em todo pedido. Uma ferramenta
 *adiada* aparece no prompt de sistema em uma linha, e sua definição entra no
