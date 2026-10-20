@@ -286,11 +286,7 @@ pub async fn run_workflow_with_profile(
     // Every line the run is held to comes from the model it is about to talk
     // to, and is re-derived whenever a mode switch changes that model.
     let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
-    let mut budget = ContextBudget::for_model(
-        config,
-        config.model_for_mode(cur_mode.as_str()),
-        prefix_tokens,
-    );
+    let mut budget = ContextBudget::for_model(config, config.model(), prefix_tokens);
     ctx.limits.apply(&budget);
     // Before anything else is tried: no handoff and no summary can shrink
     // what is sent ahead of the conversation, and each would cost a request —
@@ -300,7 +296,7 @@ pub async fn run_workflow_with_profile(
     }
 
     {
-        let model = config.model_for_mode(cur_mode.as_str());
+        let model = config.model();
         store.try_append(&SessionRecord::RunConfig {
             model: model.to_string(),
             mode: cur_mode.as_str().into(),
@@ -543,14 +539,10 @@ pub async fn run_workflow_with_profile(
                 has_golden_goals,
                 &loaded,
             );
-            // A mode switch is also a model switch (brain_model vs
-            // builder_model), and the two need not share a window.
+            // A mode switch changes the prompt and tools; the budget is
+            // re-derived with them.
             prefix_tokens = estimate_tokens(&[], &system, &tools);
-            budget = ContextBudget::for_model(
-                config,
-                config.model_for_mode(cur_mode.as_str()),
-                prefix_tokens,
-            );
+            budget = ContextBudget::for_model(config, config.model(), prefix_tokens);
             ctx.limits.apply(&budget);
             if budget.prefix_overflows(prefix_tokens) {
                 return Err(budget.refusal(prefix_tokens));
@@ -636,11 +628,7 @@ pub async fn run_workflow_with_profile(
                             &loaded,
                         );
                         prefix_tokens = estimate_tokens(&[], &system, &tools);
-                        budget = ContextBudget::for_model(
-                            config,
-                            config.model_for_mode(cur_mode.as_str()),
-                            prefix_tokens,
-                        );
+                        budget = ContextBudget::for_model(config, config.model(), prefix_tokens);
                         ctx.limits.apply(&budget);
                         if budget.prefix_overflows(prefix_tokens) {
                             return Err(budget.refusal(prefix_tokens));
@@ -705,7 +693,7 @@ pub async fn run_workflow_with_profile(
         }
 
         let mut assistant_text = String::new();
-        let resolved_model = config.model_for_mode(cur_mode.as_str());
+        let resolved_model = config.model();
         let net_detail = format!("{resolved_model} · {}", cur_mode.as_str());
         let stream_output = stream_message_with_retry(
             config,
@@ -959,7 +947,7 @@ pub async fn run_workflow_with_profile(
             if !last_text.is_empty() && guards.unfinished_streak < 2 {
                 // Always judge with the Brain model (planning/reasoning), never
                 // the Builder model, regardless of the session's current mode.
-                let judge_model = config.model_for_mode(SessionMode::Brain.as_str());
+                let judge_model = config.model();
                 // Jev first when the user has a credential for it: a calibrated
                 // yes/no at ~$0.00002 and ~0.2s instead of a cold call to the
                 // Brain model. Its unclear answers, and any outage, fall through
@@ -1921,7 +1909,7 @@ pub async fn run_workflow_with_profile(
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-    ledger.roll(config.model_for_mode(cur_mode.as_str()));
+    ledger.roll(config.model());
     ledger.write_status(store, ctx, session_id, Some(last_context));
     emit_final_stats(&ledger, last_context, &budget);
     let _ = event_tx.send(AgentEvent::Done {
@@ -2037,9 +2025,7 @@ pub(crate) mod surface_tests {
     /// user typed for it.
     pub(crate) fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
-            builder_model: "stub/m".into(),
-            // The completion judge and Brain-mode turns run on the Brain.
-            brain_model: "stub/m".into(),
+            model: "stub/m".into(),
             // Edits are approved without a person, so a run can finish.
             yolo_mode: true,
             ..AgentConfig::default()
@@ -2126,51 +2112,6 @@ pub(crate) mod surface_tests {
         }
     }
 
-    #[test]
-    fn the_surface_is_set_per_model_so_brain_and_builder_can_differ() {
-        let mut cfg = AgentConfig::default();
-        cfg.tool_surface
-            .insert(cfg.builder_model.clone(), "lean".into());
-
-        let builder = api_tools(SessionMode::Builder, PromptProfile::Standard, &[], &cfg);
-        let brain = api_tools(SessionMode::Brain, PromptProfile::Standard, &[], &cfg);
-        for tool in LEAN_DROPPED {
-            assert!(!names(&builder).contains(&tool), "builder is lean: {tool}");
-            assert!(names(&brain).contains(&tool), "brain was not set: {tool}");
-        }
-        // Each mode adds two tools of its own; Builder also has `edit_file`,
-        // which Brain never gets.
-        assert_eq!(builder.len() + LEAN_DROPPED.len(), brain.len() + 1);
-
-        let ctx = crate::agent::tools::tests_support::ctx();
-        let prefix = |mode| {
-            run_prefix(
-                &cfg,
-                &ctx,
-                PromptProfile::Standard,
-                mode,
-                None,
-                None,
-                &[],
-                false,
-                &[],
-            )
-        };
-        // symbol_lookup is deferred (Phase 2): offered means listed in the
-        // catalog and loadable, not sent.
-        let deferred =
-            |mode| crate::agent::prompt::deferred_tools(mode, PromptProfile::Standard, &[], &cfg);
-        let (profile, system, tools) = prefix(SessionMode::Builder);
-        assert_eq!(profile, PromptProfile::Standard);
-        assert!(!system.contains("symbol_lookup") && !names(&tools).contains(&"symbol_lookup"));
-        assert!(!names(&deferred(SessionMode::Builder)).contains(&"symbol_lookup"));
-        let (_, system, _) = prefix(SessionMode::Brain);
-        assert!(system.contains("symbol_lookup"));
-        assert!(names(&deferred(SessionMode::Brain)).contains(&"symbol_lookup"));
-    }
-
-    // With nothing set, nothing moves: the prefix every existing session
-    // caches is the one it had.
     #[test]
     fn with_no_surface_set_the_prefix_is_what_it_was() {
         let cfg = AgentConfig::default();
@@ -2267,8 +2208,7 @@ pub(crate) mod surface_tests {
     // the model Brain's read-only protocol, not Compact's edit tools.
     #[test]
     fn switching_a_compact_session_to_brain_restores_the_standard_prefix() {
-        let mut cfg = config_for("http://127.0.0.1:1", Some(32_768));
-        cfg.brain_model = "stub/m".into();
+        let cfg = config_for("http://127.0.0.1:1", Some(32_768));
         let ctx = crate::agent::tools::tests_support::ctx();
         let (profile, system, tools) = run_prefix(
             &cfg,
@@ -2293,7 +2233,7 @@ pub(crate) mod surface_tests {
         assert!(PromptProfile::Compact.is_chat() && PromptProfile::Standard.is_chat());
         assert!(!PromptProfile::GitSync.is_chat());
         let cfg = config_for("http://127.0.0.1:1", Some(32_768));
-        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 3_600);
+        let budget = ContextBudget::for_model(&cfg, cfg.model(), 3_600);
         assert_eq!(shed_line(&budget, PromptProfile::Compact), budget.soft);
     }
 
@@ -2404,9 +2344,6 @@ pub(crate) mod surface_tests {
 
         let (base, _, bodies) = spawn_recording(script(&path)).await;
         let mut config = config_for(&base, context_window);
-        if mode_ctl.get().0 == SessionMode::Brain {
-            config.brain_model = config.builder_model.clone();
-        }
         config.yolo_mode = answer.is_none();
         let ctx = ToolContext {
             workspace_root: Some(root.to_string_lossy().to_string()),
@@ -3405,7 +3342,7 @@ mod context_line_tests {
         );
         let prefix = estimate_tokens(&[], &system, &tools);
         (
-            ContextBudget::for_model(&config, &config.builder_model, prefix),
+            ContextBudget::for_model(&config, config.model(), prefix),
             prefix,
         )
     }
@@ -3488,7 +3425,7 @@ mod context_line_tests {
         let ctx = crate::agent::tools::tests_support::ctx();
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
         let system = "You are a test.".to_string();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let budget = ContextBudget::for_model(&config, config.model(), 0);
 
         let mut history = vec![Message {
             role: "user".into(),

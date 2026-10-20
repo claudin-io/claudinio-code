@@ -88,8 +88,7 @@ pub(crate) fn eval_config(opts: &RunOptions, workspace: &Path) -> AgentConfig {
     let mut config = AgentConfig {
         // No claudin.io account: web search and the plan's Jev stay off.
         api_key: String::new(),
-        builder_model: format!("{PROVIDER_ID}/{}", opts.model),
-        brain_model: format!("{PROVIDER_ID}/{}", opts.model),
+        model: format!("{PROVIDER_ID}/{}", opts.model),
         max_rounds: opts.max_rounds,
         yolo_mode: false,
         hooks: None,
@@ -918,7 +917,7 @@ reference:
     fn the_eval_config_turns_off_everything_installed_on_the_machine() {
         let work = tempfile::tempdir().unwrap();
         let config = eval_config(&options("http://127.0.0.1:1", work.path()), work.path());
-        assert_eq!(config.builder_model, "eval/m");
+        assert_eq!(config.model, "eval/m");
         assert!(!config.hooks_enabled && !config.browser.enabled && !config.yolo_mode);
         assert!(config.mcp.is_empty());
         assert!(!config.is_claudinio_account());

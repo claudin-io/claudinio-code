@@ -243,7 +243,7 @@ pub fn effective_profile(
     mode: SessionMode,
     has_golden_goals: bool,
 ) -> PromptProfile {
-    let small = config.context_window_for(config.model_for_mode(mode.as_str())) < COMPACT_BELOW;
+    let small = config.context_window_for(config.model()) < COMPACT_BELOW;
     if profile == PromptProfile::Standard
         && mode == SessionMode::Builder
         && small
@@ -274,7 +274,7 @@ mod tests {
 
     fn config_with_window(window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
-            builder_model: "local-ish/m".into(),
+            model: "local-ish/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -304,8 +304,7 @@ mod tests {
             effective_profile(std, &small, SessionMode::Builder, false),
             PromptProfile::Compact
         );
-        // Brain runs on brain_model, which here is the 200k default — and Brain
-        // keeps its own protocol whatever the window.
+        // Brain keeps its own protocol whatever the window.
         assert_eq!(
             effective_profile(std, &small, SessionMode::Brain, false),
             std
@@ -343,8 +342,7 @@ mod tests {
 
     #[test]
     fn a_brain_on_a_small_model_keeps_standard_too() {
-        let mut cfg = config_with_window(Some(32_768));
-        cfg.brain_model = "local-ish/m".into();
+        let cfg = config_with_window(Some(32_768));
         assert_eq!(
             effective_profile(PromptProfile::Standard, &cfg, SessionMode::Brain, false),
             PromptProfile::Standard

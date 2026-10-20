@@ -285,10 +285,7 @@ pub(super) fn run_prefix(
         config.prompt_version,
     );
     let system = if profile == PromptProfile::Standard {
-        crate::agent::surface::prompt_for(
-            config.tool_surface_for(config.model_for_mode(mode.as_str())),
-            system,
-        )
+        crate::agent::surface::prompt_for(config.tool_surface_for(config.model()), system)
     } else {
         system
     };
@@ -359,10 +356,7 @@ pub(super) fn api_tools(
             .collect();
     }
     let mut defs = tools::get_defs(maxp);
-    crate::agent::surface::retain_for(
-        config.tool_surface_for(config.model_for_mode(mode.as_str())),
-        &mut defs,
-    );
+    crate::agent::surface::retain_for(config.tool_surface_for(config.model()), &mut defs);
     defs.retain(|t| t.name != "web_search" || config.is_claudinio_account());
     // Same treatment as web_search: when the feature is off the tools leave the
     // prompt entirely rather than sitting there costing tokens.
@@ -977,7 +971,7 @@ essa modal este texto volte para a text area, e assim posso enviar o texto edita
             // skill, read with a tool.
             PromptVersion::V1,
         );
-        let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
+        let model = cfg.model().to_string();
         let user = format!(
             "{SESSION_REQUEST}\n\n---\nDo NOT call any tool and do NOT write a plan. Instead, output \
 ONLY a numbered list of the clarifying questions you must ask me before writing the plan."
@@ -1066,7 +1060,7 @@ ONLY a numbered list of the clarifying questions you must ask me before writing 
             .find(|e| e.name == "plan")
             .and_then(|e| e.body)
             .expect("the built-in plan skill");
-        let model = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
+        let model = cfg.model().to_string();
         let user = format!(
             "{SESSION_REQUEST}\n\n---\nYou already read the `plan` skill; `skills` returned:\n\n\
 {plan}\n\n---\nDo NOT call any tool and do NOT write a plan. Instead, output ONLY a numbered \
@@ -1102,9 +1096,7 @@ list of the clarifying questions you must ask me before writing the plan."
             false,
             PromptVersion::default(),
         );
-        let model = cfg
-            .model_for_mode(SessionMode::Builder.as_str())
-            .to_string();
+        let model = cfg.model().to_string();
         let user = "Plan task: add a new icon named 'notebook-pen' to src/components/Icon.tsx. The user \
 specified the EXACT icon to use with this reference: \
 https://icones.js.org/collection/all?s=notebook&icon=lucide:notebook-pen (that is the Lucide \
@@ -2193,10 +2185,9 @@ mod prompt_version_tests {
 
     #[test]
     fn an_unknown_prompt_version_reads_as_v2_and_keeps_every_other_setting() {
-        let cfg = load(
-            r#"{"base_url": "u", "api_key": "k", "brain_model": "b", "prompt_version": "v9"}"#,
-        );
-        assert_eq!(cfg.brain_model, "b");
+        let cfg =
+            load(r#"{"base_url": "u", "api_key": "k", "model": "b", "prompt_version": "v9"}"#);
+        assert_eq!(cfg.model, "b");
         assert_eq!(serde_json::to_value(&cfg).unwrap()["prompt_version"], "v2");
     }
 

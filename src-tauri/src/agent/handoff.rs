@@ -463,7 +463,7 @@ pub(super) async fn maybe_context_handoff(
     );
 
     let (cur_mode, cur_origin) = mode_ctl.get();
-    let resolved_model = config.model_for_mode(cur_mode.as_str());
+    let resolved_model = config.model();
     let net_detail = format!("{resolved_model} · handoff");
     let mut gen_in: u32 = 0;
     let mut gen_out: u32 = 0;
@@ -736,7 +736,7 @@ mod verbatim_compaction_tests {
     #[test]
     fn the_limit_is_the_handoff_line_for_standard_sessions() {
         let cfg = AgentConfig::default();
-        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 30_000);
+        let budget = ContextBudget::for_model(&cfg, cfg.model(), 30_000);
         assert_eq!(
             shed_line(&budget, PromptProfile::Standard),
             cfg.effective_handoff_threshold()
@@ -753,7 +753,8 @@ mod verbatim_compaction_tests {
     #[test]
     fn the_default_models_run_on_the_lines_they_always_had() {
         let cfg = AgentConfig::default();
-        for model in [cfg.brain_model.as_str(), cfg.builder_model.as_str()] {
+        {
+            let model = cfg.model.as_str();
             let b = ContextBudget::for_model(&cfg, model, 33_000);
             assert_eq!(
                 (b.soft, b.hard, b.ceiling),
@@ -819,7 +820,7 @@ mod handoff_usage_tests {
         std::fs::write(&path, "").unwrap();
         let store = SessionStore { path };
         let ctx = crate::agent::tools::tests_support::ctx();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let budget = ContextBudget::for_model(&config, config.model(), 10_000);
         let mut history = vec![
             Message {
                 role: "user".into(),
@@ -895,7 +896,7 @@ mod handoff_cache_tests {
         };
         std::fs::write(&store.path, "").unwrap();
         let ctx = crate::agent::tools::tests_support::ctx();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let budget = ContextBudget::for_model(&config, config.model(), 10_000);
         let mut history = vec![
             Message {
                 role: "user".into(),
@@ -1131,7 +1132,7 @@ mod cache_break_tests {
         let store = temp_store("prune");
         let ctx = crate::agent::tools::tests_support::ctx();
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let budget = ContextBudget::for_model(&config, config.model(), 0);
         let mut history = vec![turn("user", ContentBlock::text("Refactor the parser."))];
         for i in 0..30 {
             let id = format!("r{i}");
@@ -1173,7 +1174,7 @@ mod cache_break_tests {
         let store = temp_store("no-prune");
         let ctx = crate::agent::tools::tests_support::ctx();
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let budget = ContextBudget::for_model(&config, config.model(), 0);
         let mut history = vec![turn("user", ContentBlock::text("hi"))];
         let taken = try_verbatim_compaction(
             &config,
@@ -1373,7 +1374,7 @@ mod cache_break_tests {
         let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
         let store = temp_store("handoff");
         let ctx = crate::agent::tools::tests_support::ctx();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let budget = ContextBudget::for_model(&config, config.model(), 10_000);
         let mut history = vec![
             turn("user", ContentBlock::text("Refactor the parser.")),
             turn("assistant", ContentBlock::text("Working on it.")),

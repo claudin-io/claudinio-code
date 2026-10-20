@@ -67,7 +67,7 @@ pub async fn enhance_prompt(
         c.clone()
     };
 
-    let model = config.model_for_mode("brain").to_string();
+    let model = config.model().to_string();
 
     // Best-effort project grounding: neither git nor the index may be
     // available (fresh workspace, embedder still loading) — the enhancer

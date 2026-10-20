@@ -724,11 +724,8 @@ pub async fn disconnect_provider(
     let mut cfg = state.config.lock().await;
     cfg.providers.remove(&provider_id);
     let prefix = format!("{provider_id}/");
-    if cfg.brain_model.starts_with(&prefix) {
-        cfg.brain_model = "claudius".into();
-    }
-    if cfg.builder_model.starts_with(&prefix) {
-        cfg.builder_model = "claudinio".into();
+    if cfg.model.starts_with(&prefix) {
+        cfg.model = "claudinio".into();
     }
     save_config(&cfg);
     Ok(())
