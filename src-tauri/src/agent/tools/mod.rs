@@ -595,7 +595,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_set".into(),
-            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. An existing task sent with an empty description or journal keeps its stored one.".into(),
+            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. A task is an id and a title; an existing task sent without its title, status, description or journal keeps the stored ones.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -610,7 +610,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                                 "journal": { "type": "array", "items": { "type": "string" }, "description": "Findings and decisions" },
                                 "status": { "type": "string", "enum": ["todo", "doing", "done"] }
                             },
-                            "required": ["id", "title", "description", "journal", "status"]
+                            "required": ["id", "title"]
                         }
                     }
                 },

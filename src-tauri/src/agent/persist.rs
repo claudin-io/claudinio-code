@@ -1426,10 +1426,18 @@ pub fn list_sessions(workspace: Option<&str>) -> Result<Vec<SessionSummary>, Str
 #[serde(rename_all = "camelCase")]
 pub struct TaskItem {
     pub id: String,
+    /// Empty only in a `tasks_set` call that resends a known task without
+    /// it; `tasks::execute_set` fills it from the stored list.
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub journal: Vec<String>,
-    pub status: String, // "todo" | "doing" | "done"
+    /// "todo" | "doing" | "done"; empty in a `tasks_set` call that leaves it
+    /// out (the stored status, or "todo" for a new task).
+    #[serde(default)]
+    pub status: String,
 }
 
 /// Read all records from a JSONL file and find the LAST SessionRecord::Tasks,

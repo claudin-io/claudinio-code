@@ -32,7 +32,8 @@ pub fn execute_set(
         .ok_or("session_store_path not set")?;
     let _writing = lock_task_list();
     let prev = crate::agent::persist::load_last_tasks(Path::new(path)).unwrap_or_default();
-    let (incoming, renamed) = strip_forged_golden_ids(&prev, args.tasks);
+    let incoming = fill_from_stored(&prev, args.tasks)?;
+    let (incoming, renamed) = strip_forged_golden_ids(&prev, incoming);
     let (incoming, kept) = keep_stored_details(&prev, incoming);
     let (merged, preserved) = merge_preserving_golden(&prev, incoming);
     check_quality_gate(&prev, &merged, ctx)?;
@@ -52,6 +53,28 @@ pub fn execute_set(
         merged.len(),
         note
     ))
+}
+
+/// A task is an id and a title; the rest is optional (single-timeline plan,
+/// Phase 5). A known task resent without its title or status keeps the
+/// stored ones; a new task without a status is `todo`, and one without a
+/// title is refused — a list of bare ids is not a plan anyone can read.
+fn fill_from_stored(prev: &[TaskItem], incoming: Vec<TaskItem>) -> Result<Vec<TaskItem>, String> {
+    incoming
+        .into_iter()
+        .map(|mut t| {
+            let stored = prev.iter().find(|p| p.id == t.id);
+            if t.title.trim().is_empty() {
+                t.title = stored
+                    .map(|p| p.title.clone())
+                    .ok_or_else(|| format!("task '{}' is new and needs a title", t.id))?;
+            }
+            if t.status.trim().is_empty() {
+                t.status = stored.map_or_else(|| "todo".to_string(), |p| p.status.clone());
+            }
+            Ok(t)
+        })
+        .collect()
 }
 
 /// Change one task: its status, its journal, or both.
@@ -133,12 +156,24 @@ pub fn parse_update_args(mut args: serde_json::Value) -> Result<Vec<UpdateTaskAr
         fields.remove("updates");
     }
     match args.get("updates") {
-        Some(_) if single_form => Err(format!("tasks_update: {SHAPES}, not both.")),
+        // A top-level status or journal with no id names no task of the batch.
+        Some(_) if single_form && !has_id => Err(format!("tasks_update: {SHAPES}, not both.")),
         Some(updates) => {
-            let items: Vec<UpdateTaskArgs> = serde_json::from_value(updates.clone())
+            let mut items: Vec<UpdateTaskArgs> = serde_json::from_value(updates.clone())
                 .map_err(|e| format!("tasks_update: invalid updates ({e}); {SHAPES}."))?;
             if items.is_empty() {
                 return Err(format!("tasks_update: updates is empty; {SHAPES}."));
+            }
+            // A top-level task that names its id joins the batch, first
+            // (single-timeline plan, Phase 5: refusing it cost a round).
+            if has_id {
+                let mut one = args.clone();
+                if let Some(fields) = one.as_object_mut() {
+                    fields.remove("updates");
+                }
+                let one: UpdateTaskArgs = serde_json::from_value(one)
+                    .map_err(|e| format!("tasks_update: invalid args ({e}); {SHAPES}."))?;
+                items.insert(0, one);
             }
             Ok(items)
         }
@@ -1074,7 +1109,7 @@ mod quality_gate_tests {
     }
 
     #[test]
-    fn both_forms_parse_and_a_call_in_neither_or_both_is_refused() {
+    fn both_forms_parse_and_a_call_that_names_no_task_is_refused() {
         use serde_json::json;
         let one = parse_update_args(json!({"id": "t1", "status": "doing"})).unwrap();
         assert_eq!(one.len(), 1);
@@ -1092,8 +1127,9 @@ mod quality_gate_tests {
         for bad in [
             json!({}),
             json!({"updates": []}),
-            json!({"id": "t1", "updates": [{"id": "t2"}]}),
             json!({"updates": [{"status": "done"}]}),
+            // A top-level status beside `updates` names no task of the batch.
+            json!({"status": "done", "updates": [{"id": "t2"}]}),
         ] {
             let err = parse_update_args(bad.clone()).unwrap_err();
             assert!(
@@ -1101,6 +1137,26 @@ mod quality_gate_tests {
                 "{bad}: {err}"
             );
         }
+    }
+
+    // Single-timeline plan, Phase 5: session fc2bd5c3a6992b1e named one task
+    // at the top level and another in `updates`, and the call was refused
+    // ("not both") — a retry round for a call whose meaning was plain. A
+    // top-level task that names its id joins the batch, first.
+    #[test]
+    fn a_named_task_beside_the_batch_joins_it() {
+        use serde_json::json;
+        let both = parse_update_args(json!({
+            "id": "t1", "status": "done",
+            "updates": [{"id": "t2", "status": "doing"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            both.iter()
+                .map(|u| (u.id.as_str(), u.status.as_deref()))
+                .collect::<Vec<_>>(),
+            [("t1", Some("done")), ("t2", Some("doing"))]
+        );
     }
 
     // Some models fill every optional schema property, sending null for the
@@ -1165,6 +1221,103 @@ mod quality_gate_tests {
             parse_update_args(json!({"updates": [{"id": "t1", "status": "done"}], "journal": []}))
                 .unwrap();
         assert_eq!(many.len(), 1);
+    }
+}
+
+/// The checklist's lean shape (single-timeline plan, Phase 5): a task is
+/// an id and a title; the rest is optional.
+#[cfg(test)]
+mod checklist_tests {
+    use super::*;
+
+    fn ctx_with(
+        name: &str,
+        prev: &[TaskItem],
+    ) -> (crate::agent::tools::ToolContext, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("cq-checklist-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join(".claudinio/sessions")).unwrap();
+        let store = root.join(".claudinio/sessions/s.jsonl");
+        std::fs::write(&store, "").unwrap();
+        if !prev.is_empty() {
+            crate::agent::persist::append_tasks(&store, prev).unwrap();
+        }
+        let mut ctx = crate::agent::tools::tests_support::ctx();
+        ctx.workspace_root = Some(root.to_string_lossy().to_string());
+        ctx.session_store_path = Some(store.to_string_lossy().to_string());
+        (ctx, root)
+    }
+
+    fn stored(ctx: &crate::agent::tools::ToolContext) -> Vec<TaskItem> {
+        crate::agent::persist::load_last_tasks(std::path::Path::new(
+            ctx.session_store_path.as_deref().unwrap(),
+        ))
+        .unwrap()
+    }
+
+    /// The schema asks for what the code needs and no more: every required
+    /// field the model must fill is a chance to get one wrong.
+    #[test]
+    fn the_tasks_set_schema_requires_only_an_id_and_a_title() {
+        let def = crate::agent::tools::get_defs(4)
+            .into_iter()
+            .find(|d| d.name == "tasks_set")
+            .unwrap();
+        assert_eq!(
+            def.input_schema["properties"]["tasks"]["items"]["required"],
+            serde_json::json!(["id", "title"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_list_needs_only_ids_and_titles() {
+        let (ctx, root) = ctx_with("ids-titles", &[]);
+        crate::agent::tools::execute(
+            "tasks_set",
+            serde_json::json!({"tasks": [{"id": "t1", "title": "Parse the config"}]}),
+            &ctx,
+        )
+        .await
+        .expect("an id and a title are a task");
+        let tasks = stored(&ctx);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, "todo");
+        assert!(tasks[0].description.is_empty() && tasks[0].journal.is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Session fb4cb4d615a93162: `tasks_set` was refused for a task sent
+    /// without its title ("missing field `title`"). A task the list already
+    /// has keeps its stored title; a new one still needs one.
+    #[tokio::test]
+    async fn a_known_task_sent_without_a_title_keeps_its_title() {
+        let prev = TaskItem {
+            id: "t1".into(),
+            title: "Parse the config".into(),
+            description: String::new(),
+            journal: vec![],
+            status: "todo".into(),
+        };
+        let (ctx, root) = ctx_with("keep-title", &[prev]);
+        crate::agent::tools::execute(
+            "tasks_set",
+            serde_json::json!({"tasks": [{"id": "t1", "status": "doing"}, {"id": "t2", "title": "Write the parser"}]}),
+            &ctx,
+        )
+        .await
+        .expect("a known id keeps its title");
+        let tasks = stored(&ctx);
+        assert_eq!(tasks[0].title, "Parse the config");
+        assert_eq!(tasks[0].status, "doing");
+        let err = crate::agent::tools::execute(
+            "tasks_set",
+            serde_json::json!({"tasks": [{"id": "t3"}]}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("t3") && err.contains("title"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
     }
 }
 
