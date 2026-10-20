@@ -199,6 +199,11 @@ pub fn kept_stored_details(kept: &[(String, &str)]) -> String {
 /// actionability test below and for
 /// `prompt::tests::no_harness_text_orders_a_deferred_tool`. Kept complete by
 /// `tests::every_gate_text_is_in_all`, which reads this file.
+/// `tasks_set` in a session with a living document: one plan per session.
+pub(crate) const TASKS_WITH_DOCUMENT: &str = "this session's plan is its document, not a task \
+     list: add a section with doc_add, or write one with doc_write. The user's golden goals \
+     stay as they are; close them with tasks_update.";
+
 #[cfg(test)]
 pub fn all() -> Vec<(&'static str, String)> {
     vec![

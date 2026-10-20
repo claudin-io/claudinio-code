@@ -1785,9 +1785,14 @@ mod deferred_prefix_tests {
     /// when to start one, how it is filled and delegated, that the user's
     /// edits win, and that a new top-level topic is a new document in a new
     /// session. Short: it is in every request of every session.
+    ///
+    /// v1 only since the single-timeline plan (Phase 2): v2 merged TASKS and
+    /// LIVING DOCUMENT into one PLAN section on purpose — "several distinct
+    /// parts" matched a multi-step task list too, and the maintainer's
+    /// session kept both. v2's rule is pinned by the next test.
     #[test]
     fn the_standard_prompt_says_when_to_start_a_document_and_that_the_users_edits_win() {
-        for version in PromptVersion::ALL {
+        for version in [PromptVersion::V1] {
             for mode in [SessionMode::Builder, SessionMode::Brain] {
                 let sys = system_prompt(
                     Some("/ws"),
@@ -1820,6 +1825,58 @@ mod deferred_prefix_tests {
                 let words = section.split_whitespace().count();
                 assert!(words <= 120, "{words} words");
             }
+        }
+    }
+
+    /// One plan per session, sized to the request (single-timeline plan,
+    /// Phase 2): none for one step, a task list for multi-step code work, a
+    /// short document of independent questions for research, design or a
+    /// write-up — never both — and the document's sections go to subagents
+    /// in one call. One section, in every request: kept short.
+    #[test]
+    fn the_v2_prompt_has_one_plan_sized_to_the_request() {
+        for mode in [SessionMode::Builder, SessionMode::Brain] {
+            let sys = system_prompt(
+                Some("/ws"),
+                None,
+                None,
+                None,
+                mode,
+                PromptProfile::Standard,
+                subagent::MAX_PARALLEL_AGENTS,
+                false,
+                PromptVersion::V2,
+            );
+            assert!(
+                !sys.contains("# TASKS") && !sys.contains("LIVING DOCUMENT"),
+                "{sys}"
+            );
+            let start = sys.find("# PLAN").expect("a plan section");
+            let section = &sys[start
+                ..sys[start + 1..]
+                    .find("\n# ")
+                    .map_or(sys.len(), |e| start + 1 + e)];
+            for said in [
+                "one-step change needs none",
+                "`tasks_set`",
+                "`doc_create`",
+                "never both",
+                "3-6 sections",
+                "independent question",
+                "one `spawn_agents` call",
+                "`section`",
+                "`<tasks>`",
+                "`<document>`",
+                "edits win",
+                "new session",
+            ] {
+                assert!(
+                    section.contains(said),
+                    "{mode:?} does not say {said:?}: {section}"
+                );
+            }
+            let words = section.split_whitespace().count();
+            assert!(words <= 210, "{words} words");
         }
     }
 

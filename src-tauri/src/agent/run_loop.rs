@@ -4125,6 +4125,80 @@ mod document_loop_tests {
         std::fs::remove_dir_all(&ws.root).ok();
     }
 
+    /// One plan per session (single-timeline plan, Phase 2). Session
+    /// fb4cb4d615a93162 kept a task list beside its document, and the panel
+    /// showed only the document. A document replaces the checklist — the
+    /// user's golden goals stay — and `tasks_set` is refused while it is
+    /// linked, with an error that says what to use instead.
+    #[tokio::test]
+    async fn a_document_replaces_the_checklist_and_keeps_the_golden_goals() {
+        let ws = workspace("one-plan");
+        let mut tasks = crate::agent::tools::tasks::create_golden_tasks(&["ship it".into()]);
+        tasks.push(crate::agent::persist::TaskItem {
+            id: "t1".into(),
+            title: "look around".into(),
+            description: String::new(),
+            journal: vec![],
+            status: "todo".into(),
+        });
+        crate::agent::persist::append_tasks(&ws.store.path, &tasks).unwrap();
+        let (_, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Pudim de leite", "sections": ["origem", "servir"]}),
+                },
+                Reply::Tool {
+                    name: "tasks_set",
+                    input: serde_json::json!({"tasks": [{"id": "t2", "title": "again", "description": "", "journal": [], "status": "todo"}]}),
+                },
+                Reply::Text("done"),
+            ],
+        )
+        .await;
+        let created = last_result(&bodies[1]);
+        assert!(created.contains("replaces the task list"), "{created}");
+        let left = crate::agent::persist::load_last_tasks(&ws.store.path).unwrap();
+        assert!(
+            !left.is_empty() && left.iter().all(crate::agent::tools::tasks::is_golden),
+            "{left:?}"
+        );
+        let refused = last_result(&bodies[2]);
+        assert!(
+            refused.contains("Error") && refused.contains("doc_add"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// A document is a handful of independent questions: the maintainer's
+    /// first one had 13 sections of a plan template, and the main session
+    /// wrote twelve of them. More than six at creation is refused; doc_add
+    /// still grows a document the work or the person needs longer.
+    #[tokio::test]
+    async fn doc_create_refuses_more_than_six_sections() {
+        let ws = workspace("doc-cap");
+        let (_, bodies) = run(
+            &ws,
+            vec![
+                Reply::Tool {
+                    name: "doc_create",
+                    input: serde_json::json!({"title": "Plano", "sections": ["a", "b", "c", "d", "e", "f", "g"]}),
+                },
+                Reply::Text("ok"),
+            ],
+        )
+        .await;
+        let refused = last_result(&bodies[1]);
+        assert!(
+            refused.contains("Error") && refused.contains("6") && refused.contains("doc_add"),
+            "{refused}"
+        );
+        assert!(crate::agent::persist::linked_document(&records_of(&ws)).is_none());
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
     // The document tools join with the document that gives them a use. A
     // `doc_create` that creates nothing (no section topics here) must not
     // load them: that would be a cache break, and three tool definitions on

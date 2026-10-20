@@ -108,15 +108,15 @@ export function taskColumnOpen(taskCount: number, hasConversation: boolean): boo
   return taskCount > 0 || hasConversation;
 }
 
-/// The task column's width class: a session with a living document (lean-
-/// harness Phase 4b) shows its sections there, a row per topic, and needs
-/// the room; otherwise the Task Panel's dots, or nothing (`taskColumnOpen`).
+/// The plan column's width class: a plan — a living document's sections
+/// or a task list's rows — is read row by row and needs the room; without
+/// one, the narrow "single step" note, or nothing (`taskColumnOpen`).
 export function taskColumnWidth(
   hasDocument: boolean,
   taskCount: number,
   hasConversation: boolean,
 ): "w-64" | "w-10" | "w-0" {
-  if (hasDocument) return "w-64";
+  if (hasDocument || taskCount > 0) return "w-64";
   return taskColumnOpen(taskCount, hasConversation) ? "w-10" : "w-0";
 }
 
@@ -1305,20 +1305,24 @@ function App() {
             <For each={openWorkspaces()}>
               {(ws) => (
                 <Show when={activeWorkspace() === ws}>
-                  <div class="h-full">
-                    {/* A session with a living document shows its sections
-                        here instead of the task list (decision D8). */}
-                    <DocumentPanel
-                      workspace={ws}
-                      onOpen={(doc, line) => openDocument(ws, doc, line)}
-                      onDocumentChange={(doc) => setDocuments((m) => ({ ...m, [ws]: doc }))}
-                    />
-                    <Show when={!documents()[ws]}>
+                  <div class="flex h-full flex-col">
+                    {/* One plan per session: a living document's sections, or
+                        the task list. A document replaces the list, so under
+                        it only the person's golden goals remain. */}
+                    <div classList={{ "min-h-0 flex-1": !!documents()[ws] }}>
+                      <DocumentPanel
+                        workspace={ws}
+                        onOpen={(doc, line) => openDocument(ws, doc, line)}
+                        onDocumentChange={(doc) => setDocuments((m) => ({ ...m, [ws]: doc }))}
+                      />
+                    </div>
+                    <div classList={{ "min-h-0 flex-1": !documents()[ws], "border-t border-border-subtle": !!documents()[ws] }}>
                       <TasksPanel
                         workspace={ws}
+                        underDocument={!!documents()[ws]}
                         onTasksChange={(count) => setTaskCounts((m) => ({ ...m, [ws]: count }))}
                       />
-                    </Show>
+                    </div>
                   </div>
                 </Show>
               )}

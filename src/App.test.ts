@@ -165,17 +165,18 @@ describe("taskColumnOpen", () => {
 
 // ── taskColumnWidth ─────────────────────────────────────────────────
 
-// Lean-harness Phase 4b: a session with a living document shows the
-// document's sections in the task column, which needs room for a topic per
-// row; without one the column is the Task Panel's dots, or nothing.
+// Single-timeline plan, Phase 2: the plan — a document's sections or a
+// task list's rows — is read as rows in the column, so either needs the
+// room; with neither, a session shows the narrow "single step" note, and a
+// workspace with no conversation keeps the column collapsed.
 describe("taskColumnWidth", () => {
-  it("widens for a document whatever the task list says", () => {
+  it("widens for a document or a task list", () => {
     expect(taskColumnWidth(true, 0, false)).toBe("w-64");
     expect(taskColumnWidth(true, 5, true)).toBe("w-64");
+    expect(taskColumnWidth(false, 3, false)).toBe("w-64");
   });
 
-  it("is the task dots' column otherwise, collapsed when there is nothing to show", () => {
-    expect(taskColumnWidth(false, 3, false)).toBe("w-10");
+  it("is the narrow single-step note otherwise, collapsed when there is nothing to show", () => {
     expect(taskColumnWidth(false, 0, true)).toBe("w-10");
     expect(taskColumnWidth(false, 0, false)).toBe("w-0");
   });
