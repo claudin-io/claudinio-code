@@ -1,0 +1,292 @@
+id: doc-parallel-job-runner
+title: Document four independent parts of a job runner
+tags:
+- doc-parallel
+- document
+- search
+- javascript
+prompt: |
+  Before we change anything in this job runner I need to understand four parts of
+  it. Write me a document with one section per question:
+  - How are schedules written, and what does the parser accept or refuse?
+  - How are jobs persisted, and when and how is the stored file compacted?
+  - How are incoming requests authenticated?
+  - How does rate limiting work, and what does a limited client get back?
+  Only what the code actually does, please, and don't change any code.
+setup:
+  files:
+    package.json: |
+      {
+        "name": "quarry-jobs",
+        "private": true,
+        "type": "module"
+      }
+    src/index.js: |
+      import { createServer } from "./server.js";
+
+      createServer({ secret: process.env.QUARRY_SECRET ?? "" }).listen(8080);
+    src/server.js: |
+      import http from "node:http";
+      import { verify } from "./auth.js";
+      import { Limiter } from "./limits.js";
+      import { Journal } from "./journal.js";
+      import { parseSchedule } from "./schedule.js";
+
+      export function createServer({ secret, journal = new Journal("journal.ndjson") }) {
+        const limiter = new Limiter();
+        return http.createServer((req, res) => {
+          let body = "";
+          req.on("data", (chunk) => (body += chunk));
+          req.on("end", () => {
+            if (!verify(secret, req.headers, body)) {
+              res.writeHead(401).end();
+              return;
+            }
+            const verdict = limiter.take(req.headers["x-api-key"] ?? "anonymous");
+            if (!verdict.ok) {
+              res.writeHead(429, { "Retry-After": String(verdict.retryAfter) }).end();
+              return;
+            }
+            const job = JSON.parse(body);
+            job.schedule = parseSchedule(job.schedule);
+            journal.append(job);
+            res.writeHead(201).end();
+          });
+        });
+      }
+    src/schedule.js: |
+      // Schedules are strings. Only two forms exist.
+      export class ScheduleError extends Error {}
+
+      const MIN_INTERVAL_S = 30;
+
+      export function parseSchedule(text) {
+        let m = /^@every (\d+)(s|m)$/.exec(text);
+        if (m) {
+          const seconds = Number(m[1]) * (m[2] === "m" ? 60 : 1);
+          // Shorter intervals are rounded up, not refused.
+          return { kind: "interval", seconds: Math.max(seconds, MIN_INTERVAL_S) };
+        }
+        m = /^@daily (\d{2}):(\d{2})$/.exec(text);
+        if (m) {
+          // Times are UTC; there is no time-zone suffix.
+          return { kind: "daily", hour: Number(m[1]), minute: Number(m[2]) };
+        }
+        throw new ScheduleError(`unsupported schedule: ${text}`);
+      }
+    src/journal.js: |
+      import fs from "node:fs";
+
+      const COMPACT_AFTER_LINES = 500;
+
+      // Every job is appended as one JSON line; the file is replayed on start.
+      export class Journal {
+        constructor(path) {
+          this.path = path;
+          this.jobs = new Map();
+          this.lines = 0;
+          if (fs.existsSync(path)) {
+            for (const line of fs.readFileSync(path, "utf8").split("\n").filter(Boolean)) {
+              const job = JSON.parse(line);
+              this.jobs.set(job.id, job);
+              this.lines += 1;
+            }
+          }
+        }
+
+        append(job) {
+          this.jobs.set(job.id, job);
+          fs.appendFileSync(this.path, JSON.stringify(job) + "\n");
+          this.lines += 1;
+          if (this.lines > COMPACT_AFTER_LINES) this.compact();
+        }
+
+        // Rewrite with one line per live job: write a temporary file, then rename
+        // it over the journal so a crash never leaves half a file.
+        compact() {
+          const tmp = this.path + ".tmp";
+          const text = [...this.jobs.values()].map((j) => JSON.stringify(j) + "\n").join("");
+          fs.writeFileSync(tmp, text);
+          fs.renameSync(tmp, this.path);
+          this.lines = this.jobs.size;
+        }
+      }
+    src/auth.js: |
+      import crypto from "node:crypto";
+
+      const MAX_SKEW_S = 300;
+
+      // A request is signed with HMAC-SHA256 over "<timestamp>.<body>".
+      export function verify(secret, headers, body, now = Date.now()) {
+        const stamp = Number(headers["x-quarry-timestamp"]);
+        const given = String(headers["x-quarry-signature"] ?? "");
+        if (!Number.isFinite(stamp) || Math.abs(now / 1000 - stamp) > MAX_SKEW_S) return false;
+        const want = crypto.createHmac("sha256", secret).update(`${stamp}.${body}`).digest("hex");
+        return given.length === want.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(want));
+      }
+    src/limits.js: |
+      // One token bucket per API key.
+      const CAPACITY = 20;
+      const REFILL_EVERY_S = 3;
+
+      export class Limiter {
+        constructor(now = () => Date.now() / 1000) {
+          this.now = now;
+          this.buckets = new Map();
+        }
+
+        take(key) {
+          const t = this.now();
+          const b = this.buckets.get(key) ?? { tokens: CAPACITY, at: t };
+          const refill = Math.floor((t - b.at) / REFILL_EVERY_S);
+          if (refill > 0) {
+            b.tokens = Math.min(CAPACITY, b.tokens + refill);
+            b.at += refill * REFILL_EVERY_S;
+          }
+          this.buckets.set(key, b);
+          if (b.tokens === 0) {
+            return { ok: false, retryAfter: Math.ceil(b.at + REFILL_EVERY_S - t) };
+          }
+          b.tokens -= 1;
+          return { ok: true };
+        }
+      }
+    src/format.js: |
+      // Pretty-printing for the CLI listing; not used by the server.
+      export function describe(job) {
+        return `${job.id}  ${JSON.stringify(job.schedule)}`;
+      }
+    test/quarry.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { parseSchedule } from "../src/schedule.js";
+      import { Limiter } from "../src/limits.js";
+
+      test("an every-schedule is parsed", () => {
+        assert.equal(parseSchedule("@every 2m").seconds, 120);
+      });
+
+      test("a fresh key may take a token", () => {
+        assert.equal(new Limiter(() => 0).take("k").ok, true);
+      });
+check: node --test
+oracle:
+  command: python3 .oracle/check_doc.py && node --test
+  timeout_s: 60
+  files:
+    .oracle/check_doc.py: |
+      """Oracle for a doc-parallel task: the session's living document answers each
+      independent question, each in a section of its own.
+
+      The document is whatever `doc_create` wrote under .claudinio/docs/ (the eval
+      policy refuses edit_file there, so only the document tools can). A section is
+      a written `## heading` and its body; a `[placeholder]` line is not one. Each
+      question is a list of facts that are only found by reading the right file;
+      "a|b" accepts either spelling, in any case. Every question must be answered
+      by a section of its own: a single section holding every answer fails.
+      """
+      import glob
+      import itertools
+      import re
+      import sys
+
+      QUESTIONS = {'schedules': ['@every', '@daily', 'ScheduleError|30'], 'persistence': ['journal.ndjson', '500', 'rename|.tmp'], 'authentication': ['x-quarry-signature', 'hmac|sha256|sha-256', '300|5 min|five min'], 'rate limiting': ['bucket', '20', '429']}
+
+
+      def sections(text):
+          out, heading, body = [], None, []
+          for line in text.splitlines():
+              if re.match(r"^#{1,2}\s", line):
+                  if heading is not None:
+                      out.append((heading, "\n".join(body)))
+                  heading, body = (line if line.startswith("## ") else None), []
+              elif heading is not None:
+                  body.append(line)
+          if heading is not None:
+              out.append((heading, "\n".join(body)))
+          clean = lambda s: re.sub(r"<!--.*?-->", "", s, flags=re.S)
+          return [(h, clean(h + "\n" + b)) for h, b in out]
+
+
+      def answers(section_text, facts):
+          low = section_text.lower()
+          return all(any(alt.lower() in low for alt in fact.split("|")) for fact in facts)
+
+
+      def grade(path):
+          secs = sections(open(path, errors="replace").read())
+          candidates = {}
+          for question, facts in QUESTIONS.items():
+              candidates[question] = [i for i, (_, text) in enumerate(secs) if answers(text, facts)]
+              if not candidates[question]:
+                  whole = "\n".join(text for _, text in secs).lower()
+                  missing = [f for f in facts if not any(a.lower() in whole for a in f.split("|"))]
+                  return f"no section answers '{question}' (missing: {', '.join(missing) or 'facts split across sections'})"
+          names = list(QUESTIONS)
+          for pick in itertools.product(*(candidates[n] for n in names)):
+              if len(set(pick)) == len(pick):
+                  return None
+          return "the answers do not have a section each: " + ", ".join(
+              f"{n} -> {[secs[i][0] for i in candidates[n]]}" for n in names)
+
+
+      def main():
+          docs = sorted(glob.glob(".claudinio/docs/*.md"))
+          if not docs:
+              sys.exit("no living document in .claudinio/docs/")
+          reasons = []
+          for path in docs:
+              reason = grade(path)
+              if reason is None:
+                  print(f"ok: {path}")
+                  return
+              reasons.append(f"{path}: {reason}")
+          sys.exit("\n".join(reasons))
+
+
+      if __name__ == "__main__":
+          main()
+    test/quarry.test.js: |
+      import { test } from "node:test";
+      import assert from "node:assert/strict";
+      import { parseSchedule } from "../src/schedule.js";
+      import { Limiter } from "../src/limits.js";
+
+      test("an every-schedule is parsed", () => {
+        assert.equal(parseSchedule("@every 2m").seconds, 120);
+      });
+
+      test("a fresh key may take a token", () => {
+        assert.equal(new Limiter(() => 0).take("k").ok, true);
+      });
+reference:
+  files:
+    .claudinio/docs/quarry-four-parts.md: |
+      # Quarry job runner: four parts
+
+      ## Schedules
+      <!-- claudinio: id=s1 status=done by=sub:schedules -->
+      `src/schedule.js` accepts `@every <n>s|m` (intervals under 30 s are rounded up to
+      30 s) and `@daily HH:MM` in UTC. Anything else throws `ScheduleError`.
+      <!-- claudinio: end -->
+
+      ## Persistence and compaction
+      <!-- claudinio: id=s2 status=done by=sub:journal -->
+      `src/journal.js` appends each job as a JSON line to `journal.ndjson` and replays it
+      on start. After more than 500 lines it rewrites one line per live job into
+      `journal.ndjson.tmp` and renames it over the journal.
+      <!-- claudinio: end -->
+
+      ## Authentication
+      <!-- claudinio: id=s3 status=done by=sub:auth -->
+      `src/auth.js` checks `X-Quarry-Signature`, an HMAC-SHA256 hex digest of
+      `<timestamp>.<body>` keyed with the shared secret, compared in constant time; the
+      `X-Quarry-Timestamp` must be within 300 seconds of now. Failures get 401.
+      <!-- claudinio: end -->
+
+      ## Rate limiting
+      <!-- claudinio: id=s4 status=done by=sub:limits -->
+      `src/limits.js` keeps a token bucket per `X-Api-Key`: 20 tokens, one refilled every
+      3 seconds. An empty bucket answers 429 with `Retry-After`.
+      <!-- claudinio: end -->
+max_rounds: 60

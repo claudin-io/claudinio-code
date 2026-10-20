@@ -1,0 +1,288 @@
+id: doc-parallel-sync-tool
+title: Document three independent parts of a sync tool
+tags:
+- doc-parallel
+- document
+- search
+prompt: |
+  I'm starting on this repository tomorrow and want a short document I can keep
+  open while I work. Write it as a document with one section per question:
+  1. How is configuration loaded: where do values come from, and which source wins?
+  2. What is the retry policy for requests to the remote: what is retried, how many
+     times, and how long does it wait between attempts?
+  3. What does the command-line interface accept: its commands and their flags?
+  Answer from the code, not from guesses, and don't change any code.
+setup:
+  files:
+    README.md: |
+      # bramble
+
+      A small tool that syncs a folder with a remote store.
+    bramble/__init__.py: ''
+    bramble/__main__.py: |
+      import sys
+
+      from bramble.cli import main
+
+      sys.exit(main())
+    bramble/config.py: |
+      """Settings for the sync tool."""
+      import configparser
+      import os
+
+      DEFAULTS = {"remote": "https://sync.example.invalid", "timeout": "20", "workers": "2"}
+
+      # Only the first file that exists is read; the second is a fallback, never merged.
+      SEARCH = ("./bramble.ini", "~/.config/bramble/bramble.ini")
+
+      ENV_PREFIX = "BRAMBLE_"
+
+
+      class ConfigError(Exception):
+          pass
+
+
+      def load(environ=None):
+          environ = os.environ if environ is None else environ
+          values = dict(DEFAULTS)
+          for candidate in SEARCH:
+              path = os.path.expanduser(candidate)
+              if os.path.exists(path):
+                  parser = configparser.ConfigParser()
+                  parser.read(path)
+                  values.update(parser["sync"])
+                  break
+          # The environment wins over the file.
+          for key, value in environ.items():
+              if key.startswith(ENV_PREFIX):
+                  name = key[len(ENV_PREFIX):].lower()
+                  if name not in DEFAULTS:
+                      raise ConfigError(f"unknown setting {key}")
+                  values[name] = value
+          values["timeout"] = float(values["timeout"])
+          values["workers"] = int(values["workers"])
+          return values
+    bramble/retry.py: |
+      """How a request to the remote is retried."""
+      import time
+
+      RETRY_STATUSES = frozenset({429, 503})
+      MAX_ATTEMPTS = 4
+
+
+      class RetryExhausted(Exception):
+          def __init__(self, request, response):
+              super().__init__(f"{request} failed after {MAX_ATTEMPTS} attempts: {response.status}")
+              self.response = response
+
+
+      def backoff(attempt):
+          """Seconds to wait after a failed attempt (0-based) with no Retry-After."""
+          return min(0.25 * 3 ** attempt, 5.0)
+
+
+      def call_with_retry(send, request, sleep=time.sleep):
+          for attempt in range(MAX_ATTEMPTS):
+              response = send(request)
+              if response.status not in RETRY_STATUSES:
+                  return response
+              if attempt == MAX_ATTEMPTS - 1:
+                  break
+              wait = response.headers.get("Retry-After")
+              sleep(float(wait) if wait is not None else backoff(attempt))
+          raise RetryExhausted(request, response)
+    bramble/transport.py: |
+      """The HTTP layer: one request, no retries (see retry.py for those)."""
+      import json
+      import urllib.request
+
+
+      class Response:
+          def __init__(self, status, headers, body):
+              self.status, self.headers, self.body = status, headers, body
+
+
+      def send(request, timeout=20.0):
+          method, url, payload = request
+          data = None if payload is None else json.dumps(payload).encode()
+          req = urllib.request.Request(url, data=data, method=method)
+          with urllib.request.urlopen(req, timeout=timeout) as raw:
+              return Response(raw.status, dict(raw.headers), raw.read())
+    bramble/sync.py: |
+      """What push and pull actually move."""
+      import os
+
+
+      def local_files(root):
+          for folder, _, names in os.walk(root):
+              for name in names:
+                  if not name.startswith("."):
+                      yield os.path.relpath(os.path.join(folder, name), root)
+
+
+      def plan_push(root, remote_names):
+          return sorted(set(local_files(root)) - set(remote_names))
+    bramble/cli.py: |
+      """The command line: bramble [--remote URL] [-v] {push,pull,status}."""
+      import argparse
+
+
+      def build_parser():
+          parser = argparse.ArgumentParser(prog="bramble")
+          parser.add_argument("--remote", help="overrides the configured remote for this run")
+          parser.add_argument("-v", "--verbose", action="count", default=0)
+          commands = parser.add_subparsers(dest="command")
+          push = commands.add_parser("push", help="upload local changes")
+          push.add_argument("--dry-run", action="store_true", help="list what would be uploaded")
+          pull = commands.add_parser("pull", help="download remote changes")
+          pull.add_argument("--since", metavar="YYYY-MM-DD", help="only files changed since then")
+          commands.add_parser("status", help="compare local and remote")
+          return parser
+
+
+      def parse(argv):
+          args = build_parser().parse_args(argv)
+          if args.command is None:
+              # No command means status.
+              args.command = "status"
+          return args
+
+
+      def main(argv=None):
+          args = parse(argv)
+          print(f"bramble {args.command}")
+          return 0
+    tests/__init__.py: ''
+    tests/test_bramble.py: |
+      from bramble import cli, config, retry
+
+
+      def test_no_command_is_status():
+          assert cli.parse([]).command == "status"
+
+
+      def test_environment_overrides_defaults():
+          assert config.load({"BRAMBLE_WORKERS": "5"})["workers"] == 5
+
+
+      def test_backoff_is_capped():
+          assert retry.backoff(10) == 5.0
+check: python3 -m pytest -q -p no:cacheprovider tests
+oracle:
+  command: python3 .oracle/check_doc.py && python3 -m pytest -q -p no:cacheprovider tests
+  timeout_s: 60
+  files:
+    .oracle/check_doc.py: |
+      """Oracle for a doc-parallel task: the session's living document answers each
+      independent question, each in a section of its own.
+
+      The document is whatever `doc_create` wrote under .claudinio/docs/ (the eval
+      policy refuses edit_file there, so only the document tools can). A section is
+      a written `## heading` and its body; a `[placeholder]` line is not one. Each
+      question is a list of facts that are only found by reading the right file;
+      "a|b" accepts either spelling, in any case. Every question must be answered
+      by a section of its own: a single section holding every answer fails.
+      """
+      import glob
+      import itertools
+      import re
+      import sys
+
+      QUESTIONS = {'configuration loading': ['BRAMBLE_', 'bramble.ini', 'ConfigError|unknown setting'], 'retry policy': ['429', '503', 'Retry-After'], 'command-line interface': ['--dry-run|dry-run|dry run', '--since', 'push', 'pull']}
+
+
+      def sections(text):
+          out, heading, body = [], None, []
+          for line in text.splitlines():
+              if re.match(r"^#{1,2}\s", line):
+                  if heading is not None:
+                      out.append((heading, "\n".join(body)))
+                  heading, body = (line if line.startswith("## ") else None), []
+              elif heading is not None:
+                  body.append(line)
+          if heading is not None:
+              out.append((heading, "\n".join(body)))
+          clean = lambda s: re.sub(r"<!--.*?-->", "", s, flags=re.S)
+          return [(h, clean(h + "\n" + b)) for h, b in out]
+
+
+      def answers(section_text, facts):
+          low = section_text.lower()
+          return all(any(alt.lower() in low for alt in fact.split("|")) for fact in facts)
+
+
+      def grade(path):
+          secs = sections(open(path, errors="replace").read())
+          candidates = {}
+          for question, facts in QUESTIONS.items():
+              candidates[question] = [i for i, (_, text) in enumerate(secs) if answers(text, facts)]
+              if not candidates[question]:
+                  whole = "\n".join(text for _, text in secs).lower()
+                  missing = [f for f in facts if not any(a.lower() in whole for a in f.split("|"))]
+                  return f"no section answers '{question}' (missing: {', '.join(missing) or 'facts split across sections'})"
+          names = list(QUESTIONS)
+          for pick in itertools.product(*(candidates[n] for n in names)):
+              if len(set(pick)) == len(pick):
+                  return None
+          return "the answers do not have a section each: " + ", ".join(
+              f"{n} -> {[secs[i][0] for i in candidates[n]]}" for n in names)
+
+
+      def main():
+          docs = sorted(glob.glob(".claudinio/docs/*.md"))
+          if not docs:
+              sys.exit("no living document in .claudinio/docs/")
+          reasons = []
+          for path in docs:
+              reason = grade(path)
+              if reason is None:
+                  print(f"ok: {path}")
+                  return
+              reasons.append(f"{path}: {reason}")
+          sys.exit("\n".join(reasons))
+
+
+      if __name__ == "__main__":
+          main()
+    tests/test_bramble.py: |
+      from bramble import cli, config, retry
+
+
+      def test_no_command_is_status():
+          assert cli.parse([]).command == "status"
+
+
+      def test_environment_overrides_defaults():
+          assert config.load({"BRAMBLE_WORKERS": "5"})["workers"] == 5
+
+
+      def test_backoff_is_capped():
+          assert retry.backoff(10) == 5.0
+reference:
+  files:
+    .claudinio/docs/how-bramble-works.md: |
+      # How bramble works
+
+      ## How configuration is loaded
+      <!-- claudinio: id=s1 status=done by=sub:config -->
+      `bramble/config.py` starts from built-in defaults (remote, timeout 20, workers 2),
+      then reads the first of `./bramble.ini` and `~/.config/bramble/bramble.ini` that
+      exists (its `[sync]` section; the other file is never merged). Environment
+      variables prefixed `BRAMBLE_` win over the file; an unknown one raises
+      `ConfigError`.
+      <!-- claudinio: end -->
+
+      ## The retry policy
+      <!-- claudinio: id=s2 status=done by=sub:retry -->
+      `bramble/retry.py` retries only HTTP 429 and 503, up to 4 attempts in all. It waits
+      for the `Retry-After` header when present, else 0.25 s x 3^attempt capped at 5 s,
+      and raises `RetryExhausted` when the last attempt still fails.
+      <!-- claudinio: end -->
+
+      ## The command-line interface
+      <!-- claudinio: id=s3 status=done by=sub:cli -->
+      `bramble/cli.py`: global `--remote URL` and `-v` (counted); commands `push`
+      (`--dry-run`), `pull` (`--since YYYY-MM-DD`) and `status`, which is also what
+      runs when no command is given.
+      <!-- claudinio: end -->
+max_rounds: 60
