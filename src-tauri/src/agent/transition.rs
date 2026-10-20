@@ -1,13 +1,13 @@
-//! Session handoff: creates linked successor sessions when the Brain flips to
-//! Builder (plan execution), the golden loop flips mode, or the context crosses
-//! the configured threshold. The old session gets a HandoffTo forward pointer;
+//! Session handoff: creates linked successor sessions when the context
+//! crosses the configured threshold or a new top-level topic opens a new
+//! document. The old session gets a HandoffTo forward pointer;
 //! the new session gets a LinkedFrom back-pointer. Both share the same
 //! event channel so the frontend renders the chain as one continuous thread.
 
 use crate::agent::persist as tasks_store;
 use crate::agent::persist::{self, SessionRecord, SessionStore, now_ms};
 use crate::agent::provider;
-use crate::agent::session::{AgentEvent, HandoffReason, HandoffSpec, ModeCtl, SteeringCtl};
+use crate::agent::session::{AgentEvent, HandoffReason, HandoffSpec, SteeringCtl};
 use crate::state::{SessionHandle, WorkspaceState};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub use crate::agent::persist::RecordsCache;
 #[derive(Clone)]
 pub struct TransitionMaps {
     pub steering: Arc<Mutex<HashMap<String, Arc<SteeringCtl>>>>,
-    pub modes: Arc<Mutex<HashMap<String, Arc<ModeCtl>>>>,
+
     pub records_cache: RecordsCache,
 }
 
@@ -114,13 +114,6 @@ pub async fn link_session(
         spec.document.as_deref(),
     );
 
-    // 6. Append the Mode record for the new session.
-    new_store.try_append(&SessionRecord::Mode {
-        mode: spec.next_mode.as_str().into(),
-        origin: spec.next_origin.as_str().into(),
-        ts: now_ms(),
-    });
-
     // 6½. Seed the successor's cost ledger with cumulative chain cost
     // so the footer never drops to zero on handoff — each session
     // inherits the cost of its entire ancestry.
@@ -155,16 +148,6 @@ pub async fn link_session(
         }
     }
 
-    // 8. Insert new ModeCtl and remove the old one.
-    {
-        let mut mode_map = maps.modes.lock().await;
-        mode_map.remove(&old_handle.id);
-        mode_map.insert(
-            new_id.clone(),
-            Arc::new(ModeCtl::new(spec.next_mode, spec.next_origin)),
-        );
-    }
-
     // 9. Swap the active session on the workspace.
     let new_handle = SessionHandle {
         id: new_id.clone(),
@@ -180,108 +163,10 @@ pub async fn link_session(
         prev_session_id: old_handle.id.clone(),
         session_id: new_id.clone(),
         reason: spec.reason.as_str().into(),
-        mode: spec.next_mode.as_str().into(),
-        origin: spec.next_origin.as_str().into(),
         first_message: spec.first_message.clone(),
     });
 
     Ok(new_handle)
-}
-
-/// The first user message of the successor session. Plan-execution handoffs
-/// (exit_plan_mode / the Continue with Builder button) get the full plan
-/// inlined — the plan IS the handoff; the spec's message is a placeholder.
-/// Golden-flip and context handoffs already carry their composed message.
-pub fn resolve_first_message(
-    spec: &HandoffSpec,
-    workspace_root: Option<&str>,
-    plan_save_path: Option<&str>,
-    tasks: &[persist::TaskItem],
-) -> String {
-    match spec.reason {
-        HandoffReason::PlanExecution | HandoffReason::ManualBuilder => {
-            let plan = workspace_root.and_then(|root| {
-                crate::agent::tools::write_plan::latest_plan_path(root, plan_save_path)
-            });
-            let path = plan.as_ref().map(|p| p.to_string_lossy().to_string());
-            let content = plan.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
-            let mut msg = compose_builder_kickoff(path.as_deref(), content.as_deref());
-            if content.is_none() {
-                msg.push_str(&compose_task_details(tasks));
-            }
-            msg
-        }
-        HandoffReason::GoldenFlip | HandoffReason::ContextHandoff | HandoffReason::NewDocument => {
-            spec.first_message.clone()
-        }
-    }
-}
-
-/// The first message for a Builder session kicked off from a Brain plan.
-/// Carries the plan inline (the plan is the handoff document) plus the
-/// execution contract.
-pub fn compose_builder_kickoff(plan_file: Option<&str>, plan_content: Option<&str>) -> String {
-    let mut msg = String::from(
-        "[system] You are in Builder mode, in a fresh session that continues a \
-         planning session. The plan below and the carried-over task list (a \
-         `<tasks>` block at the end of this message; no `<tasks>` block means there \
-         is no list) are your worklist - execute them exactly:\n\n\
-         1. Follow the plan (Solution Design + Low-Level Design).\n\
-         2. Take the tasks in dependency order:\n\
-           - Mark one 'doing' in the same round as your first tool call for it.\n\
-           - Implement it: edit directly; delegate only as the Builder rules say.\n\
-           - Mark it 'done' once verified with evidence; closing one task and starting \
-         the next is one `tasks_update` call.\n\
-         3. After all tasks, verify the whole build and call `finalize_plan`.\n",
-    );
-    if let Some(path) = plan_file {
-        msg.push_str(&format!("\nPlan file: {path}\n"));
-    }
-    if let Some(content) = plan_content {
-        msg.push_str(&format!(
-            "\n--- PLAN START ---\n{content}\n--- PLAN END ---\n"
-        ));
-    } else if plan_file.is_none() {
-        msg.push_str("\nNo plan file was found on disk - continue from the task list.\n");
-    }
-    msg
-}
-
-/// What Brain wrote for each task — its description and journal — for a
-/// Builder kickoff that has no plan to carry it. The run's `<tasks>` block
-/// names each task (`id · status · title`) and nothing more, and `tasks_get`
-/// is deferred, so without this a Builder started from the task list alone
-/// would work from titles (Phase 4 review). Empty when no task has anything
-/// to add. With a plan inline the plan is the detail, and this is not sent.
-fn compose_task_details(tasks: &[persist::TaskItem]) -> String {
-    let mut out = String::new();
-    for t in tasks {
-        let description = t.description.trim();
-        let journal: Vec<&str> = t
-            .journal
-            .iter()
-            .map(|j| j.trim())
-            .filter(|j| !j.is_empty())
-            .collect();
-        if description.is_empty() && journal.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("\n### {} \u{b7} {}\n", t.id, t.title.trim()));
-        if !description.is_empty() {
-            out.push_str(description);
-            out.push('\n');
-        }
-        for entry in journal {
-            out.push_str(&format!("- {entry}\n"));
-        }
-    }
-    if out.is_empty() {
-        return out;
-    }
-    format!(
-        "\nWhat was written for each task (descriptions, then journal entries):\n\
-         --- TASK DETAILS START ---{out}--- TASK DETAILS END ---\n"
-    )
 }
 
 /// Wraps the model-generated handoff document as the first user message of
@@ -298,7 +183,7 @@ pub fn compose_context_handoff_message(handoff_text: &str, plan_file: Option<&st
          in-flight work exactly where it stopped.\n\n",
     );
     if let Some(path) = plan_file {
-        msg.push_str(&format!("Plan file: {path}\n\n"));
+        msg.push_str(&format!("Document: {path}\n\n"));
     }
     msg.push_str(&format!(
         "--- HANDOFF DOCUMENT START ---\n{handoff_text}\n--- HANDOFF DOCUMENT END ---"
@@ -313,7 +198,6 @@ pub fn rebuild_tool_context(
     old_ctx: &crate::agent::tools::ToolContext,
     new_session_id: &str,
     new_store_path: &std::path::Path,
-    new_mode_ctl: Arc<ModeCtl>,
     config: provider::AgentConfig,
 ) -> crate::agent::tools::ToolContext {
     crate::agent::tools::ToolContext {
@@ -346,12 +230,10 @@ pub fn rebuild_tool_context(
         browser: None,
         interrupt: old_ctx.interrupt.clone(),
         agent_config: Some(config),
-        plan_save_path: old_ctx.plan_save_path.clone(),
         base_commit: old_ctx.base_commit.clone(),
         auto_approve_git: old_ctx.auto_approve_git,
         shell_gate: old_ctx.shell_gate.clone(),
         mcp: old_ctx.mcp.clone(),
-        mode_ctl: Some(new_mode_ctl),
         index_progress: old_ctx.index_progress.clone(),
         records_cache: old_ctx.records_cache.clone(),
     }
@@ -361,47 +243,7 @@ pub fn rebuild_tool_context(
 mod tests {
     use super::*;
 
-    #[test]
-    fn builder_kickoff_mentions_contract() {
-        let msg = compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X"));
-        // Phase 4: the run appends the list; the kickoff points at it instead
-        // of ordering a round to fetch it.
-        assert!(!msg.contains("tasks_get"), "{msg}");
-        assert!(msg.contains("`<tasks>` block"), "{msg}");
-        assert!(msg.contains("/tmp/plan.md"));
-        assert!(msg.contains("--- PLAN START ---"));
-        assert!(msg.contains("finalize_plan"));
-    }
-
-    // Decision D1 (lean-harness Phase 3): the Builder edits files itself, so
-    // its kickoff must not order every task through code-mode subagents.
-    #[test]
-    fn builder_kickoff_does_not_order_delegation() {
-        let msg = compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X"));
-        assert!(!msg.contains("code-mode subagents"), "{msg}");
-        assert!(msg.contains("edit directly"), "{msg}");
-    }
-
-    #[test]
-    fn builder_kickoff_without_plan_falls_back_to_tasks() {
-        let msg = compose_builder_kickoff(None, None);
-        assert!(msg.contains("No plan file was found"));
-    }
-
-    fn manual_builder_spec() -> HandoffSpec {
-        HandoffSpec {
-            reason: HandoffReason::ManualBuilder,
-            next_mode: crate::agent::session::SessionMode::Builder,
-            next_origin: crate::agent::session::ModeOrigin::Human,
-            first_message: String::new(),
-            golden_cycle: 0,
-            golden_stalls: 0,
-            golden_last_pending: Vec::new(),
-            document: None,
-        }
-    }
-
-    fn brain_task() -> persist::TaskItem {
+    fn a_task() -> persist::TaskItem {
         persist::TaskItem {
             id: "t1".into(),
             title: "Parse the config".into(),
@@ -417,10 +259,10 @@ mod tests {
     #[test]
     fn a_new_document_successor_keeps_only_the_golden_tasks() {
         let golden = persist::TaskItem {
-            id: format!("{}tests-pass-0", crate::agent::session::GOLDEN_TASK_PREFIX),
-            ..brain_task()
+            id: format!("{}tests-pass-1", crate::agent::session::GOLDEN_TASK_PREFIX),
+            ..a_task()
         };
-        let tasks = vec![brain_task(), golden.clone()];
+        let tasks = vec![a_task(), golden.clone()];
         let kept = tasks_for_successor(tasks.clone(), &HandoffReason::NewDocument);
         assert_eq!(kept.iter().map(|t| &t.id).collect::<Vec<_>>(), [&golden.id]);
         assert_eq!(
@@ -429,69 +271,12 @@ mod tests {
         );
     }
 
-    // With no plan file the Builder works from the task list, and the run's
-    // `<tasks>` block carries only id, status and title. The descriptions and
-    // findings Brain wrote must reach it in the kickoff, or it starts from
-    // titles alone with `tasks_get` deferred (Phase 4 review).
-    #[test]
-    fn a_builder_kickoff_without_a_plan_carries_the_task_descriptions_and_journals() {
-        let msg = resolve_first_message(&manual_builder_spec(), None, None, &[brain_task()]);
-        assert!(msg.contains("No plan file was found"), "{msg}");
-        assert!(msg.contains("Use the nom grammar from the spike"), "{msg}");
-        assert!(msg.contains("the spike lives in spikes/nom.rs"), "{msg}");
-        assert!(!msg.contains("tasks_get"), "{msg}");
-    }
-
-    // With a plan inline the plan is the handoff document (its Low-Level
-    // Design is where the detail lives): the kickoff does not repeat the
-    // task descriptions beside it.
-    #[test]
-    fn a_builder_kickoff_with_a_plan_does_not_repeat_the_task_descriptions() {
-        let root = std::env::temp_dir().join(format!("kickoff-plan-{}", std::process::id()));
-        let plans = root.join(".claudinio/plans");
-        std::fs::create_dir_all(&plans).unwrap();
-        std::fs::write(plans.join("p.md"), "# Plan\nDo X").unwrap();
-        let msg = resolve_first_message(
-            &manual_builder_spec(),
-            Some(root.to_str().unwrap()),
-            None,
-            &[brain_task()],
-        );
-        assert!(msg.contains("--- PLAN START ---"), "{msg}");
-        assert!(!msg.contains("Use the nom grammar from the spike"), "{msg}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    // Plans saved in `.claudinio` sit beside the project memory: the kickoff
-    // inlines the plan, never the memory that a later append made newer.
-    #[test]
-    fn a_builder_kickoff_inlines_the_plan_not_a_newer_project_memory() {
-        let root = std::env::temp_dir().join(format!("kickoff-mem-{}", std::process::id()));
-        let dir = root.join(".claudinio");
-        std::fs::create_dir_all(&dir).unwrap();
-        let plan = dir.join("2026-10-19_p.md");
-        std::fs::write(&plan, "# Plan\nDo X").unwrap();
-        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        let f = std::fs::File::options().write(true).open(&plan).unwrap();
-        f.set_modified(past).unwrap();
-        std::fs::write(dir.join("MEMORY.md"), "## Learned\n- a lesson\n").unwrap();
-        let msg = resolve_first_message(
-            &manual_builder_spec(),
-            Some(root.to_str().unwrap()),
-            Some(".claudinio"),
-            &[brain_task()],
-        );
-        assert!(msg.contains("Do X"), "{msg}");
-        assert!(!msg.contains("a lesson"), "{msg}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
     #[test]
     fn context_handoff_message_wraps_document() {
-        let msg = compose_context_handoff_message("## Purpose\nfinish it", Some("/p/plan.md"));
+        let msg = compose_context_handoff_message("## Purpose\nfinish it", Some("/p/doc.md"));
         assert!(msg.contains("--- HANDOFF DOCUMENT START ---"));
         assert!(msg.contains("finish it"));
-        assert!(msg.contains("/p/plan.md"));
+        assert!(msg.contains("/p/doc.md"));
         assert!(!msg.contains("tasks_get"), "{msg}");
         assert!(msg.contains("`<tasks>` block"), "{msg}");
     }
@@ -504,13 +289,8 @@ mod tests {
     // prefix rewrite (Phase 4 review). It says that no block means no list.
     #[test]
     fn handoff_kickoffs_do_not_promise_a_task_list_the_session_may_not_have() {
-        for msg in [
-            compose_context_handoff_message("## Purpose\nfinish it", None),
-            compose_builder_kickoff(Some("/tmp/plan.md"), Some("# Plan\nDo X")),
-            compose_builder_kickoff(None, None),
-        ] {
-            assert!(!msg.contains("block that ends this message"), "{msg}");
-            assert!(msg.contains("no `<tasks>` block means"), "{msg}");
-        }
+        let msg = compose_context_handoff_message("## Purpose\nfinish it", None);
+        assert!(!msg.contains("block that ends this message"), "{msg}");
+        assert!(msg.contains("no `<tasks>` block means"), "{msg}");
     }
 }

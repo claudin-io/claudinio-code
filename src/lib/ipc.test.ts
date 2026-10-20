@@ -420,43 +420,6 @@ describe("loadSession", () => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// Session mode
-// ─────────────────────────────────────────────────────────────
-
-describe("setSessionMode", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("calls invoke with set_session_mode, workspace and mode, returns SessionStarted", async () => {
-    const fake: import("./ipc").SessionStarted = { sessionId: "s1" };
-    mockInvokeFor(fake);
-    const { setSessionMode } = await import("./ipc");
-    const result = await setSessionMode("ws", "brain");
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith("set_session_mode", {
-      workspace: "ws",
-      mode: "brain",
-    });
-    expect(result).toEqual(fake);
-  });
-});
-
-describe("getSessionMode", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("calls invoke with get_session_mode and workspace, returns mode + origin", async () => {
-    const fake = { mode: "builder" as const, origin: "human" as const };
-    mockInvokeFor(fake);
-    const { getSessionMode } = await import("./ipc");
-    const result = await getSessionMode("ws");
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith("get_session_mode", { workspace: "ws" });
-    expect(result).toEqual(fake);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────
 // sendMessage — uses Channel
 // ─────────────────────────────────────────────────────────────
 
@@ -465,12 +428,12 @@ describe("sendMessage", () => {
     vi.clearAllMocks();
   });
 
-  it("calls invoke with send_message, workspace, message, attachments, mode and eventChannel", async () => {
+  it("calls invoke with send_message, workspace, message, attachments and eventChannel", async () => {
     const fake: import("./ipc").SessionStarted = { sessionId: "s1" };
     mockInvokeFor(fake);
     const onEvent = vi.fn();
     const { sendMessage } = await import("./ipc");
-    const result = await sendMessage("ws", "hello", [], onEvent, "builder");
+    const result = await sendMessage("ws", "hello", [], onEvent);
     expect(vi.mocked(invoke)).toHaveBeenCalledTimes(1);
     const callArgs = vi.mocked(invoke).mock.calls[0];
     expect(callArgs[0]).toBe("send_message");
@@ -478,7 +441,6 @@ describe("sendMessage", () => {
       workspace: "ws",
       message: "hello",
       attachments: undefined,
-      mode: "builder",
     });
     // Verify the channel is passed (it's a Channel instance)
     expect(callArgs[1]).toHaveProperty("eventChannel");
@@ -493,7 +455,7 @@ describe("sendMessage", () => {
     expect(args.attachments).toEqual([{ path: "/a.txt" }]);
   });
 
-  it("omits mode when not provided", async () => {
+  it("sends no mode: one timeline has none", async () => {
     mockInvokeFor({ sessionId: "s3" } as import("./ipc").SessionStarted);
     const { sendMessage } = await import("./ipc");
     await sendMessage("ws", "msg", [], vi.fn());
@@ -661,8 +623,7 @@ describe("getConfig", () => {
   it("calls invoke with get_config and returns AgentConfig", async () => {
     const fake: import("./ipc").AgentConfig = {
       baseUrl: "http://localhost",
-      brainModel: "gpt-4",
-      builderModel: "gpt-3.5",
+      model: "gpt-4",
       hasApiKey: true,
       maxContextTokens: 100000,
       compactThreshold: 1000,
@@ -703,32 +664,6 @@ describe("validateApiKey", () => {
 // ─────────────────────────────────────────────────────────────
 // setWorkspaceConfig
 // ─────────────────────────────────────────────────────────────
-
-describe("setWorkspaceConfig", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("calls invoke with set_workspace_config, workspaceRoot and planSavePath", async () => {
-    mockInvokeFor(undefined);
-    const { setWorkspaceConfig } = await import("./ipc");
-    await setWorkspaceConfig("/path/to/workspace", "/path/to/plans");
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith("set_workspace_config", {
-      workspaceRoot: "/path/to/workspace",
-      planSavePath: "/path/to/plans",
-    });
-  });
-
-  it("calls invoke with null planSavePath", async () => {
-    mockInvokeFor(undefined);
-    const { setWorkspaceConfig } = await import("./ipc");
-    await setWorkspaceConfig("/workspace", null);
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith("set_workspace_config", {
-      workspaceRoot: "/workspace",
-      planSavePath: null,
-    });
-  });
-});
 
 // ─────────────────────────────────────────────────────────────
 // Models
@@ -1414,44 +1349,23 @@ describe("commitAndPush", () => {
 // checkPlanExists
 // ─────────────────────────────────────────────────────────────
 
-describe("checkPlanExists", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("calls invoke with check_plan_exists and workspace, returns true", async () => {
-    mockInvokeFor(true);
-    const { checkPlanExists } = await import("./ipc");
-    const result = await checkPlanExists("/ws");
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith("check_plan_exists", { workspace: "/ws" });
-    expect(result).toBe(true);
-  });
-
-  it("returns false when no plan exists", async () => {
-    mockInvokeFor(false);
-    const { checkPlanExists } = await import("./ipc");
-    const result = await checkPlanExists("/ws");
-    expect(result).toBe(false);
-  });
-});
-
 // ─────────────────────────────────────────────────────────────
 // listPlans
 // ─────────────────────────────────────────────────────────────
 
-describe("listPlans", () => {
+describe("listDocuments", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("calls invoke with list_plans and workspace, returns PlanEntry[]", async () => {
-    const fake: import("./ipc").PlanEntry[] = [
-      { name: "plan1", path: "/ws/plans/plan1.json", modifiedAt: 1000 },
+  it("calls invoke with list_documents and workspace, returns DocumentEntry[]", async () => {
+    const fake: import("./ipc").DocumentEntry[] = [
+      { name: "doc1", path: "/ws/.claudinio/docs/doc1.md", modifiedAt: 1000 },
     ];
     mockInvokeFor(fake);
-    const { listPlans } = await import("./ipc");
-    const result = await listPlans("/ws");
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith("list_plans", { workspace: "/ws" });
+    const { listDocuments } = await import("./ipc");
+    const result = await listDocuments("/ws");
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("list_documents", { workspace: "/ws" });
     expect(result).toEqual(fake);
   });
 });
@@ -1496,8 +1410,7 @@ describe("getConfig with workspace", () => {
   it("passes workspace to invoke when provided", async () => {
     const fake: import("./ipc").AgentConfig = {
       baseUrl: "http://localhost",
-      brainModel: "gpt-4",
-      builderModel: "gpt-3.5",
+      model: "gpt-4",
       hasApiKey: true,
       maxContextTokens: 100000,
       compactThreshold: 1000,
@@ -1636,7 +1549,6 @@ describe("enhancePrompt", () => {
     const { enhancePrompt } = await import("./ipc");
     const context: import("./ipc").EnhancePromptContext = {
       messages: [{ role: "user", text: "hi" }],
-      mode: "brain",
       mentionedFiles: ["/a.ts"],
       activeTaskTitles: ["Fix bug"],
       projectSummary: "A cool project",

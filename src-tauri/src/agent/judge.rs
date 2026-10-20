@@ -250,7 +250,6 @@ mod tests {
 mod judge_backend_tests {
     use super::*;
     use crate::agent::provider::{AgentConfig, classify_turn_completion_metered};
-    use crate::agent::session::SessionMode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -428,7 +427,7 @@ mod judge_backend_tests {
             ..AgentConfig::default()
         };
         // Judge with the Brain model, exactly as the harness does.
-        let brain = cfg.model_for_mode(SessionMode::Brain.as_str()).to_string();
+        let brain = cfg.model().to_string();
         let (reply, _) = classify_turn_completion_metered(&cfg, &brain, &dangling)
             .await
             .expect("live judge call");

@@ -22,18 +22,14 @@ afterEach(() => {
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-async function mount(cfg: Partial<AgentConfig>, brain = "claudius", builder = "claudinio") {
+async function mount(cfg: Partial<AgentConfig>, initial = "claudinio") {
   vi.mocked(getConfig).mockResolvedValue(cfg as AgentConfig);
-  const [brainModel] = createSignal(brain);
-  const [builderModel, setBuilderModel] = createSignal(builder);
+  const [model, setModel] = createSignal(initial);
   host = document.createElement("div");
   document.body.appendChild(host);
-  dispose = render(
-    () => <SettingsToolSurface brainModel={brainModel} builderModel={builderModel} />,
-    host,
-  );
+  dispose = render(() => <SettingsToolSurface model={model} />, host);
   await flush();
-  return { el: host, setBuilderModel };
+  return { el: host, setModel };
 }
 
 const pressed = (el: HTMLElement, model: string) =>
@@ -41,20 +37,22 @@ const pressed = (el: HTMLElement, model: string) =>
     .querySelector(`[data-surface-row="${model}"] button[aria-pressed="true"]`)
     ?.getAttribute("data-surface");
 
+// One timeline: one model per session, so one row — the session's model,
+// for the main session and its subagents alike.
 describe("SettingsToolSurface", () => {
-  it("shows every model on the full catalog until one is set", async () => {
+  it("shows the session's model, on the full catalog until set", async () => {
     const { el } = await mount({});
-    expect(pressed(el, "claudius")).toBe("full");
+    expect(el.querySelectorAll("[data-surface-row]").length).toBe(1);
     expect(pressed(el, "claudinio")).toBe("full");
+    expect(el.textContent).not.toMatch(/Brain|Builder/);
   });
 
-  it("shows the surface saved for each model", async () => {
+  it("shows the surface saved for the model", async () => {
     const { el } = await mount({ toolSurface: { claudinio: "lean" } });
     expect(pressed(el, "claudinio")).toBe("lean");
-    expect(pressed(el, "claudius")).toBe("full");
   });
 
-  it("saves a choice for that model alone", async () => {
+  it("saves a choice for that model", async () => {
     const { el } = await mount({});
     el.querySelector<HTMLButtonElement>(
       '[data-surface-row="claudinio"] button[data-surface="lean"]',
@@ -64,29 +62,24 @@ describe("SettingsToolSurface", () => {
       toolSurface: { model: "claudinio", surface: "lean" },
     });
     expect(pressed(el, "claudinio")).toBe("lean");
-    expect(pressed(el, "claudius")).toBe("full");
   });
 
-  it("lists a model once when it plays both roles", async () => {
-    const { el } = await mount({}, "claudinio", "claudinio");
-    expect(el.querySelectorAll("[data-surface-row]").length).toBe(1);
-    expect(el.textContent).toContain("Brain and Builder");
+  it("follows the model picked above", async () => {
+    const { el, setModel } = await mount({});
+    setModel("claudius");
+    expect(el.querySelector('[data-surface-row="claudius"]')).not.toBeNull();
   });
 
-  it("says when the builder model runs the compact profile instead", async () => {
-    const { el, setBuilderModel } = await mount(
-      { builderProfile: "compact", builderModel: "local/qwen" },
-      "claudius",
-      "local/qwen",
-    );
+  it("says when the model runs the compact profile instead", async () => {
+    const { el, setModel } = await mount({ profile: "compact", model: "local/qwen" }, "local/qwen");
     expect(el.querySelector("[data-compact-note]")).not.toBeNull();
     // A model picked but not saved yet is not the one the note was computed for.
-    setBuilderModel("claudinio");
+    setModel("claudinio");
     expect(el.querySelector("[data-compact-note]")).toBeNull();
   });
 
   it("says nothing about compact for a model with room", async () => {
-    const { el } = await mount({ builderProfile: "standard", builderModel: "claudinio" });
+    const { el } = await mount({ profile: "standard", model: "claudinio" });
     expect(el.querySelector("[data-compact-note]")).toBeNull();
   });
 });

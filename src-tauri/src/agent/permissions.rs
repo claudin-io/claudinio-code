@@ -183,28 +183,9 @@ const BASH_ALLOWLIST: &[&str] = &[
     "date",
 ];
 
-/// Brain's allowlist, which plans and changes nothing: commands that only
-/// read and print. No test runner, build, package manager or interpreter —
-/// each runs code the model or a page it read can choose.
-const BRAIN_ALLOWLIST: &[&str] = &[
-    "git status",
-    "git diff",
-    "git log",
-    "git branch",
-    "git remote",
-    "ls",
-    "cat ",
-    "head ",
-    "tail ",
-    "wc ",
-    "which ",
-    "echo ",
-    "pwd",
-    "date",
-];
-
 /// What the eval runner approves with nobody watching (`bash_is_read_only`):
-/// Brain's list without the repository listings, `echo` and `date`.
+/// read-only commands from the allowlist, without the repository listings,
+/// `echo` and `date`.
 const READ_ONLY_PREFIXES: &[&str] = &[
     "git status",
     "git diff",
@@ -536,11 +517,6 @@ fn decide(
 #[cfg(test)]
 pub fn bash_permission(command: &str, auto_approve_git: bool) -> PermissionLevel {
     decide(command, false, BASH_ALLOWLIST, auto_approve_git)
-}
-
-/// Brain's permission for `command`: anything not Auto is refused there.
-pub fn bash_permission_brain(command: &str) -> PermissionLevel {
-    decide(command, false, BRAIN_ALLOWLIST, false)
 }
 
 /// Whether `command` only reads, for a caller that approves commands with
@@ -1392,9 +1368,10 @@ mod shell_rule_tests {
         "node --disable-warning ExperimentalWarning",
     ];
 
-    /// Found in Brain: a test runner or build given a folder, a plugin, a
-    /// program or a config runs or deletes what the model chose (recheck
-    /// round 3). Brain runs no runner, build or interpreter at all.
+    /// Found in Brain (recheck round 3): a test runner or build given a
+    /// folder, a plugin, a program or a config runs or deletes what the model
+    /// chose. Brain ran no runner at all; the session runs test runners as
+    /// it always did (`BUILDER_ONLY`).
     const FOUND_IN_BRAIN: &[&str] = &[
         "pytest --basetemp=src",
         "pytest -p evil",
@@ -1522,7 +1499,7 @@ mod shell_rule_tests {
     ];
 
     /// The read-only subset that must keep running unasked in Brain.
-    const EVERYDAY_BRAIN: &[&str] = &[
+    const EVERYDAY_READS: &[&str] = &[
         "git status",
         "git status --short",
         "git diff",
@@ -1599,27 +1576,12 @@ mod shell_rule_tests {
     }
 
     #[test]
-    fn brain_refuses_every_finding_and_every_builder_only_command_and_runs_the_read_only_corpus() {
-        for &c in FOUND_RUNNING_UNASKED
-            .iter()
-            .chain(FOUND_READING_STDIN)
-            .chain(FOUND_IN_BRAIN)
-            .chain(BUILDER_ONLY)
-        {
-            assert_eq!(
-                bash_permission_brain(c),
-                PermissionLevel::RequiresApproval,
-                "{c:?}"
-            );
-        }
-        for &c in FOUND_WRITING_THE_MEMORY {
-            assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
-        }
-        for &c in EVERYDAY_BRAIN {
-            assert_eq!(bash_permission_brain(c), PermissionLevel::Auto, "{c:?}");
-            // What Brain runs, Builder runs: the tool's own gate must not
-            // turn a Brain command into a prompt.
+    fn everyday_reads_run_without_asking_and_the_findings_never_do() {
+        for &c in EVERYDAY_READS {
             assert_eq!(builder(c, None), PermissionLevel::Auto, "{c:?}");
+        }
+        for &c in FOUND_RUNNING_UNASKED {
+            assert_ne!(builder(c, None), PermissionLevel::Auto, "{c:?}");
         }
     }
 
@@ -1635,7 +1597,6 @@ mod shell_rule_tests {
             "ls .claudinio",
         ] {
             assert_ne!(builder(c, None), PermissionLevel::Denied, "{c:?}");
-            assert_ne!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
         }
         assert_eq!(
             builder("cat .claudinio/MEMORY.md", None),
@@ -1669,23 +1630,14 @@ mod shell_rule_tests {
             "rm -rf .",
         ] {
             assert_eq!(builder(c, None), PermissionLevel::RequiresApproval, "{c:?}");
-            assert_eq!(
-                bash_permission_brain(c),
-                PermissionLevel::RequiresApproval,
-                "{c:?}"
-            );
         }
     }
 
-    /// Brain's allowlist only reads, and is part of Builder's; the eval's
-    /// read-only list is part of Brain's.
+    /// The eval's read-only list is part of the session's allowlist.
     #[test]
-    fn the_allowlists_nest_eval_inside_brain_inside_builder() {
-        for e in BRAIN_ALLOWLIST {
-            assert!(BASH_ALLOWLIST.contains(e), "{e:?}");
-        }
+    fn what_the_eval_approves_unwatched_the_session_runs_unasked() {
         for e in READ_ONLY_PREFIXES {
-            assert!(BRAIN_ALLOWLIST.contains(e), "{e:?}");
+            assert!(BASH_ALLOWLIST.contains(e), "{e:?}");
         }
     }
 
@@ -1938,11 +1890,9 @@ mod shell_rule_tests {
             .chain(DENIED_BEYOND_MAIN)
         {
             assert_eq!(builder(c, None), PermissionLevel::Denied, "{c:?}");
-            assert_eq!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
         }
         for &c in NOT_DENIED {
             assert_ne!(builder(c, None), PermissionLevel::Denied, "{c:?}");
-            assert_ne!(bash_permission_brain(c), PermissionLevel::Denied, "{c:?}");
         }
         for &c in ASKS_AS_ON_MAIN {
             assert_eq!(builder(c, None), PermissionLevel::RequiresApproval, "{c:?}");
@@ -1981,7 +1931,7 @@ mod shell_rule_tests {
             .chain(FOUND_IN_BRAIN)
             .chain(FOUND_WRITING_THE_MEMORY)
             .chain(EVERYDAY_BUILDER)
-            .chain(EVERYDAY_BRAIN)
+            .chain(EVERYDAY_READS)
             .chain(BUILDER_ONLY);
         let mut checked = 0;
         for &c in everything {

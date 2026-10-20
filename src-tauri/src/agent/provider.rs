@@ -124,16 +124,10 @@ impl ResolvedProvider {
 pub struct AgentConfig {
     pub base_url: String,
     pub api_key: String,
-    /// Legacy single model field — kept for backward compat with old config.json.
-    /// New configs use brain_model + builder_model.
-    #[serde(default)]
-    pub model: String,
-    /// Model used in Brain (planning) mode.
-    #[serde(default = "default_claudius")]
-    pub brain_model: String,
-    /// Model used in Builder (execution) mode.
+    /// The model a session runs on — main session, subagents and the
+    /// completion judge alike (single-timeline plan, decision S1).
     #[serde(default = "default_claudinio")]
-    pub builder_model: String,
+    pub model: String,
     /// Max tool-call rounds for the main agent loop. None = infinite.
     pub max_rounds: Option<usize>,
     /// Max tool-call rounds for subagents. None = infinite.
@@ -163,10 +157,6 @@ pub struct AgentConfig {
     /// stops with "golden_stalled". None falls back to the default (2).
     #[serde(default)]
     pub max_golden_stalls: Option<usize>,
-    /// Custom path for saving plans, relative to workspace root.
-    /// None = use default (.claudinio/plans).
-    #[serde(default)]
-    pub plan_save_path: Option<String>,
     /// Opaque per-device id (salted SHA-256 of the OS install GUID), sent at
     /// login to gate the once-per-device app-install promo. Cached here so it's
     /// stable across runs. See `agent::install_id`.
@@ -236,10 +226,6 @@ pub struct AgentConfig {
     /// (120k). Clamped to 120k-256k (the Settings slider range).
     #[serde(default)]
     pub handoff_context_tokens: Option<u64>,
-    /// When true, automatically `git add` + `git commit` the plan file after the
-    /// final write_plan call (with Low-Level Design) or when exiting Brain mode.
-    #[serde(default = "default_true")]
-    pub auto_commit_plan: bool,
     /// Thinking effort level: "low" | "medium" | "high" | "xhigh" | "max".
     /// Mapped to an Anthropic `thinking.budget_tokens` value on each
     /// stream_message request; the claudin_router buckets it upstream.
@@ -260,10 +246,6 @@ pub struct AgentConfig {
     /// full catalog — see `crate::agent::surface`.
     #[serde(default)]
     pub tool_surface: std::collections::HashMap<String, String>,
-    /// Which Standard prompt sessions are sent: v2 (default) or v1, the
-    /// pre-Phase-5 prompt kept for one release — see `agent::prompt`.
-    #[serde(default)]
-    pub prompt_version: crate::agent::prompt::PromptVersion,
     /// The first run of a new session reads the workspace's AGENTS.md or
     /// CLAUDE.md and `.claudinio/MEMORY.md` — see `agent::project_memory`.
     #[serde(default = "default_true")]
@@ -534,10 +516,6 @@ fn default_claudinio() -> String {
     "claudinio".into()
 }
 
-fn default_claudius() -> String {
-    "claudius".into()
-}
-
 fn default_services_url() -> String {
     "https://claudin.io".into()
 }
@@ -551,8 +529,6 @@ impl Default for AgentConfig {
             hooks: None,
             hooks_enabled: true,
             model: "claudinio".into(),
-            brain_model: "claudius".into(),
-            builder_model: "claudinio".into(),
             max_rounds: None,
             sub_max_rounds: None,
             yolo_mode: false,
@@ -562,7 +538,6 @@ impl Default for AgentConfig {
             account_tier: None,
             max_golden_cycles: None,
             max_golden_stalls: None,
-            plan_save_path: None,
             install_id: None,
             install_fallback_seed: None,
             max_parallel_agents: None,
@@ -574,25 +549,20 @@ impl Default for AgentConfig {
             code_intel_enabled: true,
             preferred_ide: None,
             handoff_context_tokens: None,
-            auto_commit_plan: true,
             thinking_effort: default_thinking_effort(),
             providers: std::collections::HashMap::new(),
             jev: crate::agent::jev::JevPrefs::default(),
             local: crate::llama::LocalPrefs::default(),
             tool_surface: std::collections::HashMap::new(),
-            prompt_version: Default::default(),
             project_memory: true,
         }
     }
 }
 
 impl AgentConfig {
-    /// Resolve which model to use for a given session mode.
-    pub fn model_for_mode(&self, mode: &str) -> &str {
-        match mode {
-            "brain" | "pensador" => &self.brain_model,
-            _ => &self.builder_model,
-        }
+    /// The session's model.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     /// Anthropic `thinking.budget_tokens` for the configured effort level.
@@ -723,8 +693,7 @@ pub fn config_path() -> Result<std::path::PathBuf, String> {
     Ok(dir.join("config.json"))
 }
 
-/// Load AgentConfig from the config file, migrating old configs that only have
-/// a single `model` field to the new `brain_model` + `builder_model`.
+/// Load AgentConfig from the config file, migrated by [`from_saved`].
 pub fn load_config() -> AgentConfig {
     let path = match config_path() {
         Ok(p) => p,
@@ -734,28 +703,27 @@ pub fn load_config() -> AgentConfig {
         Ok(s) => s,
         Err(_) => return AgentConfig::default(),
     };
-    let mut cfg: serde_json::Value = match serde_json::from_str(&s) {
+    let cfg: serde_json::Value = match serde_json::from_str(&s) {
         Ok(v) => v,
         Err(_) => return AgentConfig::default(),
     };
-    // Migration: if the old `model` field exists but `brain_model`/`builder_model`
-    // don't, seed both from `model`.
-    if cfg.get("brain_model").is_none() || cfg.get("builder_model").is_none() {
-        let legacy = cfg
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("claudinio")
-            .to_string();
-        if cfg.get("brain_model").is_none() {
-            cfg["brain_model"] = serde_json::json!(legacy);
-        }
-        if cfg.get("builder_model").is_none() {
-            cfg["builder_model"] = serde_json::json!(legacy);
-        }
-    }
-    let mut cfg: AgentConfig = serde_json::from_value(cfg).unwrap_or_default();
+    let mut cfg = from_saved(cfg);
     backfill_context_limits(&mut cfg, catalog::cached_context_limits);
     cfg
+}
+
+/// A saved config.json, migrated to the current fields.
+pub fn from_saved(mut cfg: serde_json::Value) -> AgentConfig {
+    // Brain/Builder had a model each; the one that did the work, Builder's,
+    // is the session's model now.
+    if let Some(builder) = cfg
+        .get("builder_model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        cfg["model"] = serde_json::json!(builder);
+    }
+    serde_json::from_value(cfg).unwrap_or_default()
 }
 
 pub fn save_config(config: &AgentConfig) {
@@ -790,7 +758,7 @@ pub fn read_workspace_config(workspace_root: &str) -> Option<Value> {
 
 /// Merge workspace config values into an AgentConfig.
 /// Workspace values OVERRIDE the local config for these fields ONLY:
-/// plan_save_path, brain_model, builder_model, max_rounds, sub_max_rounds,
+/// model, max_rounds, sub_max_rounds,
 /// yolo_mode, yolo_blacklist, max_parallel_agents.
 /// Fields like api_key, base_url, account_*, max_golden_*, services_url
 /// are NEVER read from workspace config.
@@ -799,18 +767,14 @@ pub fn merge_workspace_config(cfg: &mut AgentConfig, ws: &Value) {
         Some(o) => o,
         None => return,
     };
-    if let Some(v) = obj.get("plan_save_path") {
-        if v.is_null() {
-            cfg.plan_save_path = None;
-        } else if let Some(s) = v.as_str() {
-            cfg.plan_save_path = Some(s.to_string());
-        }
-    }
-    if let Some(v) = obj.get("brain_model").and_then(|v| v.as_str()) {
-        cfg.brain_model = v.to_string();
-    }
-    if let Some(v) = obj.get("builder_model").and_then(|v| v.as_str()) {
-        cfg.builder_model = v.to_string();
+    // `builder_model` is the name a workspace config written before one
+    // timeline uses for the same thing.
+    if let Some(v) = obj
+        .get("model")
+        .or_else(|| obj.get("builder_model"))
+        .and_then(|v| v.as_str())
+    {
+        cfg.model = v.to_string();
     }
     if let Some(v) = obj.get("max_rounds") {
         cfg.max_rounds = v.as_u64().map(|n| n as usize);
@@ -2029,6 +1993,26 @@ mod tests {
         let cfg: AgentConfig = serde_json::from_str(r#"{"base_url":"x","api_key":"","model":"m"}"#)
             .expect("config without thinking_effort must deserialize");
         assert_eq!(cfg.thinking_effort, "medium");
+    }
+
+    /// One model per session (single-timeline plan, decision S1): the
+    /// model that did the work — the old Builder model — is the session's
+    /// model; the old Brain model is dropped.
+    #[test]
+    fn the_session_model_is_the_old_builder_model() {
+        let cfg = from_saved(serde_json::json!({
+            "base_url": "x", "api_key": "y", "max_rounds": null, "sub_max_rounds": null,
+            "model": "claudinio", "brain_model": "claudius", "builder_model": "deepseek-flash"
+        }));
+        assert_eq!(cfg.model, "deepseek-flash");
+        // A config from before Brain/Builder keeps its one model.
+        let cfg = from_saved(serde_json::json!({
+            "base_url": "x", "api_key": "y", "max_rounds": null, "sub_max_rounds": null,
+            "model": "mimo"
+        }));
+        assert_eq!(cfg.model, "mimo");
+        // And a new one starts on claudinio.
+        assert_eq!(AgentConfig::default().model, "claudinio");
     }
 
     #[test]

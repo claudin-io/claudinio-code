@@ -611,7 +611,7 @@ pub(crate) async fn run_subagent_recorded(
         None => String::new(),
     };
     let system = crate::agent::surface::prompt_for(
-        config.tool_surface_for(&config.builder_model),
+        config.tool_surface_for(config.model()),
         subagent_system_prompt(
             ctx.workspace_root.as_deref(),
             &skills_hint,
@@ -623,11 +623,8 @@ pub(crate) async fn run_subagent_recorded(
     // it gets a budget — and result caps — of its own rather than the
     // parent's: a Brain on a 200k model can spawn workers on a 32k one.
     let prefix_tokens = session::estimate_tokens(&[], &system, &tools);
-    let budget = crate::agent::budget::ContextBudget::for_model(
-        config,
-        &config.builder_model,
-        prefix_tokens,
-    );
+    let budget =
+        crate::agent::budget::ContextBudget::for_model(config, config.model(), prefix_tokens);
     let limits = crate::agent::budget::RunLimits::for_budget(&budget);
     let ctx = &ToolContext {
         limits: Arc::new(limits),
@@ -723,7 +720,7 @@ pub(crate) async fn run_subagent_recorded(
         let mut assistant_text = String::new();
         let stream_output = match provider::stream_message(
             config,
-            &config.builder_model,
+            config.model(),
             &history,
             &tools,
             Some(system.as_str()),
@@ -760,7 +757,7 @@ pub(crate) async fn run_subagent_recorded(
         }
         rounds += 1;
         if let Some(t) = transcript {
-            t.usage(rounds, &config.builder_model, stream_output.usage.as_ref());
+            t.usage(rounds, config.model(), stream_output.usage.as_ref());
         }
 
         if stream_output.interrupted {
@@ -775,8 +772,7 @@ pub(crate) async fn run_subagent_recorded(
                 });
             }
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
-                let est =
-                    session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
+                let est = session::cost_breakdown_for(config.model(), total_in, 0, total_out);
                 est.input + est.output
             } else {
                 total_cost
@@ -843,8 +839,7 @@ pub(crate) async fn run_subagent_recorded(
             }
 
             let final_cost = if total_cost == 0.0 && (total_in > 0 || total_out > 0) {
-                let est =
-                    session::cost_breakdown_for(&config.builder_model, total_in, 0, total_out);
+                let est = session::cost_breakdown_for(config.model(), total_in, 0, total_out);
                 est.input + est.output
             } else {
                 total_cost
@@ -1371,13 +1366,9 @@ mod tests {
         };
         let default = AgentConfig::default();
         let mut configs = Vec::new();
-        for (on_brain, surface) in [(false, "full"), (false, "lean"), (true, "lean")] {
+        for surface in ["full", "lean"] {
             let mut config = AgentConfig::default();
-            let model = if on_brain {
-                config.brain_model.clone()
-            } else {
-                config.builder_model.clone()
-            };
+            let model = config.model.clone();
             config.tool_surface.insert(model, surface.into());
             configs.push(config);
         }
@@ -1588,9 +1579,8 @@ pub(crate) mod scripted_model {
         config: &crate::agent::provider::AgentConfig,
         base: &str,
     ) {
-        for model in [&config.builder_model, &config.brain_model] {
-            assert_eq!(config.resolve_provider(model).base_url, base, "{model}");
-        }
+        let model = config.model();
+        assert_eq!(config.resolve_provider(model).base_url, base, "{model}");
     }
 
     fn sse(event: &str, data: Value) -> String {
@@ -1809,8 +1799,7 @@ mod context_budget_tests {
     /// treated before windows were tracked.
     fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
-            builder_model: "stub/m".into(),
-            brain_model: "stub/m".into(),
+            model: "stub/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -2186,8 +2175,7 @@ mod transcript_tests {
 
     fn config_for(base_url: &str) -> AgentConfig {
         let mut config = AgentConfig {
-            builder_model: "stub/m".into(),
-            brain_model: "stub/m".into(),
+            model: "stub/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -2688,8 +2676,7 @@ mod delegation_tests {
 
     fn config_for(base_url: &str) -> AgentConfig {
         let mut config = AgentConfig {
-            builder_model: "stub/m".into(),
-            brain_model: "stub/m".into(),
+            model: "stub/m".into(),
             ..AgentConfig::default()
         };
         config.providers.insert(
@@ -3028,14 +3015,20 @@ mod delegation_tests {
             }],
         )
         .unwrap();
-        let plans = ws.join(".claudinio").join("plans");
-        std::fs::create_dir_all(&plans).unwrap();
-        std::fs::write(plans.join("greeting.md"), "# Plan\n").unwrap();
         let ctx = ToolContext {
             workspace_root: Some(ws_str.clone()),
             session_store_path: Some(store.path.to_string_lossy().to_string()),
             ..crate::agent::tools::tests_support::ctx()
         };
+        // The session's document is its plan: the brief points at it.
+        let (rel, _) = crate::agent::doc_session::create(
+            &ws,
+            Some(&store.path),
+            "Greeting",
+            &["what to say".to_string()],
+        )
+        .unwrap();
+        crate::agent::doc_session::link(&store, &ctx.records_cache, &rel);
         {
             let mut tracker = ctx.read_tracker.lock().await;
             tracker.record_read(&format!("{ws_str}/src/b.rs"), None, None, "fn b() {}");
@@ -3067,7 +3060,7 @@ mod delegation_tests {
         assert!(!explore.contains("<brief>"), "{explore}");
         assert!(code.contains("<brief>"), "{code}");
         assert!(code.contains("Rename the greeting"), "{code}");
-        assert!(code.contains(".claudinio/plans/greeting.md"), "{code}");
+        assert!(code.contains(".claudinio/docs/greeting.md"), "{code}");
         let (a, b) = (
             code.find("- src/a.rs").expect("a read path"),
             code.find("- src/b.rs").expect("a read path"),

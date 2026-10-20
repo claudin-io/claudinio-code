@@ -23,7 +23,6 @@ mod swebench;
 mod task;
 mod validate;
 
-use crate::agent::prompt::PromptVersion;
 use metrics::{Prices, cache_read_share, median};
 use runner::{RunOptions, TaskResult};
 use serde::Serialize;
@@ -42,11 +41,10 @@ usage: claudinio-eval <command> ...
       [--protocol anthropic|openai] [--tasks id,id] [--out results.jsonl]
       [--max-rounds N] [--context-window TOKENS] [--task-timeout-s SECS]
       [--price-in USD --price-out USD [--price-cache-read USD] [--price-cache-write USD]]
-      [--jev-api-key-env ENV] [--work-dir DIR] [--prompt-version v1|v2]
-      One fresh Builder session per task against the given provider, then the
+      [--jev-api-key-env ENV] [--work-dir DIR]
+      One fresh session per task against the given provider, then the
       oracle. Prices are USD per million tokens, used only for requests whose
-      provider reports no cost. --prompt-version picks the Standard system
-      prompt (default v2); each result line records it.
+      provider reports no cost.
 
   import-swebench <instances.jsonl> <out-dir> [--test-cmd-template 'python -m pytest {tests}']
       Convert SWE-bench instance records into task files.
@@ -142,16 +140,6 @@ impl Args {
                 .filter(|s| !s.is_empty())
                 .collect()
         })
-    }
-
-    /// `--prompt-version v1|v2`; v2 when absent.
-    fn prompt_version(&self) -> Result<PromptVersion, String> {
-        match self.flag("prompt-version") {
-            None => Ok(PromptVersion::default()),
-            Some("v1") => Ok(PromptVersion::V1),
-            Some("v2") => Ok(PromptVersion::V2),
-            Some(other) => Err(format!("--prompt-version must be v1 or v2, not {other}")),
-        }
     }
 
     /// `--work-dir`, or a fresh temporary directory (kept by `run`, and by a
@@ -263,7 +251,6 @@ async fn cmd_run(args: &Args) -> Result<i32, String> {
         jev_api_key,
         work_root: work.path.clone(),
         task_timeout: Duration::from_secs(args.number("task-timeout-s")?.unwrap_or(3_600)),
-        prompt_version: args.prompt_version()?,
     };
     let out = results_path(args, &work);
     eprintln!(
@@ -473,7 +460,6 @@ mod tests {
             wall_s: 1.0,
             oracle_exit: Some(0),
             oracle_tail: String::new(),
-            prompt_version: PromptVersion::default(),
             metrics: RunMetrics {
                 rounds,
                 input_tokens: 100,
@@ -644,24 +630,5 @@ mod tests {
         assert_eq!(a.number::<usize>("max-rounds").unwrap(), Some(7));
         assert!(a.number::<usize>("context-window").unwrap().is_none());
         assert!(Args::parse(&["--model".to_string()]).is_err());
-    }
-
-    /// A typo must not silently measure v2 under a v1 label: unlike the
-    /// config file's lenient reader, the flag accepts exactly v1 or v2.
-    #[test]
-    fn the_prompt_version_flag_selects_v1_or_v2_and_rejects_anything_else() {
-        assert_eq!(argv(&[]).prompt_version().unwrap(), PromptVersion::V2);
-        assert_eq!(
-            argv(&["--prompt-version", "v1"]).prompt_version().unwrap(),
-            PromptVersion::V1
-        );
-        assert_eq!(
-            argv(&["--prompt-version", "v2"]).prompt_version().unwrap(),
-            PromptVersion::V2
-        );
-        let err = argv(&["--prompt-version", "1"])
-            .prompt_version()
-            .unwrap_err();
-        assert!(err.contains("v1 or v2"), "{err}");
     }
 }

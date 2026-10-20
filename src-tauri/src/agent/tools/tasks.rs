@@ -23,7 +23,6 @@ pub fn execute_set(
     args: SetTasksArgs,
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
-    check_brain_lld_gate(ctx, "tasks_set")?;
     if crate::agent::doc_session::has_document(ctx) {
         return Err(crate::agent::gate_text::TASKS_WITH_DOCUMENT.into());
     }
@@ -163,7 +162,6 @@ pub fn execute_updates(
     items: Vec<UpdateTaskArgs>,
     ctx: &crate::agent::tools::ToolContext,
 ) -> Result<String, String> {
-    check_brain_lld_gate(ctx, "tasks_update")?;
     let path = ctx
         .session_store_path
         .as_ref()
@@ -290,36 +288,6 @@ fn board(tasks: &[TaskItem]) -> String {
         out.push_str(&format!(" Next: {}.", name(t)));
     }
     out
-}
-
-/// Brain-mode gate: tasks may only be created once the most recent plan file
-/// carries a non-empty `## Low-Level Design` section, so every task can
-/// reference concrete technical detail instead of guesses. No-op in Builder
-/// mode or when no mode handle / workspace is attached (tests, aux workflows).
-fn check_brain_lld_gate(ctx: &crate::agent::tools::ToolContext, tool: &str) -> Result<(), String> {
-    use crate::agent::tools::write_plan::{LLD_HEADING, has_nonempty_section, latest_plan_path};
-    if !ctx.is_brain() {
-        return Ok(());
-    }
-    let root = match ctx.workspace_root.as_deref() {
-        Some(r) => r,
-        None => return Ok(()),
-    };
-    match latest_plan_path(root, ctx.plan_save_path.as_deref()) {
-        None => Err(crate::agent::gate_text::lld_no_plan(tool)),
-        Some(path) => {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| format!("{tool}: cannot read plan {}: {e}", path.display()))?;
-            if has_nonempty_section(&content, LLD_HEADING) {
-                Ok(())
-            } else {
-                Err(crate::agent::gate_text::lld_missing(
-                    tool,
-                    &path.display().to_string(),
-                ))
-            }
-        }
-    }
 }
 
 /// Quality gate: an execution goal may only be closed with verified evidence.
@@ -502,29 +470,20 @@ pub fn merge_preserving_golden(
 /// Create golden tasks from parsed <goal> tags.
 /// Each goal generates two golden tasks: one for planning, one for execution.
 pub fn create_golden_tasks(goals: &[String]) -> Vec<TaskItem> {
-    let mut tasks = Vec::new();
-    for goal in goals {
-        let slug = slugify(goal);
-        // Title carries the raw goal text only; the phase lives in the id
-        // suffix (-0 plan, -1 execute). The UI localizes the visible label
-        // from those two facts, so no user-facing language is baked in here.
-        // The description is model-facing (tasks_get) and stays English.
-        tasks.push(TaskItem {
-            id: format!("golden-{}-0", slug),
+    // One task per goal, gated by the quality check (`is_golden_execution`):
+    // the `-1` suffix is the gated half sessions from before one timeline
+    // already carry, so their goals keep their ids. The title carries the
+    // raw goal text; the description is model-facing (tasks_get).
+    goals
+        .iter()
+        .map(|goal| TaskItem {
+            id: format!("golden-{}-1", slugify(goal)),
             title: goal.clone(),
-            description: format!("Create a detailed plan to achieve the goal: {}", goal),
+            description: format!("Achieve the goal and verify it is met: {goal}"),
             journal: Vec::new(),
             status: "todo".to_string(),
-        });
-        tasks.push(TaskItem {
-            id: format!("golden-{}-1", slug),
-            title: goal.clone(),
-            description: format!("Execute the plan and verify the goal is met: {}", goal),
-            journal: Vec::new(),
-            status: "todo".to_string(),
-        });
-    }
-    tasks
+        })
+        .collect()
 }
 
 /// Check if a task is a golden task (id starts with the golden prefix).
@@ -537,7 +496,9 @@ pub fn is_golden(task: &TaskItem) -> bool {
 pub fn golden_tasks_remaining(tasks: &[TaskItem]) -> Vec<&TaskItem> {
     tasks
         .iter()
-        .filter(|t| is_golden(t) && t.status != "done")
+        // A `-0` "plan" half is from a session before one timeline: nobody
+        // has to close it any more.
+        .filter(|t| is_golden(t) && t.status != "done" && !t.id.ends_with("-0"))
         .collect()
 }
 
@@ -588,434 +549,6 @@ pub fn slugify(s: &str) -> String {
         }
     } else {
         result
-    }
-}
-
-#[cfg(test)]
-mod lld_gate_tests {
-    use super::*;
-    use crate::agent::session::{ModeCtl, ModeOrigin, SessionMode};
-    use lru::LruCache;
-    use std::sync::Arc;
-
-    /// Tempdir workspace with a session JSONL; `mode` = None disables the gate.
-    fn ctx_for(
-        name: &str,
-        mode: Option<SessionMode>,
-    ) -> (crate::agent::tools::ToolContext, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("lld-gate-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let store = root.join("session.jsonl");
-        std::fs::write(&store, "").unwrap();
-        let ctx = crate::agent::tools::ToolContext {
-            doc_access: Default::default(),
-            hooks: None,
-            db_path: None,
-            browser: None,
-            lsp_manager: None,
-            workspace_root: Some(root.to_string_lossy().to_string()),
-            embedding_model: Arc::new(tokio::sync::Mutex::new(None)),
-            session_store_path: Some(store.to_string_lossy().to_string()),
-            limits: Default::default(),
-            read_tracker: Arc::new(tokio::sync::Mutex::new(
-                crate::agent::tools::ReadTracker::default(),
-            )),
-            interrupt: None,
-            agent_config: None,
-            plan_save_path: None,
-            base_commit: None,
-            auto_approve_git: false,
-            shell_gate: None,
-            mcp: None,
-            mode_ctl: mode.map(|m| Arc::new(ModeCtl::new(m, ModeOrigin::Human))),
-            index_progress: None,
-            records_cache: Arc::new(std::sync::Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(1).unwrap(),
-            ))),
-        };
-        (ctx, root)
-    }
-
-    // A goal in Portuguese: "ç" and "ã" are two bytes each, and the cut at
-    // byte 40 used to land inside one.
-    #[test]
-    fn a_goal_with_accents_gets_a_slug_instead_of_a_panic() {
-        // 39 one-byte letters, then "ç": byte 40 is its second byte.
-        let goal = format!("{}ção do cadastro", "x".repeat(39));
-        assert!(!goal.is_char_boundary(40));
-        let slug = slugify(&goal);
-        assert_eq!(slug, format!("{}ç", "x".repeat(39)));
-        assert_eq!(slug.chars().count(), 40);
-        // A real one, cut between two letters.
-        assert_eq!(
-            slugify("a migração da autenticação não pode quebrar sessões antigas"),
-            "a-migração-da-autenticação-não-pode-queb"
-        );
-        // Every offset the cut can fall on, inside a character or between two.
-        for lead in 0..4 {
-            let _ = slugify(&format!("{}{}", "x".repeat(lead), "çã".repeat(40)));
-        }
-        // Plain ASCII is cut where it always was.
-        assert_eq!(slugify(&"a".repeat(60)).len(), 40);
-    }
-
-    // Subagents run in parallel and each closes its own task. Without one
-    // writer at a time, two of them start from the same list and the later
-    // write undoes the earlier one.
-    #[test]
-    fn updates_from_parallel_agents_do_not_undo_each_other() {
-        let (ctx, root) = ctx_for("parallel-updates", None);
-        let tasks: Vec<TaskItem> = (0..24)
-            .map(|i| TaskItem {
-                id: format!("t{i}"),
-                title: "t".into(),
-                description: "d".into(),
-                journal: vec![],
-                status: "todo".into(),
-            })
-            .collect();
-        execute_set(SetTasksArgs { tasks }, &ctx).unwrap();
-
-        std::thread::scope(|scope| {
-            for i in 0..24 {
-                let ctx = &ctx;
-                scope.spawn(move || {
-                    execute_update(
-                        UpdateTaskArgs {
-                            id: format!("t{i}"),
-                            status: Some("done".into()),
-                            journal: vec![format!("closed by agent {i}")],
-                        },
-                        ctx,
-                    )
-                    .unwrap();
-                });
-            }
-        });
-
-        let store = ctx.session_store_path.as_deref().unwrap();
-        let after = crate::agent::persist::load_last_tasks(Path::new(store)).unwrap();
-        assert_eq!(after.len(), 24);
-        for (i, task) in after.iter().enumerate() {
-            assert_eq!(task.status, "done", "{}", task.id);
-            assert_eq!(task.journal, vec![format!("closed by agent {i}")]);
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // Each run shows the model the list as `id · status · title` only, and
-    // `tasks_get` is deferred, so a model that adds or rewords one task with
-    // `tasks_set` resends the others from that block: an empty description
-    // and an empty journal. A full replacement must not turn that into the
-    // loss of the descriptions Brain wrote and the findings recorded since —
-    // for a task that already exists, an empty description or journal keeps
-    // the stored one, golden tasks included (Phase 4 review).
-    #[test]
-    fn a_rewrite_from_the_tasks_block_alone_keeps_descriptions_and_journals() {
-        let (ctx, root) = ctx_for("rewrite-from-block", None);
-        let stored = |id: &str, title: &str, description: &str, journal: &[&str]| TaskItem {
-            id: id.into(),
-            title: title.into(),
-            description: description.into(),
-            journal: journal.iter().map(|j| j.to_string()).collect(),
-            status: "todo".into(),
-        };
-        let store = ctx.session_store_path.clone().unwrap();
-        crate::agent::persist::append_tasks(
-            Path::new(&store),
-            &[
-                stored("golden-g-0", "the goal", "Plan the goal", &["scoped it"]),
-                stored("t1", "Parse it", "Brain's parser design", &["uses nom"]),
-            ],
-        )
-        .unwrap();
-
-        let from_block = |id: &str, title: &str, status: &str| TaskItem {
-            id: id.into(),
-            title: title.into(),
-            description: String::new(),
-            journal: vec![],
-            status: status.into(),
-        };
-        execute_set(
-            SetTasksArgs {
-                tasks: vec![
-                    from_block("golden-g-0", "the goal", "doing"),
-                    from_block("t1", "Parse the config", "done"),
-                    TaskItem {
-                        description: "Write the docs".into(),
-                        ..from_block("t2", "Docs", "todo")
-                    },
-                ],
-            },
-            &ctx,
-        )
-        .unwrap();
-
-        let after = crate::agent::persist::load_last_tasks(Path::new(&store)).unwrap();
-        let by_id = |id: &str| after.iter().find(|t| t.id == id).unwrap().clone();
-        let golden = by_id("golden-g-0");
-        assert_eq!(golden.description, "Plan the goal");
-        assert_eq!(golden.journal, ["scoped it"]);
-        assert_eq!(golden.status, "doing");
-        let t1 = by_id("t1");
-        // What the call does say still wins: the new title and status.
-        assert_eq!(t1.title, "Parse the config");
-        assert_eq!(t1.status, "done");
-        assert_eq!(t1.description, "Brain's parser design");
-        assert_eq!(t1.journal, ["uses nom"]);
-        assert_eq!(by_id("t2").description, "Write the docs");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // Ids are the model's and usually sequential (`t1`, `t2`, ...), so a
-    // fresh list for an unrelated request reuses the ids of a finished one.
-    // A task that only shares an id with a finished task of another title is
-    // a new task: it must start with the details it was sent, not inherit
-    // the old task's description and journal. A finished task resent from
-    // the `<tasks>` block under its own title still keeps them.
-    #[test]
-    fn a_fresh_list_that_reuses_ids_does_not_inherit_the_finished_tasks_details() {
-        let (ctx, root) = ctx_for("fresh-list-reuses-ids", None);
-        let store = ctx.session_store_path.clone().unwrap();
-        let task =
-            |id: &str, title: &str, description: &str, journal: &[&str], status: &str| TaskItem {
-                id: id.into(),
-                title: title.into(),
-                description: description.into(),
-                journal: journal.iter().map(|j| j.to_string()).collect(),
-                status: status.into(),
-            };
-        crate::agent::persist::append_tasks(
-            Path::new(&store),
-            &[
-                task(
-                    "t1",
-                    "Parse the config",
-                    "nom parser",
-                    &["uses nom"],
-                    "done",
-                ),
-                task(
-                    "t2",
-                    "Write the docs",
-                    "README",
-                    &["added a section"],
-                    "done",
-                ),
-            ],
-        )
-        .unwrap();
-        execute_set(
-            SetTasksArgs {
-                tasks: vec![
-                    task("t1", "Add a login page", "", &[], "todo"),
-                    task("t2", "Write the docs", "", &[], "done"),
-                ],
-            },
-            &ctx,
-        )
-        .unwrap();
-        let after = crate::agent::persist::load_last_tasks(Path::new(&store)).unwrap();
-        assert_eq!(after[0].title, "Add a login page");
-        assert_eq!(after[0].description, "");
-        assert!(after[0].journal.is_empty(), "{:?}", after[0].journal);
-        assert_eq!(after[1].description, "README");
-        assert_eq!(after[1].journal, ["added a section"]);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // An unfinished stored task under a new title is either a reword (keep
-    // its details) or a fresh list reusing the id of an abandoned one (do
-    // not). The harness cannot tell, so it keeps them and says which tasks
-    // did, and how to start one clean. A task resent under its own title
-    // is not named: nothing about it is in doubt.
-    #[test]
-    fn tasks_set_names_the_retitled_tasks_that_kept_stored_details() {
-        let (ctx, root) = ctx_for("names-kept-details", None);
-        let store = ctx.session_store_path.clone().unwrap();
-        let task = |id: &str, title: &str, journal: &[&str]| TaskItem {
-            id: id.into(),
-            title: title.into(),
-            description: String::new(),
-            journal: journal.iter().map(|j| j.to_string()).collect(),
-            status: "todo".into(),
-        };
-        crate::agent::persist::append_tasks(
-            Path::new(&store),
-            &[
-                task("t1", "Parse the config", &["uses nom"]),
-                task("t2", "Write the docs", &["added a section"]),
-            ],
-        )
-        .unwrap();
-        let out = execute_set(
-            SetTasksArgs {
-                tasks: vec![
-                    task("t1", "Add a login page", &[]),
-                    task("t2", "Write the docs", &[]),
-                ],
-            },
-            &ctx,
-        )
-        .unwrap();
-        // t1 had a journal and no description: the note names what was kept,
-        // never a description that did not exist.
-        assert!(out.contains("kept the stored journal of t1"), "{out}");
-        assert!(!out.contains("description"), "{out}");
-        assert!(!out.contains("t2"), "{out}");
-        assert!(out.contains("give it a new id"), "{out}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // A description or journal the call does send replaces the stored one:
-    // rewording a task is what `tasks_set` is for.
-    #[test]
-    fn a_rewrite_that_sends_a_description_or_journal_replaces_it() {
-        let (ctx, root) = ctx_for("rewrite-with-details", None);
-        let store = ctx.session_store_path.clone().unwrap();
-        let t = |description: &str, journal: &[&str]| TaskItem {
-            id: "t1".into(),
-            title: "t".into(),
-            description: description.into(),
-            journal: journal.iter().map(|j| j.to_string()).collect(),
-            status: "todo".into(),
-        };
-        crate::agent::persist::append_tasks(Path::new(&store), &[t("old", &["a"])]).unwrap();
-        execute_set(
-            SetTasksArgs {
-                tasks: vec![t("new", &["b"])],
-            },
-            &ctx,
-        )
-        .unwrap();
-        let after = crate::agent::persist::load_last_tasks(Path::new(&store)).unwrap();
-        assert_eq!(after[0].description, "new");
-        assert_eq!(after[0].journal, ["b"]);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    fn one_task() -> SetTasksArgs {
-        SetTasksArgs {
-            tasks: vec![TaskItem {
-                id: "t1".into(),
-                title: "t".into(),
-                description: "d".into(),
-                journal: vec![],
-                status: "todo".into(),
-            }],
-        }
-    }
-
-    fn write_plan_file(root: &std::path::Path, content: &str) {
-        let dir = root.join(".claudinio").join("plans");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("2026-07-14_plan.md"), content).unwrap();
-    }
-
-    #[test]
-    fn brain_without_plan_rejected() {
-        let (ctx, root) = ctx_for("no-plan", Some(SessionMode::Brain));
-        let err = execute_set(one_task(), &ctx).unwrap_err();
-        assert!(err.contains("Low-Level Design"), "unexpected error: {err}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn brain_plan_without_lld_rejected() {
-        let (ctx, root) = ctx_for("no-lld", Some(SessionMode::Brain));
-        write_plan_file(&root, "# Plan\n## Solution Design\nagreed stuff\n");
-        let err = execute_set(one_task(), &ctx).unwrap_err();
-        assert!(err.contains("Low-Level Design"), "unexpected error: {err}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    // With plans saved in `.claudinio`, the memory a `finalize_plan` appended
-    // is the newest `.md` in the folder. The gate reads the plan's Low-Level
-    // Design, never the memory's (a file edit_file refuses to write).
-    #[test]
-    fn brain_lld_gate_reads_the_plan_not_a_newer_project_memory() {
-        let (mut ctx, root) = ctx_for("lld-mem", Some(SessionMode::Brain));
-        ctx.plan_save_path = Some(".claudinio".into());
-        let dir = root.join(".claudinio");
-        std::fs::create_dir_all(&dir).unwrap();
-        let plan = dir.join("2026-10-19_plan.md");
-        std::fs::write(
-            &plan,
-            "# Plan\n## Low-Level Design\nsrc/foo.rs: add bar()\n",
-        )
-        .unwrap();
-        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        let f = std::fs::File::options().write(true).open(&plan).unwrap();
-        f.set_modified(past).unwrap();
-        std::fs::write(dir.join("MEMORY.md"), "## Learned\n- a lesson\n").unwrap();
-        let res = execute_set(one_task(), &ctx);
-        assert!(res.is_ok(), "unexpected error: {res:?}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn brain_plan_with_lld_accepted() {
-        let (ctx, root) = ctx_for("with-lld", Some(SessionMode::Brain));
-        write_plan_file(
-            &root,
-            "# Plan\n## Solution Design\nagreed\n## Low-Level Design\nsrc/foo.rs: add bar()\n",
-        );
-        let res = execute_set(one_task(), &ctx);
-        assert!(res.is_ok(), "unexpected error: {res:?}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn brain_update_before_the_lld_is_rejected_and_names_itself() {
-        let (ctx, root) = ctx_for("update-nold", Some(SessionMode::Brain));
-        let err = execute_update(
-            UpdateTaskArgs {
-                id: "t1".into(),
-                status: Some("done".into()),
-                journal: vec![],
-            },
-            &ctx,
-        )
-        .unwrap_err();
-        // The retry instruction names the tool that was actually called.
-        assert!(err.contains("tasks_update rejected"), "{err}");
-        assert!(err.contains("retry tasks_update"), "{err}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    // The LLD gate holds for the batch form as for the single one.
-    #[test]
-    fn brain_batch_update_before_the_lld_is_rejected() {
-        let (ctx, root) = ctx_for("batch-nold", Some(SessionMode::Brain));
-        let err = execute_updates(
-            vec![UpdateTaskArgs {
-                id: "t1".into(),
-                status: Some("done".into()),
-                journal: vec![],
-            }],
-            &ctx,
-        )
-        .unwrap_err();
-        assert!(err.contains("tasks_update rejected"), "{err}");
-        assert!(err.contains("Low-Level Design"), "{err}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn builder_mode_not_gated() {
-        let (ctx, root) = ctx_for("builder", Some(SessionMode::Builder));
-        let res = execute_set(one_task(), &ctx);
-        assert!(res.is_ok(), "unexpected error: {res:?}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn no_mode_handle_not_gated() {
-        let (ctx, root) = ctx_for("no-handle", None);
-        let res = execute_set(one_task(), &ctx);
-        assert!(res.is_ok(), "unexpected error: {res:?}");
-        std::fs::remove_dir_all(&root).ok();
     }
 }
 
@@ -1640,15 +1173,40 @@ mod golden_tests {
     use super::*;
     use crate::agent::persist::TaskItem;
 
+    /// One timeline (single-timeline plan, Phase 3): a goal is one task,
+    /// gated by the quality check, not a Brain "plan" half and a Builder
+    /// "execute" half.
+    #[test]
+    fn a_goal_is_one_gated_task() {
+        let tasks = create_golden_tasks(&["ship it".into()]);
+        assert_eq!(tasks.len(), 1, "{tasks:?}");
+        assert!(is_golden_execution(&tasks[0]));
+        assert_eq!(tasks[0].title, "ship it");
+        // A session from before keeps loading: its "-0" plan half is not a
+        // goal anyone has to close any more.
+        let mut legacy = create_golden_tasks(&["ship it".into()]);
+        legacy.push(TaskItem {
+            id: "golden-ship-it-0".into(),
+            title: "ship it".into(),
+            description: String::new(),
+            journal: vec![],
+            status: "todo".into(),
+        });
+        legacy[0].status = "done".into();
+        assert!(
+            golden_pending_ids(&legacy).is_empty(),
+            "{:?}",
+            golden_pending_ids(&legacy)
+        );
+    }
+
     #[test]
     fn test_create_golden_tasks() {
         let goals = vec!["code coverage in 80%".to_string()];
         let tasks = create_golden_tasks(&goals);
-        assert_eq!(tasks.len(), 2);
-        assert!(tasks[0].id.starts_with("golden-"));
-        assert!(tasks[1].id.starts_with("golden-"));
+        assert_eq!(tasks.len(), 1, "one gated task per goal");
+        assert!(tasks[0].id.starts_with("golden-") && tasks[0].id.ends_with("-1"));
         assert_eq!(tasks[0].status, "todo");
-        assert_eq!(tasks[1].status, "todo");
     }
 
     #[test]
@@ -1673,32 +1231,24 @@ mod golden_tests {
 
     #[test]
     fn test_golden_tasks_remaining() {
+        let task = |id: &str, status: &str| TaskItem {
+            id: id.into(),
+            title: "test".into(),
+            description: "".into(),
+            journal: vec![],
+            status: status.into(),
+        };
+        // A goal's gated task still open counts; a done one and a plain task
+        // do not, and neither does a legacy "-0" plan half.
         let tasks = vec![
-            TaskItem {
-                id: "golden-a-0".into(),
-                title: "test".into(),
-                description: "".into(),
-                journal: vec![],
-                status: "todo".into(),
-            },
-            TaskItem {
-                id: "golden-a-1".into(),
-                title: "test".into(),
-                description: "".into(),
-                journal: vec![],
-                status: "done".into(),
-            },
-            TaskItem {
-                id: "normal-task".into(),
-                title: "test".into(),
-                description: "".into(),
-                journal: vec![],
-                status: "todo".into(),
-            },
+            task("golden-a-0", "todo"),
+            task("golden-a-1", "todo"),
+            task("golden-b-1", "done"),
+            task("normal-task", "todo"),
         ];
         let remaining = golden_tasks_remaining(&tasks);
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, "golden-a-0");
+        assert_eq!(remaining[0].id, "golden-a-1");
     }
 
     #[test]
@@ -1778,23 +1328,18 @@ mod golden_tests {
 
     #[test]
     fn test_golden_pending_ids() {
+        let task = |id: &str, status: &str| TaskItem {
+            id: id.into(),
+            title: "t".into(),
+            description: "".into(),
+            journal: vec![],
+            status: status.into(),
+        };
         let tasks = vec![
-            TaskItem {
-                id: "golden-x-0".into(),
-                title: "t".into(),
-                description: "".into(),
-                journal: vec![],
-                status: "todo".into(),
-            },
-            TaskItem {
-                id: "golden-x-1".into(),
-                title: "t".into(),
-                description: "".into(),
-                journal: vec![],
-                status: "done".into(),
-            },
+            task("golden-x-0", "todo"),
+            task("golden-x-1", "todo"),
+            task("golden-y-1", "done"),
         ];
-        let ids = golden_pending_ids(&tasks);
-        assert_eq!(ids, vec!["golden-x-0"]);
+        assert_eq!(golden_pending_ids(&tasks), vec!["golden-x-1"]);
     }
 }

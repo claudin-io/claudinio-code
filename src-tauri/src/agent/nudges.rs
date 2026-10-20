@@ -32,43 +32,6 @@ pub const ANNOUNCED_NOT_TAKEN: &str = "[system] Your previous message announced 
      the edit). If the task is genuinely complete, instead \
      reply with a short final summary of what was done.";
 
-/// The one reminder before the harness writes the Implementation Log itself.
-pub const FINALIZE_PLAN: &str = "[system] All goals are met. Before finishing, call \
-     finalize_plan with a journal of your findings — it records the \
-     changed files and commits into the plan for future reference. \
-     This is the required last step.";
-
-/// Brain mode explored for several rounds without a deliverable.
-/// Since lean-harness Phase 5 it no longer orders an interview (decision D5):
-/// a decision that is the user's goes to `ask_user`; otherwise the plan is due.
-pub const BRAIN_EXPLORING: &str = "[system] You have been exploring for several consecutive rounds \
-     in Brain mode without making progress on the deliverables. Brain mode is for \
-     planning: if a decision only the user can make is still open, ask it with \
-     ask_user (independent questions in one call); otherwise write the Solution \
-     Design with write_plan, then write_plan again to add the '## Low-Level Design' \
-     section, then tasks_set to create executable tasks. Explore further only for \
-     a fact the plan is missing.";
-
-/// [`BRAIN_EXPLORING`] as it stood before Phase 5, sent under prompt v1:
-/// v1 is the pre-phase prompt kept so a user can flip back (decision D7), and
-/// its Brain block still runs the one-question-per-call interview — the v2
-/// nudge's "independent questions in one call" would argue with it.
-pub const BRAIN_EXPLORING_V1: &str = "[system] You have been exploring for several consecutive rounds \
-     in Brain mode without making progress on the required deliverables. \
-     Brain mode is for planning — you MUST call ask_user to interview \
-     the user, then write_plan to create the Solution Design, then \
-     write_plan again to add the '## Low-Level Design' section, then \
-     tasks_set to create executable tasks. Do not continue exploring \
-     until you have gathered the information you need.";
-
-/// The Brain-exploring nudge that matches the session's prompt.
-pub fn brain_exploring(version: crate::agent::prompt::PromptVersion) -> &'static str {
-    match version {
-        crate::agent::prompt::PromptVersion::V1 => BRAIN_EXPLORING_V1,
-        crate::agent::prompt::PromptVersion::V2 => BRAIN_EXPLORING,
-    }
-}
-
 /// The context reached its limit: the next reply is the handoff document.
 pub const HANDOFF_REQUEST: &str = "[system] This session's context reached its limit. Your next reply must be \
      ONLY a handoff document for a successor session that will continue this \
@@ -85,13 +48,13 @@ pub const HANDOFF_RETRY: &str = "[system] That reply was not a valid handoff doc
      ONLY the handoff document, using the exact markdown sections \
      requested above.";
 
-/// The first message of the session a golden flip hands over to.
-pub fn golden_flip(pending: &[String], mode: &str, cycle: u32, max_cycles: usize) -> String {
+/// The message that sends a run back to its pending golden goals when it
+/// tried to end with some still open (single-timeline plan: the same
+/// session continues; there is no mode to flip to).
+pub fn golden_continue(pending: &[String], cycle: u32, max_cycles: usize) -> String {
     format!(
-        "[system] Golden tasks are still pending: {}. You are now in {} mode (golden cycle {}/{max_cycles}). The task list, pending goals included, is the `<tasks>` block at the end of this message; read the linked session's plan file, then resume work on the pending goals — plan or execute what is missing, and only mark a golden task 'done' after verifying the goal is truly met.",
+        "[system] Golden tasks are still pending: {} (golden cycle {cycle}/{max_cycles}). Continue the work on them, and only mark a golden task 'done' after verifying its goal is truly met.",
         pending.join(", "),
-        mode,
-        cycle,
     )
 }
 
@@ -136,15 +99,6 @@ pub fn repeating(what: &str) -> String {
     )
 }
 
-/// The first message of the Builder session a plan approval opens
-/// (`exit_plan_mode`, `HandoffReason::PlanExecution`).
-pub const PLAN_APPROVED: &str = "Plan approved. Read the plan and execute the tasks.";
-
-/// `exit_plan_mode`'s result when the plan is approved: this session ends
-/// and the Builder session above takes over.
-pub const PLAN_APPROVED_RESULT: &str =
-    "Plan approved. Switching to Builder mode via new session... End your turn.";
-
 /// Every fixed text above, by name, for the test that checks them all
 /// (`prompt::tests::no_harness_text_orders_a_deferred_tool`). Kept complete
 /// by [`tests::every_text_constant_is_in_all`], which reads this file: a new
@@ -154,13 +108,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("CUT_OFF", CUT_OFF),
     ("EMPTY_REPLY", EMPTY_REPLY),
     ("ANNOUNCED_NOT_TAKEN", ANNOUNCED_NOT_TAKEN),
-    ("FINALIZE_PLAN", FINALIZE_PLAN),
-    ("BRAIN_EXPLORING", BRAIN_EXPLORING),
-    ("BRAIN_EXPLORING_V1", BRAIN_EXPLORING_V1),
     ("HANDOFF_REQUEST", HANDOFF_REQUEST),
     ("HANDOFF_RETRY", HANDOFF_RETRY),
-    ("PLAN_APPROVED", PLAN_APPROVED),
-    ("PLAN_APPROVED_RESULT", PLAN_APPROVED_RESULT),
 ];
 
 #[cfg(test)]
@@ -186,54 +135,17 @@ mod tests {
         );
     }
 
-    // Decision D5 (lean-harness Phase 5): the Brain interview is adaptive.
-    // The nudge Brain gets after exploring too long must not bring back the
-    // mandatory interview the prompt dropped: it asks only when a decision
-    // that is the user's is open, and otherwise moves on to the plan.
+    // The golden loop sends the run back to its pending goals in the same
+    // session: the message names them and the cycle, and asks for a check
+    // before a goal is closed.
     #[test]
-    fn the_brain_exploring_nudge_keeps_the_interview_adaptive() {
-        assert!(!BRAIN_EXPLORING.contains("MUST"), "{BRAIN_EXPLORING}");
-        assert!(
-            !BRAIN_EXPLORING.contains("interview the user"),
-            "{BRAIN_EXPLORING}"
-        );
-        for step in ["ask_user", "write_plan", "## Low-Level Design", "tasks_set"] {
-            assert!(BRAIN_EXPLORING.contains(step), "{step}: {BRAIN_EXPLORING}");
-        }
-    }
-
-    // Prompt v1 is the pre-phase prompt (decision D7): choosing it must bring
-    // back the pre-phase nudge too, word for word, not v2's adaptive one that
-    // contradicts v1's one-question-per-call interview. v2 gets the adaptive one.
-    #[test]
-    fn each_prompt_version_gets_the_brain_exploring_nudge_that_matches_it() {
-        use crate::agent::prompt::PromptVersion;
-        let pre_phase = "[system] You have been exploring for several consecutive rounds \
-             in Brain mode without making progress on the required deliverables. \
-             Brain mode is for planning — you MUST call ask_user to interview \
-             the user, then write_plan to create the Solution Design, then \
-             write_plan again to add the '## Low-Level Design' section, then \
-             tasks_set to create executable tasks. Do not continue exploring \
-             until you have gathered the information you need.";
-        assert_eq!(brain_exploring(PromptVersion::V1), pre_phase);
-        assert_eq!(brain_exploring(PromptVersion::V2), BRAIN_EXPLORING);
-        assert!(!brain_exploring(PromptVersion::V1).contains("in one call"));
-    }
-
-    // A golden flip's successor always has a list (the pending goals are
-    // tasks), and its first run ends the kickoff with it as a `<tasks>` block.
-    // The kickoff points there rather than asking the model to "read the
-    // tasks" — the only tool that reads them is `tasks_get`, which is
-    // deferred, so an order to read them is a load and a prefix rewrite
-    // (Phase 4 review).
-    #[test]
-    fn the_golden_flip_points_at_the_tasks_block_instead_of_a_read() {
-        let msg = golden_flip(&["golden-ship-1".into()], "builder", 1, 3);
-        assert!(msg.contains("`<tasks>` block"), "{msg}");
-        assert!(!msg.contains("plan file and tasks"), "{msg}");
+    fn the_golden_continue_names_the_pending_goals_and_the_cycle() {
+        let msg = golden_continue(&["golden-ship-1".into()], 1, 3);
         assert!(
             msg.contains("golden-ship-1") && msg.contains("1/3"),
             "{msg}"
         );
+        assert!(msg.contains("verifying"), "{msg}");
+        assert!(!msg.contains("mode"), "{msg}");
     }
 }

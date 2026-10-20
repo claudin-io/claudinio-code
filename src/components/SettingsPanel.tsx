@@ -6,7 +6,6 @@ import { SettingsModels } from "./settings/SettingsModels";
 import { SettingsAccount } from "./settings/SettingsAccount";
 import { SettingsAgent } from "./settings/SettingsAgent";
 import { SettingsJev } from "./settings/SettingsJev";
-import { SettingsPromptVersion } from "./settings/SettingsPromptVersion";
 import { SettingsProjectMemory } from "./settings/SettingsProjectMemory";
 import { SettingsToolSurface } from "./settings/SettingsToolSurface";
 import { SettingsMcp } from "./settings/SettingsMcp";
@@ -19,10 +18,8 @@ import { SettingsHooks } from "./settings/SettingsHooks";
 interface SettingsPanelProps {
   showConfig: Accessor<boolean>;
   setShowConfig: Setter<boolean>;
-  configBrainModel: Accessor<string>;
-  setConfigBrainModel: Setter<string>;
-  configBuilderModel: Accessor<string>;
-  setConfigBuilderModel: Setter<string>;
+  configModel: Accessor<string>;
+  setConfigModel: Setter<string>;
   modelGroups: Accessor<ModelGroup[]>;
   configMaxParallelAgents: Accessor<number>;
   setConfigMaxParallelAgents: Setter<number>;
@@ -44,13 +41,9 @@ interface SettingsPanelProps {
   setConfigKeepAwake: Setter<boolean>;
   configCodeIntelEnabled: Accessor<boolean>;
   setConfigCodeIntelEnabled: Setter<boolean>;
-  configAutoCommitPlan: Accessor<boolean>;
-  setConfigAutoCommitPlan: Setter<boolean>;
   configPreferredIde: Accessor<string>;
   setConfigPreferredIde: Setter<string>;
   availableIdes: Accessor<string[]>;
-  configPlanSavePath: Accessor<string>;
-  setConfigPlanSavePath: Setter<string>;
   workspaceConfigFields: Accessor<Set<string>>;
   /// The project the Quality tab configures — those settings live in the
   /// workspace's own `.claudinio.json`, not the global config.
@@ -86,7 +79,6 @@ interface SettingsPanelProps {
   saveConfig: () => Promise<void>;
   doLogin: () => Promise<void>;
   doLogout: () => Promise<void>;
-  pickPlanPath: () => Promise<void>;
   addMcpServerTemplate: () => void;
   testAllMcpServers: () => Promise<void>;
   openSupportUrl: () => void;
@@ -101,11 +93,11 @@ interface Category {
 }
 
 const CATEGORIES: Category[] = [
-  { id: 'general', icon: 'sliders', searchTerms: ["Language","Theme","Keep awake while working","Plan save path","Preferred IDE","Auto-commit plan on finalize","Code intelligence"] },
-  { id: 'models', icon: 'brain', searchTerms: ["Brain Model","Builder Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override","Tools offered to each model","Lean","Tool surface"] },
+  { id: 'general', icon: 'sliders', searchTerms: ["Language","Theme","Keep awake while working","Preferred IDE","Code intelligence"] },
+  { id: 'models', icon: 'brain', searchTerms: ["Model","Max rounds (main agent)","Max rounds (subagents)","Parallel subagents","Max golden cycles","Max golden stalls","Session handoff threshold","Anthropic URL Override","API Key Override","Tools offered to the model","Lean","Tool surface"] },
   { id: 'local', icon: 'monitor', searchTerms: ["Local models","llama.cpp","GGUF","Hugging Face","Quantization","Offline","VRAM","Backend","Vulkan","Download a model","Runtime"] },
   { id: 'account', icon: 'key', searchTerms: ["Account","Sign in with claudin.io","Sign out","API Key","Support","Providers","More providers\u2026","Add custom provider\u2026","Custom","LiteLLM","Ollama","localhost","Base URL","Connect","Access hundreds of models through one account, via OAuth."] },
-  { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)","Jev decisions (TypeSafe)","TypeSafe API key (optional)","Jev","TypeSafe","Auto mode for new sessions","Auto","Shadow","System prompt","Prompt version","Project memory","AGENTS.md","CLAUDE.md","MEMORY.md"] },
+  { id: 'agent', icon: 'construction-worker', searchTerms: ["\u26a1 YOLO Mode (auto-approve all)","YOLO Blacklist (comma-separated tool names)","Jev decisions (TypeSafe)","TypeSafe API key (optional)","Jev","TypeSafe","Project memory","AGENTS.md","CLAUDE.md","MEMORY.md"] },
   { id: 'quality', icon: 'check-circle', searchTerms: ["Quality harness","Verify at the end of","Layers that block a finish","Tests","Changed-line coverage","Minimum coverage of changed lines","Test command override","Coverage command override","Detected in this project"] },
   { id: 'mcp', icon: 'package-process', searchTerms: ["MCP Servers","+ Add server","Test all"] },
   { id: 'browser', icon: 'globe', searchTerms: ["Browser","Chromium","Screenshot","Console","Network","Headless","Viewport","Download","Install a browser"] },
@@ -266,25 +258,18 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                 <SettingsGeneral
                   keepAwake={props.configKeepAwake}
                   setKeepAwake={props.setConfigKeepAwake}
-                  planSavePath={props.configPlanSavePath}
-                  setPlanSavePath={props.setConfigPlanSavePath}
                   preferredIde={props.configPreferredIde}
                   setPreferredIde={props.setConfigPreferredIde}
-                  autoCommitPlan={props.configAutoCommitPlan}
-                  setAutoCommitPlan={props.setConfigAutoCommitPlan}
                   codeIntelEnabled={props.configCodeIntelEnabled}
                   setCodeIntelEnabled={props.setConfigCodeIntelEnabled}
-                  pickPlanPath={props.pickPlanPath}
                   availableIdes={props.availableIdes}
                 />
               </Show>
 
               <Show when={searchQuery() ? true : activeCategory() === 'models'}>
                 <SettingsModels
-                  brainModel={props.configBrainModel}
-                  setBrainModel={props.setConfigBrainModel}
-                  builderModel={props.configBuilderModel}
-                  setBuilderModel={props.setConfigBuilderModel}
+                  model={props.configModel}
+                  setModel={props.setConfigModel}
                   maxParallelAgents={props.configMaxParallelAgents}
                   setMaxParallelAgents={props.setConfigMaxParallelAgents}
                   maxRounds={props.configMaxRounds}
@@ -305,10 +290,7 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   setOverrideApiKey={props.setConfigOverrideApiKey}
                   modelGroups={props.modelGroups}
                 />
-                <SettingsToolSurface
-                  brainModel={props.configBrainModel}
-                  builderModel={props.configBuilderModel}
-                />
+                <SettingsToolSurface model={props.configModel} />
               </Show>
 
               <Show when={searchQuery() ? true : activeCategory() === 'account'}>
@@ -341,7 +323,6 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
                   setYoloBlacklist={props.setConfigYoloBlacklist}
                   workspaceConfigFields={props.workspaceConfigFields}
                 />
-                <SettingsPromptVersion />
                 <SettingsProjectMemory />
                 <SettingsJev />
               </Show>

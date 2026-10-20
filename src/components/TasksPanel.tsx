@@ -13,10 +13,10 @@ function chipClass(status: string): string {
 
 const isGolden = (task: TaskItem) => task.id.startsWith("golden-");
 
-// Golden task ids end in -0 (plan) or -1 (execute); the backend keeps the
-// raw goal text in `title`, so the visible label is composed here.
+// A goal is one task and reads as the goal. A "-0" id is the plan half a
+// session from before one timeline still carries.
 const displayTitle = (task: TaskItem) =>
-  isGolden(task) ? `${task.id.endsWith("-0") ? "Plan" : "Execute"}: ${task.title}` : task.title;
+  isGolden(task) && task.id.endsWith("-0") ? `Plan: ${task.title}` : task.title;
 
 /** The row's tooltip: what the task is and what was found doing it. */
 const tooltip = (task: TaskItem) =>

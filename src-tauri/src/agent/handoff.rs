@@ -10,8 +10,8 @@ use crate::agent::persist::{CacheBreakReason, SessionRecord, SessionStore, now_m
 use crate::agent::provider::{AgentConfig, ContentBlock, Message, ToolDescription};
 use crate::agent::retry::stream_message_with_retry;
 use crate::agent::session::{
-    AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, PromptProfile, SessionMode, SteeringCtl,
-    estimate_message_tokens, estimate_tokens, push_turn, push_user_blocks, write_status,
+    AnswerMap, ApprovalMap, PromptProfile, SteeringCtl, estimate_message_tokens, estimate_tokens,
+    push_turn, push_user_blocks, write_status,
 };
 use crate::agent::subagent;
 use crate::agent::tools::ToolContext;
@@ -153,14 +153,8 @@ pub async fn compact_history(
 /// Why this session is handing off to a new linked session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HandoffReason {
-    #[serde(rename = "plan_execution")]
-    PlanExecution,
-    #[serde(rename = "golden_flip")]
-    GoldenFlip,
     #[serde(rename = "context_handoff")]
     ContextHandoff,
-    #[serde(rename = "manual_builder")]
-    ManualBuilder,
     /// `doc_create` in a session that already has a document: a new
     /// top-level topic is a new session (lean-harness Phase 4b).
     #[serde(rename = "new_document")]
@@ -170,18 +164,15 @@ pub enum HandoffReason {
 impl HandoffReason {
     pub fn as_str(&self) -> &'static str {
         match self {
-            HandoffReason::PlanExecution => "plan_execution",
-            HandoffReason::GoldenFlip => "golden_flip",
             HandoffReason::ContextHandoff => "context_handoff",
-            HandoffReason::ManualBuilder => "manual_builder",
             HandoffReason::NewDocument => "new_document",
         }
     }
 }
 
 /// The answer to a handoff-producing call (`doc_create` in a session that has
-/// a document, `enter_plan_mode`, `exit_plan_mode`) in a round that already
-/// queued a handoff: the app follows one successor per run.
+/// a document) in a round that already queued a handoff: the app follows one
+/// successor per run.
 pub const HANDOFF_QUEUED: &str = "A handoff to a new session is already queued this turn, \
      so this call was not run. End your turn now; anything else waits for the user's next message.";
 
@@ -189,29 +180,12 @@ pub const HANDOFF_QUEUED: &str = "A handoff to a new session is already queued t
 /// hook's `continue: false` outranks the handoff, so no successor run starts;
 /// what the round already did stays, and this says so to the model — which
 /// had been told a session opens — as a note for the tool-results turn.
-/// `exit_plan_mode` had already recorded Builder and committed the plan, so
-/// the session takes the Builder its record says and the next message builds
-/// here.
-pub(crate) fn not_followed(
-    spec: &HandoffSpec,
-    mode_ctl: &ModeCtl,
-    event_tx: &Channel<AgentEvent>,
-) -> String {
+pub(crate) fn not_followed(spec: &HandoffSpec) -> String {
     let what = match (&spec.reason, &spec.document) {
         (HandoffReason::NewDocument, Some(doc)) => format!(
             "the linked session for {doc} did not open. {doc} was created and no session \
              owns it; this session keeps its own document."
         ),
-        (HandoffReason::PlanExecution, _) => {
-            mode_ctl.set(spec.next_mode, spec.next_origin);
-            let _ = event_tx.send(AgentEvent::ModeChanged {
-                mode: spec.next_mode.as_str().into(),
-                origin: spec.next_origin.as_str().into(),
-                reason: None,
-            });
-            "the plan's Builder session did not open. This session is now in Builder mode."
-                .to_string()
-        }
         _ => "the linked session did not open.".to_string(),
     };
     format!("<handoff-not-followed>A hook stopped the run, so {what}</handoff-not-followed>")
@@ -220,8 +194,6 @@ pub(crate) fn not_followed(
 /// Data needed to create a linked successor session and resume work.
 pub struct HandoffSpec {
     pub reason: HandoffReason,
-    pub next_mode: SessionMode,
-    pub next_origin: ModeOrigin,
     pub first_message: String,
     pub golden_cycle: u32,
     pub golden_stalls: u32,
@@ -407,7 +379,6 @@ pub(super) async fn maybe_context_handoff(
     event_tx: &Channel<AgentEvent>,
     session_id: &str,
     steering: &Arc<SteeringCtl>,
-    mode_ctl: &Arc<ModeCtl>,
     run_in: u32,
     run_out: u32,
     run_cache: u32,
@@ -462,8 +433,7 @@ pub(super) async fn maybe_context_handoff(
         vec![ContentBlock::text(crate::agent::nudges::HANDOFF_REQUEST)],
     );
 
-    let (cur_mode, cur_origin) = mode_ctl.get();
-    let resolved_model = config.model_for_mode(cur_mode.as_str());
+    let resolved_model = config.model();
     let net_detail = format!("{resolved_model} · handoff");
     let mut gen_in: u32 = 0;
     let mut gen_out: u32 = 0;
@@ -589,9 +559,8 @@ pub(super) async fn maybe_context_handoff(
         crate::agent::persist::linked_golden_state(&records);
     let golden_cycle = crate::agent::persist::golden_cycle_count(&records).max(linked_cycle);
 
-    let plan_path = ctx.workspace_root.as_deref().and_then(|root| {
-        crate::agent::tools::write_plan::latest_plan_path(root, ctx.plan_save_path.as_deref())
-    });
+    // The session's document is its plan; the successor stays linked to it.
+    let plan_path = crate::agent::doc_session::linked_path(ctx);
     let first_message = crate::agent::transition::compose_context_handoff_message(
         &handoff_text,
         plan_path.as_deref().map(|p| p.to_str().unwrap_or_default()),
@@ -599,8 +568,6 @@ pub(super) async fn maybe_context_handoff(
 
     Some(RunOutcome::Handoff(Box::new(HandoffSpec {
         reason: HandoffReason::ContextHandoff,
-        next_mode: cur_mode,
-        next_origin: cur_origin,
         first_message,
         golden_cycle,
         golden_stalls: linked_stalls,
@@ -736,7 +703,7 @@ mod verbatim_compaction_tests {
     #[test]
     fn the_limit_is_the_handoff_line_for_standard_sessions() {
         let cfg = AgentConfig::default();
-        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 30_000);
+        let budget = ContextBudget::for_model(&cfg, cfg.model(), 30_000);
         assert_eq!(
             shed_line(&budget, PromptProfile::Standard),
             cfg.effective_handoff_threshold()
@@ -753,7 +720,8 @@ mod verbatim_compaction_tests {
     #[test]
     fn the_default_models_run_on_the_lines_they_always_had() {
         let cfg = AgentConfig::default();
-        for model in [cfg.brain_model.as_str(), cfg.builder_model.as_str()] {
+        {
+            let model = cfg.model.as_str();
             let b = ContextBudget::for_model(&cfg, model, 33_000);
             assert_eq!(
                 (b.soft, b.hard, b.ceiling),
@@ -819,7 +787,7 @@ mod handoff_usage_tests {
         std::fs::write(&path, "").unwrap();
         let store = SessionStore { path };
         let ctx = crate::agent::tools::tests_support::ctx();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let budget = ContextBudget::for_model(&config, config.model(), 10_000);
         let mut history = vec![
             Message {
                 role: "user".into(),
@@ -844,7 +812,6 @@ mod handoff_usage_tests {
             &events,
             "handoff-usage",
             &Arc::new(SteeringCtl::new()),
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
             0,
             0,
             0,
@@ -895,7 +862,7 @@ mod handoff_cache_tests {
         };
         std::fs::write(&store.path, "").unwrap();
         let ctx = crate::agent::tools::tests_support::ctx();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let budget = ContextBudget::for_model(&config, config.model(), 10_000);
         let mut history = vec![
             Message {
                 role: "user".into(),
@@ -920,7 +887,6 @@ mod handoff_cache_tests {
             &events,
             "handoff-cache",
             &Arc::new(SteeringCtl::new()),
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
             0,
             0,
             0,
@@ -1131,7 +1097,7 @@ mod cache_break_tests {
         let store = temp_store("prune");
         let ctx = crate::agent::tools::tests_support::ctx();
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let budget = ContextBudget::for_model(&config, config.model(), 0);
         let mut history = vec![turn("user", ContentBlock::text("Refactor the parser."))];
         for i in 0..30 {
             let id = format!("r{i}");
@@ -1173,7 +1139,7 @@ mod cache_break_tests {
         let store = temp_store("no-prune");
         let ctx = crate::agent::tools::tests_support::ctx();
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let budget = ContextBudget::for_model(&config, config.model(), 0);
         let mut history = vec![turn("user", ContentBlock::text("hi"))];
         let taken = try_verbatim_compaction(
             &config,
@@ -1373,7 +1339,7 @@ mod cache_break_tests {
         let config = crate::agent::run_loop::surface_tests::config_for(&base, None);
         let store = temp_store("handoff");
         let ctx = crate::agent::tools::tests_support::ctx();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 10_000);
+        let budget = ContextBudget::for_model(&config, config.model(), 10_000);
         let mut history = vec![
             turn("user", ContentBlock::text("Refactor the parser.")),
             turn("assistant", ContentBlock::text("Working on it.")),
@@ -1392,7 +1358,6 @@ mod cache_break_tests {
             &events,
             "cache-break-handoff",
             &Arc::new(SteeringCtl::new()),
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
             0,
             0,
             0,

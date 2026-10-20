@@ -7,32 +7,26 @@ use crate::agent::budget::ContextBudget;
 use crate::agent::events::{AgentEvent, QualityLayerView};
 use crate::agent::gate_text;
 use crate::agent::handoff::{
-    HandoffReason, HandoffSpec, RunOutcome, compact_history, has_something_to_compress,
-    maybe_context_handoff, try_verbatim_compaction,
+    HandoffSpec, RunOutcome, compact_history, has_something_to_compress, maybe_context_handoff,
+    try_verbatim_compaction,
 };
 use crate::agent::judge::{
     TurnVerdict, judge_terminal_turn_metered, judge_with_jev, loop_verdict, should_nudge_terminal,
 };
 use crate::agent::permissions;
-use crate::agent::permissions::PermissionLevel;
 use crate::agent::persist::{SessionRecord, SessionStore, now_ms};
 use crate::agent::prompt::{build_spec_prompt_section, deferred_tools, run_prefix};
 use crate::agent::provider::{AgentConfig, ContentBlock, Message};
 use crate::agent::result_cap::fit_round;
 use crate::agent::retry::stream_message_with_retry;
-use crate::agent::route::route_first_prompt;
 use crate::agent::run_state::{CostLedger, GoldenLoopState, GuardState};
 use crate::agent::session::{
-    AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, PromptProfile, SessionMode, SteeringCtl,
-    cost_or_estimate, estimate_tokens, inject_steering, prefix_breakdown, push_turn,
-    push_user_blocks, write_status,
+    AnswerMap, ApprovalMap, PromptProfile, SteeringCtl, cost_or_estimate, estimate_tokens,
+    inject_steering, prefix_breakdown, push_turn, push_user_blocks, write_status,
 };
 use crate::agent::subagent;
 use crate::agent::tool_batch;
-use crate::agent::tool_exec::{
-    MAX_STOP_HOOK_BLOCKS, deny_tool, force_explore_mode, handle_mode_switch, run_tool,
-    tool_response_for_hook,
-};
+use crate::agent::tool_exec::{MAX_STOP_HOOK_BLOCKS, deny_tool, run_tool, tool_response_for_hook};
 use crate::agent::tools::ToolContext;
 use serde_json::Value;
 use std::sync::Arc;
@@ -102,7 +96,6 @@ pub async fn run_workflow(
     ctx: &ToolContext,
     store: &SessionStore,
     steering: &Arc<SteeringCtl>,
-    mode_ctl: &Arc<ModeCtl>,
 ) -> Result<RunOutcome, String> {
     run_workflow_with_profile(
         config,
@@ -116,7 +109,6 @@ pub async fn run_workflow(
         ctx,
         store,
         steering,
-        mode_ctl,
         PromptProfile::Standard,
     )
     .await
@@ -138,7 +130,6 @@ pub async fn run_workflow_with_profile(
     ctx: &ToolContext,
     store: &SessionStore,
     steering: &Arc<SteeringCtl>,
-    mode_ctl: &Arc<ModeCtl>,
     profile: PromptProfile,
 ) -> Result<RunOutcome, String> {
     // ── Hooks: SessionStart, then UserPromptSubmit ───────────────────────────
@@ -206,18 +197,6 @@ pub async fn run_workflow_with_profile(
     } else {
         Vec::new()
     };
-    let route_cost = route_first_prompt(
-        config,
-        profile,
-        history.is_empty(),
-        &user_message,
-        store,
-        ctx,
-        mode_ctl,
-        event_tx,
-    )
-    .await;
-
     store.try_append(&SessionRecord::User {
         text: user_message.clone(),
         ts: now_ms(),
@@ -256,8 +235,7 @@ pub async fn run_workflow_with_profile(
     let skills_section = crate::agent::skills::build_skills_system_prompt_section(&skill_mgr);
     // The specs are the requirement. Putting them in the prompt is what makes
     // them an input to planning rather than a document nobody opens.
-    let spec_section = build_spec_prompt_section(ctx, config.prompt_version);
-    let (mut cur_mode, _) = mode_ctl.get();
+    let spec_section = build_spec_prompt_section(ctx);
     // MCP tool discovery already happened before `run_workflow` was called
     // (the caller awaits `ensure_mcp_connected`), so this is a cheap sync
     // snapshot read, not a fresh connection attempt.
@@ -272,8 +250,7 @@ pub async fn run_workflow_with_profile(
         .iter()
         .any(crate::agent::tools::tasks::is_golden);
     // From here on `profile` is the one the run actually uses; what the caller
-    // asked for is kept to derive it again when the mode — and with it the
-    // model and its window — changes.
+    // asked for is kept to derive it again when a tool load grows the list.
     let requested_profile = profile;
     // Deferred tools this session loaded in earlier runs, in load order: the
     // tool array starts where the last request left it (`agent::deferred`).
@@ -289,7 +266,6 @@ pub async fn run_workflow_with_profile(
         config,
         ctx,
         requested_profile,
-        cur_mode,
         skills_section.as_deref(),
         spec_section.as_deref(),
         &mcp_defs,
@@ -297,13 +273,9 @@ pub async fn run_workflow_with_profile(
         &loaded,
     );
     // Every line the run is held to comes from the model it is about to talk
-    // to, and is re-derived whenever a mode switch changes that model.
+    // to, and is re-derived whenever the prefix changes.
     let mut prefix_tokens = estimate_tokens(&[], &system, &tools);
-    let mut budget = ContextBudget::for_model(
-        config,
-        config.model_for_mode(cur_mode.as_str()),
-        prefix_tokens,
-    );
+    let mut budget = ContextBudget::for_model(config, config.model(), prefix_tokens);
     ctx.limits.apply(&budget);
     // Before anything else is tried: no handoff and no summary can shrink
     // what is sent ahead of the conversation, and each would cost a request —
@@ -313,10 +285,10 @@ pub async fn run_workflow_with_profile(
     }
 
     {
-        let model = config.model_for_mode(cur_mode.as_str());
+        let model = config.model();
         store.try_append(&SessionRecord::RunConfig {
             model: model.to_string(),
-            mode: cur_mode.as_str().into(),
+            mode: String::new(),
             context_window: budget.window,
             regime: budget.regime.as_str().into(),
             soft: budget.soft,
@@ -351,7 +323,7 @@ pub async fn run_workflow_with_profile(
     // Lossless first: Jev drops old tool traffic, every word stays. Only when
     // that is unavailable or not enough does the handoff / summary run.
     let mut estimated = estimated;
-    let mut pre_run_jev_cost = route_cost;
+    let mut pre_run_jev_cost = 0.0;
     if let Some((new_estimate, cost)) = try_verbatim_compaction(
         config, &budget, profile, estimated, history, &system, &tools, store, ctx, event_tx,
     )
@@ -365,7 +337,7 @@ pub async fn run_workflow_with_profile(
     // below stays as the safety net when generation fails or doesn't apply.
     if let Some(outcome) = maybe_context_handoff(
         config, &budget, profile, estimated, history, &system, &tools, store, ctx, event_tx,
-        session_id, steering, mode_ctl, 0, 0, 0,
+        session_id, steering, 0, 0, 0,
     )
     .await
     {
@@ -506,16 +478,6 @@ pub async fn run_workflow_with_profile(
         stalls: linked_stalls as usize,
     };
 
-    // Plan-finalization state. `guards.plan_finalized` flips when the agent calls the
-    // finalize_plan tool this run; `guards.finalize_nudged` bounds the enforcement to a
-    // single reminder before the harness falls back to auto-appending the log.
-
-    // Brain progress guard: track consecutive rounds where the agent only uses
-    // explore tools without interviewing (ask_user), writing a plan (write_plan),
-    // or creating tasks (tasks_set). After BRAIN_EXPLORE_LIMIT rounds, inject
-    // a system reminder redirecting the agent to the required deliverables.
-    const BRAIN_EXPLORE_LIMIT: u32 = 4;
-
     // Anchor the diff window at the true start of the plan's work: record the
     // git HEAD once per session (guarded), so finalize_plan can report every
     // changed file / commit since planning began, even across resumed runs.
@@ -537,33 +499,23 @@ pub async fn run_workflow_with_profile(
     // Provider requests made by this run, for the per-request `Usage` record.
     let mut requests: u32 = 0;
     for _ in 0..max_rounds {
-        // The mode can change mid-run (human toggle, or the agent's own
-        // enter/exit_plan_mode in the previous round) — refresh the prompt
-        // and tool list before each request.
-        // A deferred-tool load in the last round grows the list the same way.
-        let (mode_now, _) = mode_ctl.get();
-        if mode_now != cur_mode || loaded.len() != prefix_loaded {
-            cur_mode = mode_now;
+        // A deferred-tool load in the last round grows the tool list:
+        // refresh the prefix before the next request.
+        if loaded.len() != prefix_loaded {
             prefix_loaded = loaded.len();
             (profile, system, tools) = run_prefix(
                 config,
                 ctx,
                 requested_profile,
-                cur_mode,
                 skills_section.as_deref(),
                 spec_section.as_deref(),
                 &mcp_defs,
                 has_golden_goals,
                 &loaded,
             );
-            // A mode switch is also a model switch (brain_model vs
-            // builder_model), and the two need not share a window.
+            // The budget is re-derived with the prefix.
             prefix_tokens = estimate_tokens(&[], &system, &tools);
-            budget = ContextBudget::for_model(
-                config,
-                config.model_for_mode(cur_mode.as_str()),
-                prefix_tokens,
-            );
+            budget = ContextBudget::for_model(config, config.model(), prefix_tokens);
             ctx.limits.apply(&budget);
             if budget.prefix_overflows(prefix_tokens) {
                 return Err(budget.refusal(prefix_tokens));
@@ -594,7 +546,6 @@ pub async fn run_workflow_with_profile(
             event_tx,
             session_id,
             steering,
-            mode_ctl,
             ledger.total_in,
             ledger.total_out,
             ledger.total_cache,
@@ -633,32 +584,6 @@ pub async fn run_workflow_with_profile(
                         )
                         .unwrap_or_default(),
                     );
-                    // Mode/system/tools may have changed mid-compact, refresh.
-                    let (mode_now2, _) = mode_ctl.get();
-                    if mode_now2 != cur_mode {
-                        cur_mode = mode_now2;
-                        (profile, system, tools) = run_prefix(
-                            config,
-                            ctx,
-                            requested_profile,
-                            cur_mode,
-                            skills_section.as_deref(),
-                            spec_section.as_deref(),
-                            &mcp_defs,
-                            has_golden_goals,
-                            &loaded,
-                        );
-                        prefix_tokens = estimate_tokens(&[], &system, &tools);
-                        budget = ContextBudget::for_model(
-                            config,
-                            config.model_for_mode(cur_mode.as_str()),
-                            prefix_tokens,
-                        );
-                        ctx.limits.apply(&budget);
-                        if budget.prefix_overflows(prefix_tokens) {
-                            return Err(budget.refusal(prefix_tokens));
-                        }
-                    }
                     let new_ctx = estimate_tokens(history, &system, &tools);
                     let (ci, co, cc, cci, cco, ccc) = crate::agent::persist::cumulative_stats(
                         &crate::agent::persist::load_records_cached(
@@ -718,8 +643,8 @@ pub async fn run_workflow_with_profile(
         }
 
         let mut assistant_text = String::new();
-        let resolved_model = config.model_for_mode(cur_mode.as_str());
-        let net_detail = format!("{resolved_model} · {}", cur_mode.as_str());
+        let resolved_model = config.model();
+        let net_detail = resolved_model.to_string();
         let stream_output = stream_message_with_retry(
             config,
             resolved_model,
@@ -972,7 +897,7 @@ pub async fn run_workflow_with_profile(
             if !last_text.is_empty() && guards.unfinished_streak < 2 {
                 // Always judge with the Brain model (planning/reasoning), never
                 // the Builder model, regardless of the session's current mode.
-                let judge_model = config.model_for_mode(SessionMode::Brain.as_str());
+                let judge_model = config.model();
                 // Jev first when the user has a credential for it: a calibrated
                 // yes/no at ~$0.00002 and ~0.2s instead of a cold call to the
                 // Brain model. Its unclear answers, and any outage, fall through
@@ -1046,8 +971,8 @@ pub async fn run_workflow_with_profile(
                 continue;
             }
             // Golden verification: an end_turn with golden tasks still pending
-            // is not a real finish — flip Brain↔Builder and send the model
-            // back to work, bounded by the cycle and stall caps.
+            // is not a real finish — send the model back to work in the same
+            // session, bounded by the cycle and stall caps.
             let mut stop_reason = "end_turn";
             let golden_pending: Vec<String> = ctx
                 .session_store_path
@@ -1070,50 +995,31 @@ pub async fn run_workflow_with_profile(
                 golden.last_pending = golden_pending.clone();
                 if (golden.cycle as usize) < max_cycles && golden.stalls < max_stalls {
                     golden.cycle += 1;
-                    let next = match cur_mode {
-                        SessionMode::Brain => SessionMode::Builder,
-                        SessionMode::Builder => SessionMode::Brain,
-                    };
-                    // The Mode record for `next` belongs to the successor
-                    // session (link_session writes it); this session only logs
-                    // the cycle for audit and closes its books.
+                    // One timeline: the same session goes back to its pending
+                    // goals; the cycle is logged so the caps hold across runs.
                     store.try_append(&SessionRecord::GoldenCycle {
                         cycle: golden.cycle,
-                        mode: next.as_str().into(),
+                        mode: String::new(),
                         goals: golden_pending.clone(),
                         ts: now_ms(),
                     });
-                    store.try_append(&SessionRecord::Done {
-                        input_tokens: ledger.total_in,
-                        output_tokens: ledger.total_out,
-                        cache_read_tokens: Some(ledger.total_cache),
-                        ts: now_ms(),
-                    });
                     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-                    ledger.roll(resolved_model);
-                    ledger.write_status(store, ctx, session_id, Some(last_context));
                     let _ = event_tx.send(AgentEvent::GoldenLoop {
                         cycle: golden.cycle,
                         max_cycles: max_cycles as u32,
                         pending: golden_pending.clone(),
-                        mode: next.as_str().into(),
                     });
-                    let handoff_spec = HandoffSpec {
-                        reason: HandoffReason::GoldenFlip,
-                        next_mode: next,
-                        next_origin: ModeOrigin::Agent,
-                        first_message: crate::agent::nudges::golden_flip(
+                    push_user_blocks(
+                        history,
+                        store,
+                        ctx,
+                        vec![ContentBlock::text(crate::agent::nudges::golden_continue(
                             &golden_pending,
-                            next.as_str(),
                             golden.cycle,
                             max_cycles,
-                        ),
-                        golden_cycle: golden.cycle,
-                        golden_stalls: golden.stalls as u32,
-                        golden_last_pending: golden_pending.clone(),
-                        document: None,
-                    };
-                    return Ok(RunOutcome::Handoff(Box::new(handoff_spec)));
+                        ))],
+                    );
+                    continue;
                 }
                 // Cap hit: stop honestly with a specific reason so the user
                 // sees WHY the loop gave up with goals unmet.
@@ -1232,46 +1138,6 @@ pub async fn run_workflow_with_profile(
                 }
             }
 
-            // Feed the plan its Implementation Log when a goal-driven build
-            // truly finishes: golden tasks existed and are all done (so this is
-            // an honest end_turn, not a cap give-up), a plan file exists, and
-            // finalize_plan wasn't called yet. One reminder, then the harness
-            // auto-appends the log so the plan is ALWAYS fed. Fail-open: this
-            // never blocks the finish.
-            if !guards.plan_finalized && stop_reason == "end_turn" {
-                let tasks = ctx
-                    .session_store_path
-                    .as_deref()
-                    .and_then(|p| {
-                        crate::agent::persist::load_last_tasks(std::path::Path::new(p)).ok()
-                    })
-                    .unwrap_or_default();
-                let had_golden = tasks.iter().any(crate::agent::tools::tasks::is_golden);
-                let plan_exists =
-                    crate::agent::tools::finalize_plan::latest_plan_file(ctx).is_some();
-                if had_golden && plan_exists {
-                    if !guards.finalize_nudged {
-                        guards.finalize_nudged = true;
-                        push_user_blocks(
-                            history,
-                            store,
-                            ctx,
-                            vec![ContentBlock::text(crate::agent::nudges::FINALIZE_PLAN)],
-                        );
-                        continue;
-                    }
-                    // The model still skipped it — record the log ourselves.
-                    if let Some(outcome) = crate::agent::tools::finalize_plan::auto_finalize(ctx) {
-                        let _ = event_tx.send(AgentEvent::TextStep {
-                            text: format!(
-                                "📝 Implementation Log recorded to {}",
-                                outcome.plan_file
-                            ),
-                        });
-                    }
-                }
-            }
-
             // The checks above can run for minutes, and a message the user
             // sends meanwhile is only queued. The check at the top of this
             // branch ran before them, so without this one the run would end
@@ -1381,8 +1247,7 @@ pub async fn run_workflow_with_profile(
             // run the whole run at once (`tool_batch`). Each result is then
             // taken below in the model's order, as if the call ran here.
             if ready[ti].is_none() && !steering.interrupt.load(Ordering::SeqCst) {
-                let compact = profile == PromptProfile::Compact
-                    && !matches!(mode_ctl.get().0, SessionMode::Brain);
+                let compact = profile == PromptProfile::Compact;
                 tool_batch::run_ahead(
                     &tool_uses,
                     ti,
@@ -1464,25 +1329,18 @@ pub async fn run_workflow_with_profile(
                 hook_stop_request = Some(reason);
             }
 
-            // One reading of the live toggle per call: every gate below comes
-            // from it. Two reads could straddle a flip to Brain and give
-            // `in_brain` with `direct_edit`, letting `edit_file` past Brain's
-            // refusal (Phase 3 final review).
-            let mode_now = mode_ctl.get().0;
-            let in_brain = mode_now == SessionMode::Brain;
-            // A Builder session changes files itself (`edits_files`: Compact,
-            // and Standard since decision D1). Each change is asked about — an
+            // The session changes files itself (`edits_files`: every chat
+            // profile, decision D1). Each change is asked about — an
             // `edit_file` as always, and a shell command that writes a file,
             // which the shell rule never runs unasked
-            // (`permissions::bash_call_permission`). Brain's read-only gates
-            // are untouched — a toggle mid-round is read here, per call.
-            let direct_edit = profile.edits_files(mode_now);
+            // (`permissions::bash_call_permission`).
+            let direct_edit = profile.edits_files();
             // Compact also refuses whatever lies outside its ten tools.
-            let compact = profile == PromptProfile::Compact && !in_brain;
-            // A denial short-circuits everything downstream, including the mode
-            // gates — there is nothing left to decide once the tool will not
-            // run. An `allow` or `ask` does NOT short-circuit: the mode gates
-            // still apply. Hooks may relax a prompt; they may never relax a
+            let compact = profile == PromptProfile::Compact;
+            // A denial short-circuits everything downstream, including the
+            // write gates — there is nothing left to decide once the tool will
+            // not run. An `allow` or `ask` does NOT short-circuit: the write
+            // gates still apply. Hooks may relax a prompt; they may never relax a
             // policy.
             // `load_tools` is answered here; a deferred tool called before it
             // was loaded is loaded now and then runs like any other call.
@@ -1498,7 +1356,7 @@ pub async fn run_workflow_with_profile(
                     &tool_name,
                     &tool_use_id,
                     &tool_input,
-                    || deferred_tools(cur_mode, profile, &mcp_defs, config),
+                    || deferred_tools(profile, &mcp_defs, config),
                     &mut loaded,
                     event_tx,
                     session_id,
@@ -1534,24 +1392,11 @@ pub async fn run_workflow_with_profile(
                     event_tx,
                     session_id,
                 )
-            } else if tool_name == "enter_plan_mode" || tool_name == "exit_plan_mode" {
-                handle_mode_switch(
-                    &tool_name,
-                    &tool_use_id,
-                    &tool_input,
-                    mode_ctl,
-                    store,
-                    ctx,
-                    event_tx,
-                    session_id,
-                    &mut pending_handoff,
-                )
             } else if tool_name == "doc_create" && profile == PromptProfile::Standard {
                 let block = crate::agent::doc_session::create_call(
                     &tool_use_id,
                     &tool_input,
                     &user_message,
-                    mode_ctl,
                     store,
                     ctx,
                     event_tx,
@@ -1561,12 +1406,6 @@ pub async fn run_workflow_with_profile(
                 crate::agent::doc_session::join_tools(ctx, &mut loaded);
                 block
             } else if tool_name == "spawn_agents" {
-                // Brain may only spawn read-only subagents.
-                let tool_input = if in_brain {
-                    force_explore_mode(tool_input)
-                } else {
-                    tool_input
-                };
                 let (block, sub_in, sub_out, sub_cost) = subagent::run_spawn_agents(
                     config,
                     ctx,
@@ -1584,22 +1423,17 @@ pub async fn run_workflow_with_profile(
                 ledger.subagent_cost += sub_cost;
                 block
             } else if tool_name == "edit_file" && !direct_edit {
-                // Not offered where the session does not edit (Brain, the git
+                // Not offered where the session does not edit (the git
                 // operator); deny defensively in case the model hallucinates it.
                 deny_tool(
                     &tool_name,
                     &tool_use_id,
                     &tool_input,
-                    if in_brain {
-                        gate_text::EDIT_IN_BRAIN
-                    } else {
-                        gate_text::EDIT_NOT_IN_SESSION
-                    },
+                    gate_text::EDIT_NOT_IN_SESSION,
                     event_tx,
                     session_id,
                 )
-            } else if !in_brain
-                && !direct_edit
+            } else if !direct_edit
                 && tool_name == "bash"
                 && permissions::bash_writes_files(
                     tool_input
@@ -1613,43 +1447,6 @@ pub async fn run_workflow_with_profile(
                     &tool_use_id,
                     &tool_input,
                     gate_text::BASH_WRITES_NO_EDIT,
-                    event_tx,
-                    session_id,
-                )
-            } else if in_brain
-                && tool_name == "bash"
-                && permissions::bash_writes_files(
-                    tool_input
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(""),
-                )
-            {
-                deny_tool(
-                    &tool_name,
-                    &tool_use_id,
-                    &tool_input,
-                    gate_text::BASH_WRITES_IN_BRAIN,
-                    event_tx,
-                    session_id,
-                )
-            } else if in_brain
-                && tool_name == "bash"
-                && !matches!(
-                    permissions::bash_permission_brain(
-                        tool_input
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(""),
-                    ),
-                    PermissionLevel::Auto
-                )
-            {
-                deny_tool(
-                    &tool_name,
-                    &tool_use_id,
-                    &tool_input,
-                    gate_text::BASH_NOT_ALLOWED_IN_BRAIN,
                     event_tx,
                     session_id,
                 )
@@ -1669,14 +1466,6 @@ pub async fn run_workflow_with_profile(
                 )
                 .await
             };
-            // Note a successful finalize_plan so the golden-completion gate
-            // knows the plan was fed and skips the reminder / fallback.
-            if tool_name == "finalize_plan"
-                && let ContentBlock::ToolResult { content, .. } = &block
-                && !content.as_text().starts_with("Error")
-            {
-                guards.plan_finalized = true;
-            }
 
             // ── Hooks: PostToolUse ───────────────────────────────────────
             //
@@ -1744,7 +1533,7 @@ pub async fn run_workflow_with_profile(
         if hook_stop_request.is_some()
             && let Some(spec) = pending_handoff.take()
         {
-            let note = crate::agent::handoff::not_followed(&spec, mode_ctl, event_tx);
+            let note = crate::agent::handoff::not_followed(&spec);
             tool_result_blocks.push(ContentBlock::text(note));
         }
         push_turn(
@@ -1843,52 +1632,6 @@ pub async fn run_workflow_with_profile(
             }
         }
 
-        // Brain progress guard: if the agent is in Brain mode and only using
-        // explore tools without interviewing/planning/tasking, redirect it.
-        let is_brain = matches!(mode_ctl.get().0, SessionMode::Brain);
-        if is_brain {
-            let explore_tools = [
-                "spawn_agents",
-                "semantic_search",
-                "code_search",
-                "grep",
-                "read_file",
-                "file_outline",
-                "list_dir",
-                "symbol_lookup",
-                "go_to_definition",
-                "find_references",
-            ];
-            let is_explore_only = tool_uses.iter().all(|t| {
-                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                explore_tools.contains(&name)
-            });
-            let has_progress_tool = tool_uses.iter().any(|t| {
-                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                name == "ask_user" || name == "write_plan" || name == "tasks_set"
-            });
-
-            if has_progress_tool {
-                guards.brain_explore_streak = 0;
-            } else if is_explore_only {
-                guards.brain_explore_streak += 1;
-                if guards.brain_explore_streak >= BRAIN_EXPLORE_LIMIT {
-                    guards.brain_explore_streak = 0; // Reset so we don't loop-spam
-                    push_user_blocks(
-                        history,
-                        store,
-                        ctx,
-                        vec![ContentBlock::text(crate::agent::nudges::brain_exploring(
-                            config.prompt_version,
-                        ))],
-                    );
-                    continue;
-                }
-            } else {
-                // Some mixed tools that aren't purely explore — don't count.
-            }
-        }
-
         // Interrupt check after tool results.
         if steering.interrupt.swap(false, Ordering::SeqCst) {
             if inject_steering(history, store, ctx, steering, event_tx) {
@@ -1934,7 +1677,7 @@ pub async fn run_workflow_with_profile(
         ts: now_ms(),
     });
     crate::agent::persist::invalidate_cache(&store.path, &ctx.records_cache);
-    ledger.roll(config.model_for_mode(cur_mode.as_str()));
+    ledger.roll(config.model());
     ledger.write_status(store, ctx, session_id, Some(last_context));
     emit_final_stats(&ledger, last_context, &budget);
     let _ = event_tx.send(AgentEvent::Done {
@@ -2050,9 +1793,7 @@ pub(crate) mod surface_tests {
     /// user typed for it.
     pub(crate) fn config_for(base_url: &str, context_window: Option<u32>) -> AgentConfig {
         let mut config = AgentConfig {
-            builder_model: "stub/m".into(),
-            // The completion judge and Brain-mode turns run on the Brain.
-            brain_model: "stub/m".into(),
+            model: "stub/m".into(),
             // Edits are approved without a person, so a run can finish.
             yolo_mode: true,
             ..AgentConfig::default()
@@ -2089,17 +1830,14 @@ pub(crate) mod surface_tests {
         tools.iter().map(|t| t.name.as_str()).collect()
     }
 
-    fn standard(mode: SessionMode, version: crate::agent::prompt::PromptVersion) -> String {
+    fn standard() -> String {
         system_prompt(
             Some("/ws"),
             Some(SKILLS),
             Some(SPECS),
-            None,
-            mode,
             PromptProfile::Standard,
             4,
             false,
-            version,
         )
     }
 
@@ -2107,83 +1845,19 @@ pub(crate) mod surface_tests {
     // cost a failed call every time the model believed it.
     #[test]
     fn a_lean_prompt_names_none_of_the_tools_lean_drops() {
-        for (mode, version) in [SessionMode::Brain, SessionMode::Builder]
-            .into_iter()
-            .flat_map(|m| crate::agent::prompt::PromptVersion::ALL.map(|v| (m, v)))
-        {
-            let full = standard(mode, version);
-            // v1 ranks the LSP tools first; v2 never names them (they are
-            // deferred, and the catalog leaves out what Lean drops).
-            assert!(
-                version == crate::agent::prompt::PromptVersion::V2
-                    || LEAN_DROPPED.iter().any(|t| full.contains(t))
-                    || full.contains("LSP"),
-                "{mode:?}: the full prompt steers toward the LSP tools"
-            );
-            let lean = prompt_for(ToolSurface::Lean, full.clone());
-            for tool in LEAN_DROPPED {
-                assert!(!lean.contains(tool), "{mode:?} still names {tool}");
-            }
-            assert!(!lean.contains("LSP"), "{mode:?} still ranks LSP first");
-            // Everything else is the same prompt.
-            assert!(lean.contains("`semantic_search`") && lean.contains(SKILLS));
-            assert!(lean.len() > full.len() - 400);
-            // v1 steers toward the LSP tools, so Lean must take text out of it;
-            // v2 names none of them, so its Lean prompt is its full prompt.
-            match version {
-                crate::agent::prompt::PromptVersion::V1 => {
-                    assert!(lean.len() < full.len(), "{mode:?}: v1 Lean is shorter")
-                }
-                crate::agent::prompt::PromptVersion::V2 => assert_eq!(lean, full, "{mode:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn the_surface_is_set_per_model_so_brain_and_builder_can_differ() {
-        let mut cfg = AgentConfig::default();
-        cfg.tool_surface
-            .insert(cfg.builder_model.clone(), "lean".into());
-
-        let builder = api_tools(SessionMode::Builder, PromptProfile::Standard, &[], &cfg);
-        let brain = api_tools(SessionMode::Brain, PromptProfile::Standard, &[], &cfg);
+        let full = standard();
+        let lean = prompt_for(ToolSurface::Lean, full.clone());
         for tool in LEAN_DROPPED {
-            assert!(!names(&builder).contains(&tool), "builder is lean: {tool}");
-            assert!(names(&brain).contains(&tool), "brain was not set: {tool}");
+            assert!(!lean.contains(tool), "still names {tool}");
         }
-        // Each mode adds two tools of its own; Builder also has `edit_file`,
-        // which Brain never gets.
-        assert_eq!(builder.len() + LEAN_DROPPED.len(), brain.len() + 1);
-
-        let ctx = crate::agent::tools::tests_support::ctx();
-        let prefix = |mode| {
-            run_prefix(
-                &cfg,
-                &ctx,
-                PromptProfile::Standard,
-                mode,
-                None,
-                None,
-                &[],
-                false,
-                &[],
-            )
-        };
-        // symbol_lookup is deferred (Phase 2): offered means listed in the
-        // catalog and loadable, not sent.
-        let deferred =
-            |mode| crate::agent::prompt::deferred_tools(mode, PromptProfile::Standard, &[], &cfg);
-        let (profile, system, tools) = prefix(SessionMode::Builder);
-        assert_eq!(profile, PromptProfile::Standard);
-        assert!(!system.contains("symbol_lookup") && !names(&tools).contains(&"symbol_lookup"));
-        assert!(!names(&deferred(SessionMode::Builder)).contains(&"symbol_lookup"));
-        let (_, system, _) = prefix(SessionMode::Brain);
-        assert!(system.contains("symbol_lookup"));
-        assert!(names(&deferred(SessionMode::Brain)).contains(&"symbol_lookup"));
+        assert!(!lean.contains("LSP"), "still ranks LSP first");
+        // The prompt never names the LSP tools (they are deferred, and the
+        // catalog leaves out what Lean drops), so its Lean prompt is its
+        // full prompt.
+        assert!(lean.contains("`semantic_search`") && lean.contains(SKILLS));
+        assert_eq!(lean, full);
     }
 
-    // With nothing set, nothing moves: the prefix every existing session
-    // caches is the one it had.
     #[test]
     fn with_no_surface_set_the_prefix_is_what_it_was() {
         let cfg = AgentConfig::default();
@@ -2191,38 +1865,35 @@ pub(crate) mod surface_tests {
             workspace_root: Some("/ws".into()),
             ..crate::agent::tools::tests_support::ctx()
         };
-        for mode in [SessionMode::Brain, SessionMode::Builder] {
-            let (profile, system, tools) = run_prefix(
-                &cfg,
-                &ctx,
-                PromptProfile::Standard,
-                mode,
-                Some(SKILLS),
-                Some(SPECS),
-                &[],
-                false,
-                &[],
-            );
-            assert_eq!(profile, PromptProfile::Standard);
-            // Phase 2 appends the deferred catalog to the prompt and sends the
-            // core of the surface plus `load_tools`; with no surface set the
-            // surface itself is the full one.
-            let catalog = system
-                .strip_prefix(standard(mode, cfg.prompt_version).as_str())
-                .expect("the prompt, then the catalog");
-            assert!(catalog.starts_with("\n\n## DEFERRED TOOLS"));
-            assert!(catalog.contains("- go_to_definition "));
-            let mut core: Vec<&str> = Vec::new();
-            let surface = api_tools(mode, PromptProfile::Standard, &[], &cfg);
-            core.extend(
-                names(&surface)
-                    .into_iter()
-                    .filter(|n| !crate::agent::deferred::is_deferred(n)),
-            );
-            core.push("load_tools");
-            assert_eq!(names(&tools), core);
-            assert!(names(&surface).contains(&"go_to_definition"));
-        }
+        let (profile, system, tools) = run_prefix(
+            &cfg,
+            &ctx,
+            PromptProfile::Standard,
+            Some(SKILLS),
+            Some(SPECS),
+            &[],
+            false,
+            &[],
+        );
+        assert_eq!(profile, PromptProfile::Standard);
+        // Phase 2 appends the deferred catalog to the prompt and sends the
+        // core of the surface plus `load_tools`; with no surface set the
+        // surface itself is the full one.
+        let catalog = system
+            .strip_prefix(standard().as_str())
+            .expect("the prompt, then the catalog");
+        assert!(catalog.starts_with("\n\n## DEFERRED TOOLS"));
+        assert!(catalog.contains("- go_to_definition "));
+        let mut core: Vec<&str> = Vec::new();
+        let surface = api_tools(PromptProfile::Standard, &[], &cfg);
+        core.extend(
+            names(&surface)
+                .into_iter()
+                .filter(|n| !crate::agent::deferred::is_deferred(n)),
+        );
+        core.push("load_tools");
+        assert_eq!(names(&tools), core);
+        assert!(names(&surface).contains(&"go_to_definition"));
     }
 
     #[test]
@@ -2241,7 +1912,6 @@ pub(crate) mod surface_tests {
             &cfg,
             &ctx,
             PromptProfile::Standard,
-            SessionMode::Builder,
             Some(SKILLS),
             Some(SPECS),
             &mcp,
@@ -2266,38 +1936,10 @@ pub(crate) mod surface_tests {
         // word of the conversation. 12% of the window, where the Standard
         // prompt and tools — before any skill or MCP schema — took 30%.
         let compact = estimate_tokens(&[], &system, &tools);
-        let full_tools = api_tools(SessionMode::Builder, PromptProfile::Standard, &mcp, &cfg);
-        let full = estimate_tokens(
-            &[],
-            &standard(SessionMode::Builder, cfg.prompt_version),
-            &full_tools,
-        );
+        let full_tools = api_tools(PromptProfile::Standard, &mcp, &cfg);
+        let full = estimate_tokens(&[], &standard(), &full_tools);
         assert!(compact < 4_000, "compact prefix: {compact} tokens");
         assert!(full > 2 * compact, "standard {full} vs compact {compact}");
-    }
-
-    // The same session in Brain keeps the Standard profile: a toggle must hand
-    // the model Brain's read-only protocol, not Compact's edit tools.
-    #[test]
-    fn switching_a_compact_session_to_brain_restores_the_standard_prefix() {
-        let mut cfg = config_for("http://127.0.0.1:1", Some(32_768));
-        cfg.brain_model = "stub/m".into();
-        let ctx = crate::agent::tools::tests_support::ctx();
-        let (profile, system, tools) = run_prefix(
-            &cfg,
-            &ctx,
-            PromptProfile::Standard,
-            SessionMode::Brain,
-            None,
-            None,
-            &[],
-            false,
-            &[],
-        );
-        assert_eq!(profile, PromptProfile::Standard);
-        assert!(system.contains("CURRENT MODE: BRAIN"));
-        assert!(!names(&tools).contains(&"edit_file"));
-        assert!(names(&tools).contains(&"write_plan"));
     }
 
     #[test]
@@ -2306,7 +1948,7 @@ pub(crate) mod surface_tests {
         assert!(PromptProfile::Compact.is_chat() && PromptProfile::Standard.is_chat());
         assert!(!PromptProfile::GitSync.is_chat());
         let cfg = config_for("http://127.0.0.1:1", Some(32_768));
-        let budget = ContextBudget::for_model(&cfg, &cfg.builder_model, 3_600);
+        let budget = ContextBudget::for_model(&cfg, cfg.model(), 3_600);
         assert_eq!(shed_line(&budget, PromptProfile::Compact), budget.soft);
     }
 
@@ -2355,19 +1997,6 @@ pub(crate) mod surface_tests {
         run_script_steered(tag, context_window, answer, script, steering, |_, _| {}).await
     }
 
-    /// `run_script`, with the session in `mode` from its first round (the
-    /// brain model is the same stub as the builder).
-    async fn run_script_in(
-        mode: SessionMode,
-        tag: &str,
-        answer: Option<bool>,
-        script: impl FnOnce(&str) -> Vec<Reply>,
-    ) -> Run {
-        let steering = Arc::new(SteeringCtl::new());
-        let mode_ctl = Arc::new(ModeCtl::new(mode, ModeOrigin::Human));
-        run_script_with(mode_ctl, tag, None, answer, script, steering, |_, _| {}).await
-    }
-
     /// `run_script`, with the run's steering in the test's hands and
     /// `on_event` called with each event (and that steering) as it is sent.
     async fn run_script_steered(
@@ -2378,22 +2007,10 @@ pub(crate) mod surface_tests {
         steering: Arc<SteeringCtl>,
         on_event: impl Fn(&AgentEvent, &SteeringCtl) + Send + Sync + 'static,
     ) -> Run {
-        run_script_with(
-            Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
-            tag,
-            context_window,
-            answer,
-            script,
-            steering,
-            on_event,
-        )
-        .await
+        run_script_with(tag, context_window, answer, script, steering, on_event).await
     }
 
-    /// The run is handed `mode_ctl`, so a test holding it can flip the
-    /// session's mode while the run is under way, as the UI toggle does.
     async fn run_script_with(
-        mode_ctl: Arc<ModeCtl>,
         tag: &str,
         context_window: Option<u32>,
         answer: Option<bool>,
@@ -2417,9 +2034,6 @@ pub(crate) mod surface_tests {
 
         let (base, _, bodies) = spawn_recording(script(&path)).await;
         let mut config = config_for(&base, context_window);
-        if mode_ctl.get().0 == SessionMode::Brain {
-            config.brain_model = config.builder_model.clone();
-        }
         config.yolo_mode = answer.is_none();
         let ctx = ToolContext {
             workspace_root: Some(root.to_string_lossy().to_string()),
@@ -2468,7 +2082,6 @@ pub(crate) mod surface_tests {
             &ctx,
             &store,
             &steering,
-            &mode_ctl,
         )
         .await;
         if let Some(user) = user {
@@ -3189,163 +2802,6 @@ pub(crate) mod surface_tests {
             std::fs::remove_dir_all(&run.root).ok();
         }
     }
-
-    /// Brain stays strictly read-only whatever Builder may now do: it is not
-    /// offered `edit_file`, a call to it is refused, and a shell command that
-    /// writes a file is refused even when the person would have said yes.
-    #[tokio::test]
-    async fn a_brain_session_refuses_every_write_even_with_approval() {
-        let run = run_script_in(SessionMode::Brain, "brain-writes", Some(true), |path| {
-            vec![
-                Reply::Tool {
-                    name: "read_file",
-                    input: serde_json::json!({ "path": path }),
-                },
-                Reply::Tool {
-                    name: "edit_file",
-                    input: serde_json::json!({
-                        "path": path, "old_string": "hello", "new_string": "goodbye",
-                    }),
-                },
-                Reply::Tool {
-                    name: "bash",
-                    input: serde_json::json!({ "command": format!("echo goodbye > {path}") }),
-                },
-                Reply::Text("done"),
-            ]
-        })
-        .await;
-        assert!(
-            matches!(run.outcome, Ok(RunOutcome::Completed)),
-            "{:?}",
-            run.outcome.err()
-        );
-        assert_eq!(std::fs::read_to_string(&run.file).unwrap(), "hello world\n");
-        let first: serde_json::Value = serde_json::from_str(&run.bodies[0]).unwrap();
-        assert!(first["system"].to_string().contains("CURRENT MODE: BRAIN"));
-        let sent: Vec<&str> = first["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-        assert!(!sent.contains(&"edit_file"), "{sent:?}");
-        assert!(run.bodies[2].contains("not available in Brain mode"));
-        assert!(run.bodies[3].contains("In Brain mode you cannot mutate"));
-        std::fs::remove_dir_all(&run.root).ok();
-    }
-
-    /// The write heuristic does not see a script that writes, and `node ` is
-    /// allowlisted, so Brain ran it unasked (final branch review): an
-    /// interpreter or a chain with an unlisted command is refused there.
-    #[tokio::test]
-    async fn a_brain_session_refuses_an_interpreter_and_a_chain() {
-        let run = run_script_in(SessionMode::Brain, "brain-node", Some(true), |path| {
-            vec![
-                Reply::Tool {
-                    name: "bash",
-                    input: serde_json::json!({
-                        "command": format!("node -e \"require('fs').rmSync('{path}')\""),
-                    }),
-                },
-                Reply::Tool {
-                    name: "bash",
-                    input: serde_json::json!({ "command": format!("ls && rm -f {path}") }),
-                },
-                Reply::Text("done"),
-            ]
-        })
-        .await;
-        assert!(
-            matches!(run.outcome, Ok(RunOutcome::Completed)),
-            "{:?}",
-            run.outcome.err()
-        );
-        assert_eq!(std::fs::read_to_string(&run.file).unwrap(), "hello world\n");
-        assert!(run.bodies[1].contains("not allowed in Brain mode"));
-        assert!(run.bodies[2].contains("not allowed in Brain mode"));
-        std::fs::remove_dir_all(&run.root).ok();
-    }
-
-    /// The toggle can be flipped from Brain to Builder while a round's batch
-    /// is still running. From that moment the session edits, and a shell
-    /// command that writes a file is an edit: it must be asked about — as
-    /// any Builder shell write is, not refused — and never run unasked
-    /// because its prefix (`echo `) is allowlisted and the round began in
-    /// Brain.
-    #[tokio::test]
-    async fn flipping_brain_to_builder_mid_batch_still_asks_before_a_shell_write() {
-        let mode_ctl = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Human));
-        let flip = mode_ctl.clone();
-        let run = run_script_with(
-            mode_ctl,
-            "brain-flip",
-            None,
-            Some(false),
-            |path| {
-                vec![
-                    Reply::Tools(vec![
-                        (
-                            "bash",
-                            serde_json::json!({ "command": format!("cat {path}") }),
-                        ),
-                        (
-                            "bash",
-                            serde_json::json!({ "command": format!("echo goodbye > {path}") }),
-                        ),
-                    ]),
-                    Reply::Text("done"),
-                ]
-            },
-            Arc::new(SteeringCtl::new()),
-            move |event, _| {
-                // The person flips the toggle as soon as the first call answers.
-                if let AgentEvent::ToolResult { output, .. } = event
-                    && output.contains("hello world")
-                {
-                    flip.set(SessionMode::Builder, ModeOrigin::Human);
-                }
-            },
-        )
-        .await;
-        assert!(
-            matches!(run.outcome, Ok(RunOutcome::Completed)),
-            "{:?}",
-            run.outcome.err()
-        );
-        assert_eq!(
-            std::fs::read_to_string(&run.file).unwrap(),
-            "hello world\n",
-            "the write ran although the person said no to every prompt"
-        );
-        assert!(
-            !run.events.iter().any(|e| matches!(
-                e,
-                AgentEvent::ToolCall { tool_name, args, permission, .. }
-                    if tool_name == "bash"
-                        && args.to_string().contains("echo goodbye")
-                        && permission == "auto"
-            )),
-            "a file-writing shell command never runs unasked"
-        );
-        // Asked, and the person's "no" is what the model reads.
-        assert!(
-            run.events.iter().any(|e| matches!(
-                e,
-                AgentEvent::ToolCall { tool_name, args, permission, .. }
-                    if tool_name == "bash"
-                        && args.to_string().contains("echo goodbye")
-                        && permission == "requires_approval"
-            )),
-            "the write after the flip is put to the person"
-        );
-        assert!(
-            run.bodies[1].contains("rejected by user"),
-            "{}",
-            run.bodies[1]
-        );
-        std::fs::remove_dir_all(&run.root).ok();
-    }
 }
 
 /// What a run does at its context lines when there is nothing to shed.
@@ -3392,7 +2848,6 @@ mod context_line_tests {
             &ctx,
             &store,
             &Arc::new(SteeringCtl::new()),
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
         )
         .await;
         let requests = bodies.lock().unwrap().len();
@@ -3409,7 +2864,6 @@ mod context_line_tests {
             &config,
             &ctx,
             PromptProfile::Standard,
-            SessionMode::Builder,
             None,
             None,
             &[],
@@ -3418,7 +2872,7 @@ mod context_line_tests {
         );
         let prefix = estimate_tokens(&[], &system, &tools);
         (
-            ContextBudget::for_model(&config, &config.builder_model, prefix),
+            ContextBudget::for_model(&config, config.model(), prefix),
             prefix,
         )
     }
@@ -3501,7 +2955,7 @@ mod context_line_tests {
         let ctx = crate::agent::tools::tests_support::ctx();
         let events: Channel<AgentEvent> = Channel::new(|_| Ok(()));
         let system = "You are a test.".to_string();
-        let budget = ContextBudget::for_model(&config, &config.builder_model, 0);
+        let budget = ContextBudget::for_model(&config, config.model(), 0);
 
         let mut history = vec![Message {
             role: "user".into(),
@@ -3635,7 +3089,6 @@ mod usage_record_tests {
             &ctx,
             &store,
             &Arc::new(SteeringCtl::new()),
-            &Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human)),
         )
         .await;
         assert!(matches!(outcome, Ok(RunOutcome::Completed)));
@@ -3691,7 +3144,7 @@ mod usage_record_tests {
 #[cfg(test)]
 mod deferred_loop_tests {
     use super::*;
-    use crate::agent::session::{AnswerMap, ApprovalMap, ModeCtl, ModeOrigin, SteeringCtl};
+    use crate::agent::session::{AnswerMap, ApprovalMap, SteeringCtl};
     use crate::agent::subagent::scripted_model::{Reply, spawn_recording};
 
     pub(super) struct Workspace {
@@ -3739,16 +3192,14 @@ mod deferred_loop_tests {
         message: &str,
         script: Vec<Reply>,
     ) -> (Result<RunOutcome, String>, Vec<String>) {
-        let mode = Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human));
-        run_with(ws, window, message, &mode, None, script).await
+        run_with(ws, window, message, None, script).await
     }
 
-    /// `run_saying`, in the mode `mode_ctl` holds and with these hooks.
+    /// `run_saying`, with these hooks.
     pub(super) async fn run_with(
         ws: &Workspace,
         window: Option<u32>,
         message: &str,
-        mode_ctl: &Arc<ModeCtl>,
         hooks: Option<Arc<crate::agent::hooks::HookCtx>>,
         script: Vec<Reply>,
     ) -> (Result<RunOutcome, String>, Vec<String>) {
@@ -3776,7 +3227,6 @@ mod deferred_loop_tests {
             &ctx,
             &ws.store,
             &Arc::new(SteeringCtl::new()),
-            mode_ctl,
         )
         .await;
         let bodies = bodies.lock().unwrap().clone();
@@ -3811,7 +3261,7 @@ mod deferred_loop_tests {
             vec![
                 Reply::Tool {
                     name: "load_tools",
-                    input: serde_json::json!({"names": ["semantic_search", "enter_plan_mode"]}),
+                    input: serde_json::json!({"names": ["semantic_search", "code_search"]}),
                 },
                 Reply::Text("done"),
             ],
@@ -3826,18 +3276,15 @@ mod deferred_loop_tests {
         let second = tool_names(&bodies[1]);
         assert!(!first.contains(&"semantic_search".to_string()));
         assert_eq!(second[..first.len()], first[..], "nothing before moves");
-        assert_eq!(
-            second[first.len()..],
-            ["semantic_search", "enter_plan_mode"]
-        );
+        assert_eq!(second[first.len()..], ["semantic_search", "code_search"]);
         // The system prompt is the same bytes on both requests.
         let system = |b: &str| serde_json::from_str::<Value>(b).unwrap()["system"].clone();
         assert_eq!(system(&bodies[0]), system(&bodies[1]));
-        assert!(last_result(&bodies[1]).contains("Loaded: semantic_search, enter_plan_mode"));
+        assert!(last_result(&bodies[1]).contains("Loaded: semantic_search, code_search"));
         let records = records_of(&ws);
         assert_eq!(
             crate::agent::deferred::loaded_names(&records),
-            ["semantic_search", "enter_plan_mode"]
+            ["semantic_search", "code_search"]
         );
         assert!(records.iter().any(|r| matches!(
             r,
@@ -4037,7 +3484,6 @@ mod document_loop_tests {
     };
     use super::*;
     use crate::agent::deferred::DOCUMENT_TOOLS;
-    use crate::agent::session::{ModeCtl, ModeOrigin};
     use crate::agent::subagent::scripted_model::Reply;
 
     /// The text blocks of the last message of a request body.
@@ -4168,6 +3614,53 @@ mod document_loop_tests {
         assert!(
             refused.contains("Error") && refused.contains("doc_add"),
             "{refused}"
+        );
+        std::fs::remove_dir_all(&ws.root).ok();
+    }
+
+    /// One timeline: a run that ends with a golden goal still open is sent
+    /// back to it in the same session — no handoff to a session in another
+    /// mode — and the cycle is logged so the caps hold; the stall cap ends
+    /// it when the model makes no progress.
+    #[tokio::test]
+    async fn pending_golden_goals_send_the_run_back_in_the_same_session() {
+        let ws = workspace("golden-continue");
+        crate::agent::persist::append_tasks(
+            &ws.store.path,
+            &crate::agent::tools::tasks::create_golden_tasks(&["ship it".into()]),
+        )
+        .unwrap();
+        let (outcome, bodies) = run(
+            &ws,
+            vec![
+                Reply::Text("Done."),
+                Reply::Text("Done, really."),
+                Reply::Text("Done!"),
+                Reply::Text("Done."),
+            ],
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(RunOutcome::Completed)),
+            "{:?}",
+            outcome.as_ref().err()
+        );
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.contains("Golden tasks are still pending")),
+            "the run is sent back to its goals"
+        );
+        let records = records_of(&ws);
+        assert!(records.iter().any(|r| matches!(
+            r,
+            SessionRecord::GoldenCycle { cycle: 1, mode, .. } if mode.is_empty()
+        )));
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(r, SessionRecord::HandoffTo { .. })),
+            "no successor session"
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }
@@ -4360,7 +3853,10 @@ mod document_loop_tests {
         let Ok(RunOutcome::Handoff(spec)) = outcome else {
             panic!("expected a handoff");
         };
-        assert_eq!(spec.reason, HandoffReason::NewDocument);
+        assert_eq!(
+            spec.reason,
+            crate::agent::handoff::HandoffReason::NewDocument
+        );
         assert_eq!(
             spec.document.as_deref(),
             Some(".claudinio/docs/bolo-de-cenoura.md")
@@ -4411,84 +3907,6 @@ mod document_loop_tests {
         assert!(
             !ws.root.join(".claudinio/docs/torta-de-limao.md").exists(),
             "the refused call writes nothing"
-        );
-        let second = results_of(&ws).pop().unwrap();
-        assert!(
-            second.contains(crate::agent::handoff::HANDOFF_QUEUED),
-            "{second}"
-        );
-        std::fs::remove_dir_all(&ws.root).ok();
-    }
-
-    #[tokio::test]
-    async fn doc_create_after_exit_plan_mode_in_one_round_leaves_the_plan_handoff_standing() {
-        let ws = workspace("doc-after-exit");
-        link_doc(&ws, &["origem"]);
-        let mode = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Agent));
-        let (outcome, _) = run_with(
-            &ws,
-            None,
-            "go",
-            &mode,
-            None,
-            vec![
-                Reply::Tools(vec![
-                    ("exit_plan_mode", serde_json::json!({})),
-                    (
-                        "doc_create",
-                        serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
-                    ),
-                ]),
-                Reply::Text("never sent"),
-            ],
-        )
-        .await;
-        let Ok(RunOutcome::Handoff(spec)) = outcome else {
-            panic!("expected a handoff");
-        };
-        assert_eq!(spec.reason, HandoffReason::PlanExecution);
-        assert!(!ws.root.join(".claudinio/docs/bolo-de-cenoura.md").exists());
-        let second = results_of(&ws).pop().unwrap();
-        assert!(
-            second.contains(crate::agent::handoff::HANDOFF_QUEUED),
-            "{second}"
-        );
-        std::fs::remove_dir_all(&ws.root).ok();
-    }
-
-    #[tokio::test]
-    async fn exit_plan_mode_after_doc_create_in_one_round_leaves_the_document_handoff_standing() {
-        let ws = workspace("exit-after-doc");
-        link_doc(&ws, &["origem"]);
-        let mode = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Agent));
-        let (outcome, _) = run_with(
-            &ws,
-            None,
-            "go",
-            &mode,
-            None,
-            vec![
-                Reply::Tools(vec![
-                    (
-                        "doc_create",
-                        serde_json::json!({"title": "Bolo de cenoura", "sections": ["massa"]}),
-                    ),
-                    ("exit_plan_mode", serde_json::json!({})),
-                ]),
-                Reply::Text("never sent"),
-            ],
-        )
-        .await;
-        let Ok(RunOutcome::Handoff(spec)) = outcome else {
-            panic!("expected a handoff");
-        };
-        assert_eq!(spec.reason, HandoffReason::NewDocument);
-        assert!(
-            !records_of(&ws).iter().any(|r| matches!(
-                r,
-                SessionRecord::Mode { mode, .. } if mode == "builder"
-            )),
-            "the refused exit records no mode change"
         );
         let second = results_of(&ws).pop().unwrap();
         assert!(
@@ -4561,12 +3979,10 @@ mod document_loop_tests {
     async fn a_hook_stop_in_a_new_document_round_says_the_linked_session_did_not_open() {
         let ws = workspace("doc-handoff-hook-stop");
         link_doc(&ws, &["origem"]);
-        let mode = Arc::new(ModeCtl::new(SessionMode::Builder, ModeOrigin::Human));
         let (outcome, bodies) = run_with(
             &ws,
             None,
             "go",
-            &mode,
             Some(stopping_hook(&ws)),
             vec![
                 Reply::Tool {
@@ -4586,39 +4002,6 @@ mod document_loop_tests {
         assert!(
             note.contains(".claudinio/docs/bolo-de-cenoura.md"),
             "{note}"
-        );
-        std::fs::remove_dir_all(&ws.root).ok();
-    }
-
-    /// `exit_plan_mode` had already recorded Builder and committed the plan;
-    /// a hook stop in its round leaves the session in the Builder its record
-    /// says, so the next message builds here.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_hook_stop_in_the_exit_plan_mode_round_leaves_the_session_in_builder() {
-        let ws = workspace("exit-hook-stop");
-        let mode = Arc::new(ModeCtl::new(SessionMode::Brain, ModeOrigin::Agent));
-        let (outcome, _) = run_with(
-            &ws,
-            None,
-            "go",
-            &mode,
-            Some(stopping_hook(&ws)),
-            vec![
-                Reply::Tool {
-                    name: "exit_plan_mode",
-                    input: serde_json::json!({}),
-                },
-                Reply::Text("never sent"),
-            ],
-        )
-        .await;
-        assert!(matches!(outcome, Ok(RunOutcome::Completed)));
-        assert_eq!(mode.get(), (SessionMode::Builder, ModeOrigin::Agent));
-        assert!(
-            user_texts(&ws)
-                .iter()
-                .any(|t| t.starts_with("<handoff-not-followed>")),
         );
         std::fs::remove_dir_all(&ws.root).ok();
     }
@@ -4820,7 +4203,10 @@ mod document_loop_tests {
         let Ok(RunOutcome::Handoff(spec)) = outcome else {
             panic!("expected a handoff");
         };
-        assert_eq!(spec.reason, HandoffReason::NewDocument);
+        assert_eq!(
+            spec.reason,
+            crate::agent::handoff::HandoffReason::NewDocument
+        );
         assert_eq!(
             spec.golden_cycle, 2,
             "the golden loop's cycle count carries over"

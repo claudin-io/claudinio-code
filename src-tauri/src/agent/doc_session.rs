@@ -253,6 +253,11 @@ pub fn is_linked_document(ctx: &crate::agent::tools::ToolContext, path: &str) ->
     canon(&given) == canon(&l.abs)
 }
 
+/// The absolute path of the session's document, if it has one.
+pub fn linked_path(ctx: &crate::agent::tools::ToolContext) -> Option<std::path::PathBuf> {
+    linked(ctx).map(|l| l.abs)
+}
+
 /// Whether the session `ctx` writes to has a document.
 pub fn has_document(ctx: &crate::agent::tools::ToolContext) -> bool {
     linked(ctx).is_some()
@@ -988,7 +993,6 @@ pub(crate) fn create_call(
     tool_use_id: &str,
     input: &serde_json::Value,
     user_message: &str,
-    mode_ctl: &crate::agent::session::ModeCtl,
     store: &crate::agent::persist::SessionStore,
     ctx: &crate::agent::tools::ToolContext,
     event_tx: &tauri::ipc::Channel<crate::agent::events::AgentEvent>,
@@ -1062,7 +1066,6 @@ pub(crate) fn create_call(
             )
         }
         Some(old) => {
-            let (mode, origin) = mode_ctl.get();
             // The golden loop's state carries over, as on a context handoff,
             // so its caps never reset; the golden tasks go along too
             // (`transition::tasks_for_successor`).
@@ -1073,8 +1076,6 @@ pub(crate) fn create_call(
                 crate::agent::persist::linked_golden_state(&records);
             *pending_handoff = Some(crate::agent::handoff::HandoffSpec {
                 reason: crate::agent::handoff::HandoffReason::NewDocument,
-                next_mode: mode,
-                next_origin: origin,
                 first_message: new_document_kickoff(user_message, &rel),
                 golden_cycle: crate::agent::persist::golden_cycle_count(&records).max(linked_cycle),
                 golden_stalls,

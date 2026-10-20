@@ -325,3 +325,30 @@ describe("SubagentDoneData", () => {
     expect(withoutReport.report).toBeUndefined();
   });
 });
+
+// ── One timeline ───────────────────────────────────────────────────
+//
+// Single-timeline plan, Phase 4: the chat has no Auto/Brain/Builder control
+// and no "Continue with Builder"; the Plans list became the workspace's
+// documents. The panel is too heavy to mount here, so its source is pinned.
+import chatPanelSource from "./ChatPanel.tsx?raw";
+
+describe("ChatPanel has one timeline", () => {
+  it("offers no mode control and no plan-approval buttons", () => {
+    for (const gone of [
+      "data-mode-choice",
+      "switchMode",
+      "Continue with Builder",
+      "Read Plan",
+      "setSessionMode",
+      "listPlans",
+    ]) {
+      expect(chatPanelSource, gone).not.toContain(gone);
+    }
+  });
+
+  it("lists the workspace's documents where the plans were", () => {
+    expect(chatPanelSource).toContain("listDocuments");
+    expect(chatPanelSource).toContain('{"Documents"}');
+  });
+});

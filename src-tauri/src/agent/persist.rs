@@ -174,6 +174,9 @@ pub enum SessionRecord {
     #[serde(rename = "golden_cycle")]
     GoldenCycle {
         cycle: u32,
+        /// The mode a golden flip handed over to, in a session from before
+        /// one timeline; empty since.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         mode: String,
         goals: Vec<String>,
         ts: u64,
@@ -306,6 +309,9 @@ pub enum SessionRecord {
     /// session file instead of estimated after the fact.
     RunConfig {
         model: String,
+        /// Brain or Builder, in a session from before one timeline; empty
+        /// since.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         mode: String,
         context_window: u64,
         /// `full` | `sized` | `scaled` — see `agent::budget`.
@@ -584,13 +590,8 @@ pub fn linked_golden_state(records: &[SessionRecord]) -> (u32, u32, Vec<String>)
     }
 }
 
-/// The earliest recorded base commit for the session (the git HEAD when work
-/// first began), or None if no `BaseCommit` record exists yet.
-pub fn earliest_base_commit(records: &[SessionRecord]) -> Option<String> {
-    earliest_base_commit_at(records).map(|(sha, _)| sha)
-}
-
-/// [`earliest_base_commit`] together with when it was recorded (ms) — the
+/// The earliest recorded base commit (the git HEAD when work first began)
+/// together with when it was recorded (ms) — the
 /// moment this session's work began. The quality gate uses it to tell commits
 /// the session made from commits that already existed and merely arrived in
 /// the worktree (a pull, a fast-forward, a branch switch).
@@ -1099,14 +1100,6 @@ pub fn tail_start_index(records: &[SessionRecord], compact_idx: usize, tail_turn
             None => return compact_idx, // no user turn found — drop the tail
         }
     }
-}
-
-/// The mode recorded by the most recent Mode record, if any: (mode, origin).
-pub fn last_mode(records: &[SessionRecord]) -> Option<(String, String)> {
-    records.iter().rev().find_map(|r| match r {
-        SessionRecord::Mode { mode, origin, .. } => Some((mode.clone(), origin.clone())),
-        _ => None,
-    })
 }
 
 /// The context size recorded by the most recent Status record, if it still
@@ -3094,6 +3087,26 @@ mod usage_tests {
         let path = tmp_file("old", &OLD_SESSION);
         let records = load_records(&path).unwrap();
         assert_eq!(records.len(), 4);
+        assert_eq!(history_from_records(&records).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// A session from before one timeline (single-timeline plan) still
+    /// opens: its mode, router, golden-flip, run-config and plan-log lines
+    /// load, none of them is dropped, and the conversation is intact.
+    #[test]
+    fn a_session_written_with_brain_and_builder_still_loads() {
+        let mut lines = OLD_SESSION.to_vec();
+        lines.extend([
+            r#"{"kind":"mode","mode":"brain","origin":"human","ts":5}"#,
+            r#"{"kind":"mode_route","verdict":"brain","ran_as":"builder","source":"jev","shadow":true,"ts":6}"#,
+            r#"{"kind":"golden_cycle","cycle":1,"mode":"builder","goals":["golden-g-0"],"ts":7}"#,
+            r#"{"kind":"run_config","model":"stub/m","mode":"builder","context_window":200000,"regime":"full","soft":1,"hard":2,"ceiling":3,"prefix":{"system":1,"skills":0,"specs":0,"tools":1,"mcp":0},"profile":"standard","surface":"","ts":8}"#,
+            r#"{"kind":"plan_finalized","plan_file":".claudinio/plans/p.md","commits":[],"files_changed":[],"ts":9}"#,
+        ]);
+        let path = tmp_file("brain-builder", &lines);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 9, "no old line is dropped: {records:?}");
         assert_eq!(history_from_records(&records).len(), 1);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

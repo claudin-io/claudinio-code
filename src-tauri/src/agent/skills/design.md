@@ -1,25 +1,25 @@
 ---
-name: plan
-description: Planning a feature in Brain mode — the consensus checklist, UI sizing and assets, the Low-Level Design, diagrams.
+name: design
+description: Designing a feature before code — the consensus checklist, UI sizing and assets, the design document, diagrams.
 ---
 
-# plan
+# design
 
-Read this when a planning request is large, touches the UI, or carries assets
-the user supplied. A small, fully specified request does not need it.
+Read this when a request is large, touches the UI, or carries assets the user
+supplied. A small, fully specified request does not need it: do the work.
 
-## 1. Interview: ask what changes the plan
+## 1. Interview: ask what changes the work
 
 Every question costs the user a round trip, so ask only about decisions whose
-answer changes the plan, and never about a fact the codebase can tell you —
+answer changes the work, and never about a fact the codebase can tell you —
 look that up instead. Explore before you ask, so each question rests on facts.
 
 - Bundle independent questions in one `ask_user` call; ask a question that
   depends on an earlier answer after that answer arrives.
 - Put your recommended answer first in every question, suffixed
   ' (Recommended)'.
-- Finish with one question that confirms the agreed design, then call
-  `write_plan`.
+- Finish with one question that confirms the agreed design, then write it
+  down (section 3).
 
 ### The consensus checklist
 
@@ -47,22 +47,22 @@ buttons, layouts), these decisions are the user's — ask, do not invent:
 - **User-provided assets**: an icon name, URL, image, prototype or exact copy
   the user gave is GROUND TRUTH. Do not paraphrase it as "an icon similar to
   X". Resolve it (fetch the URL, read the image) to get the real data, confirm
-  you will use it exactly, and record it VERBATIM in the plan and in the task
-  descriptions — the full URL, the exact icon id such as
-  `lucide:notebook-pen`, the real SVG — so Builder and its subagents use real
+  you will use it exactly, and record it VERBATIM in the document and in any
+  subagent's goal — the full URL, the exact icon id such as
+  `lucide:notebook-pen`, the real SVG — so whoever builds it uses real
   content, not guesses. (Session 44ec41c1 shipped the wrong icon because a
   task said "similar to".)
 
-## 3. The two documents
+## 3. The design document
 
-The Solution Design (the first `write_plan`) records WHAT was agreed: Context,
-Solution Design, Risks, Non-goals — scope, UX and sizing, verbatim assets, edge
-cases. No implementation detail (file paths, symbols, schemas) belongs there.
-
-The `## Low-Level Design` (the second `write_plan`, same name, the FULL plan
-content plus the new section) records HOW it will be built, grounded in the
-real codebase. Research it on your own — 'explore' subagents, indexed search,
-targeted reading — and cover:
+A design worth writing down goes in the session's living document:
+`doc_create` with 3-6 sections, each an independent question the design
+needs answered — how the code does it today, the options, the data, the UI —
+not the Risks or Next steps of one answer. Give every independent section to
+an explore subagent in one `spawn_agents` call (`section`), and write yourself
+only the section that depends on them: the decision, with what was agreed
+(scope, UX and sizing, verbatim assets, edge cases, non-goals) and how it will
+be built, grounded in the real codebase:
 
 - the exact files and symbols to touch;
 - data flow;
@@ -70,23 +70,18 @@ targeted reading — and cover:
 - existing patterns to reuse;
 - integration points.
 
-Every claim comes from the codebase, not from memory. Do not re-open settled
-requirements here; but a technical trade-off that would change the agreed
-design (a conflict with an existing pattern, a much cheaper alternative) goes
-to the user with `ask_user` before it goes into the plan. End the plan with a
-short Tasks summary.
-
-Then `tasks_set`: one self-contained task per atomic step, each carrying the
-file paths, symbols, constraints, the plan file path and every value the user
-gave verbatim (URLs, asset and icon ids, real snippets, agreed sizes), so a
-Builder subagent that never saw this conversation, and cannot ask, can do it.
-A task that names a design decision without its concrete value is incomplete.
+Every claim comes from the codebase, not from memory. A technical trade-off
+that would change the agreed design (a conflict with an existing pattern, a
+much cheaper alternative) goes to the user with `ask_user` before it goes into
+the document. Then build it: the document replaces a task list, so its
+sections are the plan, and a subagent you delegate a change to gets every
+value the user gave verbatim (URLs, asset and icon ids, real snippets, agreed
+sizes) — it never saw this conversation and cannot ask.
 
 ## 4. Diagrams (Mermaid)
 
 When an idea is clearer as a picture than as prose, draw a Mermaid diagram (a
-```mermaid fenced code block) — in chat and inside the Solution Design and the
-Low-Level Design. Drawing it also sharpens your own reasoning. The app renders
+```mermaid fenced code block) — in chat and inside the document. Drawing it also sharpens your own reasoning. The app renders
 the FULL Mermaid catalog, so pick the most expressive type: `flowchart` for
 control flow and architecture, `sequenceDiagram` for interactions,
 `classDiagram` for data models, `stateDiagram-v2` for state machines,

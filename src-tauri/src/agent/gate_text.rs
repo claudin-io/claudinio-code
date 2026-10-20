@@ -1,19 +1,14 @@
 //! What each gate tells the model when it refuses.
 //!
-//! The gates are policy in code: the Low-Level Design gate on `tasks_set` in
-//! Brain, the quality gate on closing a golden execution goal, golden-task
-//! protection, read-before-edit, the write gates (Brain, the git operator) and
-//! the spec guard. Prompt v1 also described each of them in prose; prompt v2
-//! (lean-harness Phase 5, design rule 4: "the prompt explains, it does not
-//! enforce") says only that tools refuse what the session may not do yet and
-//! that the error says what to do next. So these texts are now the
+//! The gates are policy in code: the quality gate on closing a golden
+//! execution goal, golden-task protection, one plan per session,
+//! read-before-edit, the git operator's write gates and the spec guard. The
+//! prompt (lean-harness Phase 5, design rule 4: "the prompt explains, it does
+//! not enforce") says only that tools refuse what the session may not do yet
+//! and that the error says what to do next. So these texts are now the
 //! instruction, and each one names the next step — `tests` pins that, gate by
 //! gate. They live together so that one test can read all of them, the way
 //! `nudges` keeps the loop's own texts.
-
-/// `edit_file` called in Brain, where it is not offered.
-pub const EDIT_IN_BRAIN: &str = "edit_file is not available in Brain mode — it is read-only. \
-     Record the intended change in the plan (write_plan) instead.";
 
 /// `edit_file` called in a session that does not edit (the git operator).
 pub const EDIT_NOT_IN_SESSION: &str = "edit_file is not available in this session: it commits \
@@ -25,46 +20,17 @@ pub const BASH_WRITES_NO_EDIT: &str = "This bash command writes files, and this 
      files. Bash here is for git, builds, tests and read-only inspection; if a file must \
      change first, say so with ask_user.";
 
-/// A `bash` command that writes files, in Brain.
-pub const BASH_WRITES_IN_BRAIN: &str = "This bash command writes files. In Brain mode you cannot mutate \
-     — record the change in the plan (write_plan) instead.";
-
-/// A `bash` command outside Brain's read-only allowlist.
-pub const BASH_NOT_ALLOWED_IN_BRAIN: &str = "Command not allowed in Brain mode — only read-only allowlisted \
-     commands (git status/diff/log, ls, cat, head, tail, wc, ...) run here, alone or piped into \
-     head, tail, wc, grep, cut, tr or nl; no builds, tests or interpreters. Read files with \
-     read_file, search with grep or the indexed search tools, and put what needs running in \
-     the plan.";
-
 /// A write to the project memory, by `edit_file`, a subagent's apply or the
-/// shell (lean-harness Phase 9): only the harness writes it.
+/// shell (lean-harness Phase 9): only `remember` writes it.
 pub const PROJECT_MEMORY_WRITE: &str = "Refused: .claudinio/MEMORY.md is the project memory, and \
-     only the harness writes it; a shell command that names it runs only when it is a plain \
-     read like cat or head. To read it, use read_file. To add a lesson, pass it in \
-     finalize_plan's `memory` list when the plan is done; to change or remove an entry, \
-     ask_user.";
+     only the remember tool writes it; a shell command that names it runs only when it is a \
+     plain read like cat or head. To read it, use read_file. To add a lesson, call remember; \
+     to change or remove an entry, ask_user.";
 
-/// The Low-Level Design gate, before any plan file exists.
-pub fn lld_no_plan(tool: &str) -> String {
-    format!(
-        "{tool} rejected: no plan file exists yet. In Brain mode tasks may only \
-         be created after the plan is complete: write the Solution Design via \
-         write_plan, then call write_plan again with the full content plus a \
-         '## Low-Level Design' section, then retry {tool}."
-    )
-}
-
-/// The Low-Level Design gate, when the latest plan has no such section.
-pub fn lld_missing(tool: &str, plan: &str) -> String {
-    format!(
-        "{tool} rejected: the most recent plan ({plan}) has no non-empty \
-         '## Low-Level Design' section. Research the codebase first ('explore' \
-         subagents, indexed search, file reading), then call write_plan again \
-         with the FULL plan content including a '## Low-Level Design' section \
-         (files/symbols to touch, data flow, APIs/schemas, patterns to reuse) - \
-         then retry {tool}."
-    )
-}
+/// `tasks_set` in a session with a living document: one plan per session.
+pub const TASKS_WITH_DOCUMENT: &str = "this session's plan is its document, not a task \
+     list: add a section with doc_add, or write one with doc_write. The user's golden goals \
+     stay as they are; close them with tasks_update.";
 
 /// Read-before-edit, for a file never read in this session.
 pub fn not_read(path: &str) -> String {
@@ -199,28 +165,13 @@ pub fn kept_stored_details(kept: &[(String, &str)]) -> String {
 /// actionability test below and for
 /// `prompt::tests::no_harness_text_orders_a_deferred_tool`. Kept complete by
 /// `tests::every_gate_text_is_in_all`, which reads this file.
-/// `tasks_set` in a session with a living document: one plan per session.
-pub(crate) const TASKS_WITH_DOCUMENT: &str = "this session's plan is its document, not a task \
-     list: add a section with doc_add, or write one with doc_write. The user's golden goals \
-     stay as they are; close them with tasks_update.";
-
 #[cfg(test)]
 pub fn all() -> Vec<(&'static str, String)> {
     vec![
-        ("EDIT_IN_BRAIN", EDIT_IN_BRAIN.to_string()),
         ("EDIT_NOT_IN_SESSION", EDIT_NOT_IN_SESSION.to_string()),
         ("BASH_WRITES_NO_EDIT", BASH_WRITES_NO_EDIT.to_string()),
-        ("BASH_WRITES_IN_BRAIN", BASH_WRITES_IN_BRAIN.to_string()),
-        (
-            "BASH_NOT_ALLOWED_IN_BRAIN",
-            BASH_NOT_ALLOWED_IN_BRAIN.to_string(),
-        ),
         ("PROJECT_MEMORY_WRITE", PROJECT_MEMORY_WRITE.to_string()),
-        ("lld_no_plan", lld_no_plan("tasks_set")),
-        (
-            "lld_missing",
-            lld_missing("tasks_set", ".claudinio/plans/p.md"),
-        ),
+        ("TASKS_WITH_DOCUMENT", TASKS_WITH_DOCUMENT.to_string()),
         ("not_read", not_read("/w/src/a.rs")),
         (
             "partial_read_at_line",
@@ -259,28 +210,20 @@ mod tests {
     /// The step each refusal must name, because since prompt v2 nothing else
     /// tells the model what to do when it hits that gate. Case-blind.
     const NEXT_STEP: &[(&str, &[&str])] = &[
-        // Brain plans; the edit belongs in the plan.
-        ("EDIT_IN_BRAIN", &["write_plan"]),
         // The git operator commits what is there; a needed change is the user's call.
         ("EDIT_NOT_IN_SESSION", &["ask_user"]),
         ("BASH_WRITES_NO_EDIT", &["ask_user"]),
-        ("BASH_WRITES_IN_BRAIN", &["write_plan"]),
-        // What to use instead of the refused command.
-        ("BASH_NOT_ALLOWED_IN_BRAIN", &["read_file", "git status"]),
-        // The memory is written through finalize_plan, or by the person.
+        // The memory is written through remember, or by the person.
         (
             "PROJECT_MEMORY_WRITE",
             // A read the shell guard refused (`grep … .claudinio/MEMORY.md`)
             // is pointed at read_file, not told it tried to write.
-            &["read_file", "finalize_plan", "`memory`", "ask_user"],
+            &["read_file", "remember", "ask_user"],
         ),
+        // One plan per session: the document's own tools.
         (
-            "lld_no_plan",
-            &["write_plan", "## low-level design", "then retry tasks_set"],
-        ),
-        (
-            "lld_missing",
-            &["write_plan", "## low-level design", "then retry tasks_set"],
+            "TASKS_WITH_DOCUMENT",
+            &["doc_add", "doc_write", "tasks_update"],
         ),
         ("not_read", &["read_file", "then retry edit_file"]),
         // Read the lines that hold the text, or the file again, then edit.

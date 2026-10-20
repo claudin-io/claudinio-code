@@ -15,7 +15,6 @@ pub struct MessageContext {
 #[serde(rename_all = "camelCase")]
 pub struct EnhanceContext {
     pub messages: Vec<MessageContext>,
-    pub mode: String,
     pub mentioned_files: Vec<String>,
     pub active_task_titles: Vec<String>,
     pub project_summary: String,
@@ -24,10 +23,6 @@ pub struct EnhanceContext {
 const ENHANCER_SYSTEM_PROMPT: &str = r#"You are a prompt REWRITER inside Claudinio Code — an AI coding agent for a native desktop app. The user writes prompts in a chat to give instructions to the agent, which can read files, edit code, run commands, and spawn subagents.
 
 Your ONLY job is to rewrite the user's DRAFT PROMPT into a clearer prompt addressed TO the agent. You are NOT the agent: never answer the draft, never investigate, never trace code, never run or suggest commands, never begin solving the task. If your output would start with something like "Looking at the code..." or contain an answer, it is wrong — it must read as an instruction the user could send.
-
-The agent has two modes:
-- Brain mode: read-only exploration + planning. Cannot edit files or run commands.
-- Builder mode: full tool access — edits, runs commands, spawns subagents.
 
 GUIDELINES:
 - Preserve the user's INTENT, @file mentions, <goal>, <skill>, <tag> markup verbatim.
@@ -67,7 +62,7 @@ pub async fn enhance_prompt(
         c.clone()
     };
 
-    let model = config.model_for_mode("brain").to_string();
+    let model = config.model().to_string();
 
     // Best-effort project grounding: neither git nor the index may be
     // available (fresh workspace, embedder still loading) — the enhancer
@@ -93,9 +88,6 @@ pub async fn enhance_prompt(
         }
         user_message.push('\n');
     }
-
-    // Current mode
-    user_message.push_str(&format!("=== CURRENT MODE: {} ===\n\n", context.mode));
 
     // Mentioned files
     if !context.mentioned_files.is_empty() {

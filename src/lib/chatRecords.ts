@@ -9,10 +9,8 @@ import {
   type DoneData,
   type GoldenLoopData,
   type HandoffReason,
-  type ModeChangedData,
   type Phase,
   type QualityVerdictData,
-  type SessionMode,
   type SessionRecord,
   type ToolCallData,
   type ToolResultData,
@@ -105,7 +103,6 @@ export interface TimelineItem {
   /// handoff-document record.
   linked?: {
     reason: HandoffReason;
-    mode?: SessionMode;
     firstMessage?: string;
     docOnly?: boolean;
   };
@@ -114,6 +111,14 @@ export interface TimelineItem {
 export interface QueuedSteeringEntry {
   text: string;
   attachments: Array<{ name: string; mediaType: string; size: number }>;
+}
+
+/// A mode change recorded by a session from before one timeline: still
+/// rendered when such a session is reopened. No new session writes one.
+export interface ModeChangedData {
+  mode: "brain" | "builder";
+  origin: "human" | "agent";
+  reason?: string | null;
 }
 
 export const MODE_CHANGE_LABEL: Record<string, string> = {
@@ -590,7 +595,6 @@ export function recordsToMessages(rawRecords: SessionRecord[]): ChatMessage[] {
           cycle: Number(rec.cycle ?? 0),
           maxCycles: 0,
           pending: (rec.goals as string[]) ?? [],
-          mode: normalizeSessionMode(rec.mode),
         },
       });
     } else if (kind === "done") {

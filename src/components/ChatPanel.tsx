@@ -9,28 +9,21 @@ import {
   newSession,
   listSessions,
   loadSession,
-  listPlans,
   queueSteering,
   interruptSession,
   compactSession,
   getSessionStats,
   getConfig,
+  listDocuments,
   loginWithClaudinio,
   openExternalUrl,
   readAttachment,
   writeClipboardBlob,
-  setSessionMode,
-  continueWithBuilderSession,
-  checkPlanExists,
-  normalizeSessionMode,
   pickFiles,
   enhancePrompt,
   getTasks,
   type EnhancePromptContext,
-  type ModeOrigin,
-  type SessionMode,
   type ThinkingEffort,
-  type ModeChangedData,
   type GoldenLoopData,
   type HookStartedData,
   type HookFinishedData,
@@ -47,13 +40,10 @@ import {
   type SubagentStartedData,
   type SubagentDoneData,
   type SessionSummary,
-  type PlanEntry,
+  type DocumentEntry,
   type SessionRecord,
   type UserAnswer,
 } from "../lib/ipc";
-import { createAutoMode } from "../lib/autoMode";
-import type { ModeChoice } from "../lib/modeChoice";
-import { linkedModeOrigin } from "../lib/modeChoice";
 import { applySubagentDone, syncSubagentTimelineItems } from "../lib/subagentTimeline";
 import { createSmoothText, balanceMarkdown } from "../lib/createSmoothText";
 import { renderMarkdown, renderLiveMarkdown } from "../lib/markdown";
@@ -222,8 +212,8 @@ export const ChatPanel: Component<{
   const [liveExpandedStep, setLiveExpandedStep] = createSignal<number | null>(null);
   const [sessions, setSessions] = createSignal<SessionSummary[]>([]);
   const [showSessions, setShowSessions] = createSignal(false);
-  const [plans, setPlans] = createSignal<PlanEntry[]>([]);
-  const [showPlans, setShowPlans] = createSignal(false);
+  const [documents, setDocuments] = createSignal<DocumentEntry[]>([]);
+  const [showDocuments, setShowDocuments] = createSignal(false);
   const [showNewPopover, setShowNewPopover] = createSignal(false);
   let newButtonRef: HTMLButtonElement | undefined;
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null);
@@ -293,71 +283,6 @@ export const ChatPanel: Component<{
   const [maxContextTokens, setMaxContextTokens] = createSignal(256_000);
   const [compactThreshold, setCompactThreshold] = createSignal(192_000);
   const [isCompacting, setIsCompacting] = createSignal(false);
-  const [mode, setMode] = createSignal<SessionMode>("builder");
-  const [modeOrigin, setModeOrigin] = createSignal<ModeOrigin>("human");
-  // Auto: the choice of starting phase is left to the harness. Only a state of
-  // the control before a session's first prompt — never a mode a session is in
-  // (`lib/autoMode`).
-  const auto = createAutoMode({
-    mode,
-    // Fresh means no prompt yet — not "no session yet": clicking Brain or
-    // Builder creates the session to record the choice, and Auto has to stay
-    // on offer after that, or trying a mode would be a one-way door.
-    sessionIsFresh: () => messages().length === 0,
-    loadJev: async () => (await getConfig()).jev,
-  });
-  const [hasPlanBeenWritten, setHasPlanBeenWritten] = createSignal(false);
-
-  // Human toggle: persists a Mode record in the session JSONL immediately so
-  // the mode survives reloads; a running workflow picks it up next round.
-  const switchMode = async (m: SessionMode) => {
-    // Picking a mode by hand takes the choice back from the harness, even
-    // when it is the mode the session is already in — and from a message
-    // waiting behind the sign-in card, which is then sent in this mode.
-    auto.disarm();
-    setPendingChoice(null);
-    if (m === mode()) return;
-    setHasPlanBeenWritten(false);
-    setMode(m);
-    setCurrentSteps((prev) => [
-      ...prev,
-      { type: "mode" as const, modeChange: { mode: m, origin: "human" as const } },
-    ]);
-    try {
-      const result = await setSessionMode(props.workspace, m);
-      setActiveSessionId(result.sessionId);
-
-      // If switching to brain mode and a plan already exists on disk,
-      // show the "Continue with Builder" button immediately
-      if (m === "brain") {
-        const planExists = await checkPlanExists(props.workspace);
-        if (planExists) setHasPlanBeenWritten(true);
-      }
-    } catch {
-      // backend unavailable — sendMessage will sync the mode on next send
-    }
-  };
-
-  // Approve the plan: the backend creates a NEW linked Builder session whose
-  // first prompt carries the plan, and starts executing it. The SessionLinked
-  // event on the channel inserts the chain divider and flips the mode — for
-  // the user it's the same continuous conversation.
-  const continueWithBuilder = async () => {
-    try {
-      setHasPlanBeenWritten(false);
-      flushPendingDone();
-      setThinkingStart(0);
-      setStatus("thinking");
-      scrollToBottom(true);
-      const result = await continueWithBuilderSession(props.workspace, handleEvent);
-      setActiveSessionId(result.sessionId);
-      setMode("builder");
-      setModeOrigin("human");
-    } catch (e) {
-      setRetryableError(String(e));
-      setStatus("error");
-    }
-  };
 
   // Feed the sidebar's per-workspace running indicator.
   createEffect(() => setWorkspaceStatus(props.workspace, status()));
@@ -637,7 +562,6 @@ export const ChatPanel: Component<{
         if (cfg.compactThreshold) setCompactThreshold(cfg.compactThreshold);
       })
       .catch(() => {});
-    void auto.arm();
 
     // Listen for native file drop events via Tauri window API. Every mounted
     // panel receives these, so only the visible one may react.
@@ -716,11 +640,8 @@ export const ChatPanel: Component<{
   let scrollContainerRef: HTMLDivElement | undefined;
   let inputRef: HTMLTextAreaElement | undefined;
   let historyButtonRef: HTMLButtonElement | undefined;
-  let plansButtonRef: HTMLButtonElement | undefined;
+  let documentsButtonRef: HTMLButtonElement | undefined;
   const [pendingMessage, setPendingMessage] = createSignal<string | null>(null);
-  // The mode choice that message was sent with, so signing in sends it again
-  // as it was — Auto included, which by then is spent.
-  const [pendingChoice, setPendingChoice] = createSignal<ModeChoice | null>(null);
   const [authSigningIn, setAuthSigningIn] = createSignal(false);
 
   // Smart scroll: only auto-follow new content while the user is at the
@@ -963,7 +884,6 @@ export const ChatPanel: Component<{
     } else if (event.event === "ToolResult") {
       const data = event.data as ToolResultData;
       setCurrentSteps((prev) => applyToolResultIn(prev, data));
-      if (data.toolName === "write_plan") setHasPlanBeenWritten(true);
       if (data.toolName === "ask_user") {
         setCurrentAskUser(null);
         setStatus("thinking");
@@ -984,18 +904,8 @@ export const ChatPanel: Component<{
       setCurrentAskUser(event.data as AskUserData);
       setStatus("awaiting_input");
       scrollToBottom();
-    } else if (event.event === "ModeChanged") {
-      const data = event.data as ModeChangedData;
-      setMode(data.mode);
-      setModeOrigin(data.origin);
-      setCurrentSteps((prev) => [
-        ...prev,
-        { type: "mode" as const, modeChange: data } as TimelineItem,
-      ]);
-      scrollToBottom();
     } else if (event.event === "GoldenLoop") {
       const data = event.data as GoldenLoopData;
-      setMode(data.mode);
       setCurrentSteps((prev) => [
         ...prev,
         { type: "golden" as const, golden: data } as TimelineItem,
@@ -1081,12 +991,10 @@ export const ChatPanel: Component<{
       setCurrentSteps([
         {
           type: "linked" as const,
-          linked: { reason: data.reason, mode: data.mode, firstMessage: data.firstMessage },
+          linked: { reason: data.reason, firstMessage: data.firstMessage },
         } as TimelineItem,
       ]);
       setActiveSessionId(data.sessionId);
-      setMode(data.mode);
-      setModeOrigin(linkedModeOrigin(data));
       setStatus("thinking");
       scrollToBottom();
     } else if (event.event === "SteeringInjected") {
@@ -1291,15 +1199,7 @@ export const ChatPanel: Component<{
         setStatus("thinking");
         scrollToBottom(true);
         try {
-          const choice = pendingChoice() ?? mode();
-          setPendingChoice(null);
-          const result = await sendMessage(
-            props.workspace,
-            pending,
-            [],
-            handleEvent,
-            choice,
-          );
+          const result = await sendMessage(props.workspace, pending, [], handleEvent);
           setActiveSessionId(result.sessionId);
         } catch (e) {
           if (String(e).includes("API key not configured")) {
@@ -1331,7 +1231,6 @@ export const ChatPanel: Component<{
         "[system] continue from where you stopped",
         [],
         handleEvent,
-        mode(),
       );
       setActiveSessionId(result.sessionId);
     } catch (e) {
@@ -1383,7 +1282,6 @@ export const ChatPanel: Component<{
 
     return {
       messages: recent,
-      mode: mode(),
       mentionedFiles: mentioned,
       activeTaskTitles,
       projectSummary,
@@ -1426,9 +1324,6 @@ export const ChatPanel: Component<{
     // isn't lost or double-rendered once the new run's events start.
     flushPendingDone();
 
-    // Auto is for one prompt: whatever the harness picks, the session is in a
-    // real mode from here on and the control shows that.
-    const choice = auto.take();
     setMessages((prev) => [
       ...prev,
       {
@@ -1454,14 +1349,12 @@ export const ChatPanel: Component<{
         text,
         atts.map((a) => ({ path: a.path })),
         handleEvent,
-        choice,
       );
       setActiveSessionId(result.sessionId);
       setAttachments([]);
     } catch (e) {
       if (String(e).includes("API key not configured")) {
         setPendingMessage(text);
-        setPendingChoice(choice);
         setMessages((prev) => [...prev, { role: "user" as const, text: "__auth_card__" }]);
         setStatus("idle");
       } else {
@@ -1522,10 +1415,8 @@ export const ChatPanel: Component<{
     setCurrentSteps([]);
     setThinkingStart(0);
     setContextStats({ contextTokens: 0, cumulativeTokens: 0 });
-    setMode("builder");
     setStatus("idle");
     setShowSessions(false);
-    void auto.arm();
   };
 
   const handleConfirmNew = async () => {
@@ -1542,10 +1433,8 @@ export const ChatPanel: Component<{
     setCurrentSteps([]);
     setThinkingStart(0);
     setContextStats({ contextTokens: 0, cumulativeTokens: 0 });
-    setMode("builder");
     setStatus("idle");
     setShowSessions(false);
-    void auto.arm();
   };
 
   const toggleSessions = async () => {
@@ -1560,32 +1449,21 @@ export const ChatPanel: Component<{
     }
   };
 
-  const togglePlans = async () => {
-    const next = !showPlans();
-    setShowPlans(next);
+  const toggleDocuments = async () => {
+    const next = !showDocuments();
+    setShowDocuments(next);
     if (next) {
       try {
-        setPlans(await listPlans(props.workspace));
+        setDocuments(await listDocuments(props.workspace));
       } catch {
-        setPlans([]);
+        setDocuments([]);
       }
     }
   };
 
-  const openPlan = (path: string, title: string) => {
-    setShowPlans(false);
+  const openDocumentEntry = (path: string, title: string) => {
+    setShowDocuments(false);
     setViewerFile({ type: "text", path, title });
-  };
-
-  const readLatestPlan = async () => {
-    try {
-      const planList = await listPlans(props.workspace);
-      if (planList.length > 0) {
-        setViewerFile({ type: "text", path: planList[0].path, title: planList[0].name });
-      }
-    } catch {
-      // silently fail
-    }
   };
 
   const reopenSession = async (id: string) => {
@@ -1599,17 +1477,7 @@ export const ChatPanel: Component<{
       } catch (e) {
         console.error("statsFromRecords failed", e);
       }
-      // The JSONL is the source of truth for the mode too: restore the last one.
-      const lastMode = [...records].reverse().find((r) => r.kind === "mode");
-      try {
-        setMode(lastMode ? normalizeSessionMode(lastMode.mode) : "builder");
-      } catch (e) {
-        console.error("setMode failed", e);
-        setMode("builder");
-      }
       setActiveSessionId(id);
-      // A session with a past is in the mode it was left in, not on Auto.
-      auto.disarm();
       setCurrentSteps([]);
       setThinkingStart(0);
       setStatus("idle");
@@ -1716,13 +1584,13 @@ export const ChatPanel: Component<{
             {"History"}
           </button>
           <button
-            ref={plansButtonRef}
-            onClick={togglePlans}
+            ref={documentsButtonRef}
+            onClick={toggleDocuments}
             class="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2"
-            title={"Plans"}
+            title={"The workspace's documents"}
           >
             <Icon name="archive-drawer" class="h-3.5 w-3.5" />
-            {"Plans"}
+            {"Documents"}
           </button>
           <GitIndicator workspace={props.workspace} active={props.isActive()} onShowChanges={() => setShowGitModal(true)} />
           <NetworkIndicator workspace={props.workspace} onClick={() => setShowNetModal(true)} />
@@ -1776,22 +1644,23 @@ export const ChatPanel: Component<{
         </Popover>
 
         <Popover
-          open={showPlans()}
-          onClose={() => setShowPlans(false)}
-          triggerRef={plansButtonRef}
+          open={showDocuments()}
+          onClose={() => setShowDocuments(false)}
+          triggerRef={documentsButtonRef}
           anchorPoint={{x:1,y:1}}
           originPoint={{x:1,y:0}}
           class="z-20"
         >
           <div class="max-h-80 w-80 overflow-y-auto rounded-lg border border-border-subtle bg-surface-1 py-1 shadow-lg">
             <Show
-              when={plans().length > 0}
-              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{"No plans found."}</div>}
+              when={documents().length > 0}
+              fallback={<div class="px-3 py-2 text-[12px] text-ink-faint">{"No documents yet."}</div>}
             >
-              <For each={plans()}>
+              <For each={documents()}>
                 {(p) => (
                   <button
-                    onClick={() => openPlan(p.path, p.name)}
+                    data-document-entry
+                    onClick={() => openDocumentEntry(p.path, p.name)}
                     class="flex w-full flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-surface-2"
                   >
                     <span class="truncate text-[12px] text-ink">{p.name}</span>
@@ -1909,25 +1778,6 @@ export const ChatPanel: Component<{
               </div></ErrorBoundary>);
             }}
           </For>
-
-          <Show when={mode() === "brain" && modeOrigin() === "human" && status() === "done" && hasPlanBeenWritten()}>
-            <div class="mb-6 flex justify-center gap-3">
-              <button
-                onClick={readLatestPlan}
-                class="inline-flex items-center gap-2 rounded-full border border-border-subtle bg-surface-1 px-5 py-2.5 text-sm font-semibold text-ink-muted transition-all hover:bg-surface-2 hover:text-ink active:scale-[0.98]"
-              >
-                <Icon name="archive-drawer" class="h-4 w-4" />
-                {"Read Plan"}
-              </button>
-              <button
-                onClick={continueWithBuilder}
-                class="inline-flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-accent-ink shadow-lg shadow-accent/20 transition-all hover:bg-accent/90 hover:shadow-xl hover:shadow-accent/30 active:scale-[0.98]"
-              >
-                <Icon name="construction-worker" class="h-4 w-4" />
-                {"Continue with Builder"}
-              </button>
-            </div>
-          </Show>
 
           <Show when={status() === "thinking" || status() === "done" || status() === "awaiting_input"}>
             <ErrorBoundary fallback={<RenderErrorFallback />}>
@@ -2282,45 +2132,6 @@ export const ChatPanel: Component<{
                 >
                   <Icon name="notebook-pen" class="h-4 w-4" stroke />
                 </button>
-                <div class="flex shrink-0 items-center rounded-md border border-border-subtle bg-surface-0 p-0.5">
-                  <Show when={auto.offered()}>
-                    <button
-                      data-mode-choice="auto"
-                      aria-pressed={auto.active()}
-                      onClick={() => auto.select()}
-                      class={`flex h-7 items-center justify-center rounded px-2 text-[11px] font-medium ${
-                        auto.active()
-                          ? "bg-accent/15 text-accent"
-                          : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
-                      }`}
-                      title={"Auto: plans first when the request needs decisions or a design, builds otherwise"}
-                    >
-                      {"Auto"}
-                    </button>
-                  </Show>
-                  <button
-                    onClick={() => switchMode("brain")}
-                    class={`flex h-7 w-7 items-center justify-center rounded ${
-                      mode() === "brain" && !auto.active()
-                        ? "bg-accent/15 text-accent"
-                        : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
-                    }`}
-                    title={"Brain mode: read-only exploration, requirements interview, plan + tasks"}
-                  >
-                    <Icon name="thinking-face" class="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => switchMode("builder")}
-                    class={`flex h-7 w-7 items-center justify-center rounded ${
-                      mode() === "builder" && !auto.active()
-                        ? "bg-accent/15 text-accent"
-                        : "text-ink-faint hover:bg-surface-3 hover:text-ink-muted"
-                    }`}
-                    title={"Builder mode: executes the plan's tasks with subagents"}
-                  >
-                    <Icon name="construction-worker" class="h-4 w-4" />
-                  </button>
-                </div>
               </div>
               <div class="flex-1" />
               <div class="flex items-center gap-2">

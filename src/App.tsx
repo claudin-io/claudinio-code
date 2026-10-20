@@ -2,7 +2,7 @@ import { createSignal, For, Match, Show, Switch, onMount, onCleanup, createEffec
 import { fileIndexMap, loadFileIndex } from "./lib/fileIndex";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listAllModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, setWorkspaceConfig, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, openrouterLogin, openrouterLoginCancel, disconnectProvider, type ConnectedProviderInfo, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ModelGroup, type ThinkingEffort } from "./lib/ipc";
+import { pickFolder, openWorkspace, closeWorkspace, setConfig, getConfig, setKeepAwake, listAllModels, openExternal, openExternalUrl, loginWithClaudinio, logoutClaudinio, validateApiKey, listMcpServers, testMcpServer, detectIdes, openInIde, normalizeThinkingEffort, openrouterLogin, openrouterLoginCancel, disconnectProvider, type ConnectedProviderInfo, type IndexProgress, type IndexStatus, type McpServerMap, type McpServerStatus, type ModelGroup, type ThinkingEffort } from "./lib/ipc";
 import { workspaceStatus } from "./lib/workspaceStatus";
 import { FileTree } from "./components/FileTree";
 import { ChatPanel } from "./components/ChatPanel";
@@ -129,8 +129,7 @@ function App() {
   const [progressMap, setProgressMap] = createSignal<Record<string, IndexProgress | null>>({});
   const [showConfig, setShowConfig] = createSignal(false);
   const [configApiKey, setConfigApiKey] = createSignal("");
-  const [configBrainModel, setConfigBrainModel] = createSignal("claudius");
-  const [configBuilderModel, setConfigBuilderModel] = createSignal("claudinio");
+  const [configModel, setConfigModel] = createSignal("claudinio");
   const [modelGroups, setModelGroups] = createSignal<ModelGroup[]>([
     { providerId: "claudinio", providerName: "Claudinio", models: ["claudinio", "claudius"] },
   ]);
@@ -151,11 +150,9 @@ function App() {
   const [configYoloBlacklist, setConfigYoloBlacklist] = createSignal("");
   const [configKeepAwake, setConfigKeepAwake] = createSignal(true);
   const [configCodeIntelEnabled, setConfigCodeIntelEnabled] = createSignal(true);
-  const [configAutoCommitPlan, setConfigAutoCommitPlan] = createSignal(true);
   const [configThinkingEffort, setConfigThinkingEffort] = createSignal<ThinkingEffort>("medium");
   const [configPreferredIde, setConfigPreferredIde] = createSignal("");
   const [availableIdes, setAvailableIdes] = createSignal<string[]>([]);
-  const [configPlanSavePath, setConfigPlanSavePath] = createSignal("");
   const [workspaceConfigFields, setWorkspaceConfigFields] = createSignal<Set<string>>(new Set());
   const [accountLogin, setAccountLogin] = createSignal<string | null>(null);
   const [, setAccountTier] = createSignal<string | null>(null);
@@ -394,8 +391,7 @@ function App() {
     try {
       const [cfg, groups] = await Promise.all([getConfig(activeWorkspace() ?? undefined), listAllModels()]);
       if (cfg) {
-        setConfigBrainModel(cfg.brainModel);
-        setConfigBuilderModel(cfg.builderModel);
+        setConfigModel(cfg.model);
         setConfigMaxRounds(cfg.maxRounds ?? null);
         setConfigSubMaxRounds(cfg.subMaxRounds ?? null);
         setConfigMaxGoldenCycles(cfg.maxGoldenCycles ?? null);
@@ -406,10 +402,8 @@ function App() {
         setConfigYoloBlacklist((cfg.yoloBlacklist ?? []).join(", "));
         setConfigKeepAwake(cfg.keepAwake ?? true);
         setConfigCodeIntelEnabled(cfg.codeIntelEnabled ?? true);
-        setConfigAutoCommitPlan(cfg.autoCommitPlan ?? true);
         setConfigThinkingEffort(normalizeThinkingEffort(cfg.thinkingEffort));
         setConfigPreferredIde(cfg.preferredIde ?? "");
-        setConfigPlanSavePath(cfg.planSavePath ?? "");
         setConfigOverrideBaseUrl(cfg.overrideBaseUrl ?? "");
         setConfigOverrideApiKey(cfg.overrideApiKey ?? "");
         setConfigMcpJson(mcpMapToJsonText(cfg.mcp));
@@ -479,8 +473,7 @@ function App() {
 
       await setConfig({
         apiKey: changedApiKey || undefined,
-        brainModel: configBrainModel() || undefined,
-        builderModel: configBuilderModel() || undefined,
+        model: configModel() || undefined,
         maxRounds: configMaxRounds(),
         subMaxRounds: configSubMaxRounds(),
         maxGoldenCycles: configMaxGoldenCycles(),
@@ -490,9 +483,7 @@ function App() {
         yoloMode: configYoloMode(),
         keepAwake: configKeepAwake(),
         codeIntelEnabled: configCodeIntelEnabled(),
-        autoCommitPlan: configAutoCommitPlan(),
         preferredIde: configPreferredIde() || undefined,
-        planSavePath: configPlanSavePath() || undefined,
         yoloBlacklist: configYoloBlacklist()
           .split(",")
           .map((s) => s.trim())
@@ -505,12 +496,6 @@ function App() {
       // mark them as authenticated so onboarding stays hidden.
       if (changedApiKey && !accountLogin()) {
         setHasApiKey(true);
-      }
-      // Also persist plan_save_path to workspace config (.claudinio.json)
-      const ws = activeWorkspace();
-      if (ws) {
-        const psp = configPlanSavePath();
-        await setWorkspaceConfig(ws, psp || null);
       }
       setShowConfig(false);
       setConfigApiKey("");
@@ -577,29 +562,10 @@ function App() {
       await disconnectProvider(providerId);
       // The backend already reset persisted model slots pointing at the
       // removed provider; mirror that in the open settings form.
-      if (configBrainModel().startsWith(`${providerId}/`)) setConfigBrainModel("claudius");
-      if (configBuilderModel().startsWith(`${providerId}/`)) setConfigBuilderModel("claudinio");
+      if (configModel().startsWith(`${providerId}/`)) setConfigModel("claudinio");
       await refreshProviders();
     } catch (e) {
       setProviderError(String(e));
-    }
-  };
-
-  const pickPlanPath = async () => {
-    const folder = await pickFolder(activeWorkspace() ?? undefined);
-    if (!folder) return;
-    const ws = activeWorkspace();
-    if (!ws) {
-      setConfigPlanSavePath(folder);
-      return;
-    }
-    // Convert absolute path to relative (relative to workspace root)
-    if (folder.startsWith(ws)) {
-      let rel = folder.slice(ws.length);
-      if (rel.startsWith("/") || rel.startsWith("\\")) rel = rel.slice(1);
-      setConfigPlanSavePath(rel || ".");
-    } else {
-      setConfigPlanSavePath(folder);
     }
   };
 
@@ -853,10 +819,8 @@ function App() {
       <SettingsPanel
         showConfig={showConfig}
         setShowConfig={setShowConfig}
-        configBrainModel={configBrainModel}
-        setConfigBrainModel={setConfigBrainModel}
-        configBuilderModel={configBuilderModel}
-        setConfigBuilderModel={setConfigBuilderModel}
+        configModel={configModel}
+        setConfigModel={setConfigModel}
         modelGroups={modelGroups}
         onModelsChanged={refreshProviders}
         configMaxParallelAgents={configMaxParallelAgents}
@@ -879,13 +843,9 @@ function App() {
         setConfigKeepAwake={setConfigKeepAwake}
         configCodeIntelEnabled={configCodeIntelEnabled}
         setConfigCodeIntelEnabled={setConfigCodeIntelEnabled}
-        configAutoCommitPlan={configAutoCommitPlan}
-        setConfigAutoCommitPlan={setConfigAutoCommitPlan}
         configPreferredIde={configPreferredIde}
         setConfigPreferredIde={setConfigPreferredIde}
         availableIdes={availableIdes}
-        configPlanSavePath={configPlanSavePath}
-        setConfigPlanSavePath={setConfigPlanSavePath}
         workspaceConfigFields={workspaceConfigFields}
         activeWorkspace={activeWorkspace}
         accountLogin={accountLogin}
@@ -917,7 +877,6 @@ function App() {
         saveConfig={saveConfig}
         doLogin={doLogin}
         doLogout={doLogout}
-        pickPlanPath={pickPlanPath}
         addMcpServerTemplate={addMcpServerTemplate}
         testAllMcpServers={testAllMcpServers}
         openSupportUrl={() => openExternalUrl("https://claudin.io/dashboard#account")}
