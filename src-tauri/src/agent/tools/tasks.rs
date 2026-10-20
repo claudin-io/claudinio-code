@@ -334,9 +334,9 @@ fn board(tasks: &[TaskItem]) -> String {
 /// passing quality run whose digest still matches the worktree, which also
 /// rules out run-then-edit-then-close.
 ///
-/// Only the execution half of each goal is gated (`golden-<slug>-1`): the
-/// planning half is closed by Brain, which has not written any code and could
-/// not make a test suite green if it wanted to.
+/// Each goal is one gated task (`golden-<slug>-1`). A `-0` planning half,
+/// which sessions from before one timeline still carry, is not gated: it was
+/// closed before any code was written.
 fn check_quality_gate(
     prev: &[TaskItem],
     merged: &[TaskItem],
@@ -415,7 +415,7 @@ fn strip_forged_golden_ids(prev: &[TaskItem], incoming: Vec<TaskItem>) -> (Vec<T
 /// `id · status · title`, nothing more — and `tasks_get` is deferred. A
 /// model that adds or rewords one task resends every other one from that
 /// block, with nothing to put in their descriptions and journals; read
-/// literally, the full replacement would erase what Brain wrote and every
+/// literally, the full replacement would erase what was planned and every
 /// finding recorded since (Phase 4 review). What the call does send — a
 /// title, a status, a non-empty description or journal — still replaces the
 /// stored value, so rewording stays what `tasks_set` is for.
@@ -714,8 +714,8 @@ mod quality_gate_tests {
 
     #[test]
     fn the_planning_half_of_a_goal_is_not_gated() {
-        // Brain closes `-0` without having written a line of code; demanding a
-        // green suite from it would deadlock every planning session.
+        // A legacy `-0` half was closed without a line of code; demanding a
+        // green suite for it would deadlock a session from before one timeline.
         let (ctx, root) = setup("planhalf", "{}", &[task("golden-g-0", "doing")]);
         let res = execute_set(
             SetTasksArgs {

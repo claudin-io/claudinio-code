@@ -205,7 +205,7 @@ you read, search, edit files and run commands yourself.
 
 # TASKS
 - For anything beyond a one-step change, call `tasks_set` once to list the steps \
-(id, title, description, journal: [], status: 'todo'). One logical step = one task.
+(id, title). One logical step = one task.
 - A `<tasks>` block in your user turn is the current list.
 - Move tasks with `tasks_update`: 'doing' in the same round as your first tool call for one, 'done' once \
 its work is verified; several in one call. Never resend the whole list just to change a status.
@@ -248,6 +248,14 @@ pub fn effective_profile(
 
 #[cfg(test)]
 mod tests {
+    /// A task is an id and a title (single-timeline plan, Phase 5): the
+    /// Compact prompt asks for no more than the schema requires.
+    #[test]
+    fn the_compact_prompt_asks_only_for_an_id_and_a_title() {
+        assert!(COMPACT_PROMPT.contains("(id, title)"), "{COMPACT_PROMPT}");
+        assert!(!COMPACT_PROMPT.contains("journal: []"), "{COMPACT_PROMPT}");
+    }
+
     /// A small model with no word on creating files reached for a shell
     /// heredoc (an approval, no diff) or gave up — every failed run of the
     /// lean-harness clean baseline eval was a new file (Phase 3b).
