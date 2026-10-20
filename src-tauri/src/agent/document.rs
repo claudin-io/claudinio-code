@@ -687,8 +687,16 @@ impl Document {
                 s.end_raw = format!("{END_MARKER}\n\n");
             }
         }
+        // Main revising a finished subagent section leaves it its author's,
+        // so the panel still shows the work was done in parallel.
+        let keeps_author = owner == "main"
+            && s.status == Status::Done
+            && status == Status::Done
+            && s.owner.as_deref().is_some_and(|o| o.starts_with("sub:"));
         s.status = status;
-        s.owner = Some(owner.to_string());
+        if !keeps_author {
+            s.owner = Some(owner.to_string());
+        }
         Ok(())
     }
 
@@ -793,6 +801,36 @@ mod tests {
         doc.reserve_from(u32::MAX);
         let added = doc.add_placeholder("b", None).unwrap();
         assert_ne!(added, "s1000000000");
+    }
+
+    /// Session fb4cb4d615a93162: main rewrote three sections subagents had
+    /// finished, and the panel credited all three to `main` — the person
+    /// could no longer see the work had been done in parallel. A finished
+    /// subagent section stays its author's when main revises it; only
+    /// main's own sections, or a section main takes over before it is
+    /// done, become main's.
+    #[test]
+    fn main_revising_a_finished_subagent_section_keeps_its_author() {
+        let mut doc = parse(
+            "[a] <!-- claudinio: id=s1 status=todo -->\n[b] <!-- claudinio: id=s2 status=todo -->\n",
+        );
+        doc.apply_write("s1", Some("found it"), "sub:pesquisa", Status::Done)
+            .unwrap();
+        doc.apply_write("s1", Some("found it, revised"), "main", Status::Done)
+            .unwrap();
+        assert_eq!(
+            doc.section("s1").unwrap().owner.as_deref(),
+            Some("sub:pesquisa")
+        );
+        assert_eq!(doc.section("s1").unwrap().text(), "found it, revised");
+
+        // Not finished: main takes it over.
+        doc.apply_write("s2", None, "sub:outro", Status::Doing)
+            .unwrap();
+        doc.section_mut("s2").unwrap().status = Status::Todo;
+        doc.apply_write("s2", Some("mine now"), "main", Status::Done)
+            .unwrap();
+        assert_eq!(doc.section("s2").unwrap().owner.as_deref(), Some("main"));
     }
 
     const PUDIM: &str = "# Pudim de leite\n\n[origem do pudim de leite]\n[ingredientes originais]\n[Modo de preparo clássico]\n[Como servir o pudim]\n[Como armazenar o pudim]\n";
