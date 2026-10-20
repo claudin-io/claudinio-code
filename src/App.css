@@ -1244,6 +1244,58 @@ input.handoff-slider::-moz-range-track {
   }
 }
 
+/* === Projects sidebar rows ===
+ *
+ * The rows must form one straight left edge, and the app's root font-size is
+ * 13px, which makes every rem-based Tailwind step land on a fraction
+ * (px-3 → 9.75px, gap-2 → 6.5px, h-6 → 19.5px). Rows stacked from fractions
+ * put each one on a different subpixel phase, so their text rasterises a
+ * pixel apart and the column looks jagged. Every measure below is therefore
+ * a whole pixel and the two text lines get whole-pixel line-heights, which
+ * keeps the icon, the name and the path on one vertical line for every row.
+ */
+.projects-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  border-left: 2px solid transparent;
+  padding: 6px 6px 6px 10px;
+  text-align: left;
+}
+
+.projects-row-icon {
+  display: block;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+}
+
+.projects-row-link {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+}
+
+.projects-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.projects-row-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 16px;
+}
+
 /* === Settings Panel (VS Code-style sidebar) === */
 
 .settings-panel-overlay {

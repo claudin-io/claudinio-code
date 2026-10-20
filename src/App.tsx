@@ -997,7 +997,7 @@ function App() {
             when={showTree() && activeWorkspace()}
             fallback={
               <>
-                <div class="flex items-center justify-between border-b border-border-subtle px-3 py-2">
+                <div class="flex items-center justify-between border-b border-border-subtle py-[8px] pe-[12px] ps-[12px]">
                   <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
                     {"Projects"}
                   </span>
@@ -1011,7 +1011,7 @@ function App() {
                   <For each={openWorkspaces()}>
                     {(proj) => (
                       <div
-                        class="group flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm hover:bg-surface-2"
+                        class="projects-row group border-transparent text-sm hover:bg-surface-2"
                         classList={{
                           "border-accent bg-surface-2": activeWorkspace() === proj,
                         }}
@@ -1021,14 +1021,14 @@ function App() {
                         }}
                       >
                         <button
-                          class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          class="projects-row-link text-left"
                           onClick={() => activateWorkspace(proj)}
                         >
-                          <span class="relative shrink-0">
-                            <Icon name="folder" class="text-ink-muted" />
+                          <span class="relative flex w-[24px] shrink-0">
+                            <Icon name="folder" class="projects-row-icon text-ink-muted" />
                             <Show when={workspaceStatus[proj]}>
                               <span
-                                class="absolute -right-1 -top-1 block h-2 w-2 rounded-full"
+                                class="absolute -right-[3px] -top-[3px] block h-[6px] w-[6px] rounded-full"
                                 classList={{
                                   "bg-accent animate-pulse": workspaceStatus[proj] === "thinking",
                                   "bg-amber-400 animate-pulse":
@@ -1043,11 +1043,11 @@ function App() {
                             </Show>
                           </span>
                           <div class="min-w-0">
-                            <div class="truncate text-[13px] text-ink">
+                            <div class="projects-row-name text-ink">
                               {baseName(proj)}
                             </div>
 
-                            <div class="truncate text-[11px] text-ink-faint">
+                            <div class="projects-row-path text-ink-faint">
                               {workspaceStatus[proj] === "thinking"
                                 ? "Thinking"
                                 : workspaceStatus[proj] === "awaiting_approval"
@@ -1078,23 +1078,23 @@ function App() {
                   {/* Recent projects not currently open */}
                   <For each={recentProjects().filter((p) => !openWorkspaces().includes(p))}>
                     {(proj) => (
-                      <div class="group flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-2 text-left text-sm opacity-70 hover:bg-surface-2 hover:opacity-100"
+                      <div class="projects-row group border-transparent text-sm opacity-70 hover:bg-surface-2 hover:opacity-100"
                         onContextMenu={(e) => {
                           e.preventDefault();
                           setContextPos({ x: e.clientX, y: e.clientY, path: proj });
                         }}
                       >
                         <button
-                          class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          class="projects-row-link text-left"
                           onClick={() => openRecent(proj)}
                         >
-                          <Icon name="folder" class="shrink-0 text-ink-muted" />
+                          <Icon name="folder" class="projects-row-icon text-ink-muted" />
                           <div class="min-w-0">
-                            <div class="truncate text-[13px] text-ink">
+                            <div class="projects-row-name text-ink">
                               {baseName(proj)}
                             </div>
 
-                            <div class="truncate text-[11px] text-ink-faint">
+                            <div class="projects-row-path text-ink-faint">
                               {proj}
                             </div>
 
@@ -1117,7 +1117,7 @@ function App() {
                   </For>
 
                   <Show when={recentProjects().length === 0 && openWorkspaces().length === 0}>
-                    <div class="px-3 py-8 text-center text-xs text-ink-faint">
+                    <div class="px-[12px] py-[32px] text-center text-xs text-ink-faint">
                       {"No recent projects"}
                     </div>
 
@@ -1125,10 +1125,10 @@ function App() {
                 </div>
 
 
-                <div class="border-t border-border-subtle p-2">
+                <div class="border-t border-border-subtle p-[8px]">
                   <button
                     onClick={openFolder}
-                    class="flex w-full items-center gap-2 rounded-md border border-dashed border-border-subtle px-3 py-2 text-xs text-ink-muted hover:border-accent hover:text-accent"
+                    class="flex w-full items-center gap-[8px] rounded-md border border-dashed border-border-subtle px-[10px] py-[6px] text-xs text-ink-muted hover:border-accent hover:text-accent"
                   >
                     <Icon name="plus" class="h-3.5 w-3.5" />
                     {"Open folder"}
