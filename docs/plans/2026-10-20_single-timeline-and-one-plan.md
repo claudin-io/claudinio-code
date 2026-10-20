@@ -162,3 +162,32 @@ Each phase is one PR, red tests first, eval (sandboxed, `eval/README.md`) before
 ## Appendix A — Inventory used for this plan
 
 Gathered 2026-10-20 at `bac6206`. Core mode state: `agent/session.rs:146-273`, `state.rs:161-249`. Router: `agent/route.rs` (all), `agent/jev.rs:55-163`, `commands/agent.rs:774-871`. Plan tools: `agent/tools/write_plan.rs` (439), `agent/tools/finalize_plan.rs` (645), `agent/tools/mod.rs:148-155, 687-760, 1025-1079`, `agent/tool_exec.rs:887-1030`, LLD gate `agent/tools/tasks.rs:292-320`. Prompt: `agent/prompt.rs:150-397`, `agent/prompt/v1.rs`, `agent/prompt/v2.rs`, `agent/deferred.rs`, `agent/surface.rs:232-257`, `agent/permissions.rs:189, 542`, `agent/gate_text.rs`, `agent/nudges.rs`, `skills.rs:298-318`. Run loop: `agent/run_loop.rs:260-319, 541-660, 973-975, 1048-1275, 1465-1660, 1846-1890`. Handoff/transition: `agent/handoff.rs:155-608`, `agent/transition.rs`. Config: `agent/provider.rs:127-811`, `commands/agent.rs:750-967, 1185-1503`, `commands/providers.rs:727-731`, `commands/enhance.rs`. Golden goals: `session.rs:46-58`, `tools/tasks.rs:334-525`, `run_loop.rs:1048-1135`, `persist.rs:522-585`. Persisted kinds: `persist.rs:52-411`. Frontend: `ChatPanel.tsx` (46 refs), `lib/modeChoice.ts`, `lib/autoMode.ts`, `lib/ipc.ts`, `lib/chatRecords.ts`, `components/chat/TimelineRows.tsx`, `App.tsx:1300-1325`, Settings (`SettingsModels`, `SettingsPanel`, `SettingsToolSurface`, `SettingsGeneral`, `SettingsJev`, `SettingsPromptVersion`, `SettingsLocalModels`).
+
+## Implementation Log (2026-10-20)
+
+Every phase was implemented red-first; each step is its own commit. Where a test that pinned the old behaviour went red, the commit says whether the code was wrong or the rule changed on purpose.
+
+### Phase 0 — #99 (merged)
+M4 (tool error rate) and M6 (sections written by subagents) in the eval runner and `scripts/session-stats.py --meters`; two `doc-parallel` tasks; baseline in `eval/baselines/2026-10-20-doc-parallel-before/`. On the old binary only 1 of 4 sessions delegated, and that one then rewrote half of what its subagents wrote ($0.037 vs $0.010 for the same task without subagents) — F4 measured.
+
+### Phase 1 — #97 (merged)
+F1 (blank `section` = no section), F2 (each refusal states its own cause), F3 (section agents read siblings; the old "reads only that section" test changed on purpose), F4 (main revising a finished subagent section keeps its author). **Not done: F7** — clamping `read_file` ranges would make `result_cap`'s line numbering lie; the error already says what to do. **F5** (reads of unwritten sections) became a prompt line only: the outline already shows status.
+
+### Phase 2 — #98 (merged)
+`doc_create` drops the non-golden checklist; `tasks_set` refused with a document (error names `doc_add`/`doc_write`); `doc_create` caps at 6 sections; v2's TASKS + LIVING DOCUMENT became one PLAN section; the task panel became rows and no longer disappears under a document (golden goals shown as "Goals").
+
+### Phases 3 and 4 — #100
+Router removed; one model (`model`, migrated from `builder_model`); `SessionMode`/`ModeCtl`, the four plan/mode tools, the LLD gate, Brain gates and guards, mode handoffs and commands, prompt v1 and its fixtures removed; the app's mode control, plan buttons and mode settings removed; "Documents" replaces "Plans". Default Standard prefix 4,995 → 4,824 tokens.
+
+Deviations from §4:
+- **Golden goals keep the `-1` id suffix** (`golden-<slug>-1`): one task per goal as planned, but with the id old sessions already carry, so `is_golden_execution` and stored goals need no migration. A legacy `-0` half no longer blocks.
+- **`remember` is core, not deferred.** The memory guard's refusal points at it, and no harness text may order a deferred tool (a load is a prefix rewrite).
+- **`set_workspace_config` is removed too** — its only job was `plan_save_path`.
+- **`ModeRoute`, `Mode`, `GoldenCycle.mode`, `RunConfig.mode` and `PlanFinalized`** stay deserializable; a test loads a session with all of them.
+- **The Brain bash allowlist is gone**, not folded in: the session's own allowlist already contains everything it listed, and the eval's unattended read-only list is now pinned as a subset of it. `pytest --basetemp=src`-style findings that Brain refused still run unasked in a session, as they did in Builder before this plan; unchanged here.
+
+### Phase 5 — code
+`tasks_set` requires only `id` and `title`; a known task resent without title/status keeps them; `tasks_update` lets a named top-level task join a batch (F6). Docs (README, README.pt-BR, ARCHITECTURE, eval README) follow in the same PR.
+
+### Measurements
+Eval of the Phases 1–4 binary: *pending — added here when the run finishes.*
