@@ -594,8 +594,10 @@ pub fn release(ctx: &crate::agent::tools::ToolContext, id: &str, owner: &str) {
 }
 
 /// `doc_read`: one section's text, or the outline when `id` is `None`.
+/// Any agent with access reads any section — a section agent builds on its
+/// finished siblings — and writes only its own ([`write`]).
 pub fn read(ctx: &crate::agent::tools::ToolContext, id: Option<&str>) -> Result<String, String> {
-    owner_for(&ctx.doc_access, id)?;
+    owner_for(&ctx.doc_access, None)?;
     let l = linked(ctx).ok_or(NO_DOCUMENT)?;
     with_doc(&l, |doc, state| {
         let Some(id) = id else {
@@ -607,7 +609,11 @@ pub fn read(ctx: &crate::agent::tools::ToolContext, id: Option<&str>) -> Result<
                 doc.ids().join(", ")
             )
         })?;
-        state.unread.remove(id);
+        // Reading a sibling does not make it this agent's to overwrite: only
+        // a reader who may write the section clears its user-edit mark.
+        if owner_for(&ctx.doc_access, Some(id)).is_ok() {
+            state.unread.remove(id);
+        }
         let text = if s.text().is_empty() {
             "(not written yet)"
         } else {
@@ -1462,8 +1468,10 @@ mod tests {
         assert!(out.contains("s3 \u{b7} todo \u{b7} - \u{b7} c"), "{out}");
     }
 
+    /// A section agent writes only its own section and reads any (it builds
+    /// on finished siblings; session fb4cb4d615a93162 refused that 4 times).
     #[test]
-    fn a_subagent_with_a_section_writes_and_reads_only_that_section() {
+    fn a_subagent_with_a_section_writes_only_that_section_and_reads_any() {
         let (ws, _) = Ws::with_doc("grant", &["origem", "ingredientes"]);
         let sub = ws.sub("s2", "sub:ingredientes");
         write(&sub, "s2", Some("leite condensado"), Status::Done).unwrap();
@@ -1477,7 +1485,7 @@ mod tests {
                 .unwrap_err()
                 .contains("s2")
         );
-        assert!(read(&sub, Some("s1")).is_err());
+        assert!(read(&sub, Some("s1")).is_ok());
         assert!(read(&sub, Some("s2")).is_ok());
         assert!(add(&sub, "extra", None).is_err());
         let none = ToolContext {

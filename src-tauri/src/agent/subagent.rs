@@ -317,6 +317,15 @@ pub async fn run_spawn_agents(
     let specs: Vec<SubagentSpec> = agents
         .iter()
         .filter_map(|v| serde_json::from_value::<SubagentSpec>(v.clone()).ok())
+        .map(|mut spec| {
+            // Models fill an optional string they have no use for with "":
+            // a blank section is no section, not a section named "".
+            spec.section = spec
+                .section
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty());
+            spec
+        })
         .collect();
 
     if specs.len() != agents.len() {
@@ -389,9 +398,14 @@ pub async fn run_spawn_agents(
         // means this subagent does not run.
         if let Some(id) = spec.section.clone() {
             let owner = crate::agent::doc_session::subagent_owner(&spec.name);
-            let twice = specs[..i].iter().any(|s| s.section.as_deref() == Some(&id));
-            let claim = if twice {
-                Err(format!("{id} is given to another agent in this call"))
+            let twice = specs[..i]
+                .iter()
+                .find(|s| s.section.as_deref() == Some(&id));
+            let claim = if let Some(first) = twice {
+                Err(format!(
+                    "{id} is given to agent '{}' in this call, and a section has one writer",
+                    first.name
+                ))
             } else {
                 crate::agent::doc_session::claim(ctx, &id, &owner)
             };
@@ -404,7 +418,7 @@ pub async fn run_spawn_agents(
                     claimed[i] = Some((id, owner));
                 }
                 Err(e) => {
-                    let report = format!("not started: {e}. Two agents cannot hold one section.");
+                    let report = format!("not started: {e}.");
                     handles.push(tokio::spawn(async move {
                         SubagentResult {
                             status: "failed",
@@ -3236,6 +3250,108 @@ mod delegation_tests {
         )
         .await;
         assert!(!tool_names(&bodies[0]).iter().any(|n| n.starts_with("doc_")));
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Session fb4cb4d615a93162 (2026-10-19): the model filled the optional
+    /// `section` with `""` on agents that write no section, and every one
+    /// of them failed unstarted — 3 of 4 `spawn_agents` calls, 7 agents —
+    /// so the main session did their reading itself. An empty or blank
+    /// `section` means the agent writes no section.
+    #[tokio::test]
+    async fn an_empty_section_means_the_agent_writes_none() {
+        // With a document: two plain explore agents, both `""`.
+        let (ws, ctx) = doc_workspace("empty-section", &["origem"]);
+        let (text, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("looked"), Reply::Text("looked too")],
+            serde_json::json!([
+                {"name": "a", "goal": "look around", "mode": "explore", "section": ""},
+                {"name": "b", "goal": "look elsewhere", "mode": "explore", "section": "  "}
+            ]),
+        )
+        .await;
+        assert_eq!(bodies.len(), 2, "both agents ran: {text}");
+        assert!(!text.contains("not started"), "{text}");
+        assert!(!tool_names(&bodies[0]).iter().any(|n| n.starts_with("doc_")));
+        assert!(doc_text(&ws).contains("status=todo"), "nothing was claimed");
+        std::fs::remove_dir_all(&ws).ok();
+
+        // Without a document: `""` must not demand one.
+        let (ws, ws_str, store) = workspace("empty-section-no-doc");
+        let ctx = ToolContext {
+            workspace_root: Some(ws_str),
+            session_store_path: Some(store.path.to_string_lossy().to_string()),
+            ..crate::agent::tools::tests_support::ctx()
+        };
+        let (text, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("looked")],
+            serde_json::json!([{"name": "a", "goal": "look around", "mode": "explore", "section": ""}]),
+        )
+        .await;
+        assert_eq!(bodies.len(), 1, "{text}");
+        assert!(!text.contains("doc_create"), "{text}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// A refusal says its own cause, with the id quoted, and only a real
+    /// collision talks about two agents holding one section.
+    #[tokio::test]
+    async fn a_section_refusal_names_its_own_cause() {
+        let (ws, ctx) = doc_workspace("refusal-text", &["origem"]);
+        let (text, _, bodies) = spawn_script(
+            &ctx,
+            vec![Reply::Text("done")],
+            serde_json::json!([{"name": "a", "goal": "write it", "mode": "explore", "section": "s9"}]),
+        )
+        .await;
+        assert!(bodies.is_empty());
+        assert!(text.contains("'s9'") && text.contains("s1"), "{text}");
+        assert!(!text.contains("Two agents"), "not a collision: {text}");
+
+        let (text, _, _) = spawn_script(
+            &ctx,
+            vec![Reply::Text("done")],
+            serde_json::json!([
+                {"name": "a", "goal": "write it", "mode": "explore", "section": "s1"},
+                {"name": "b", "goal": "write it too", "mode": "explore", "section": "s1"}
+            ]),
+        )
+        .await;
+        assert!(
+            text.contains("s1 is given to agent 'a' in this call"),
+            "the collision names the section and the other agent: {text}"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Session fb4cb4d615a93162: the s4 and s5 agents tried to read the
+    /// finished s2 and s3 to build on them and were refused. A section
+    /// agent reads any section; it writes only its own.
+    #[tokio::test]
+    async fn a_section_agent_reads_its_siblings() {
+        let (ws, ctx) = doc_workspace("read-siblings", &["origem", "ingredientes"]);
+        crate::agent::doc_session::write(
+            &ctx,
+            "s1",
+            Some("Portugal, convento"),
+            crate::agent::document::Status::Done,
+        )
+        .unwrap();
+        let (_, _, bodies) = spawn_script(
+            &ctx,
+            vec![
+                Reply::Tool {
+                    name: "doc_read",
+                    input: serde_json::json!({"id": "s1"}),
+                },
+                Reply::Text("read it"),
+            ],
+            serde_json::json!([{"name": "ingredientes", "goal": "list them", "mode": "explore", "section": "s2"}]),
+        )
+        .await;
+        assert!(bodies[1].contains("Portugal, convento"), "{}", bodies[1]);
         std::fs::remove_dir_all(&ws).ok();
     }
 }

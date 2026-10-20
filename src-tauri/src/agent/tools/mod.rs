@@ -673,7 +673,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                                 "goal": { "type": "string", "description": "Self-contained instructions, in English" },
                                 "mode": { "type": "string", "enum": ["explore", "code"] },
                                 "expected_output": { "type": "string", "description": "What the report must contain" },
-                                "section": { "type": "string", "description": "Document section id it writes" }
+                                "section": { "type": "string", "description": "Section id it writes; omit if none" }
                             }
                         }
                     }
