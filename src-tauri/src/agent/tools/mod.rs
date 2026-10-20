@@ -73,10 +73,6 @@ pub struct ToolContext {
     /// before the agent loop starts so `mcp__` tool calls can dispatch
     /// synchronously through `tools::execute`.
     pub mcp: Option<Arc<crate::agent::mcp::McpManager>>,
-    /// Live handle to the session's mode state. Used by tasks_set to enforce
-    /// the Brain-mode Low-Level-Design gate. None in tests and one-off
-    /// workflows, which disables the gate.
-
     /// Tracks indexing progress for this workspace. `Some(progress)` means
     /// the index is still being built; `None` means the index is ready.
     /// Index-dependent tools check this and return a user-friendly message
@@ -179,7 +175,7 @@ pub fn validate_editable_path(requested: &str, ctx: &ToolContext) -> Result<(), 
     let Some(root) = ctx.workspace_root.as_deref() else {
         return Ok(());
     };
-    // The project memory is written by `finalize_plan` alone (Phase 9).
+    // The project memory is written by `remember` alone.
     if crate::agent::project_memory::is_memory_path(
         std::path::Path::new(root),
         std::path::Path::new(requested),
@@ -595,7 +591,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tasks_set".into(),
-            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. An existing task sent with an empty description or journal keeps its stored one.".into(),
+            description: "Create or rewrite the task list: a full replacement, so pass ALL tasks. Use it to create the list or to add, remove or reword tasks; to change one task's status or journal use tasks_update. A task is an id and a title; an existing task sent without its title, status, description or journal keeps the stored ones.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -610,7 +606,7 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
                                 "journal": { "type": "array", "items": { "type": "string" }, "description": "Findings and decisions" },
                                 "status": { "type": "string", "enum": ["todo", "doing", "done"] }
                             },
-                            "required": ["id", "title", "description", "journal", "status"]
+                            "required": ["id", "title"]
                         }
                     }
                 },
@@ -670,9 +666,8 @@ pub fn get_defs(max_parallel: usize) -> Vec<ToolDef> {
     ]
 }
 
-/// Definition of the finalize_plan tool. Only offered in Builder mode — it
-/// appends an Implementation Log (changed files, commits, journal) to the plan
-/// `.md`, feeding the plan with data for future reference once a build is done.
+/// Definition of the `remember` tool: up to five one-line lessons for the
+/// project memory (`agent::project_memory`).
 pub fn remember_def() -> ToolDef {
     ToolDef {
         name: "remember".into(),

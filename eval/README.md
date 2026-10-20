@@ -38,7 +38,7 @@ The runner is a Cargo example inside the app crate (it drives the private
 cargo run --example claudinio-eval -- validate ../eval/tasks
 cargo run --example claudinio-eval -- validate ../eval/tasks --tasks js-lru-cache,py-pager-last-page
 
-# One fresh Builder session per task against a provider, then the oracle.
+# One fresh session per task against a provider, then the oracle.
 export MY_KEY=...
 cargo run --example claudinio-eval -- run ../eval/tasks \
   --model claude-sonnet-4-5 --base-url https://api.anthropic.com --api-key-env MY_KEY \
@@ -54,9 +54,8 @@ limits and prompt profile from), `--task-timeout-s` (default 3600; a task that
 runs out is stopped as the Stop button stops a run — subagents included — and
 the oracle runs only once it has wound down),
 `--price-cache-read/--price-cache-write`, `--jev-api-key-env ENV` (Jev runs
-only when this is given), `--prompt-version v1|v2` (the Standard system prompt
-the sessions are sent, default v2; v1 is the pre-Phase-5 prompt, kept so the
-two can be measured on the same model and tasks) and `--work-dir DIR`. Without `--work-dir` each command
+only when this is given) and `--work-dir DIR`. There is one system prompt, the
+Standard one, so no flag selects it. Without `--work-dir` each command
 makes a fresh temporary directory. `run` keeps it, so every session can be read
 back; `validate` removes it when every task is valid (a full validate
 materializes ~235 MB) and keeps it, printing its path, when one is not. A
@@ -66,7 +65,7 @@ results to `results.jsonl` in the work directory, not into the current one.
 
 `run` writes one JSON line per task as it goes — `id`, `pass`, `outcome`
 (`completed`, `timeout`, `error: …`), `wall_s`, the oracle's exit code and
-output tail, `prompt_version`, and the metrics: `rounds` (`main_rounds` + `subagent_rounds`),
+output tail, and the metrics: `rounds` (`main_rounds` + `subagent_rounds`),
 `input_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `output_tokens`,
 `subagent_tokens`, `cost`, `cost_known`, `tool_calls` per tool, `subagents`
 (spawned with `spawn_agents`), `compactions` (summarizer runs, whose requests
@@ -89,8 +88,8 @@ commit (`start`), so `git diff` and the quality gate behave as they do for a
 user. A tree taken from git is exported with `git archive`, never cloned, so
 the model cannot read the solution out of the history. It then writes a
 `.claudinio.json` whose quality `test_cmd` is the task's `check` command,
-builds a lexical code-intel index, and starts the normal session entry
-(Builder, fresh session) with the task's prompt. The config is the app's, with
+builds a lexical code-intel index, and starts the normal session entry (one
+fresh session, the same timeline a user gets) with the task's prompt. The config is the app's, with
 everything installed on the machine turned off: no hooks, no browser, no MCP
 servers, no plugins, no claudin.io account; Jev only with `--jev-api-key-env`.
 Skills in the home directory (`~/.claude/skills`, …) still load, as they would
@@ -232,7 +231,8 @@ this repository's own `node_modules` into `/tmp`. Call tools by path
   cause is only found by reading many files), `search` (the right place is only
   findable by meaning), `document` (a write-up whose oracle checks a markdown
   file for given sections with content) and `brain` (a fully specified feature
-  that should need no interview). Hidden tests sit in `oracle.files` where
+  that should need no interview; the tag keeps its name from the Brain mode the
+  app has since removed). Hidden tests sit in `oracle.files` where
   the agent never sees them, and every test file the agent *can* see is also
   in `oracle.files`, so the oracle rewrites it before it runs: the policy
   approves every edit in the workspace, and a run must not pass by changing
@@ -260,7 +260,9 @@ this repository's own `node_modules` into `/tmp`. Call tools by path
   collect nothing and pass. The in-session check is `tsc` plus the full
   vitest suite, green on every start tree. They need the commits in the
   repository the task points at (`repo: ../..`), so they do not run from a
-  shallow clone.
+  shallow clone. What they build is history too: `hist-auto-mode-choice` adds
+  the Auto mode control (`src/lib/modeChoice.ts`) that the app has since
+  removed with the Brain/Builder modes; it still runs, on its own start tree.
 
 ## What is not here
 

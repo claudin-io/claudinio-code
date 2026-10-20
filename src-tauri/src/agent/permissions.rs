@@ -91,8 +91,8 @@ pub fn browser_permission(action: &str, url: Option<&str>) -> PermissionLevel {
 // ── The shell policy ──
 //
 // A `bash` command runs unasked only when ONE rule holds, and everything else
-// asks (Builder; YOLO or a hook's `allow` may then approve it, which is the
-// person's choice) or is refused (Brain). The rule is deliberately not a
+// asks (YOLO or a hook's `allow` may then approve it, which is the person's
+// choice). The rule is deliberately not a
 // shell parser: three review rounds on a chain splitter, a per-option
 // `sort`/`uniq` reader and a stdin detector each found a new bypass, and
 // every fix opened another (lean-harness plan, "Shell policy simplified").
@@ -499,7 +499,7 @@ fn decide(
     if on_the_deny_list(trimmed) {
         return PermissionLevel::Denied;
     }
-    // The project memory is written by `finalize_plan` alone (Phase 9).
+    // The project memory is written by `remember` alone.
     // Denied rather than asked about, so YOLO and a hook's `allow` — which
     // relax a prompt, never a policy — cannot open it.
     if crate::agent::project_memory::mentions_memory(trimmed) && !plain_memory_read(trimmed) {
@@ -552,8 +552,8 @@ pub fn bash_call_permission(
     )
 }
 
-/// Heuristic: does this bash command WRITE file contents? Brain and the git
-/// operator refuse such a command before its permission is looked up, and
+/// Heuristic: does this bash command WRITE file contents? The git operator
+/// refuses such a command before its permission is looked up, and
 /// the rule never runs one unasked. Targets content editing — redirections,
 /// `tee`, in-place `sed`/`perl`, `patch`, git's `--output` (in any spelling
 /// git accepts: an abbreviation, or split by quotes), and inline interpreter
