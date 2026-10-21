@@ -1474,11 +1474,16 @@ mod tests {
             )
             .unwrap();
         }
+        // `load_plugin` canonicalizes each plugin root, so on macOS — where
+        // `temp_dir()` is `/var/folders/…`, a symlink to `/private/var/folders/…`
+        // — comparing records against the un-canonicalized `ws` filters every
+        // one of them out. Compare against the canonical workspace instead.
+        let ws_real = std::fs::canonicalize(&ws).unwrap();
         let records: Vec<PluginRecord> = discover(Some(&ws))
             .into_iter()
             .filter(|r| match r {
-                PluginRecord::Loaded(p) => p.root.starts_with(&ws),
-                PluginRecord::Rejected { root, .. } => root.starts_with(&ws),
+                PluginRecord::Loaded(p) => p.root.starts_with(&ws_real),
+                PluginRecord::Rejected { root, .. } => root.starts_with(&ws_real),
             })
             .collect();
         let names: Vec<String> = records.iter().map(|r| r.name()).collect();
