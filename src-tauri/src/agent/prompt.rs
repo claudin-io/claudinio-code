@@ -1265,9 +1265,13 @@ mod prefix_stability_tests {
             workspace_root: Some(root.to_string_lossy().to_string()),
             ..crate::agent::tools::tests_support::ctx()
         };
-        // Built the way the run builds it: a fresh scan per run.
-        let skills = build_skills_system_prompt_section(&SkillManager::with_plugin_prefs(
+        // Built the way the run builds it: a fresh scan per run. `user_root` is
+        // `None` so the catalog holds only what this fixture wrote: the machine
+        // running the test has its own `~/.claude/skills`, and enough of them
+        // push the skills asserted below past `CATALOG_LINES`.
+        let skills = build_skills_system_prompt_section(&SkillManager::with_roots(
             Some(root.to_path_buf()),
+            None,
             &config.plugins,
         ));
         let (profile, system, tools) = run_prefix(

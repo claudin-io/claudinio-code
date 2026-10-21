@@ -322,6 +322,9 @@ const RESERVED_BUILTIN_SKILLS: &[&str] = &["plan"];
 pub struct SkillManager {
     /// Absolute path to the workspace root (project).
     workspace_root: Option<PathBuf>,
+    /// Root scanned for user-scope skills (`.agents/skills` and the rest).
+    /// Normally the home directory; `None` scans no user scope at all.
+    user_root: Option<PathBuf>,
     /// Skills discovered at the last scan, keyed by name.
     skills: HashMap<String, SkillEntry>,
     /// Per-plugin enable state, so a disabled plugin's skills stay out of the
@@ -340,8 +343,22 @@ impl SkillManager {
         workspace_root: Option<PathBuf>,
         prefs: &HashMap<String, crate::agent::provider::PluginPrefs>,
     ) -> Self {
+        Self::with_roots(workspace_root, dirs::home_dir(), prefs)
+    }
+
+    /// The general form: scan `workspace_root` for project and subfolder
+    /// skills and `user_root` for user-scope ones. A test passes `None` for
+    /// `user_root` to stay hermetic — otherwise every skill under the running
+    /// machine's `~/.claude/skills` pads the catalog and pushes the skills the
+    /// test is about past [`CATALOG_LINES`].
+    pub fn with_roots(
+        workspace_root: Option<PathBuf>,
+        user_root: Option<PathBuf>,
+        prefs: &HashMap<String, crate::agent::provider::PluginPrefs>,
+    ) -> Self {
         let mut mgr = Self {
             workspace_root,
+            user_root,
             skills: HashMap::new(),
             plugin_prefs: prefs.clone(),
         };
@@ -379,6 +396,7 @@ impl SkillManager {
     pub fn builtin_only() -> Self {
         Self {
             workspace_root: None,
+            user_root: None,
             skills: Self::builtin_entries()
                 .into_iter()
                 .map(|e| (e.name.clone(), e))
@@ -441,8 +459,8 @@ impl SkillManager {
         }
 
         // 3. User-level skills (lowest priority)
-        if let Some(home) = dirs::home_dir() {
-            scan_for_skills(&home, SkillScope::User, &mut all);
+        if let Some(ref home) = self.user_root {
+            scan_for_skills(home, SkillScope::User, &mut all);
         }
 
         // 4. The names a prompt points at stay the built-in's.
@@ -904,6 +922,7 @@ mod tests {
     fn test_build_system_prompt_none() {
         let empty = SkillManager {
             workspace_root: None,
+            user_root: None,
             skills: HashMap::new(),
             plugin_prefs: Default::default(),
         };
@@ -915,6 +934,7 @@ mod tests {
     fn test_build_system_prompt_with_skills() {
         let mut mgr = SkillManager {
             workspace_root: None,
+            user_root: None,
             skills: HashMap::new(),
             plugin_prefs: Default::default(),
         };
