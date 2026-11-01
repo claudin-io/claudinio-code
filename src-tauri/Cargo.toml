@@ -68,7 +68,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 dirs = "6"
 keepawake = "0.6"
 sys-locale = "0.3"
-tiktoken-rs = "0.6"
+tiktoken-rs = "0.12"
 serde_yaml = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
